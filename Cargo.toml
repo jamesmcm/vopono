@@ -1,0 +1,16 @@
+[package]
+name = "vopono"
+description = "Launch applications via specified VPN servers using network namespaces"
+version = "0.1.0"
+authors = ["James McMurray <jamesmcm03@gmail.com>"]
+edition = "2018"
+license = "GPL-3.0-or-later"
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+structopt = "0.3"
+anyhow = "1"
+directories-next = "1"
+log = "0.4"
+pretty_env_logger = "0.4"
+clap = "2"
