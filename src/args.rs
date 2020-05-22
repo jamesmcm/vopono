@@ -37,13 +37,12 @@ pub struct ExecCommand {
     #[structopt(long = "server", short = "s")]
     pub server: Option<String>,
 
-    #[structopt(short, long)]
     pub application: String,
 }
 
 #[derive(StructOpt)]
 pub struct SetDefaultsCommand {
-    #[structopt(long = "provider", short="p", possible_values=&["pia"])]
+    #[structopt(long = "provider", short="p", possible_values=&VpnProvider::variants())]
     pub vpn_provider: Option<VpnProvider>,
 
     /// VPN Server (if not given will use default)
