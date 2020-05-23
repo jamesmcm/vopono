@@ -16,6 +16,13 @@ use std::process::Command;
 use structopt::StructOpt;
 use sysctl::SysCtl;
 
+// TODO:
+// - Handle server selection (openvpn --remote X) - lookup in provider TOML
+// - Ability to run multiple network namespace (handle IP address allocation)
+// - Lockfile to share existing network namespaces (lookup on ID)
+// - Handle running process as current user or root (make current user default)
+// - Allow custom VPNs (provide .ovpn file?)
+
 // TODO: Allow listing of open network namespaces, applications currently running in network
 // namespaces
 fn main() -> anyhow::Result<()> {
