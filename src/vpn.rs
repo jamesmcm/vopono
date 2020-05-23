@@ -1,5 +1,6 @@
 // use std::str::FromStr;
 use clap::arg_enum;
+use std::string::ToString;
 
 arg_enum! {
     #[derive(Debug)]
@@ -8,6 +9,16 @@ pub enum VpnProvider {
     Mullvad,
     NordVpn,
 }
+}
+
+impl VpnProvider {
+    pub fn alias(&self) -> String {
+        match self {
+            Self::PrivateInternetAccess => String::from("pia"),
+            Self::Mullvad => String::from("mullvad"),
+            Self::NordVpn => String::from("nordvpn"),
+        }
+    }
 }
 
 // impl FromStr for VpnProvider {
