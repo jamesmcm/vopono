@@ -10,6 +10,13 @@ supported, using OpenVPN and iptables. Support for nftables, the
 WireGuard protocol and more VPN providers (Mullvad, etc.) will be added
 soon.
 
+## Etymology
+
+vopono is the pronunciation of the letters VPN in Esperanto.
+
+Se vi ankaŭ parolas Esperanton, bonvolu serĉi min en la kanalo de
+Discord de Rust Programming Language Community.
+
 ## Usage
 
 ```
