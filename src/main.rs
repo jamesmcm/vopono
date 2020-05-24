@@ -15,9 +15,10 @@ use std::io::{self, Write};
 use std::process::Command;
 use structopt::StructOpt;
 use sysctl::SysCtl;
+use vpn::{find_host_from_alias, get_serverlist, VpnProvider};
 
 // TODO:
-// - Handle server selection (openvpn --remote X) - lookup in provider TOML
+// - Handle authentication
 // - Ability to run multiple network namespace (handle IP address allocation)
 // - Lockfile to share existing network namespaces (lookup on ID)
 // - Handle running process as current user or root (make current user default)
@@ -53,8 +54,11 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // Get server and provider (handle default case)
     let provider = command.vpn_provider.unwrap();
     let server = command.server.unwrap();
+
+    let serverlist = get_serverlist(&provider)?;
+    let (server, port, server_alias) = find_host_from_alias(&server, &serverlist)?;
     // if protocol == OpenVPN
-    let ns_name = format!("{}_{}", provider.alias(), server.to_string());
+    let ns_name = format!("{}_{}", provider.alias(), server_alias);
     let mut ns = NetworkNamespace::new(ns_name)?;
     ns.add_loopback()?;
     ns.add_veth_pair()?;
@@ -63,7 +67,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let iptables = IpTables::add_masquerade_rule(String::from("10.200.200.0/24"), interface);
     let sysctl = SysCtl::enable_ipv4_forwarding();
     ns.dns_config()?;
-    ns.run_openvpn(&provider)?;
+    ns.run_openvpn(&provider, &server, port)?;
     let application = ApplicationWrapper::new(&ns, &command.application)?;
     let output = application.wait_with_output()?;
     io::stdout().write_all(output.stdout.as_slice())?;

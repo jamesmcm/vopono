@@ -121,8 +121,13 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn run_openvpn(&mut self, provider: &VpnProvider) -> anyhow::Result<()> {
-        self.openvpn = Some(OpenVpn::run(&self, provider)?);
+    pub fn run_openvpn(
+        &mut self,
+        provider: &VpnProvider,
+        server: &str,
+        port: u32,
+    ) -> anyhow::Result<()> {
+        self.openvpn = Some(OpenVpn::run(&self, provider, server, port)?);
         Ok(())
     }
 }
@@ -224,16 +229,25 @@ pub struct OpenVpn {
     handle: std::process::Child,
 }
 impl OpenVpn {
-    pub fn run(netns: &NetworkNamespace, provider: &VpnProvider) -> anyhow::Result<Self> {
+    pub fn run(
+        netns: &NetworkNamespace,
+        provider: &VpnProvider,
+        server: &str,
+        port: u32,
+    ) -> anyhow::Result<Self> {
         let mut openvpn_config = config_dir()?;
         openvpn_config.push(format!("vopono/{}/openvpn/client.conf", provider.alias()));
         debug!("OpenVPN config: {:?}", &openvpn_config);
         info!("Launching OpenVPN...");
-        let handle = netns.exec_no_block_silent(&[
+        let handle = netns.exec_no_block(&[
             "openvpn",
             "--config",
             openvpn_config.as_os_str().to_str().unwrap(),
+            "--remote",
+            server,
+            &port.to_string(),
         ])?;
+        // TODO: How to check for VPN connection error?? OpenVPN silently continues
         sleep(Duration::from_secs(10)); //TODO: Can we do this by parsing stdout
         Ok(Self { handle })
     }
