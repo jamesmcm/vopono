@@ -6,6 +6,8 @@ authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2018"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/jamesmcm/vopono"
+homepage = "https://github.com/jamesmcm/vopono"
+readme = "README.md"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
