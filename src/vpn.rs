@@ -1,9 +1,11 @@
 use super::netns::config_dir;
 use anyhow::{anyhow, Context};
 use clap::arg_enum;
-use log::warn;
+use dialoguer::{Input, Password};
+use log::{debug, info, warn};
 use serde::Deserialize;
 use std::fs::File;
+use std::io::{self, BufRead, BufReader, Write};
 
 arg_enum! {
     #[derive(Debug)]
@@ -89,5 +91,40 @@ pub fn find_host_from_alias(
             record.port.unwrap()
         };
         Ok((record.host.clone(), port, record.alias.clone()))
+    }
+}
+
+// TODO: handle Pipewire too
+// TODO: Can we avoid storing plaintext passwords?
+// TODO: Allow not storing credentials
+pub fn get_auth(provider: &VpnProvider) -> anyhow::Result<()> {
+    let mut auth_path = config_dir()?;
+    auth_path.push(format!("vopono/{}/openvpn/auth.txt", provider.alias()));
+    let file = File::open(&auth_path);
+    match file {
+        Ok(f) => {
+            debug!("Read auth file: {}", auth_path.to_string_lossy());
+            let bufreader = BufReader::new(f);
+            let mut iter = bufreader.lines();
+            let _username = iter.next().with_context(|| "No username")??;
+            let _password = iter.next().with_context(|| "No password")??;
+            Ok(())
+        }
+        Err(_) => {
+            debug!(
+                "No auth file: {} - prompting user",
+                auth_path.to_string_lossy()
+            );
+            let username = Input::<String>::new().with_prompt("Username").interact()?;
+            let password = Password::new()
+                .with_prompt("Password")
+                .with_confirmation("Confirm password", "Passwords did not match")
+                .interact()?;
+
+            let mut writefile = File::create(&auth_path)?;
+            write!(writefile, "{}\n{}\n", username, password)?;
+            info!("Credentials written to: {}", auth_path.to_string_lossy());
+            Ok(())
+        }
     }
 }

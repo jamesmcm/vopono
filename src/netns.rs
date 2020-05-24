@@ -46,7 +46,6 @@ impl NetworkNamespace {
             .args(&["ip", "netns", "exec", &self.name])
             .args(command)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
             .spawn()?;
         Ok(handle)
     }
@@ -235,10 +234,27 @@ impl OpenVpn {
         server: &str,
         port: u32,
     ) -> anyhow::Result<Self> {
+        let mut openvpn_auth = config_dir()?;
+        openvpn_auth.push(format!("vopono/{}/openvpn/auth.txt", provider.alias()));
+
+        // TODO: Make crl-verify and ca depend on VpnProvider
+        let mut openvpn_ca = config_dir()?;
+        openvpn_ca.push(format!(
+            "vopono/{}/openvpn/ca.rsa.2048.crt",
+            provider.alias()
+        ));
+
+        let mut openvpn_crl = config_dir()?;
+        openvpn_crl.push(format!(
+            "vopono/{}/openvpn/crl.rsa.2048.pem",
+            provider.alias()
+        ));
+
         let mut openvpn_config = config_dir()?;
         openvpn_config.push(format!("vopono/{}/openvpn/client.conf", provider.alias()));
         debug!("OpenVPN config: {:?}", &openvpn_config);
         info!("Launching OpenVPN...");
+
         let handle = netns.exec_no_block(&[
             "openvpn",
             "--config",
@@ -246,8 +262,14 @@ impl OpenVpn {
             "--remote",
             server,
             &port.to_string(),
+            "--auth-user-pass",
+            openvpn_auth.as_os_str().to_str().unwrap(),
+            "--ca",
+            openvpn_ca.as_os_str().to_str().unwrap(),
+            "--crl-verify",
+            openvpn_crl.as_os_str().to_str().unwrap(),
         ])?;
-        // TODO: How to check for VPN connection error?? OpenVPN silently continues
+        // TODO: How to check for VPN connection or auth error?? OpenVPN silently continues
         sleep(Duration::from_secs(10)); //TODO: Can we do this by parsing stdout
         Ok(Self { handle })
     }
@@ -276,7 +298,7 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
 
 impl Drop for OpenVpn {
     fn drop(&mut self) {
-        // TODO: Do this with elevated privileges
+        // TODO: Do this with elevated privileges - also need to kill spawned children
         // nix::unistd::setuid(nix::unistd::Uid::from_raw(0)).expect("Failed to elevate privileges");
         // self.handle.kill().expect("Failed to kill OpenVPN");
         // sudo_command(&["sh", "-c", &format!("kill -9 {}", &self.handle.id())])

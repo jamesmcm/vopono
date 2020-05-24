@@ -15,7 +15,7 @@ use std::io::{self, Write};
 use std::process::Command;
 use structopt::StructOpt;
 use sysctl::SysCtl;
-use vpn::{find_host_from_alias, get_serverlist, VpnProvider};
+use vpn::{find_host_from_alias, get_auth, get_serverlist, VpnProvider};
 
 // TODO:
 // - Handle authentication
@@ -54,6 +54,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // Get server and provider (handle default case)
     let provider = command.vpn_provider.unwrap();
     let server = command.server.unwrap();
+    get_auth(&provider)?;
 
     let serverlist = get_serverlist(&provider)?;
     let (server, port, server_alias) = find_host_from_alias(&server, &serverlist)?;
