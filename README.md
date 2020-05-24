@@ -30,8 +30,7 @@ the application is terminated. Note you may need to run them as your own
 user:
 
 ```
-$ vopono exec --provider privateinternetaccess --server mexico "sudo -u
-$USER firefox"
+$ vopono exec --provider privateinternetaccess --server mexico "sudo -u $USER firefox"
 ```
 
 Place your username and password in
