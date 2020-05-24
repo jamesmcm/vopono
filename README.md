@@ -32,7 +32,6 @@ user:
 ```
 $ vopono exec --provider privateinternetaccess --server mexico "sudo -u
 $USER firefox"
-Poland
 ```
 
 Place your username and password in
