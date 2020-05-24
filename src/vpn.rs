@@ -5,7 +5,7 @@ use dialoguer::{Input, Password};
 use log::{debug, info, warn};
 use serde::Deserialize;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Write};
 
 arg_enum! {
     #[derive(Debug)]
@@ -48,7 +48,7 @@ pub struct VpnServer {
 pub fn get_serverlist(provider: &VpnProvider) -> anyhow::Result<Vec<VpnServer>> {
     let mut list_path = config_dir()?;
     list_path.push(format!("vopono/{}/serverlist.csv", provider.alias()));
-    let mut file = File::open(&list_path).with_context(|| {
+    let file = File::open(&list_path).with_context(|| {
         format!(
             "Could not get serverlist for provider: {}, path: {}",
             provider.to_string(),

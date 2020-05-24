@@ -1,6 +1,6 @@
 [package]
 name = "vopono"
-description = "Launch applications via specified VPN servers using network namespaces"
+description = "Launch applications via VPN tunnels using temporary network namespaces"
 version = "0.1.0"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2018"

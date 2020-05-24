@@ -6,19 +6,18 @@ mod sysctl;
 mod vpn;
 
 use anyhow::{anyhow, Context};
-use args::{ExecCommand, SetDefaultsCommand};
+use args::ExecCommand;
 use iptables::IpTables;
-use log::{debug, error, info, log_enabled, Level, LevelFilter};
+use log::{debug, error, LevelFilter};
 use netns::NetworkNamespace;
 use network_interface::NetworkInterface;
 use std::io::{self, Write};
 use std::process::Command;
 use structopt::StructOpt;
 use sysctl::SysCtl;
-use vpn::{find_host_from_alias, get_auth, get_serverlist, VpnProvider};
+use vpn::{find_host_from_alias, get_auth, get_serverlist};
 
 // TODO:
-// - Handle authentication
 // - Ability to run multiple network namespace (handle IP address allocation)
 // - Lockfile to share existing network namespaces (lookup on ID)
 // - Handle running process as current user or root (make current user default)
@@ -60,15 +59,29 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let (server, port, server_alias) = find_host_from_alias(&server, &serverlist)?;
     // if protocol == OpenVPN
     let ns_name = format!("{}_{}", provider.alias(), server_alias);
-    let mut ns = NetworkNamespace::new(ns_name)?;
+    let mut ns = NetworkNamespace::new(ns_name.clone())?;
     ns.add_loopback()?;
     ns.add_veth_pair()?;
     ns.add_routing()?;
     let interface = NetworkInterface::Ethernet; //TODO
-    let iptables = IpTables::add_masquerade_rule(String::from("10.200.200.0/24"), interface);
-    let sysctl = SysCtl::enable_ipv4_forwarding();
+    let _iptables = IpTables::add_masquerade_rule(String::from("10.200.200.0/24"), interface);
+    let _sysctl = SysCtl::enable_ipv4_forwarding();
     ns.dns_config()?;
     ns.run_openvpn(&provider, &server, port)?;
+
+    debug!(
+        "Checking that OpenVPN is running in namespace: {}",
+        &ns_name
+    );
+    if !ns.check_openvpn_running()? {
+        error!(
+            "OpenVPN not running in network namespace {}, probable authentication error",
+            &ns_name
+        );
+        return Err(anyhow!(
+            "OpenVPN not running in network namespace, probable authentication error"
+        ));
+    }
     let application = ApplicationWrapper::new(&ns, &command.application)?;
     let output = application.wait_with_output()?;
     io::stdout().write_all(output.stdout.as_slice())?;
@@ -94,6 +107,12 @@ impl ApplicationWrapper {
     pub fn wait_with_output(self) -> anyhow::Result<std::process::Output> {
         let output = self.handle.wait_with_output()?;
         Ok(output)
+    }
+
+    pub fn check_if_running(&mut self) -> anyhow::Result<bool> {
+        let output = self.handle.try_wait()?;
+
+        Ok(output.is_none())
     }
 }
 

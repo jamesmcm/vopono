@@ -23,7 +23,10 @@ pub enum Command {
     )]
     Create(ExecCommand),
 
-    #[structopt(name = "default", about = "Get or set default VPN provider and server")]
+    #[structopt(
+        name = "default",
+        about = "Get or set default VPN provider and server (UNIMPLEMENTED)"
+    )]
     SetDefaults(SetDefaultsCommand),
 }
 

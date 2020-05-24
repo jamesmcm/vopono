@@ -14,7 +14,7 @@ pub struct NetworkNamespace {
     name: String,
     veth_pair: Option<VethPair>,
     dns_config: Option<DnsConfig>,
-    openvpn: Option<OpenVpn>,
+    pub openvpn: Option<OpenVpn>,
 }
 
 impl NetworkNamespace {
@@ -129,6 +129,10 @@ impl NetworkNamespace {
         self.openvpn = Some(OpenVpn::run(&self, provider, server, port)?);
         Ok(())
     }
+
+    pub fn check_openvpn_running(&mut self) -> anyhow::Result<bool> {
+        self.openvpn.as_mut().unwrap().check_if_running()
+    }
 }
 
 impl Drop for NetworkNamespace {
@@ -237,6 +241,7 @@ impl OpenVpn {
         let mut openvpn_auth = config_dir()?;
         openvpn_auth.push(format!("vopono/{}/openvpn/auth.txt", provider.alias()));
 
+        //TODO: use uid flag?
         // TODO: Make crl-verify and ca depend on VpnProvider
         let mut openvpn_ca = config_dir()?;
         openvpn_ca.push(format!(
@@ -272,6 +277,12 @@ impl OpenVpn {
         // TODO: How to check for VPN connection or auth error?? OpenVPN silently continues
         sleep(Duration::from_secs(10)); //TODO: Can we do this by parsing stdout
         Ok(Self { handle })
+    }
+
+    pub fn check_if_running(&mut self) -> anyhow::Result<bool> {
+        let output = self.handle.try_wait()?;
+
+        Ok(output.is_none())
     }
 }
 
