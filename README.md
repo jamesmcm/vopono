@@ -38,6 +38,11 @@ Place your username and password in
 line, and the password on the second (with a newline). Otherwise you
 will be prompted for your credentials.
 
+### Firefox
+
+Note if running multiple Firefox sessions, they need to run separate
+profiles in order to force Firefox to run them as separate processes.
+
 ### Known issues
 
 * OpenVPN output is not muted - you will see the output from OpenVPN
@@ -45,10 +50,7 @@ will be prompted for your credentials.
   applications but since it is difficult to handle failures in OpenVPN
   overall I felt it was left to leave this enabled for now (for
   debugging).
-* Multiple network namespaces at once are not currently supported. This
-  is due to the allocation of static IP addresses and will be resolved
-  soon. It is also planned to add an option to list currently running
-  vopono network namespaces.
+* It is currently not possible to list running vopono network namespaces.
 * Multiple applications cannot currently share the same network
   namespace. This requires keeping the network namespace alive between
   different instances of vopono. This will be resolved soon, probably

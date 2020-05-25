@@ -11,6 +11,7 @@ use iptables::IpTables;
 use log::{debug, error, LevelFilter};
 use netns::NetworkNamespace;
 use network_interface::NetworkInterface;
+use regex::Regex;
 use std::io::{self, Write};
 use std::process::Command;
 use structopt::StructOpt;
@@ -62,9 +63,11 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let mut ns = NetworkNamespace::new(ns_name.clone())?;
     ns.add_loopback()?;
     ns.add_veth_pair()?;
-    ns.add_routing()?;
+    let target_subnet = get_target_subnet()?;
+    ns.add_routing(target_subnet)?;
     let interface = NetworkInterface::Ethernet; //TODO
-    let _iptables = IpTables::add_masquerade_rule(String::from("10.200.200.0/24"), interface);
+    let _iptables =
+        IpTables::add_masquerade_rule(format!("10.200.{}.0/24", target_subnet), interface);
     let _sysctl = SysCtl::enable_ipv4_forwarding();
     ns.dns_config()?;
     ns.run_openvpn(&provider, &server, port)?;
@@ -134,4 +137,36 @@ pub fn sudo_command(command: &[&str]) -> anyhow::Result<()> {
     } else {
         Err(anyhow!("Command failed: sudo {}", command.join(" ")))
     }
+}
+
+fn get_target_subnet() -> anyhow::Result<u8> {
+    // TODO clean this up
+    let assigned_ips = get_allocated_ip_addresses()?;
+    let mut target_ip = 1;
+    loop {
+        let ip = format!("10.200.{}.1/24", target_ip);
+        if assigned_ips.contains(&ip) {
+            target_ip += 1;
+        } else {
+            return Ok(target_ip);
+        }
+    }
+}
+
+// TODO: Create struct for holding IPv4 addresses and use FromStr and Eq with that
+fn get_allocated_ip_addresses() -> anyhow::Result<Vec<String>> {
+    let output = Command::new("sudo")
+        .args(&["ip", "addr", "show", "type", "veth"])
+        .output()?
+        .stdout;
+    let output = std::str::from_utf8(&output)?;
+    debug!("Existing interfaces: {}", output);
+
+    let re = Regex::new(r"inet\s+(?P<ip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2})").unwrap();
+    let mut ips = Vec::new();
+    for caps in re.captures_iter(output) {
+        ips.push(String::from(&caps["ip"]));
+    }
+    debug!("Assigned IPs: {:?}", &ips);
+    Ok(ips)
 }

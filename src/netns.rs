@@ -73,7 +73,7 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn add_routing(&self) -> anyhow::Result<()> {
+    pub fn add_routing(&self, target_subnet: u8) -> anyhow::Result<()> {
         // TODO: Handle case where IP address taken
         let veth_dest = &self
             .veth_pair
@@ -87,16 +87,18 @@ impl NetworkNamespace {
             .expect("Source veth undefined")
             .source;
 
-        sudo_command(&["ip", "addr", "add", "10.200.200.1/24", "dev", veth_dest]).with_context(
-            || {
-                format!(
-                    "Failed to assign static IP to veth destination: {}",
-                    veth_dest
-                )
-            },
-        )?;
+        let ip = format!("10.200.{}.1/24", target_subnet);
+        let ip_nosub = format!("10.200.{}.1", target_subnet);
+        let veth_source_ip = format!("10.200.{}.2/24", target_subnet);
 
-        self.exec(&["ip", "addr", "add", "10.200.200.2/24", "dev", veth_source])
+        sudo_command(&["ip", "addr", "add", &ip, "dev", veth_dest]).with_context(|| {
+            format!(
+                "Failed to assign static IP to veth destination: {}",
+                veth_dest
+            )
+        })?;
+
+        self.exec(&["ip", "addr", "add", &veth_source_ip, "dev", veth_source])
             .with_context(|| {
                 format!("Failed to assign static IP to veth source: {}", veth_source)
             })?;
@@ -106,7 +108,7 @@ impl NetworkNamespace {
             "add",
             "default",
             "via",
-            "10.200.200.1",
+            &ip_nosub,
             "dev",
             veth_source,
         ])
