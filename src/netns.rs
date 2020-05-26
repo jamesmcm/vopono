@@ -139,6 +139,9 @@ impl NetworkNamespace {
 
 impl Drop for NetworkNamespace {
     fn drop(&mut self) {
+        self.openvpn = None;
+        self.veth_pair = None;
+        self.dns_config = None;
         sudo_command(&["ip", "netns", "delete", &self.name]).expect(&format!(
             "Failed to delete network namespace: {}",
             &self.name
@@ -314,10 +317,10 @@ impl Drop for OpenVpn {
         // TODO: Do this with elevated privileges - also need to kill spawned children
         // nix::unistd::setuid(nix::unistd::Uid::from_raw(0)).expect("Failed to elevate privileges");
         // self.handle.kill().expect("Failed to kill OpenVPN");
-        // sudo_command(&["sh", "-c", &format!("kill -9 {}", &self.handle.id())])
-        //     .expect("Failed to kill OpenVPN");
+        sudo_command(&["pkill", "-P", &format!("{}", &self.handle.id())])
+            .expect("Failed to kill OpenVPN");
         // TODO: Fix this!
-        sudo_command(&["killall", "-s", "SIGKILL", "openvpn"]).expect("Failed to kill OpenVPN");
+        // sudo_command(&["killall", "-s", "SIGKILL", "openvpn"]).expect("Failed to kill OpenVPN");
         sleep(Duration::from_secs(2));
     }
 }
