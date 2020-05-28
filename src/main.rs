@@ -60,7 +60,13 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let (server, port, server_alias) = find_host_from_alias(&server, &serverlist)?;
     // if protocol == OpenVPN
     let ns_name = format!("{}_{}", provider.alias(), server_alias);
-    let mut ns = NetworkNamespace::new(ns_name.clone())?;
+    let mut ns;
+    if get_existing_namespaces()?.contains(&ns_name) {
+        // If namespace exists, read its lock config
+        ns = NetworkNamespace::from_existing(ns_name.clone())?;
+    } else {
+        ns = NetworkNamespace::new(ns_name.clone())?;
+    }
     ns.add_loopback()?;
     ns.add_veth_pair()?;
     let target_subnet = get_target_subnet()?;
@@ -169,4 +175,19 @@ fn get_allocated_ip_addresses() -> anyhow::Result<Vec<String>> {
     }
     debug!("Assigned IPs: {:?}", &ips);
     Ok(ips)
+}
+
+fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
+    let output = Command::new("sudo")
+        .args(&["ip", "netns", "list"])
+        .output()?
+        .stdout;
+    let output = std::str::from_utf8(&output)?
+        .split("\n")
+        .into_iter()
+        .map(|x| String::from(x))
+        .collect();
+    debug!("Existing namespaces: {:?}", output);
+
+    Ok(output)
 }

@@ -18,6 +18,26 @@ pub struct NetworkNamespace {
 }
 
 impl NetworkNamespace {
+    pub fn from_existing(
+        name: String,
+        provider: &VpnProvider,
+        server: &str,
+        port: u32,
+    ) -> anyhow::Result<Self> {
+        let ns = Self {
+            name,
+            veth_pair: None,
+            dns_config: None,
+            openvpn: None,
+        };
+
+        ns.openvpn = OpenVpn {
+            handle: None,
+            pid: u32,
+        };
+
+        Ok(ns)
+    }
     pub fn new(name: String) -> anyhow::Result<Self> {
         // TODO: Lockfile to allow shared namespaces
         sudo_command(&["ip", "netns", "add", name.as_str()])
@@ -235,6 +255,7 @@ impl Drop for DnsConfig {
 
 pub struct OpenVpn {
     handle: std::process::Child,
+    pid: u32,
 }
 impl OpenVpn {
     pub fn run(
@@ -281,7 +302,10 @@ impl OpenVpn {
         ])?;
         // TODO: How to check for VPN connection or auth error?? OpenVPN silently continues
         sleep(Duration::from_secs(10)); //TODO: Can we do this by parsing stdout
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            pid: handle.id(),
+        })
     }
 
     pub fn check_if_running(&mut self) -> anyhow::Result<bool> {
