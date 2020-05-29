@@ -1,15 +1,20 @@
-use super::sudo_command;
 use super::vpn::VpnProvider;
+use super::{check_process_running, sudo_command};
 use anyhow::anyhow;
 use anyhow::Context;
 use directories_next::BaseDirs;
 use log::{debug, info};
+use nix::unistd;
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 use users::{get_current_uid, get_user_by_uid};
 
+#[derive(Serialize, Deserialize)]
 pub struct NetworkNamespace {
     name: String,
     veth_pair: Option<VethPair>,
@@ -18,26 +23,20 @@ pub struct NetworkNamespace {
 }
 
 impl NetworkNamespace {
-    pub fn from_existing(
-        name: String,
-        provider: &VpnProvider,
-        server: &str,
-        port: u32,
-    ) -> anyhow::Result<Self> {
-        let ns = Self {
-            name,
-            veth_pair: None,
-            dns_config: None,
-            openvpn: None,
-        };
+    pub fn from_existing(name: String) -> anyhow::Result<Self> {
+        let mut lockfile_path = config_dir()?;
+        lockfile_path.push(format!("vopono/locks/{}", name));
 
-        ns.openvpn = OpenVpn {
-            handle: None,
-            pid: u32,
-        };
+        std::fs::create_dir_all(&lockfile_path)?;
+        let lockfile = std::fs::read_dir(lockfile_path)?
+            .next()
+            .expect("No lockfile")?;
 
+        let lockfile = File::open(lockfile.path())?;
+        let ns: Self = ron::de::from_reader(lockfile)?;
         Ok(ns)
     }
+
     pub fn new(name: String) -> anyhow::Result<Self> {
         // TODO: Lockfile to allow shared namespaces
         sudo_command(&["ip", "netns", "add", name.as_str()])
@@ -155,20 +154,56 @@ impl NetworkNamespace {
     pub fn check_openvpn_running(&mut self) -> anyhow::Result<bool> {
         self.openvpn.as_mut().unwrap().check_if_running()
     }
+
+    pub fn write_lockfile(&self) -> anyhow::Result<()> {
+        let mut lockfile_path = config_dir()?;
+        lockfile_path.push(format!("vopono/locks/{}", self.name));
+        std::fs::create_dir_all(&lockfile_path)?;
+        lockfile_path.push(format!("{}", unistd::getpid()));
+        let lock_string = ron::ser::to_string(self)?;
+        let mut f = File::create(lockfile_path)?;
+        write!(f, "{}", lock_string)?;
+        Ok(())
+    }
 }
 
 impl Drop for NetworkNamespace {
     fn drop(&mut self) {
-        self.openvpn = None;
-        self.veth_pair = None;
-        self.dns_config = None;
-        sudo_command(&["ip", "netns", "delete", &self.name]).expect(&format!(
-            "Failed to delete network namespace: {}",
-            &self.name
-        ));
+        let mut lockfile_path = config_dir().expect("Failed to get config dir");
+        lockfile_path.push(format!("vopono/locks/{}/{}", self.name, unistd::getpid()));
+        std::fs::remove_file(lockfile_path).expect("Failed to remove lockfile");
+
+        let mut lockfile_path = config_dir().expect("Failed to get config dir");
+        lockfile_path.push(format!("vopono/locks/{}", self.name));
+        let try_delete = std::fs::remove_dir(lockfile_path);
+
+        // TODO: Clean this up
+        if try_delete.is_ok() {
+            self.openvpn = None;
+            self.veth_pair = None;
+            self.dns_config = None;
+            sudo_command(&["ip", "netns", "delete", &self.name]).expect(&format!(
+                "Failed to delete network namespace: {}",
+                &self.name
+            ));
+        } else {
+            // Avoid triggering destructors?
+            let openvpn = self.openvpn.take();
+            let openvpn = Box::new(openvpn);
+            Box::leak(openvpn);
+
+            let veth_pair = self.veth_pair.take();
+            let veth_pair = Box::new(veth_pair);
+            Box::leak(veth_pair);
+
+            let dns_config = self.dns_config.take();
+            let dns_config = Box::new(dns_config);
+            Box::leak(dns_config);
+        }
     }
 }
 
+#[derive(Serialize, Deserialize)]
 struct VethPair {
     source: String,
     dest: String,
@@ -214,6 +249,7 @@ impl Drop for VethPair {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 struct DnsConfig {
     ns_name: String,
 }
@@ -253,10 +289,11 @@ impl Drop for DnsConfig {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct OpenVpn {
-    handle: std::process::Child,
     pid: u32,
 }
+
 impl OpenVpn {
     pub fn run(
         netns: &NetworkNamespace,
@@ -268,7 +305,7 @@ impl OpenVpn {
         openvpn_auth.push(format!("vopono/{}/openvpn/auth.txt", provider.alias()));
 
         //TODO: use uid flag?
-        // TODO: Make crl-verify and ca depend on VpnProvider
+        // TODO: Make crl-verify and ca depend on VpnProvider - put inside openvpn config file?
         let mut openvpn_ca = config_dir()?;
         openvpn_ca.push(format!(
             "vopono/{}/openvpn/ca.rsa.2048.crt",
@@ -302,16 +339,11 @@ impl OpenVpn {
         ])?;
         // TODO: How to check for VPN connection or auth error?? OpenVPN silently continues
         sleep(Duration::from_secs(10)); //TODO: Can we do this by parsing stdout
-        Ok(Self {
-            handle,
-            pid: handle.id(),
-        })
+        Ok(Self { pid: handle.id() })
     }
 
     pub fn check_if_running(&mut self) -> anyhow::Result<bool> {
-        let output = self.handle.try_wait()?;
-
-        Ok(output.is_none())
+        check_process_running(self.pid)
     }
 }
 
@@ -341,8 +373,7 @@ impl Drop for OpenVpn {
         // TODO: Do this with elevated privileges - also need to kill spawned children
         // nix::unistd::setuid(nix::unistd::Uid::from_raw(0)).expect("Failed to elevate privileges");
         // self.handle.kill().expect("Failed to kill OpenVPN");
-        sudo_command(&["pkill", "-P", &format!("{}", &self.handle.id())])
-            .expect("Failed to kill OpenVPN");
+        sudo_command(&["pkill", "-P", &format!("{}", self.pid)]).expect("Failed to kill OpenVPN");
         // TODO: Fix this!
         // sudo_command(&["killall", "-s", "SIGKILL", "openvpn"]).expect("Failed to kill OpenVPN");
         sleep(Duration::from_secs(2));

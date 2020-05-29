@@ -61,22 +61,24 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // if protocol == OpenVPN
     let ns_name = format!("{}_{}", provider.alias(), server_alias);
     let mut ns;
+    // Better to check for lockfile exists?
     if get_existing_namespaces()?.contains(&ns_name) {
         // If namespace exists, read its lock config
         ns = NetworkNamespace::from_existing(ns_name.clone())?;
     } else {
         ns = NetworkNamespace::new(ns_name.clone())?;
+        ns.add_loopback()?;
+        ns.add_veth_pair()?;
+        let target_subnet = get_target_subnet()?;
+        ns.add_routing(target_subnet)?;
+        let interface = NetworkInterface::Ethernet; //TODO
+        let _iptables =
+            IpTables::add_masquerade_rule(format!("10.200.{}.0/24", target_subnet), interface);
+        let _sysctl = SysCtl::enable_ipv4_forwarding();
+        ns.dns_config()?;
+        ns.run_openvpn(&provider, &server, port)?;
     }
-    ns.add_loopback()?;
-    ns.add_veth_pair()?;
-    let target_subnet = get_target_subnet()?;
-    ns.add_routing(target_subnet)?;
-    let interface = NetworkInterface::Ethernet; //TODO
-    let _iptables =
-        IpTables::add_masquerade_rule(format!("10.200.{}.0/24", target_subnet), interface);
-    let _sysctl = SysCtl::enable_ipv4_forwarding();
-    ns.dns_config()?;
-    ns.run_openvpn(&provider, &server, port)?;
+    ns.write_lockfile()?;
 
     debug!(
         "Checking that OpenVPN is running in namespace: {}",
@@ -84,11 +86,11 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     );
     if !ns.check_openvpn_running()? {
         error!(
-            "OpenVPN not running in network namespace {}, probable authentication error",
+            "OpenVPN not running in network namespace {}, probable dead lock file or authentication error",
             &ns_name
         );
         return Err(anyhow!(
-            "OpenVPN not running in network namespace, probable authentication error"
+            "OpenVPN not running in network namespace, probable dead lock file authentication error"
         ));
     }
     let application = ApplicationWrapper::new(&ns, &command.application)?;
@@ -185,9 +187,25 @@ fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
     let output = std::str::from_utf8(&output)?
         .split("\n")
         .into_iter()
-        .map(|x| String::from(x))
+        .map(|x| x.split_whitespace().nth(0))
+        .filter(|x| x.is_some())
+        .map(|x| String::from(x.unwrap()))
         .collect();
     debug!("Existing namespaces: {:?}", output);
 
     Ok(output)
+}
+
+fn check_process_running(pid: u32) -> anyhow::Result<bool> {
+    let output = Command::new("ps")
+        .args(&["-p", &pid.to_string(), "-o", "pid:1", "--no-headers"])
+        .output()?
+        .stdout;
+    let output = std::str::from_utf8(&output)?.split("\n").into_iter().next();
+    debug!("pid: {}, output: {:?}", pid, &output);
+    if let Some(x) = output {
+        Ok(x.trim() == pid.to_string())
+    } else {
+        Ok(false)
+    }
 }

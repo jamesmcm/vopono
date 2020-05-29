@@ -24,3 +24,4 @@ serde = {version = "1", features = ["derive"]}
 csv = "1"
 dialoguer = "0.6"
 regex = "1"
+ron = "0.6"
