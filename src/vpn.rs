@@ -1,4 +1,4 @@
-use super::netns::config_dir;
+use super::util::config_dir;
 use anyhow::{anyhow, Context};
 use clap::arg_enum;
 use dialoguer::{Input, Password};
@@ -13,6 +13,7 @@ pub enum VpnProvider {
     PrivateInternetAccess,
     Mullvad,
     NordVpn,
+    TigerVpn,
 }
 }
 
@@ -20,10 +21,16 @@ impl VpnProvider {
     pub fn alias(&self) -> String {
         match self {
             Self::PrivateInternetAccess => String::from("pia"),
-            Self::Mullvad => String::from("mullvad"),
-            Self::NordVpn => String::from("nordvpn"),
+            Self::Mullvad => String::from("mull"),
+            Self::NordVpn => String::from("nord"),
+            Self::TigerVpn => String::from("tig"),
         }
     }
+}
+
+pub enum OpenVpnProtocol {
+    UDP,
+    TCP,
 }
 
 pub enum Protocol {
@@ -94,7 +101,7 @@ pub fn find_host_from_alias(
     }
 }
 
-// TODO: handle Pipewire too
+// TODO: handle Wireguard too
 // TODO: Can we avoid storing plaintext passwords?
 // TODO: Allow not storing credentials
 pub fn get_auth(provider: &VpnProvider) -> anyhow::Result<()> {

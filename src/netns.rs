@@ -1,22 +1,19 @@
+use super::dns_config::DnsConfig;
+use super::openvpn::OpenVpn;
+use super::util::{config_dir, sudo_command};
+use super::veth_pair::VethPair;
 use super::vpn::VpnProvider;
-use super::{check_process_running, sudo_command};
-use anyhow::anyhow;
 use anyhow::Context;
-use directories_next::BaseDirs;
-use log::{debug, info};
+use log::debug;
 use nix::unistd;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread::sleep;
-use std::time::Duration;
-use users::{get_current_uid, get_user_by_uid};
 
 #[derive(Serialize, Deserialize)]
 pub struct NetworkNamespace {
-    name: String,
+    pub name: String,
     veth_pair: Option<VethPair>,
     dns_config: Option<DnsConfig>,
     pub openvpn: Option<OpenVpn>,
@@ -38,7 +35,6 @@ impl NetworkNamespace {
     }
 
     pub fn new(name: String) -> anyhow::Result<Self> {
-        // TODO: Lockfile to allow shared namespaces
         sudo_command(&["ip", "netns", "add", name.as_str()])
             .with_context(|| format!("Failed to create network namespace: {}", &name))?;
 
@@ -200,182 +196,5 @@ impl Drop for NetworkNamespace {
             let dns_config = Box::new(dns_config);
             Box::leak(dns_config);
         }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct VethPair {
-    source: String,
-    dest: String,
-}
-
-impl VethPair {
-    fn new(source: String, dest: String, netns: &NetworkNamespace) -> anyhow::Result<Self> {
-        sudo_command(&[
-            "ip",
-            "link",
-            "add",
-            dest.as_str(),
-            "type",
-            "veth",
-            "peer",
-            "name",
-            source.as_str(),
-        ])
-        .with_context(|| format!("Failed to create veth pair {}, {}", &source, &dest))?;
-
-        sudo_command(&["ip", "link", "set", dest.as_str(), "up"])
-            .with_context(|| format!("Failed to bring up destination veth: {}", &dest))?;
-
-        sudo_command(&[
-            "ip",
-            "link",
-            "set",
-            source.as_str(),
-            "netns",
-            &netns.name,
-            "up",
-        ])
-        .with_context(|| format!("Failed to bring up source veth: {}", &dest))?;
-
-        Ok(Self { source, dest })
-    }
-}
-
-impl Drop for VethPair {
-    fn drop(&mut self) {
-        sudo_command(&["ip", "link", "delete", &self.dest])
-            .expect(&format!("Failed to delete veth pair: {}", &self.dest));
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct DnsConfig {
-    ns_name: String,
-}
-
-impl DnsConfig {
-    pub fn new(ns_name: String) -> anyhow::Result<Self> {
-        // TODO: Do this by requesting escalated privileges to current binary and use std::fs
-        sudo_command(&["mkdir", "-p", &format!("/etc/netns/{}", ns_name)])
-            .with_context(|| format!("Failed to create directory: /etc/netns/{}", ns_name))?;
-
-        sudo_command(&[
-            "sh",
-            "-c",
-            &format!(
-                "echo 'nameserver 8.8.8.8' > /etc/netns/{}/resolv.conf",
-                ns_name
-            ),
-        ])
-        .with_context(|| {
-            format!(
-                "Failed to overwrite resolv.conf: /etc/netns/{}/resolv.conf",
-                ns_name
-            )
-        })?;
-
-        Ok(Self { ns_name })
-    }
-}
-
-impl Drop for DnsConfig {
-    fn drop(&mut self) {
-        //TODO: Do this a much safer way!!
-        sudo_command(&["rm", "-rf", &format!("/etc/netns/{}", self.ns_name)]).expect(&format!(
-            "Failed to delete resolv.conf for {}",
-            self.ns_name
-        ));
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct OpenVpn {
-    pid: u32,
-}
-
-impl OpenVpn {
-    pub fn run(
-        netns: &NetworkNamespace,
-        provider: &VpnProvider,
-        server: &str,
-        port: u32,
-    ) -> anyhow::Result<Self> {
-        let mut openvpn_auth = config_dir()?;
-        openvpn_auth.push(format!("vopono/{}/openvpn/auth.txt", provider.alias()));
-
-        //TODO: use uid flag?
-        // TODO: Make crl-verify and ca depend on VpnProvider - put inside openvpn config file?
-        let mut openvpn_ca = config_dir()?;
-        openvpn_ca.push(format!(
-            "vopono/{}/openvpn/ca.rsa.2048.crt",
-            provider.alias()
-        ));
-
-        let mut openvpn_crl = config_dir()?;
-        openvpn_crl.push(format!(
-            "vopono/{}/openvpn/crl.rsa.2048.pem",
-            provider.alias()
-        ));
-
-        let mut openvpn_config = config_dir()?;
-        openvpn_config.push(format!("vopono/{}/openvpn/client.conf", provider.alias()));
-        debug!("OpenVPN config: {:?}", &openvpn_config);
-        info!("Launching OpenVPN...");
-
-        let handle = netns.exec_no_block(&[
-            "openvpn",
-            "--config",
-            openvpn_config.as_os_str().to_str().unwrap(),
-            "--remote",
-            server,
-            &port.to_string(),
-            "--auth-user-pass",
-            openvpn_auth.as_os_str().to_str().unwrap(),
-            "--ca",
-            openvpn_ca.as_os_str().to_str().unwrap(),
-            "--crl-verify",
-            openvpn_crl.as_os_str().to_str().unwrap(),
-        ])?;
-        // TODO: How to check for VPN connection or auth error?? OpenVPN silently continues
-        sleep(Duration::from_secs(10)); //TODO: Can we do this by parsing stdout
-        Ok(Self { pid: handle.id() })
-    }
-
-    pub fn check_if_running(&mut self) -> anyhow::Result<bool> {
-        check_process_running(self.pid)
-    }
-}
-
-pub fn config_dir() -> anyhow::Result<PathBuf> {
-    let mut pathbuf = PathBuf::new();
-    let _res: () = if let Some(base_dirs) = BaseDirs::new() {
-        pathbuf.push(base_dirs.config_dir());
-        Ok(())
-    // Ok((*base_dirs.config_dir()))
-    } else if let Some(user) = get_user_by_uid(get_current_uid()) {
-        let confpath = format!("/home/{}/.config", user.name().to_str().unwrap());
-        let path = Path::new(&confpath);
-        if path.exists() {
-            pathbuf.push(path);
-            Ok(())
-        } else {
-            Err(anyhow!("Could not find valid config directory!"))
-        }
-    } else {
-        Err(anyhow!("Could not find valid config directory!"))
-    }?;
-    Ok(pathbuf)
-}
-
-impl Drop for OpenVpn {
-    fn drop(&mut self) {
-        // TODO: Do this with elevated privileges - also need to kill spawned children
-        // nix::unistd::setuid(nix::unistd::Uid::from_raw(0)).expect("Failed to elevate privileges");
-        // self.handle.kill().expect("Failed to kill OpenVPN");
-        sudo_command(&["pkill", "-P", &format!("{}", self.pid)]).expect("Failed to kill OpenVPN");
-        // TODO: Fix this!
-        // sudo_command(&["killall", "-s", "SIGKILL", "openvpn"]).expect("Failed to kill OpenVPN");
-        sleep(Duration::from_secs(2));
     }
 }

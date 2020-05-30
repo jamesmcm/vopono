@@ -1,5 +1,5 @@
 use super::network_interface::NetworkInterface;
-use super::sudo_command;
+use super::util::sudo_command;
 use anyhow::Context;
 
 pub struct IpTables {
