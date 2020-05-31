@@ -3,6 +3,7 @@ use super::openvpn::OpenVpn;
 use super::util::{config_dir, sudo_command};
 use super::veth_pair::VethPair;
 use super::vpn::VpnProvider;
+use super::wireguard::Wireguard;
 use anyhow::Context;
 use log::{debug, error};
 use nix::unistd;
@@ -17,6 +18,7 @@ pub struct NetworkNamespace {
     veth_pair: Option<VethPair>,
     dns_config: Option<DnsConfig>,
     pub openvpn: Option<OpenVpn>,
+    pub wireguard: Option<Wireguard>,
 }
 
 impl NetworkNamespace {

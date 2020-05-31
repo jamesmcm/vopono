@@ -9,6 +9,7 @@ mod sysctl;
 mod util;
 mod veth_pair;
 mod vpn;
+mod wireguard;
 
 use anyhow::anyhow;
 use application_wrapper::ApplicationWrapper;
@@ -21,16 +22,18 @@ use std::io::{self, Write};
 use structopt::StructOpt;
 use sysctl::SysCtl;
 use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet};
-use vpn::{find_host_from_alias, get_auth, get_serverlist};
+use vpn::{find_host_from_alias, get_auth, get_protocol, get_serverlist, Protocol};
+use wireguard::{get_config_from_alias, Wireguard};
 
 // TODO:
+// - Add configuration for wireless interface for OpenVPN
 // - Parse OpenVPN stdout (can we buffer?)
 // - Allow OpenVPN UDP (1194) and TCP (443) toggle
-// - Add Mullvad OpenVPN
 // - Add Mullvad Wireguard
-// - Add DNS server support (parse for Mullvad)
+// - Add DNS server support for OpenVPN (parse for Mullvad)
 // - Always run as root (use sudo self on startup)
 // - Allow custom VPNs (provide .ovpn file?)
+// - Mullvad Shadowsocks
 
 // TODO: Allow listing of open network namespaces, applications currently running in network
 // namespaces
@@ -66,7 +69,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
 
     let serverlist = get_serverlist(&provider)?;
     let (server, port, server_alias) = find_host_from_alias(&server, &serverlist)?;
-    // if protocol == OpenVPN
+    let protocol = get_protocol(&provider, command.protocol)?;
     let ns_name = format!("{}_{}", provider.alias(), server_alias);
     let mut ns;
     // Better to check for lockfile exists?
@@ -80,16 +83,26 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         ns = NetworkNamespace::from_existing(ns_name.clone())?;
     } else {
         ns = NetworkNamespace::new(ns_name.clone())?;
-        ns.add_loopback()?;
-        ns.add_veth_pair()?;
-        target_subnet = get_target_subnet()?;
-        ns.add_routing(target_subnet)?;
-        interface = NetworkInterface::Ethernet; //TODO
-        _iptables =
-            IpTables::add_masquerade_rule(format!("10.200.{}.0/24", target_subnet), interface);
-        _sysctl = SysCtl::enable_ipv4_forwarding();
-        ns.dns_config()?;
-        ns.run_openvpn(&provider, &server, port)?;
+        match protocol {
+            Protocol::OpenVpn => {
+                ns.add_loopback()?;
+                ns.add_veth_pair()?;
+                target_subnet = get_target_subnet()?;
+                ns.add_routing(target_subnet)?;
+                interface = NetworkInterface::Ethernet; //TODO
+                _iptables = IpTables::add_masquerade_rule(
+                    format!("10.200.{}.0/24", target_subnet),
+                    interface,
+                );
+                _sysctl = SysCtl::enable_ipv4_forwarding();
+                ns.dns_config()?;
+                ns.run_openvpn(&provider, &server, port)?;
+            }
+            Protocol::Wireguard => {
+                let config = get_config_from_alias(&provider, &server)?;
+                ns.
+            }
+        }
     }
     ns.write_lockfile()?;
 

@@ -2,7 +2,7 @@ use super::util::config_dir;
 use anyhow::{anyhow, Context};
 use clap::arg_enum;
 use dialoguer::{Input, Password};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
 use rand::seq::SliceRandom;
 use serde::Deserialize;
 use std::fs::File;
@@ -13,7 +13,6 @@ arg_enum! {
 pub enum VpnProvider {
     PrivateInternetAccess,
     Mullvad,
-    NordVpn,
     TigerVpn,
 }
 }
@@ -23,7 +22,6 @@ impl VpnProvider {
         match self {
             Self::PrivateInternetAccess => String::from("pia"),
             Self::Mullvad => String::from("mv"),
-            Self::NordVpn => String::from("nord"),
             Self::TigerVpn => String::from("tig"),
         }
     }
@@ -34,9 +32,12 @@ pub enum OpenVpnProtocol {
     TCP,
 }
 
+arg_enum! {
+    #[derive(Debug)]
 pub enum Protocol {
     OpenVpn,
     Wireguard,
+}
 }
 
 pub enum Firewall {
@@ -74,6 +75,7 @@ pub fn get_serverlist(provider: &VpnProvider) -> anyhow::Result<Vec<VpnServer>> 
     Ok(resultvec)
 }
 
+// OpenVPN
 pub fn find_host_from_alias(
     alias: &String,
     serverlist: &Vec<VpnServer>,
@@ -112,7 +114,6 @@ pub fn find_host_from_alias(
     }
 }
 
-// TODO: handle Wireguard too
 // TODO: Can we avoid storing plaintext passwords?
 // TODO: Allow not storing credentials
 pub fn get_auth(provider: &VpnProvider) -> anyhow::Result<()> {
@@ -145,5 +146,34 @@ pub fn get_auth(provider: &VpnProvider) -> anyhow::Result<()> {
             info!("Credentials written to: {}", auth_path.to_string_lossy());
             Ok(())
         }
+    }
+}
+
+// TODO: For providers that provide both, check if system has wireguard capability first for
+// default
+pub fn get_protocol(
+    provider: &VpnProvider,
+    protocol: Option<Protocol>,
+) -> anyhow::Result<Protocol> {
+    match protocol {
+        Some(Protocol::Wireguard) => match provider {
+            VpnProvider::Mullvad => Ok(Protocol::Wireguard),
+            VpnProvider::TigerVpn => {
+                error!("Wireguard not implemented for TigerVPN");
+                Err(anyhow!("Wireguard not implemented for TigerVPN"))
+            }
+            VpnProvider::PrivateInternetAccess => {
+                error!("Wireguard not implemented for PrivateInternetAccess");
+                Err(anyhow!(
+                    "Wireguard not implemented for PrivateInternetAccess"
+                ))
+            }
+        },
+        Some(Protocol::OpenVpn) => Ok(Protocol::OpenVpn),
+        None => match provider {
+            VpnProvider::Mullvad => Ok(Protocol::Wireguard),
+            VpnProvider::TigerVpn => Ok(Protocol::OpenVpn),
+            VpnProvider::PrivateInternetAccess => Ok(Protocol::OpenVpn),
+        },
     }
 }
