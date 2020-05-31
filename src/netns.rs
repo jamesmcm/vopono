@@ -4,7 +4,7 @@ use super::util::{config_dir, sudo_command};
 use super::veth_pair::VethPair;
 use super::vpn::VpnProvider;
 use anyhow::Context;
-use log::debug;
+use log::{debug, error};
 use nix::unistd;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -82,8 +82,8 @@ impl NetworkNamespace {
         // TODO: Handle if name taken?
         // TODO: Can we share veth dest between namespaces?
         // TODO: Better handle name length limits
-        let source = format!("{}_src0", &self.name);
-        let dest = format!("{}_dest0", &self.name);
+        let source = format!("{}_s", &self.name);
+        let dest = format!("{}_d", &self.name);
         self.veth_pair = Some(VethPair::new(source, dest, &self)?);
         Ok(())
     }
@@ -155,10 +155,12 @@ impl NetworkNamespace {
         let mut lockfile_path = config_dir()?;
         lockfile_path.push(format!("vopono/locks/{}", self.name));
         std::fs::create_dir_all(&lockfile_path)?;
+        debug!("Writing lockfile: {}", lockfile_path.display());
         lockfile_path.push(format!("{}", unistd::getpid()));
         let lock_string = ron::ser::to_string(self)?;
-        let mut f = File::create(lockfile_path)?;
+        let mut f = File::create(&lockfile_path)?;
         write!(f, "{}", lock_string)?;
+        debug!("Lockfile written: {}", lockfile_path.display());
         Ok(())
     }
 }
@@ -167,7 +169,12 @@ impl Drop for NetworkNamespace {
     fn drop(&mut self) {
         let mut lockfile_path = config_dir().expect("Failed to get config dir");
         lockfile_path.push(format!("vopono/locks/{}/{}", self.name, unistd::getpid()));
-        std::fs::remove_file(lockfile_path).expect("Failed to remove lockfile");
+        match std::fs::remove_file(lockfile_path) {
+            Ok(_) => {}
+            Err(e) => {
+                error!("Failed to remove lockfile: {:?}", e);
+            }
+        };
 
         let mut lockfile_path = config_dir().expect("Failed to get config dir");
         lockfile_path.push(format!("vopono/locks/{}", self.name));

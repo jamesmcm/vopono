@@ -9,8 +9,11 @@ pub struct VethPair {
     pub dest: String,
 }
 
+// ifname must be less <= 15 chars
 impl VethPair {
     pub fn new(source: String, dest: String, netns: &NetworkNamespace) -> anyhow::Result<Self> {
+        assert!(source.len() <= 15, "ifname must be <= 15 chars: {}", source);
+        assert!(dest.len() <= 15, "ifname must be <= 15 chars: {}", dest);
         sudo_command(&[
             "ip",
             "link",

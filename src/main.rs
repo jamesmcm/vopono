@@ -25,10 +25,10 @@ use vpn::{find_host_from_alias, get_auth, get_serverlist};
 
 // TODO:
 // - Parse OpenVPN stdout (can we buffer?)
-// - Add TigerVPN
 // - Allow OpenVPN UDP (1194) and TCP (443) toggle
 // - Add Mullvad OpenVPN
 // - Add Mullvad Wireguard
+// - Add DNS server support (parse for Mullvad)
 // - Always run as root (use sudo self on startup)
 // - Allow custom VPNs (provide .ovpn file?)
 

@@ -3,6 +3,7 @@ use anyhow::{anyhow, Context};
 use clap::arg_enum;
 use dialoguer::{Input, Password};
 use log::{debug, info, warn};
+use rand::seq::SliceRandom;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
@@ -21,7 +22,7 @@ impl VpnProvider {
     pub fn alias(&self) -> String {
         match self {
             Self::PrivateInternetAccess => String::from("pia"),
-            Self::Mullvad => String::from("mull"),
+            Self::Mullvad => String::from("mv"),
             Self::NordVpn => String::from("nord"),
             Self::TigerVpn => String::from("tig"),
         }
@@ -79,15 +80,24 @@ pub fn find_host_from_alias(
 ) -> anyhow::Result<(String, u32, String)> {
     let alias = alias.to_lowercase();
     let record = serverlist
-        .iter()
-        .find(|x| x.name == alias || x.alias == alias || x.name.replace("_", "-") == alias);
-    if record.is_none() {
+        .into_iter()
+        .filter(|x| {
+            x.name.starts_with(&alias)
+                || x.alias.starts_with(&alias)
+                || x.name.replace("_", "-").starts_with(&alias)
+        })
+        .collect::<Vec<&VpnServer>>();
+
+    if record.len() == 0 {
         Err(anyhow!(
             "Could not find server alias {} in serverlist",
             &alias
         ))
     } else {
-        let record = record.unwrap();
+        let record = record
+            .choose(&mut rand::thread_rng())
+            .expect("Could not find server alias");
+
         let port = if record.port.is_none() {
             warn!(
                 "Using default OpenVPN port 1194 for {}, as no port provided",
@@ -97,6 +107,7 @@ pub fn find_host_from_alias(
         } else {
             record.port.unwrap()
         };
+        debug!("Chosen server: {}:{}", record.host, port);
         Ok((record.host.clone(), port, record.alias.clone()))
     }
 }
@@ -128,7 +139,8 @@ pub fn get_auth(provider: &VpnProvider) -> anyhow::Result<()> {
                 .with_confirmation("Confirm password", "Passwords did not match")
                 .interact()?;
 
-            let mut writefile = File::create(&auth_path)?;
+            let mut writefile = File::create(&auth_path)
+                .with_context(|| format!("Could not create auth file: {}", auth_path.display()))?;
             write!(writefile, "{}\n{}\n", username, password)?;
             info!("Credentials written to: {}", auth_path.to_string_lossy());
             Ok(())
