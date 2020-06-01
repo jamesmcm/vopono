@@ -64,20 +64,36 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // TODO: Handle running as current user vs. root
     // Get server and provider (handle default case)
     let provider = command.vpn_provider.unwrap();
-    let server = command.server.unwrap();
-    get_auth(&provider)?;
+    let server_name = command.server.unwrap();
+
+    let protocol = get_protocol(&provider, command.protocol)?;
 
     let serverlist = get_serverlist(&provider)?;
-    let (server, port, server_alias) = find_host_from_alias(&server, &serverlist)?;
-    let protocol = get_protocol(&provider, command.protocol)?;
-    let ns_name = format!("{}_{}", provider.alias(), server_alias);
+    let server;
+    let port;
+    let ns_name;
+    let server_alias;
+
+    match protocol {
+        Protocol::OpenVpn => {
+            let x = find_host_from_alias(&server_name, &serverlist)?;
+            server = x.0;
+            port = x.1;
+            server_alias = x.2;
+            // (server, port, server_alias) = find_host_from_alias(&server, &serverlist)?;
+            ns_name = format!("{}_{}", provider.alias(), server_alias);
+        }
+        Protocol::Wireguard => {
+            ns_name = format!("{}_{}", provider.alias(), server_name);
+        }
+    }
     let mut ns;
-    // Better to check for lockfile exists?
     let _iptables;
     let _sysctl;
     let target_subnet;
     let interface;
 
+    // Better to check for lockfile exists?
     if get_existing_namespaces()?.contains(&ns_name) {
         // If namespace exists, read its lock config
         ns = NetworkNamespace::from_existing(ns_name.clone())?;
@@ -85,6 +101,8 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         ns = NetworkNamespace::new(ns_name.clone())?;
         match protocol {
             Protocol::OpenVpn => {
+                let (server, port, server_alias) = find_host_from_alias(&server_name, &serverlist)?;
+                get_auth(&provider)?;
                 ns.add_loopback()?;
                 ns.add_veth_pair()?;
                 target_subnet = get_target_subnet()?;
@@ -97,28 +115,28 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 _sysctl = SysCtl::enable_ipv4_forwarding();
                 ns.dns_config()?;
                 ns.run_openvpn(&provider, &server, port)?;
-            }
-            Protocol::Wireguard => {
-                let config = get_config_from_alias(&provider, &server)?;
-                ns.
-            }
-        }
-    }
-    ns.write_lockfile()?;
-
-    debug!(
-        "Checking that OpenVPN is running in namespace: {}",
-        &ns_name
-    );
-    if !ns.check_openvpn_running()? {
-        error!(
+                debug!(
+                    "Checking that OpenVPN is running in namespace: {}",
+                    &ns_name
+                );
+                if !ns.check_openvpn_running()? {
+                    error!(
             "OpenVPN not running in network namespace {}, probable dead lock file or authentication error",
             &ns_name
         );
-        return Err(anyhow!(
+                    return Err(anyhow!(
             "OpenVPN not running in network namespace, probable dead lock file authentication error"
         ));
+                }
+            }
+            Protocol::Wireguard => {
+                let config = get_config_from_alias(&provider, &server_name)?;
+                ns.run_wireguard(config)?;
+            }
+        }
     }
+
+    ns.write_lockfile()?;
     let application = ApplicationWrapper::new(&ns, &command.application)?;
     let output = application.wait_with_output()?;
     io::stdout().write_all(output.stdout.as_slice())?;

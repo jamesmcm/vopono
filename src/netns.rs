@@ -5,11 +5,12 @@ use super::veth_pair::VethPair;
 use super::vpn::VpnProvider;
 use super::wireguard::Wireguard;
 use anyhow::Context;
-use log::{debug, error};
+use log::{debug, warn};
 use nix::unistd;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 #[derive(Serialize, Deserialize)]
@@ -45,6 +46,7 @@ impl NetworkNamespace {
             veth_pair: None,
             dns_config: None,
             openvpn: None,
+            wireguard: None,
         })
     }
     pub fn exec_no_block(&self, command: &[&str]) -> anyhow::Result<std::process::Child> {
@@ -149,6 +151,11 @@ impl NetworkNamespace {
         Ok(())
     }
 
+    pub fn run_wireguard(&mut self, config_file: PathBuf) -> anyhow::Result<()> {
+        self.wireguard = Some(Wireguard::run(&self, config_file)?);
+        Ok(())
+    }
+
     pub fn check_openvpn_running(&mut self) -> anyhow::Result<bool> {
         self.openvpn.as_mut().unwrap().check_if_running()
     }
@@ -174,7 +181,7 @@ impl Drop for NetworkNamespace {
         match std::fs::remove_file(lockfile_path) {
             Ok(_) => {}
             Err(e) => {
-                error!("Failed to remove lockfile: {:?}", e);
+                warn!("Failed to remove lockfile: {:?}", e);
             }
         };
 

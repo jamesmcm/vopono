@@ -1,5 +1,5 @@
 use super::netns::NetworkNamespace;
-use super::util::config_dir;
+use super::util::{config_dir, sudo_command};
 use super::vpn::VpnProvider;
 use anyhow::anyhow;
 use log::{debug, error};
@@ -8,15 +8,15 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
-// TODO: Swap to use netns name so we can serialize
 #[derive(Serialize, Deserialize)]
-pub struct Wireguard<'a> {
-    namespace: &'a NetworkNamespace,
+pub struct Wireguard {
+    ns_name: String,
     config_file: PathBuf,
 }
 
-impl<'a> Wireguard<'a> {
-    pub fn new(namespace: &'a NetworkNamespace, config_file: PathBuf) -> anyhow::Result<Self> {
+// TODO: Implement wg-quick commands for network namespace
+impl Wireguard {
+    pub fn run(namespace: &NetworkNamespace, config_file: PathBuf) -> anyhow::Result<Self> {
         namespace.exec(&[
             "wg-quick",
             "up",
@@ -24,26 +24,30 @@ impl<'a> Wireguard<'a> {
         ])?;
         Ok(Self {
             config_file,
-            namespace: &namespace,
+            ns_name: namespace.name.clone(),
         })
     }
 }
 
-impl<'a> Drop for Wireguard<'a> {
+impl Drop for Wireguard {
     fn drop(&mut self) {
-        if self
-            .namespace
-            .exec(&[
-                "wg-quick",
-                "down",
-                self.config_file.to_str().expect("No Wireguard config path"),
-            ])
-            .is_err()
+        if sudo_command(&[
+            "ip",
+            "netns",
+            "exec",
+            &self.ns_name,
+            "wg-quick",
+            "down",
+            self.config_file.to_str().expect("No Wireguard config path"),
+        ])
+        .is_err()
         {
-            error!(
-                "Failed to kill Wireguard, config: {}",
-                self.config_file.to_str().expect("No Wireguard config path")
-            );
+            {
+                error!(
+                    "Failed to kill Wireguard, config: {}",
+                    self.config_file.to_str().expect("No Wireguard config path")
+                );
+            }
         }
     }
 }
