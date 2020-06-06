@@ -1,3 +1,4 @@
+use super::network_interface::NetworkInterface;
 use super::vpn::{Protocol, VpnProvider};
 use structopt::StructOpt;
 
@@ -39,6 +40,10 @@ pub struct ExecCommand {
     /// VPN Protocol (if not given will use default)
     #[structopt(long = "protocol", short="c", possible_values = &Protocol::variants(), case_insensitive = true)]
     pub protocol: Option<Protocol>,
+
+    /// Network Interface (if not given, will use first active network interface)
+    #[structopt(long = "interface", short = "i", case_insensitive = true)]
+    pub interface: Option<NetworkInterface>,
 
     /// VPN Server (if not given will use default)
     #[structopt(long = "server", short = "s")]

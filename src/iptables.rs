@@ -21,15 +21,14 @@ impl IpTables {
             "-s",
             &ip_mask,
             "-o",
-            &interface.wildcard(),
+            &interface.name,
             "-j",
             "MASQUERADE",
         ])
         .with_context(|| {
             format!(
                 "Failed to add iptables masquerade rule, ip_mask: {}, interface: {}",
-                &ip_mask,
-                interface.wildcard()
+                &ip_mask, &interface.name
             )
         })?;
         Ok(IpTables { ip_mask, interface })
@@ -47,14 +46,13 @@ impl Drop for IpTables {
             "-s",
             &self.ip_mask,
             "-o",
-            &self.interface.wildcard(),
+            &self.interface.name,
             "-j",
             "MASQUERADE",
         ])
         .expect(&format!(
             "Failed to delete iptables masquerade rule, ip_mask: {}, interface: {}",
-            &self.ip_mask,
-            &self.interface.wildcard()
+            &self.ip_mask, &self.interface.name
         ));
     }
 }

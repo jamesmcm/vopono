@@ -17,7 +17,7 @@ use args::ExecCommand;
 use iptables::IpTables;
 use log::{debug, error, LevelFilter};
 use netns::NetworkNamespace;
-use network_interface::NetworkInterface;
+use network_interface::{get_active_interfaces, NetworkInterface};
 use std::io::{self, Write};
 use structopt::StructOpt;
 use sysctl::SysCtl;
@@ -76,6 +76,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
 
     match protocol {
         Protocol::OpenVpn => {
+            // TODO: Cannot call this twice!!
             let x = find_host_from_alias(&server_name, &serverlist)?;
             server = x.0;
             port = x.1;
@@ -91,8 +92,17 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let _iptables;
     let _sysctl;
     let target_subnet;
-    let interface;
+    let interface: NetworkInterface = match command.interface {
+        Some(x) => anyhow::Result::<NetworkInterface>::Ok(x),
+        None => Ok(NetworkInterface::new(
+            get_active_interfaces()?
+                .into_iter()
+                .nth(0)
+                .ok_or_else(|| anyhow!("No active interface"))?,
+        )?),
+    }?;
 
+    debug!("Interface: {}", &interface.name);
     // Better to check for lockfile exists?
     if get_existing_namespaces()?.contains(&ns_name) {
         // If namespace exists, read its lock config
@@ -107,7 +117,6 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 ns.add_veth_pair()?;
                 target_subnet = get_target_subnet()?;
                 ns.add_routing(target_subnet)?;
-                interface = NetworkInterface::Ethernet; //TODO
                 _iptables = IpTables::add_masquerade_rule(
                     format!("10.200.{}.0/24", target_subnet),
                     interface,
