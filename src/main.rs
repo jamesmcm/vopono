@@ -76,7 +76,6 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
 
     match protocol {
         Protocol::OpenVpn => {
-            // TODO: Cannot call this twice!!
             let x = find_host_from_alias(&server_name, &serverlist)?;
             server = x.0;
             port = x.1;
@@ -85,6 +84,9 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
             ns_name = format!("{}_{}", provider.alias(), server_alias);
         }
         Protocol::Wireguard => {
+            server = String::new();
+            port = 0;
+            server_alias = String::new();
             ns_name = format!("{}_{}", provider.alias(), server_name);
         }
     }
@@ -111,7 +113,6 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         ns = NetworkNamespace::new(ns_name.clone())?;
         match protocol {
             Protocol::OpenVpn => {
-                let (server, port, server_alias) = find_host_from_alias(&server_name, &serverlist)?;
                 get_auth(&provider)?;
                 ns.add_loopback()?;
                 ns.add_veth_pair()?;
@@ -122,7 +123,8 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     interface,
                 );
                 _sysctl = SysCtl::enable_ipv4_forwarding();
-                ns.dns_config()?;
+                // TODO: Handle custom DNS
+                ns.dns_config(None)?;
                 ns.run_openvpn(&provider, &server, port)?;
                 debug!(
                     "Checking that OpenVPN is running in namespace: {}",

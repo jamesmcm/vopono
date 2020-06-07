@@ -149,7 +149,10 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
         .filter(|x| x.1.is_some())
         .map(|x| (x.0, running_processes.contains(&x.1.unwrap())))
         .filter(|x| x.1 == true)
-        .map(|x| std::fs::remove_file(x.0.path()))
+        .map(|x| {
+            debug!("Removing lockfile: {}", x.0.path().display());
+            std::fs::remove_file(x.0.path())
+        })
         .collect::<Result<(), _>>()?;
 
     // Delete subdirectories if they contain no locks (ignore errors)

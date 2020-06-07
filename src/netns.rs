@@ -28,6 +28,7 @@ impl NetworkNamespace {
         lockfile_path.push(format!("vopono/locks/{}", name));
 
         std::fs::create_dir_all(&lockfile_path)?;
+        debug!("Trying to read lockfile: {}", lockfile_path.display());
         let lockfile = std::fs::read_dir(lockfile_path)?
             .next()
             .expect("No lockfile")?;
@@ -136,8 +137,8 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn dns_config(&mut self) -> anyhow::Result<()> {
-        self.dns_config = Some(DnsConfig::new(self.name.clone())?);
+    pub fn dns_config(&mut self, server: Option<String>) -> anyhow::Result<()> {
+        self.dns_config = Some(DnsConfig::new(self.name.clone(), server)?);
         Ok(())
     }
 
@@ -194,6 +195,7 @@ impl Drop for NetworkNamespace {
             self.openvpn = None;
             self.veth_pair = None;
             self.dns_config = None;
+            self.wireguard = None;
             sudo_command(&["ip", "netns", "delete", &self.name]).expect(&format!(
                 "Failed to delete network namespace: {}",
                 &self.name

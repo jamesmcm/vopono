@@ -8,7 +8,7 @@ pub struct DnsConfig {
 }
 
 impl DnsConfig {
-    pub fn new(ns_name: String) -> anyhow::Result<Self> {
+    pub fn new(ns_name: String, server: Option<String>) -> anyhow::Result<Self> {
         // TODO: Do this by requesting escalated privileges to current binary and use std::fs
         sudo_command(&["mkdir", "-p", &format!("/etc/netns/{}", ns_name)])
             .with_context(|| format!("Failed to create directory: /etc/netns/{}", ns_name))?;
@@ -17,7 +17,8 @@ impl DnsConfig {
             "sh",
             "-c",
             &format!(
-                "echo 'nameserver 8.8.8.8' > /etc/netns/{}/resolv.conf",
+                "echo 'nameserver {}' > /etc/netns/{}/resolv.conf",
+                server.unwrap_or(String::from("8.8.8.8")),
                 ns_name
             ),
         ])

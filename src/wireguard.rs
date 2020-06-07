@@ -4,6 +4,7 @@ use super::vpn::VpnProvider;
 use anyhow::anyhow;
 use log::{debug, error};
 use rand::seq::SliceRandom;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use walkdir::WalkDir;
@@ -15,13 +16,203 @@ pub struct Wireguard {
 }
 
 // TODO: Implement wg-quick commands for network namespace
+// MTU, PRE_UP, PRE_DOWN, POST_UP, POST_DOWN, TABLE
+// Only need interface section?
+
+// Wireguard UP:
+// PRE_UP hooks
+// add_if
+// sudo ip link add INTERFACE type wireguard
+// set_config
+// wg setconf INTERFACE < config
+// add_addr
+// ip -4 (or -6) address add ADDRESS dev INTERFACE
+// set_mtu_up
+// if MTU: ip link set mtu MTU up dev INTERFACE
+// set_dns
+// write to netns resolv.conf
+// add_route (from allowed IPs for interface)
+// if TABLE: ip -4 route add IP dev INTERFACE table TABLE
+// elif */0:  add_default: nftcmd
+// POST_UP hooks
+
+// [#] ip link add mullvad-se16 type wireguard
+// [#] wg setconf mullvad-se16 /dev/fd/63
+// [#] ip -4 address add 10.67.24.207/32 dev mullvad-se16
+// [#] ip -6 address add fc00:bbbb:bbbb:bb01::4:18ce/128 dev mullvad-se16
+// [#] ip link set mtu 1420 up dev mullvad-se16
+// [#] resolvconf -a mullvad-se16 -m 0 -x
+// [#] wg set mullvad-se16 fwmark 51820
+// [#] ip -6 route add ::/0 dev mullvad-se16 table 51820
+// [#] ip -6 rule add not fwmark 51820 table 51820
+// [#] ip -6 rule add table main suppress_prefixlength 0
+// [#] nft -f /dev/fd/63
+// [#] ip -4 route add 0.0.0.0/0 dev mullvad-se16 table 51820
+// [#] ip -4 rule add not fwmark 51820 table 51820
+// [#] ip -4 rule add table main suppress_prefixlength 0
+// [#] sysctl -q net.ipv4.conf.all.src_valid_mark=1
+// [#] nft -f /dev/fd/63
+
+// Wireguard DOWN:
+// PRE_DOWN hooks
+// del_if
+// unset_dns
+// remove_firewall
+// POST_DOWN hooks
+
 impl Wireguard {
-    pub fn run(namespace: &NetworkNamespace, config_file: PathBuf) -> anyhow::Result<Self> {
+    pub fn run(namespace: &mut NetworkNamespace, config_file: PathBuf) -> anyhow::Result<Self> {
+        let config_string = std::fs::read_to_string(&config_file)?;
+        let re = Regex::new(r"(?P<key>[^\s]+) = (?P<value>[^\s]+)")?;
+        let mut config_string = re
+            .replace_all(&config_string, "$key = \"$value\"")
+            .to_string();
+        config_string.push('\n');
+        let config: WireguardConfig = toml::from_str(&config_string)?;
+        debug!("TOML config: {:?}", config);
+        sudo_command(&["ip", "link", "add", &namespace.name, "type", "wireguard"])?;
+        sudo_command(&[
+            "wg",
+            "setconf",
+            &namespace.name,
+            config_file.as_path().to_str().expect("Bad wg conf path"),
+        ])?;
         namespace.exec(&[
             "wg-quick",
             "up",
             &config_file.to_str().expect("No Wireguard config path"),
         ])?;
+        // Extract addresses
+        for address in config.interface.address.split(",") {
+            if address.contains(":") {
+                // IPv6
+                sudo_command(&[
+                    "ip",
+                    "-6",
+                    "address",
+                    "add",
+                    address,
+                    "dev",
+                    &namespace.name,
+                ])?;
+            } else {
+                // IPv4
+                sudo_command(&[
+                    "ip",
+                    "-4",
+                    "address",
+                    "add",
+                    address,
+                    "dev",
+                    &namespace.name,
+                ])?;
+            }
+        }
+
+        // TODO: Handle custom MTU
+        sudo_command(&[
+            "ip",
+            "link",
+            "set",
+            "mtu",
+            "1420",
+            "up",
+            "dev",
+            &namespace.name,
+        ])?;
+
+        namespace.dns_config(Some(config.interface.dns))?;
+        let fwmark = "51820";
+        sudo_command(&["wg", "set", &namespace.name, "fwmark", fwmark])?;
+        // IPv6
+        sudo_command(&[
+            "ip",
+            "-6",
+            "route",
+            "add",
+            "::/0",
+            "dev",
+            &namespace.name,
+            "table",
+            fwmark,
+        ]);
+        sudo_command(&[
+            "ip", "-6", "rule", "add", "not", "fwmark", fwmark, "table", fwmark,
+        ]);
+        sudo_command(&[
+            "ip",
+            "-6",
+            "rule",
+            "add",
+            "table",
+            "main",
+            "suppress_prefixlength",
+            "0",
+        ]);
+
+        // nft ipv6
+        let nftable = format!("vopono_{}", &namespace.name);
+        let pf = "ip6";
+        let nftcmd: Vec<String> = Vec::with_capacity(16);
+        nftcmd.push(format!("add table {} {}", pf, &nftable));
+        nftcmd.push(format!(
+            "add chain {} {} preraw {{ type filter hook prerouting priority -300; }}",
+            pf, &nftable
+        ));
+        nftcmd.push(format!(
+            "add chain {} {} premangle {{ type filter hook prerouting priority -150; }}",
+            pf, &nftable
+        ));
+        nftcmd.push(format!(
+            "add chain {} {} postmangle {{ type filter hook prerouting priority -150; }}",
+            pf, &nftable
+        ));
+        nftcmd.push(format!(
+            "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
+            pf, &nftable, &namespace.name, pf, address?
+        ));
+        todo!();
+        // printf -v nftcmd '%sadd table %s %s\n' "$nftcmd" "$pf" "$nftable"
+        // printf -v nftcmd '%sadd chain %s %s preraw { type filter hook prerouting priority -300; }\n' "$nftcmd" "$pf" "$nftable"
+        // printf -v nftcmd '%sadd chain %s %s premangle { type filter hook prerouting priority -150; }\n' "$nftcmd" "$pf" "$nftable"
+        // printf -v nftcmd '%sadd chain %s %s postmangle { type filter hook postrouting priority -150; }\n' "$nftcmd" "$pf" "$nftable"
+        // while read -r line; do
+        // 	[[ $line =~ .*inet6?\ ([0-9a-f:.]+)/[0-9]+.* ]] || continue
+        // 	printf -v restore '%s-I PREROUTING ! -i %s -d %s -m addrtype ! --src-type LOCAL -j DROP %s\n' "$restore" "$INTERFACE" "${BASH_REMATCH[1]}" "$marker"
+        // 	printf -v nftcmd '%sadd rule %s %s preraw iifname != "%s" %s daddr %s fib saddr type != local drop\n' "$nftcmd" "$pf" "$nftable" "$INTERFACE" "$pf" "${BASH_REMATCH[1]}"
+        // done < <(ip -o $proto addr show dev "$INTERFACE" 2>/dev/null)
+        // printf -v restore '%sCOMMIT\n*mangle\n-I POSTROUTING -m mark --mark %d -p udp -j CONNMARK --save-mark %s\n-I PREROUTING -p udp -j CONNMARK --restore-mark %s\nCOMMIT\n' "$restore" $table "$marker" "$marker"
+        // printf -v nftcmd '%sadd rule %s %s postmangle meta l4proto udp mark %d ct mark set mark \n' "$nftcmd" "$pf" "$nftable" $table
+        // printf -v nftcmd '%sadd rule %s %s premangle meta l4proto udp meta mark set ct mark \n' "$nftcmd" "$pf" "$nftable"
+
+        // IPv4
+        sudo_command(&[
+            "ip",
+            "-4",
+            "route",
+            "add",
+            "0.0.0.0/0",
+            "dev",
+            &namespace.name,
+            "table",
+            fwmark,
+        ]);
+        sudo_command(&[
+            "ip", "-4", "rule", "add", "not", "fwmark", fwmark, "table", fwmark,
+        ]);
+        sudo_command(&[
+            "ip",
+            "-4",
+            "rule",
+            "add",
+            "table",
+            "main",
+            "suppress_prefixlength",
+            "0",
+        ]);
+        sudo_command(&["sysctl", "-q", "net.ipv4.conf.all.src_valid_mark=1"]);
+
+        //nft ipv4
         Ok(Self {
             config_file,
             ns_name: namespace.name.clone(),
@@ -94,4 +285,32 @@ pub fn get_config_from_alias(provider: &VpnProvider, alias: &str) -> anyhow::Res
         debug!("Chosen Wireguard config: {}", config.display());
         Ok(config.clone())
     }
+}
+
+#[derive(Deserialize, Debug)]
+struct WireguardInterface {
+    #[serde(rename = "PrivateKey")]
+    private_key: String,
+    #[serde(rename = "Address")]
+    address: String,
+    #[serde(rename = "DNS")]
+    dns: String,
+}
+
+#[derive(Deserialize, Debug)]
+struct WireguardPeer {
+    #[serde(rename = "PublicKey")]
+    public_key: String,
+    #[serde(rename = "AllowedIPs")]
+    allowed_ips: String,
+    #[serde(rename = "Endpoint")]
+    endpoint: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct WireguardConfig {
+    #[serde(rename = "Interface")]
+    interface: WireguardInterface,
+    #[serde(rename = "Peer")]
+    peer: WireguardPeer,
 }
