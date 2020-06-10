@@ -2,10 +2,11 @@ use super::netns::NetworkNamespace;
 use super::util::{config_dir, sudo_command};
 use super::vpn::VpnProvider;
 use anyhow::anyhow;
-use log::{debug, error};
+use log::{debug, warn};
 use rand::seq::SliceRandom;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
@@ -63,6 +64,34 @@ pub struct Wireguard {
 impl Wireguard {
     pub fn run(namespace: &mut NetworkNamespace, config_file: PathBuf) -> anyhow::Result<Self> {
         let config_string = std::fs::read_to_string(&config_file)?;
+        // Create temp conf file
+        {
+            let skip_keys = vec![
+                "Address",
+                "DNS",
+                "MTU",
+                "Table",
+                "PreUp",
+                "PreDown",
+                "PostUp",
+                "PostDown",
+                "SaveConfig",
+            ];
+
+            let mut f = std::fs::File::create("/tmp/vopono_nft.conf")?;
+            write!(
+                f,
+                "{}",
+                config_string
+                    .clone()
+                    .split("\n")
+                    .into_iter()
+                    .filter(|x| !skip_keys
+                        .contains(&x.split_whitespace().into_iter().nth(0).unwrap_or("")))
+                    .collect::<Vec<&str>>()
+                    .join("\n")
+            )?;
+        }
         let re = Regex::new(r"(?P<key>[^\s]+) = (?P<value>[^\s]+)")?;
         let mut config_string = re
             .replace_all(&config_string, "$key = \"$value\"")
@@ -71,17 +100,9 @@ impl Wireguard {
         let config: WireguardConfig = toml::from_str(&config_string)?;
         debug!("TOML config: {:?}", config);
         sudo_command(&["ip", "link", "add", &namespace.name, "type", "wireguard"])?;
-        sudo_command(&[
-            "wg",
-            "setconf",
-            &namespace.name,
-            config_file.as_path().to_str().expect("Bad wg conf path"),
-        ])?;
-        namespace.exec(&[
-            "wg-quick",
-            "up",
-            &config_file.to_str().expect("No Wireguard config path"),
-        ])?;
+
+        sudo_command(&["wg", "setconf", &namespace.name, "/tmp/vopono_nft.conf"])?;
+        std::fs::remove_file("/tmp/vopono_nft.conf")?;
         // Extract addresses
         for address in config.interface.address.split(",") {
             if address.contains(":") {
@@ -135,10 +156,10 @@ impl Wireguard {
             &namespace.name,
             "table",
             fwmark,
-        ]);
+        ])?;
         sudo_command(&[
             "ip", "-6", "rule", "add", "not", "fwmark", fwmark, "table", fwmark,
-        ]);
+        ])?;
         sudo_command(&[
             "ip",
             "-6",
@@ -148,12 +169,12 @@ impl Wireguard {
             "main",
             "suppress_prefixlength",
             "0",
-        ]);
+        ])?;
 
         // nft ipv6
         let nftable = format!("vopono_{}", &namespace.name);
         let pf = "ip6";
-        let nftcmd: Vec<String> = Vec::with_capacity(16);
+        let mut nftcmd: Vec<String> = Vec::with_capacity(16);
         nftcmd.push(format!("add table {} {}", pf, &nftable));
         nftcmd.push(format!(
             "add chain {} {} preraw {{ type filter hook prerouting priority -300; }}",
@@ -167,11 +188,31 @@ impl Wireguard {
             "add chain {} {} postmangle {{ type filter hook prerouting priority -150; }}",
             pf, &nftable
         ));
+        for address in config.interface.address.split(",") {
+            if address.contains(":") {
+                nftcmd.push(format!(
+                "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
+                pf, &nftable, &namespace.name, pf, address
+            ));
+            }
+        }
         nftcmd.push(format!(
-            "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
-            pf, &nftable, &namespace.name, pf, address?
+            "add rule {} {} postmangle meta l4proto udp mark {} ct mark set mark",
+            pf, &nftable, fwmark
         ));
-        todo!();
+        nftcmd.push(format!(
+            "add rule {} {} premangle meta l4proto udp meta mark set ct mark",
+            pf, &nftable
+        ));
+
+        let nftcmd = nftcmd.join("\n");
+        {
+            let mut f = std::fs::File::create("/tmp/vopono_nft.sh")?;
+            write!(f, "{}", nftcmd)?;
+        }
+
+        sudo_command(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
+        std::fs::remove_file("/tmp/vopono_nft.sh")?;
         // printf -v nftcmd '%sadd table %s %s\n' "$nftcmd" "$pf" "$nftable"
         // printf -v nftcmd '%sadd chain %s %s preraw { type filter hook prerouting priority -300; }\n' "$nftcmd" "$pf" "$nftable"
         // printf -v nftcmd '%sadd chain %s %s premangle { type filter hook prerouting priority -150; }\n' "$nftcmd" "$pf" "$nftable"
@@ -196,10 +237,10 @@ impl Wireguard {
             &namespace.name,
             "table",
             fwmark,
-        ]);
+        ])?;
         sudo_command(&[
             "ip", "-4", "rule", "add", "not", "fwmark", fwmark, "table", fwmark,
-        ]);
+        ])?;
         sudo_command(&[
             "ip",
             "-4",
@@ -209,10 +250,52 @@ impl Wireguard {
             "main",
             "suppress_prefixlength",
             "0",
-        ]);
-        sudo_command(&["sysctl", "-q", "net.ipv4.conf.all.src_valid_mark=1"]);
+        ])?;
+        sudo_command(&["sysctl", "-q", "net.ipv4.conf.all.src_valid_mark=1"])?;
 
-        //nft ipv4
+        //nft ipv4  -TODO: DRY
+        let nftable = format!("vopono_{}", &namespace.name);
+        let pf = "ip";
+        let mut nftcmd: Vec<String> = Vec::with_capacity(16);
+        nftcmd.push(format!("add table {} {}", pf, &nftable));
+        nftcmd.push(format!(
+            "add chain {} {} preraw {{ type filter hook prerouting priority -300; }}",
+            pf, &nftable
+        ));
+        nftcmd.push(format!(
+            "add chain {} {} premangle {{ type filter hook prerouting priority -150; }}",
+            pf, &nftable
+        ));
+        nftcmd.push(format!(
+            "add chain {} {} postmangle {{ type filter hook prerouting priority -150; }}",
+            pf, &nftable
+        ));
+        for address in config.interface.address.split(",") {
+            // TODO: Better split ipv4 and ipv6 cases
+            if address.contains(".") {
+                nftcmd.push(format!(
+                "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
+                pf, &nftable, &namespace.name, pf, address
+            ));
+            }
+        }
+        nftcmd.push(format!(
+            "add rule {} {} postmangle meta l4proto udp mark {} ct mark set mark",
+            pf, &nftable, fwmark
+        ));
+        nftcmd.push(format!(
+            "add rule {} {} premangle meta l4proto udp meta mark set ct mark",
+            pf, &nftable
+        ));
+
+        let nftcmd = nftcmd.join("\n");
+        {
+            let mut f = std::fs::File::create("/tmp/vopono_nft.sh")?;
+            write!(f, "{}", nftcmd)?;
+        }
+
+        sudo_command(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
+        std::fs::remove_file("/tmp/vopono_nft.sh")?;
         Ok(Self {
             config_file,
             ns_name: namespace.name.clone(),
@@ -222,24 +305,39 @@ impl Wireguard {
 
 impl Drop for Wireguard {
     fn drop(&mut self) {
-        if sudo_command(&[
+        // TODO: Handle case of only ipv4
+        match sudo_command(&["ip", "link", "del", &self.ns_name]) {
+            Ok(_) => {}
+            Err(e) => warn!("Failed to delete ip link {}: {:?}", &self.ns_name, e),
+        };
+
+        match sudo_command(&[
+            "nft",
+            "delete",
+            "table",
             "ip",
-            "netns",
-            "exec",
-            &self.ns_name,
-            "wg-quick",
-            "down",
-            self.config_file.to_str().expect("No Wireguard config path"),
-        ])
-        .is_err()
-        {
-            {
-                error!(
-                    "Failed to kill Wireguard, config: {}",
-                    self.config_file.to_str().expect("No Wireguard config path")
-                );
-            }
-        }
+            &format!("vopono_{}", self.ns_name),
+        ]) {
+            Ok(_) => {}
+            Err(e) => warn!(
+                "Failed to delete nft ipv4 table: vopono_{}: {:?}",
+                self.ns_name, e
+            ),
+        };
+
+        match sudo_command(&[
+            "nft",
+            "delete",
+            "table",
+            "ip6",
+            &format!("vopono_{}", self.ns_name),
+        ]) {
+            Ok(_) => {}
+            Err(e) => warn!(
+                "Failed to delete nft ipv6 table: vopono_{}: {:?}",
+                self.ns_name, e
+            ),
+        };
     }
 }
 
