@@ -99,15 +99,15 @@ impl Wireguard {
         config_string.push('\n');
         let config: WireguardConfig = toml::from_str(&config_string)?;
         debug!("TOML config: {:?}", config);
-        sudo_command(&["ip", "link", "add", &namespace.name, "type", "wireguard"])?;
+        namespace.exec(&["ip", "link", "add", &namespace.name, "type", "wireguard"])?;
 
-        sudo_command(&["wg", "setconf", &namespace.name, "/tmp/vopono_nft.conf"])?;
+        namespace.exec(&["wg", "setconf", &namespace.name, "/tmp/vopono_nft.conf"])?;
         std::fs::remove_file("/tmp/vopono_nft.conf")?;
         // Extract addresses
         for address in config.interface.address.split(",") {
             if address.contains(":") {
                 // IPv6
-                sudo_command(&[
+                namespace.exec(&[
                     "ip",
                     "-6",
                     "address",
@@ -118,7 +118,7 @@ impl Wireguard {
                 ])?;
             } else {
                 // IPv4
-                sudo_command(&[
+                namespace.exec(&[
                     "ip",
                     "-4",
                     "address",
@@ -131,7 +131,7 @@ impl Wireguard {
         }
 
         // TODO: Handle custom MTU
-        sudo_command(&[
+        namespace.exec(&[
             "ip",
             "link",
             "set",
@@ -144,9 +144,9 @@ impl Wireguard {
 
         namespace.dns_config(Some(config.interface.dns))?;
         let fwmark = "51820";
-        sudo_command(&["wg", "set", &namespace.name, "fwmark", fwmark])?;
+        namespace.exec(&["wg", "set", &namespace.name, "fwmark", fwmark])?;
         // IPv6
-        sudo_command(&[
+        namespace.exec(&[
             "ip",
             "-6",
             "route",
@@ -157,10 +157,10 @@ impl Wireguard {
             "table",
             fwmark,
         ])?;
-        sudo_command(&[
+        namespace.exec(&[
             "ip", "-6", "rule", "add", "not", "fwmark", fwmark, "table", fwmark,
         ])?;
-        sudo_command(&[
+        namespace.exec(&[
             "ip",
             "-6",
             "rule",
@@ -211,7 +211,7 @@ impl Wireguard {
             write!(f, "{}", nftcmd)?;
         }
 
-        sudo_command(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
+        namespace.exec(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
         std::fs::remove_file("/tmp/vopono_nft.sh")?;
         // printf -v nftcmd '%sadd table %s %s\n' "$nftcmd" "$pf" "$nftable"
         // printf -v nftcmd '%sadd chain %s %s preraw { type filter hook prerouting priority -300; }\n' "$nftcmd" "$pf" "$nftable"
@@ -227,7 +227,7 @@ impl Wireguard {
         // printf -v nftcmd '%sadd rule %s %s premangle meta l4proto udp meta mark set ct mark \n' "$nftcmd" "$pf" "$nftable"
 
         // IPv4
-        sudo_command(&[
+        namespace.exec(&[
             "ip",
             "-4",
             "route",
@@ -238,10 +238,10 @@ impl Wireguard {
             "table",
             fwmark,
         ])?;
-        sudo_command(&[
+        namespace.exec(&[
             "ip", "-4", "rule", "add", "not", "fwmark", fwmark, "table", fwmark,
         ])?;
-        sudo_command(&[
+        namespace.exec(&[
             "ip",
             "-4",
             "rule",
@@ -294,7 +294,7 @@ impl Wireguard {
             write!(f, "{}", nftcmd)?;
         }
 
-        sudo_command(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
+        namespace.exec(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
         std::fs::remove_file("/tmp/vopono_nft.sh")?;
         Ok(Self {
             config_file,
@@ -306,12 +306,26 @@ impl Wireguard {
 impl Drop for Wireguard {
     fn drop(&mut self) {
         // TODO: Handle case of only ipv4
-        match sudo_command(&["ip", "link", "del", &self.ns_name]) {
+        // TODO: These need to run inside namespace
+        match sudo_command(&[
+            "ip",
+            "netns",
+            "exec",
+            &self.ns_name,
+            "ip",
+            "link",
+            "del",
+            &self.ns_name,
+        ]) {
             Ok(_) => {}
             Err(e) => warn!("Failed to delete ip link {}: {:?}", &self.ns_name, e),
         };
 
         match sudo_command(&[
+            "ip",
+            "netns",
+            "exec",
+            &self.ns_name,
             "nft",
             "delete",
             "table",
@@ -326,6 +340,10 @@ impl Drop for Wireguard {
         };
 
         match sudo_command(&[
+            "ip",
+            "netns",
+            "exec",
+            &self.ns_name,
             "nft",
             "delete",
             "table",

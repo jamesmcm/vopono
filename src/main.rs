@@ -142,6 +142,15 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
             }
             Protocol::Wireguard => {
                 let config = get_config_from_alias(&provider, &server_name)?;
+                ns.add_loopback()?;
+                ns.add_veth_pair()?;
+                target_subnet = get_target_subnet()?;
+                ns.add_routing(target_subnet)?;
+                _iptables = IpTables::add_masquerade_rule(
+                    format!("10.200.{}.0/24", target_subnet),
+                    interface,
+                );
+                _sysctl = SysCtl::enable_ipv4_forwarding();
                 ns.run_wireguard(config)?;
             }
         }
