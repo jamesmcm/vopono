@@ -7,6 +7,7 @@ use std::process::Command;
 use users::{get_current_uid, get_user_by_uid};
 use walkdir::WalkDir;
 
+// TODO: Make config dir handle root user correctly - $SUDO_USER
 pub fn config_dir() -> anyhow::Result<PathBuf> {
     let mut pathbuf = PathBuf::new();
     let _res: () = if let Some(base_dirs) = BaseDirs::new() {

@@ -58,6 +58,7 @@ fn main() -> anyhow::Result<()> {
                 let mut args: Vec<String> = std::env::args().collect();
                 debug!("Args: {:?}", &args);
 
+                // Consider simplifying with $SUDO_USER
                 if cmd.user.is_none() {
                     let current_user = nix::unistd::User::from_uid(nix::unistd::getuid())?
                         .expect("Could not get username")

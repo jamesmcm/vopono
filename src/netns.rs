@@ -59,6 +59,7 @@ impl NetworkNamespace {
         command: &[&str],
         user: Option<String>,
     ) -> anyhow::Result<std::process::Child> {
+        // TODO: DRY
         if user.is_some() {
             debug!(
                 "ip netns exec {} sudo -u {} {}",
