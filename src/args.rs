@@ -49,7 +49,12 @@ pub struct ExecCommand {
     #[structopt(long = "server", short = "s")]
     pub server: Option<String>,
 
+    /// Application to run (should be on PATH or full path to binary)
     pub application: String,
+
+    /// User with which to run the application (default is current user)
+    #[structopt(long = "user", short = "u")]
+    pub user: Option<String>,
 }
 
 #[derive(StructOpt)]

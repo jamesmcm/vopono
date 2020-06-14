@@ -14,10 +14,11 @@ mod wireguard;
 use anyhow::anyhow;
 use application_wrapper::ApplicationWrapper;
 use args::ExecCommand;
-use log::{debug, error, LevelFilter};
+use log::{debug, error, info, LevelFilter};
 use netns::NetworkNamespace;
 use network_interface::{get_active_interfaces, NetworkInterface};
 use std::io::{self, Write};
+use std::process::Command;
 use structopt::StructOpt;
 use sysctl::SysCtl;
 use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet};
@@ -25,11 +26,9 @@ use vpn::{find_host_from_alias, get_auth, get_protocol, get_serverlist, Protocol
 use wireguard::get_config_from_alias;
 
 // TODO:
-// - Add configuration for wireless interface for OpenVPN
+// - Test configuration for wireless interface for OpenVPN
 // - Parse OpenVPN stdout (can we buffer?)
 // - Allow OpenVPN UDP (1194) and TCP (443) toggle
-// - Add Mullvad Wireguard
-// - Add DNS server support for OpenVPN (parse for Mullvad)
 // - Always run as root (use sudo self on startup)
 // - Allow custom VPNs (provide .ovpn file?)
 // - Mullvad Shadowsocks
@@ -52,7 +51,26 @@ fn main() -> anyhow::Result<()> {
 
     clean_dead_locks()?;
     match app.cmd {
-        args::Command::Create(cmd) => exec(cmd)?,
+        args::Command::Create(cmd) => {
+            // Check if already running as root
+            if nix::unistd::getuid().as_raw() != 0 {
+                info!("Calling sudo for elevated privileges, current user will be used as default user");
+                let mut args: Vec<String> = std::env::args().collect();
+                debug!("Args: {:?}", &args);
+
+                if cmd.user.is_none() {
+                    let current_user = nix::unistd::User::from_uid(nix::unistd::getuid())?
+                        .expect("Could not get username")
+                        .name;
+                    args.push(String::from("--user"));
+                    args.push(current_user);
+                }
+                Command::new("sudo").args(args).spawn()?;
+                std::process::exit(0);
+            }
+
+            exec(cmd)?
+        }
         args::Command::SetDefaults(cmd) => todo!(),
     }
     Ok(())
@@ -149,7 +167,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     }
 
     ns.write_lockfile()?;
-    let application = ApplicationWrapper::new(&ns, &command.application)?;
+    let application = ApplicationWrapper::new(&ns, &command.application, command.user)?;
     let output = application.wait_with_output()?;
     io::stdout().write_all(output.stdout.as_slice())?;
 

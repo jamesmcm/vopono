@@ -57,7 +57,7 @@ impl OpenVpn {
             command_vec.push(crl.as_os_str().to_str().unwrap());
         }
 
-        let handle = netns.exec_no_block(&command_vec)?;
+        let handle = netns.exec_no_block(&command_vec, None)?;
         // TODO: How to check for VPN connection or auth error?? OpenVPN silently continues
         sleep(Duration::from_secs(10)); //TODO: Can we do this by parsing stdout
         Ok(Self { pid: handle.id() })

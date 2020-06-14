@@ -30,8 +30,8 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
 
 // TODO: Create struct for holding IPv4 addresses and use FromStr and Eq with that
 pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<String>> {
-    let output = Command::new("sudo")
-        .args(&["ip", "addr", "show", "type", "veth"])
+    let output = Command::new("ip")
+        .args(&["addr", "show", "type", "veth"])
         .output()?
         .stdout;
     let output = std::str::from_utf8(&output)?;
@@ -47,10 +47,7 @@ pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<String>> {
 }
 
 pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
-    let output = Command::new("sudo")
-        .args(&["ip", "netns", "list"])
-        .output()?
-        .stdout;
+    let output = Command::new("ip").args(&["netns", "list"]).output()?.stdout;
     let output = std::str::from_utf8(&output)?
         .split("\n")
         .into_iter()
@@ -108,17 +105,23 @@ pub fn get_target_subnet() -> anyhow::Result<u8> {
     }
 }
 
+// TODO: Fix deprecated name
 pub fn sudo_command(command: &[&str]) -> anyhow::Result<()> {
-    debug!("sudo {}", command.join(" "));
-    let exit_status = Command::new("sudo")
-        .args(command)
+    debug!("{}", command.join(" "));
+
+    let (start_command, args) = command
+        .split_first()
+        .expect("Could not split command slice");
+
+    let exit_status = Command::new(start_command)
+        .args(args)
         .status()
-        .with_context(|| format!("Failed to run command: sudo {}", command.join(" ")))?;
+        .with_context(|| format!("Failed to run command: {}", command.join(" ")))?;
 
     if exit_status.success() {
         Ok(())
     } else {
-        Err(anyhow!("Command failed: sudo {}", command.join(" ")))
+        Err(anyhow!("Command failed: {}", command.join(" ")))
     }
 }
 

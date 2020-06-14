@@ -54,20 +54,39 @@ impl NetworkNamespace {
             iptables: None,
         })
     }
-    pub fn exec_no_block(&self, command: &[&str]) -> anyhow::Result<std::process::Child> {
-        debug!("sudo ip netns exec {} {}", &self.name, command.join(" "));
-        let handle = Command::new("sudo")
-            .args(&["ip", "netns", "exec", &self.name])
-            .args(command)
-            .spawn()?;
-        Ok(handle)
+    pub fn exec_no_block(
+        &self,
+        command: &[&str],
+        user: Option<String>,
+    ) -> anyhow::Result<std::process::Child> {
+        if user.is_some() {
+            debug!(
+                "ip netns exec {} sudo -u {} {}",
+                &self.name,
+                user.as_ref().unwrap(),
+                command.join(" ")
+            );
+            let handle = Command::new("ip")
+                .args(&["netns", "exec", &self.name])
+                .args(&["sudo", "-u", user.as_ref().unwrap()])
+                .args(command)
+                .spawn()?;
+            Ok(handle)
+        } else {
+            debug!("ip netns exec {} {}", &self.name, command.join(" "));
+            let handle = Command::new("ip")
+                .args(&["netns", "exec", &self.name])
+                .args(command)
+                .spawn()?;
+            Ok(handle)
+        }
     }
 
     //TODO: DRY
     pub fn exec_no_block_silent(&self, command: &[&str]) -> anyhow::Result<std::process::Child> {
-        debug!("sudo ip netns exec {} {}", &self.name, command.join(" "));
-        let handle = Command::new("sudo")
-            .args(&["ip", "netns", "exec", &self.name])
+        debug!("ip netns exec {} {}", &self.name, command.join(" "));
+        let handle = Command::new("ip")
+            .args(&["netns", "exec", &self.name])
             .args(command)
             .stdout(Stdio::null())
             .spawn()?;
@@ -75,7 +94,7 @@ impl NetworkNamespace {
     }
 
     pub fn exec(&self, command: &[&str]) -> anyhow::Result<()> {
-        self.exec_no_block(command)?.wait()?;
+        self.exec_no_block(command, None)?.wait()?;
         Ok(())
     }
 
