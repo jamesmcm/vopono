@@ -14,7 +14,6 @@ mod wireguard;
 use anyhow::anyhow;
 use application_wrapper::ApplicationWrapper;
 use args::ExecCommand;
-use iptables::IpTables;
 use log::{debug, error, LevelFilter};
 use netns::NetworkNamespace;
 use network_interface::{get_active_interfaces, NetworkInterface};
@@ -23,7 +22,7 @@ use structopt::StructOpt;
 use sysctl::SysCtl;
 use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet};
 use vpn::{find_host_from_alias, get_auth, get_protocol, get_serverlist, Protocol};
-use wireguard::{get_config_from_alias, Wireguard};
+use wireguard::get_config_from_alias;
 
 // TODO:
 // - Add configuration for wireless interface for OpenVPN
@@ -91,7 +90,6 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         }
     }
     let mut ns;
-    let _iptables;
     let _sysctl;
     let target_subnet;
     let interface: NetworkInterface = match command.interface {
@@ -118,10 +116,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 ns.add_veth_pair()?;
                 target_subnet = get_target_subnet()?;
                 ns.add_routing(target_subnet)?;
-                _iptables = IpTables::add_masquerade_rule(
-                    format!("10.200.{}.0/24", target_subnet),
-                    interface,
-                );
+                ns.add_iptables_rule(target_subnet, interface)?;
                 _sysctl = SysCtl::enable_ipv4_forwarding();
                 // TODO: Handle custom DNS
                 ns.dns_config(None)?;
@@ -146,10 +141,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 ns.add_veth_pair()?;
                 target_subnet = get_target_subnet()?;
                 ns.add_routing(target_subnet)?;
-                _iptables = IpTables::add_masquerade_rule(
-                    format!("10.200.{}.0/24", target_subnet),
-                    interface,
-                );
+                ns.add_iptables_rule(target_subnet, interface)?;
                 _sysctl = SysCtl::enable_ipv4_forwarding();
                 ns.run_wireguard(config)?;
             }

@@ -1,7 +1,9 @@
 use super::network_interface::NetworkInterface;
 use super::util::sudo_command;
 use anyhow::Context;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct IpTables {
     ip_mask: String,
     interface: NetworkInterface,

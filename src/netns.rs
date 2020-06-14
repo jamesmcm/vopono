@@ -1,4 +1,6 @@
 use super::dns_config::DnsConfig;
+use super::iptables::IpTables;
+use super::network_interface::NetworkInterface;
 use super::openvpn::OpenVpn;
 use super::util::{config_dir, sudo_command};
 use super::veth_pair::VethPair;
@@ -20,6 +22,7 @@ pub struct NetworkNamespace {
     dns_config: Option<DnsConfig>,
     pub openvpn: Option<OpenVpn>,
     pub wireguard: Option<Wireguard>,
+    pub iptables: Option<IpTables>,
 }
 
 impl NetworkNamespace {
@@ -48,6 +51,7 @@ impl NetworkNamespace {
             dns_config: None,
             openvpn: None,
             wireguard: None,
+            iptables: None,
         })
     }
     pub fn exec_no_block(&self, command: &[&str]) -> anyhow::Result<std::process::Child> {
@@ -157,6 +161,19 @@ impl NetworkNamespace {
         Ok(())
     }
 
+    pub fn add_iptables_rule(
+        &mut self,
+        target_subnet: u8,
+        interface: NetworkInterface,
+    ) -> anyhow::Result<()> {
+        self.iptables = Some(IpTables::add_masquerade_rule(
+            format!("10.200.{}.0/24", target_subnet),
+            interface,
+        )?);
+
+        Ok(())
+    }
+
     pub fn check_openvpn_running(&mut self) -> anyhow::Result<bool> {
         self.openvpn.as_mut().unwrap().check_if_running()
     }
@@ -196,12 +213,13 @@ impl Drop for NetworkNamespace {
             self.veth_pair = None;
             self.dns_config = None;
             self.wireguard = None;
+            self.iptables = None;
             sudo_command(&["ip", "netns", "delete", &self.name]).expect(&format!(
                 "Failed to delete network namespace: {}",
                 &self.name
             ));
         } else {
-            // Avoid triggering destructors?
+            debug!("Skipping destructors since other vopono instance using this namespace!");
             let openvpn = self.openvpn.take();
             let openvpn = Box::new(openvpn);
             Box::leak(openvpn);
@@ -213,6 +231,14 @@ impl Drop for NetworkNamespace {
             let dns_config = self.dns_config.take();
             let dns_config = Box::new(dns_config);
             Box::leak(dns_config);
+
+            let wireguard = self.wireguard.take();
+            let wireguard = Box::new(wireguard);
+            Box::leak(wireguard);
+
+            let iptables = self.iptables.take();
+            let iptables = Box::new(iptables);
+            Box::leak(iptables);
         }
     }
 }
