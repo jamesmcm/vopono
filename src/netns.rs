@@ -32,6 +32,7 @@ impl NetworkNamespace {
 
         std::fs::create_dir_all(&lockfile_path)?;
         debug!("Trying to read lockfile: {}", lockfile_path.display());
+        // TODO: Make this more robust - delete existing namespace if no lockfile
         let lockfile = std::fs::read_dir(lockfile_path)?
             .next()
             .expect("No lockfile")?;

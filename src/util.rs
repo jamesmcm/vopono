@@ -7,13 +7,21 @@ use std::process::Command;
 use users::{get_current_uid, get_user_by_uid};
 use walkdir::WalkDir;
 
-// TODO: Make config dir handle root user correctly - $SUDO_USER
 pub fn config_dir() -> anyhow::Result<PathBuf> {
     let mut pathbuf = PathBuf::new();
     let _res: () = if let Some(base_dirs) = BaseDirs::new() {
         pathbuf.push(base_dirs.config_dir());
         Ok(())
-    // Ok((*base_dirs.config_dir()))
+    } else if let Ok(user) = std::env::var("SUDO_USER") {
+        // TODO: DRY
+        let confpath = format!("/home/{}/.config", user);
+        let path = Path::new(&confpath);
+        if path.exists() {
+            pathbuf.push(path);
+            Ok(())
+        } else {
+            Err(anyhow!("Could not find valid config directory!"))
+        }
     } else if let Some(user) = get_user_by_uid(get_current_uid()) {
         let confpath = format!("/home/{}/.config", user.name().to_str().unwrap());
         let path = Path::new(&confpath);
@@ -67,7 +75,6 @@ pub fn check_process_running(pid: u32) -> anyhow::Result<bool> {
         .output()?
         .stdout;
     let output = std::str::from_utf8(&output)?.split("\n").into_iter().next();
-    // debug!("pid: {}, output: {:?}", pid, &output);
     if let Some(x) = output {
         Ok(x.trim() == pid.to_string())
     } else {

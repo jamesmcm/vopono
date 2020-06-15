@@ -27,11 +27,13 @@ use wireguard::get_config_from_alias;
 
 // TODO:
 // - Test configuration for wireless interface for OpenVPN
-// - Parse OpenVPN stdout (can we buffer?)
+// - Parse OpenVPN stdout to check when ready
 // - Allow OpenVPN UDP (1194) and TCP (443) toggle
-// - Always run as root (use sudo self on startup)
 // - Allow custom VPNs (provide .ovpn file?)
+// - Allow for not saving OpenVPN creds to config
+// - Allow for choice between iptables and nftables and avoid mixed dependency
 // - Mullvad Shadowsocks
+// - Handle setting and using default provider and server
 
 // TODO: Allow listing of open network namespaces, applications currently running in network
 // namespaces
@@ -55,18 +57,11 @@ fn main() -> anyhow::Result<()> {
             // Check if already running as root
             if nix::unistd::getuid().as_raw() != 0 {
                 info!("Calling sudo for elevated privileges, current user will be used as default user");
-                let mut args: Vec<String> = std::env::args().collect();
-                debug!("Args: {:?}", &args);
+                let args: Vec<String> = std::env::args().collect();
 
-                // Consider simplifying with $SUDO_USER
-                if cmd.user.is_none() {
-                    let current_user = nix::unistd::User::from_uid(nix::unistd::getuid())?
-                        .expect("Could not get username")
-                        .name;
-                    args.push(String::from("--user"));
-                    args.push(current_user);
-                }
-                Command::new("sudo").args(args).spawn()?;
+                debug!("Args: {:?}", &args);
+                Command::new("sudo").arg("-E").args(args).spawn()?;
+                // Do we want to block here to ensure stdout kept alive? Does it matter?
                 std::process::exit(0);
             }
 
@@ -78,8 +73,6 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn exec(command: ExecCommand) -> anyhow::Result<()> {
-    // TODO: Handle when we must elevate privileges
-    // TODO: Handle running as current user vs. root
     // Get server and provider (handle default case)
     let provider = command.vpn_provider.unwrap();
     let server_name = command.server.unwrap();
@@ -104,7 +97,6 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         Protocol::Wireguard => {
             server = String::new();
             port = 0;
-            server_alias = String::new();
             ns_name = format!("{}_{}", provider.alias(), server_name);
         }
     }
@@ -168,7 +160,14 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     }
 
     ns.write_lockfile()?;
-    let application = ApplicationWrapper::new(&ns, &command.application, command.user)?;
+
+    let user = if command.user.is_none() {
+        std::env::var("SUDO_USER").ok()
+    } else {
+        command.user
+    };
+
+    let application = ApplicationWrapper::new(&ns, &command.application, user)?;
     let output = application.wait_with_output()?;
     io::stdout().write_all(output.stdout.as_slice())?;
 

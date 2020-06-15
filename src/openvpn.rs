@@ -3,8 +3,9 @@ use super::util::check_process_running;
 use super::util::{config_dir, sudo_command};
 use super::vpn::VpnProvider;
 use anyhow::anyhow;
-use log::{debug, info};
+use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
+use std::io::Read;
 use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
@@ -59,8 +60,18 @@ impl OpenVpn {
 
         let handle = netns.exec_no_block(&command_vec, None)?;
         // TODO: How to check for VPN connection or auth error?? OpenVPN silently continues
+        let id = handle.id();
+        // let mut buffer: Vec<u8> = Vec::with_capacity(20000);
+        // let mut stdout = handle.stdout.unwrap(); // TODO: Need to pass in stdout to use
+        // while buffer.is_empty()
+        //     || !std::str::from_utf8(buffer.as_slice())?
+        //         .contains("Initialization Sequence Completed")
+        // {
+        //     stdout.read(&mut buffer)?;
+        // }
         sleep(Duration::from_secs(10)); //TODO: Can we do this by parsing stdout
-        Ok(Self { pid: handle.id() })
+                                        // Initialization Sequence Completed
+        Ok(Self { pid: id })
     }
 
     pub fn check_if_running(&mut self) -> anyhow::Result<bool> {
@@ -121,9 +132,13 @@ impl OpenVpn {
 
 impl Drop for OpenVpn {
     fn drop(&mut self) {
-        // TODO: Do this with elevated privileges - also need to kill spawned children
-        // nix::unistd::setuid(nix::unistd::Uid::from_raw(0)).expect("Failed to elevate privileges");
-        // self.handle.kill().expect("Failed to kill OpenVPN");
-        sudo_command(&["pkill", "-P", &format!("{}", self.pid)]).expect("Failed to kill OpenVPN");
+        // Do we need to handle child processes?
+        match nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(self.pid as i32),
+            nix::sys::signal::Signal::SIGKILL,
+        ) {
+            Ok(_) => debug!("Killed OpenVPN (pid: {})", self.pid),
+            Err(e) => error!("Failed to kill OpenVPN (pid: {}): {:?}", self.pid, e),
+        }
     }
 }

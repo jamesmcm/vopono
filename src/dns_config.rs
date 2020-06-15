@@ -1,5 +1,6 @@
 use super::util::sudo_command;
 use anyhow::Context;
+use log::warn;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -35,10 +36,17 @@ impl DnsConfig {
 
 impl Drop for DnsConfig {
     fn drop(&mut self) {
-        //TODO: Do this a much safer way!!
-        sudo_command(&["rm", "-rf", &format!("/etc/netns/{}", self.ns_name)]).expect(&format!(
-            "Failed to delete resolv.conf for {}",
-            self.ns_name
-        ));
+        let path = format!("/etc/netns/{}", self.ns_name);
+        match std::fs::remove_dir_all(&path) {
+            Ok(_) => {}
+            Err(e) => warn!(
+                "Failed to delete network namespace directory: {}: {:?}",
+                &path, e
+            ),
+        }
+        // sudo_command(&["rm", "-rf", &format!("/etc/netns/{}", self.ns_name)]).expect(&format!(
+        //     "Failed to delete resolv.conf for {}",
+        //     self.ns_name
+        // ));
     }
 }

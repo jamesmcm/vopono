@@ -16,9 +16,8 @@ pub struct Wireguard {
     config_file: PathBuf,
 }
 
-// TODO: Implement wg-quick commands for network namespace
 // MTU, PRE_UP, PRE_DOWN, POST_UP, POST_DOWN, TABLE
-// Only need interface section?
+// Only need interface section
 
 // Wireguard UP:
 // PRE_UP hooks
@@ -306,7 +305,6 @@ impl Wireguard {
 impl Drop for Wireguard {
     fn drop(&mut self) {
         // TODO: Handle case of only ipv4
-        // TODO: These need to run inside namespace
         match sudo_command(&[
             "ip",
             "netns",
