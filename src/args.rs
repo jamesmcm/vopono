@@ -1,5 +1,6 @@
 use super::network_interface::NetworkInterface;
 use super::vpn::{Protocol, VpnProvider};
+use std::path::PathBuf;
 use structopt::StructOpt;
 
 #[derive(StructOpt)]
@@ -55,6 +56,10 @@ pub struct ExecCommand {
     /// User with which to run the application (default is current user)
     #[structopt(long = "user", short = "u")]
     pub user: Option<String>,
+
+    /// Custom VPN Provider - OpenVPN or Wireguard config file
+    #[structopt(parse(from_os_str), long = "custom")]
+    pub custom_config: Option<PathBuf>,
 }
 
 #[derive(StructOpt)]

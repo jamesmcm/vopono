@@ -9,11 +9,12 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 
 arg_enum! {
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq)]
 pub enum VpnProvider {
     PrivateInternetAccess,
     Mullvad,
     TigerVpn,
+    Custom,
 }
 }
 
@@ -23,6 +24,7 @@ impl VpnProvider {
             Self::PrivateInternetAccess => String::from("pia"),
             Self::Mullvad => String::from("mv"),
             Self::TigerVpn => String::from("tig"),
+            Self::Custom => String::from("cus"),
         }
     }
 }
@@ -168,12 +170,14 @@ pub fn get_protocol(
                     "Wireguard not implemented for PrivateInternetAccess"
                 ))
             }
+            VpnProvider::Custom => Ok(Protocol::Wireguard),
         },
         Some(Protocol::OpenVpn) => Ok(Protocol::OpenVpn),
         None => match provider {
             VpnProvider::Mullvad => Ok(Protocol::Wireguard),
             VpnProvider::TigerVpn => Ok(Protocol::OpenVpn),
             VpnProvider::PrivateInternetAccess => Ok(Protocol::OpenVpn),
+            VpnProvider::Custom => Ok(Protocol::Wireguard),
         },
     }
 }

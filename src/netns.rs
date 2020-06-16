@@ -172,8 +172,9 @@ impl NetworkNamespace {
         provider: &VpnProvider,
         server: &str,
         port: u32,
+        custom_config: Option<PathBuf>,
     ) -> anyhow::Result<()> {
-        self.openvpn = Some(OpenVpn::run(&self, provider, server, port)?);
+        self.openvpn = Some(OpenVpn::run(&self, provider, server, port, custom_config)?);
         Ok(())
     }
 

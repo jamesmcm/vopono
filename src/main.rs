@@ -11,7 +11,7 @@ mod veth_pair;
 mod vpn;
 mod wireguard;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use application_wrapper::ApplicationWrapper;
 use args::ExecCommand;
 use log::{debug, error, info, LevelFilter};
@@ -22,6 +22,7 @@ use std::process::Command;
 use structopt::StructOpt;
 use sysctl::SysCtl;
 use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet};
+use vpn::VpnProvider;
 use vpn::{find_host_from_alias, get_auth, get_protocol, get_serverlist, Protocol};
 use wireguard::get_config_from_alias;
 
@@ -73,10 +74,25 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn exec(command: ExecCommand) -> anyhow::Result<()> {
-    // Get server and provider (handle default case)
-    let provider = command.vpn_provider.unwrap();
-    let server_name = command.server.unwrap();
-
+    let provider: VpnProvider;
+    let server_name: String;
+    if let Some(path) = &command.custom_config {
+        if command.protocol.is_none() {
+            // TODO: Detect config type from file
+            bail!("Must specify protocol when using custom config");
+        }
+        provider = VpnProvider::Custom;
+        // Could hash filename with CRC and use base64 but chars are limited
+        server_name = String::from(&path.as_path().file_name().unwrap().to_str().unwrap()[0..4]);
+    } else {
+        // Get server and provider (handle default case)
+        provider = command.vpn_provider.unwrap();
+        if provider == VpnProvider::Custom {
+            bail!("Must provide config file if using custom VPN Provider");
+        }
+        server_name = command.server.unwrap();
+    }
+    // Check protocol is valid for provider
     let protocol = get_protocol(&provider, command.protocol)?;
 
     let serverlist = get_serverlist(&provider)?;
@@ -122,7 +138,9 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         ns = NetworkNamespace::new(ns_name.clone())?;
         match protocol {
             Protocol::OpenVpn => {
-                get_auth(&provider)?;
+                if command.custom_config.is_none() {
+                    get_auth(&provider)?;
+                }
                 ns.add_loopback()?;
                 ns.add_veth_pair()?;
                 target_subnet = get_target_subnet()?;
@@ -131,7 +149,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 _sysctl = SysCtl::enable_ipv4_forwarding();
                 // TODO: Handle custom DNS
                 ns.dns_config(None)?;
-                ns.run_openvpn(&provider, &server, port)?;
+                ns.run_openvpn(&provider, &server, port, command.custom_config)?;
                 debug!(
                     "Checking that OpenVPN is running in namespace: {}",
                     &ns_name
@@ -147,7 +165,11 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 }
             }
             Protocol::Wireguard => {
-                let config = get_config_from_alias(&provider, &server_name)?;
+                let config = if command.custom_config.is_some() {
+                    command.custom_config.unwrap()
+                } else {
+                    get_config_from_alias(&provider, &server_name)?
+                };
                 ns.add_loopback()?;
                 ns.add_veth_pair()?;
                 target_subnet = get_target_subnet()?;

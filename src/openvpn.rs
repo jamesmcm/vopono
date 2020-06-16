@@ -22,43 +22,54 @@ impl OpenVpn {
         provider: &VpnProvider,
         server: &str,
         port: u32,
+        custom_config: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
-        let mut openvpn_config_dir = config_dir()?;
-        openvpn_config_dir.push(format!("vopono/{}/openvpn", provider.alias()));
+        // TODO: Refactor this - move all path handling earlier
+        let handle;
 
-        let mut openvpn_auth = openvpn_config_dir.clone();
-        openvpn_auth.push("auth.txt");
+        if let Some(config) = custom_config {
+            info!("Launching OpenVPN...");
+            let command_vec =
+                (&["openvpn", "--config", config.as_os_str().to_str().unwrap()]).to_vec();
 
-        // TODO: Make crl-verify and ca depend on VpnProvider - put inside openvpn config file?
+            handle = netns.exec_no_block(&command_vec, None)?;
+        } else {
+            let mut openvpn_config_dir = config_dir()?;
+            openvpn_config_dir.push(format!("vopono/{}/openvpn", provider.alias()));
 
-        let openvpn_ca = OpenVpn::find_ca_file(&openvpn_config_dir)?;
-        let openvpn_crl = OpenVpn::find_crl_file(&openvpn_config_dir)?;
-        let openvpn_config = OpenVpn::find_config_file(&openvpn_config_dir)?;
-        debug!("OpenVPN config: {:?}", &openvpn_config);
-        info!("Launching OpenVPN...");
-        let port_string = port.to_string();
-        let mut command_vec = (&[
-            "openvpn",
-            "--config",
-            openvpn_config.as_os_str().to_str().unwrap(),
-            "--remote",
-            server,
-            port_string.as_str(),
-            "--auth-user-pass",
-            openvpn_auth.as_os_str().to_str().unwrap(),
-        ])
-            .to_vec();
+            let mut openvpn_auth = openvpn_config_dir.clone();
+            openvpn_auth.push("auth.txt");
 
-        if let Some(ca) = openvpn_ca.as_ref() {
-            command_vec.push("--ca");
-            command_vec.push(ca.as_os_str().to_str().unwrap());
+            // TODO: Make crl-verify and ca depend on VpnProvider - put inside openvpn config file?
+
+            let openvpn_ca = OpenVpn::find_ca_file(&openvpn_config_dir)?;
+            let openvpn_crl = OpenVpn::find_crl_file(&openvpn_config_dir)?;
+            let openvpn_config = OpenVpn::find_config_file(&openvpn_config_dir)?;
+            debug!("OpenVPN config: {:?}", &openvpn_config);
+            info!("Launching OpenVPN...");
+            let port_string = port.to_string();
+            let mut command_vec = (&[
+                "openvpn",
+                "--config",
+                openvpn_config.as_os_str().to_str().unwrap(),
+                "--remote",
+                server,
+                port_string.as_str(),
+                "--auth-user-pass",
+                openvpn_auth.as_os_str().to_str().unwrap(),
+            ])
+                .to_vec();
+
+            if let Some(ca) = openvpn_ca.as_ref() {
+                command_vec.push("--ca");
+                command_vec.push(ca.as_os_str().to_str().unwrap());
+            }
+            if let Some(crl) = openvpn_crl.as_ref() {
+                command_vec.push("--crl-verify");
+                command_vec.push(crl.as_os_str().to_str().unwrap());
+            }
+            handle = netns.exec_no_block(&command_vec, None)?;
         }
-        if let Some(crl) = openvpn_crl.as_ref() {
-            command_vec.push("--crl-verify");
-            command_vec.push(crl.as_os_str().to_str().unwrap());
-        }
-
-        let handle = netns.exec_no_block(&command_vec, None)?;
         // TODO: How to check for VPN connection or auth error?? OpenVPN silently continues
         let id = handle.id();
         // let mut buffer: Vec<u8> = Vec::with_capacity(20000);
