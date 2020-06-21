@@ -229,7 +229,7 @@ impl Drop for NetworkNamespace {
         lockfile_path.push(format!("vopono/locks/{}", self.name));
         let try_delete = std::fs::remove_dir(lockfile_path);
 
-        // TODO: Clean this up
+        // TODO: Clean this up - fails to handle case of invalid config dir
         if try_delete.is_ok() {
             self.openvpn = None;
             self.veth_pair = None;

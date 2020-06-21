@@ -37,8 +37,13 @@ root.
 
 ### Wireguard
 
-For Mullvad, download the Wireguard connection configuration files (the
+For Mullvad, download the [Wireguard connection configuration files](https://mullvad.net/en/account/#/wireguard-config/) (the
 wg-quick ones), and extract them to `~/.config/vopono/mv/wireguard/`.
+
+```bash
+mkdir -p ~/.config/vopono/mv/wireguard/
+unzip mullvad_wireguard_linux_all_all.zip -d ~/.config/vopono/mv/wireguard/
+```
 
 ```bash
 $ vopono exec --provider mullvad --server se --protocol wireguard "transmission-gtk"
@@ -115,6 +120,20 @@ profiles in order to force Firefox to run them as separate processes.
   them from vopono itself.
 
 ## Installation
+
+### AUR (Arch Linux)
+
+Install the `vopono-git` package with your favourite AUR helper.
+
+This will install the default configuration files to `/usr/share/doc/vopono`,
+copy them to `~/.config/vopono` manually if you want to configure vopono
+prior to your first execution (i.e. to add Wireguard configuration files),
+or run `vopono init` to have vopono copy them automatically.
+
+```bash
+yay -S vopono-git
+vopono init
+```
 
 ### From this repository (with Cargo)
 

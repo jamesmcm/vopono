@@ -24,6 +24,8 @@ pub enum Command {
         about = "Execute an application with the given VPN connection"
     )]
     Create(ExecCommand),
+    #[structopt(name = "init", about = "Initialise vopono configuration")]
+    Init,
     // #[structopt(
     //     name = "default",
     //     about = "Get or set default VPN provider and server (UNIMPLEMENTED)"

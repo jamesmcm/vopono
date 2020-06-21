@@ -50,12 +50,12 @@ pub fn get_username() -> anyhow::Result<String> {
     }
 }
 
-pub fn init_config() -> anyhow::Result<()> {
+pub fn init_config(skip_dir_check: bool) -> anyhow::Result<()> {
     let config_dir = config_dir()?;
     let mut check_dir = config_dir.clone();
     check_dir.push("vopono");
     let username = get_username()?;
-    if !check_dir.exists() {
+    if skip_dir_check || !check_dir.exists() {
         info!("Initialising vopono config...");
         debug!(
             "Copying default config from /usr/share/doc/vopono to {}",

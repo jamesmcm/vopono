@@ -52,11 +52,13 @@ fn main() -> anyhow::Result<()> {
     builder.filter_level(log_level);
     builder.init();
 
-    init_config()?;
-    clean_dead_locks()?;
+    // TODO: Clean dead namespaces?
 
     match app.cmd {
         args::Command::Create(cmd) => {
+            init_config(false)?;
+            clean_dead_locks()?;
+
             // Check if already running as root
             if nix::unistd::getuid().as_raw() != 0 {
                 info!("Calling sudo for elevated privileges, current user will be used as default user");
@@ -71,7 +73,9 @@ fn main() -> anyhow::Result<()> {
             }
 
             exec(cmd)?
-        } // args::Command::SetDefaults(cmd) => todo!(),
+        }
+        args::Command::Init => init_config(true)?,
+        // args::Command::SetDefaults(cmd) => todo!(),
     }
     Ok(())
 }
