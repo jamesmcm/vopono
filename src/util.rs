@@ -1,6 +1,6 @@
 use anyhow::{anyhow, Context};
 use directories_next::BaseDirs;
-use log::debug;
+use log::{debug, info};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -35,6 +35,53 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
         Err(anyhow!("Could not find valid config directory!"))
     }?;
     Ok(pathbuf)
+}
+
+// TODO: DRY with above
+pub fn get_username() -> anyhow::Result<String> {
+    if let Ok(user) = std::env::var("SUDO_USER") {
+        Ok(user)
+    } else if let Some(user) = get_user_by_uid(get_current_uid()) {
+        Ok(String::from(
+            user.name().to_str().expect("Invalid username"),
+        ))
+    } else {
+        Err(anyhow!("No valid username!"))
+    }
+}
+
+pub fn init_config() -> anyhow::Result<()> {
+    let config_dir = config_dir()?;
+    let mut check_dir = config_dir.clone();
+    check_dir.push("vopono");
+    let username = get_username()?;
+    if !check_dir.exists() {
+        info!("Initialising vopono config...");
+        debug!(
+            "Copying default config from /usr/share/doc/vopono to {}",
+            config_dir.as_os_str().to_str().expect("Invalid config dir")
+        );
+        // TODO: Migrate these to Rust calls
+        sudo_command(&[
+            "cp",
+            "-r",
+            "/usr/share/doc/vopono",
+            config_dir.to_str().expect("No valid config dir"),
+        ])?;
+        sudo_command(&[
+            "chown",
+            "-R",
+            username.as_str(),
+            check_dir.to_str().expect("No valid config dir"),
+        ])?;
+        sudo_command(&[
+            "chgrp",
+            "-R",
+            username.as_str(),
+            check_dir.to_str().expect("No valid config dir"),
+        ])?;
+    }
+    Ok(())
 }
 
 // TODO: Create struct for holding IPv4 addresses and use FromStr and Eq with that

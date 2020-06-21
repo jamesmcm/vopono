@@ -21,7 +21,7 @@ use std::io::{self, Write};
 use std::process::Command;
 use structopt::StructOpt;
 use sysctl::SysCtl;
-use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet};
+use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet, init_config};
 use vpn::VpnProvider;
 use vpn::{find_host_from_alias, get_auth, get_protocol, get_serverlist, Protocol};
 use wireguard::get_config_from_alias;
@@ -52,7 +52,9 @@ fn main() -> anyhow::Result<()> {
     builder.filter_level(log_level);
     builder.init();
 
+    init_config()?;
     clean_dead_locks()?;
+
     match app.cmd {
         args::Command::Create(cmd) => {
             // Check if already running as root
@@ -205,6 +207,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
 
     ns.write_lockfile()?;
 
+    // User for application command, if None will use root
     let user = if command.user.is_none() {
         std::env::var("SUDO_USER").ok()
     } else {
