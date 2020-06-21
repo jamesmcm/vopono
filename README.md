@@ -18,13 +18,6 @@ At the moment, both iptables and nftables are required.
 | PrivateInternetAccess | ✅              | ❌                |
 | TigerVPN              | ✅              | ❌                |
 
-## Etymology
-
-vopono is the pronunciation of the letters VPN in Esperanto.
-
-Se vi ankaŭ parolas Esperanton, bonvolu serĉi min en la kanalo de
-Discord de Rust Programming Language Community.
-
 ## Usage
 
 Applications will be run as the current user by default (you can use
@@ -40,14 +33,28 @@ root.
 For Mullvad, download the [Wireguard connection configuration files](https://mullvad.net/en/account/#/wireguard-config/) (the
 wg-quick ones), and extract them to `~/.config/vopono/mv/wireguard/`.
 
+Install vopono and initialise configuration:
+
+```bash
+yay -S vopono-git
+vopono init
+```
+
+Copy Wireguard config files:
+
 ```bash
 mkdir -p ~/.config/vopono/mv/wireguard/
 unzip mullvad_wireguard_linux_all_all.zip -d ~/.config/vopono/mv/wireguard/
 ```
 
+Run vopono:
+
 ```bash
 $ vopono exec --provider mullvad --server se --protocol wireguard "transmission-gtk"
 ```
+
+The server prefix will be searched against available servers and a
+random one will be chosen (and reported in the terminal).
 
 ### OpenVPN
 
@@ -65,10 +72,25 @@ user:
 $ vopono exec --provider privateinternetaccess --server mexico "firefox"
 ```
 
+The server prefix will be searched against available servers (both
+server names and aliases in the provider's `serverlist.csv`) and a
+random one will be chosen (and reported in the terminal).
+
 Place your username and password in
 `~/.config/vopono/pia/openvpn/auth.txt` - the username on the first
 line, and the password on the second (with a newline). Otherwise you
 will be prompted for your credentials.
+
+For PrivateInternetAccess these should be the same as your account
+credentials.
+
+For TigerVPN you can view your OpenVPN credentials [online on the "geeks" dashboard](https://www.tigervpn.com/dashboard/geeks).
+The OpenVPN credentials are **not** the same as your TigerVPN account credentials.
+
+For Mullvad you can obtain your OpenVPN credentials, by downloading the
+[OpenVPN configuration files](https://mullvad.net/en/account/#/openvpn-config/)
+and checking `mullvad_userpass.txt`. The OpenVPN credentials are **not**
+the same as your Mullvad account credentials.
 
 ### Custom Providers
 
@@ -145,6 +167,13 @@ install` the repository and copy over the configuration files to
 
 vopono is licensed under the GPL Version 3.0 (or above), see the LICENSE
 file or https://www.gnu.org/licenses/gpl-3.0.en.html
+
+## Etymology
+
+vopono is the pronunciation of the letters VPN in Esperanto.
+
+Se vi ankaŭ parolas Esperanton, bonvolu serĉi min en la kanalo de
+Discord de Rust Programming Language Community.
 
 ## Contribution
 
