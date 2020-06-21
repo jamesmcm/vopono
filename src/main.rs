@@ -63,7 +63,7 @@ fn main() -> anyhow::Result<()> {
                 let args: Vec<String> = std::env::args().collect();
 
                 debug!("Args: {:?}", &args);
-                Command::new("sudo").arg("-E").args(args).spawn()?;
+                Command::new("sudo").arg("-E").args(args).status()?;
                 // Do we want to block here to ensure stdout kept alive? Does it matter?
                 std::process::exit(0);
             } else {
