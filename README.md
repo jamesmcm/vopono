@@ -2,15 +2,20 @@
 
 vopono is a tool to run applications through VPN tunnels via temporary
 network namespaces. This allows you to run only a handful of
-applications through different VPNs whilst keeping your main connection
+applications through different VPNs simultaneously, whilst keeping your main connection
 as normal.
-
-![Screenshot](screenshot.png)
 
 This is alpha software, currently only Mullvad, TigerVPN and
 PrivateInternetAccess are supported.
 
 At the moment, both iptables and nftables are required.
+
+## Screenshot
+
+Screenshot showing an example with firefox, google-chrome-stable and
+lynx all running through different VPN connections:
+
+![Screenshot](screenshot.png)
 
 ## Supported Providers
 
