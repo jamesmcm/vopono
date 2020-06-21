@@ -1,11 +1,10 @@
 use super::netns::NetworkNamespace;
 use super::util::check_process_running;
-use super::util::{config_dir, sudo_command};
+use super::util::config_dir;
 use super::vpn::VpnProvider;
 use anyhow::anyhow;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
-use std::io::Read;
 use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
@@ -82,6 +81,7 @@ impl OpenVpn {
         // }
         sleep(Duration::from_secs(10)); //TODO: Can we do this by parsing stdout
                                         // Initialization Sequence Completed
+                                        // AUTH: Received control message: AUTH_FAILED
         Ok(Self { pid: id })
     }
 

@@ -14,7 +14,7 @@ mod wireguard;
 use anyhow::{anyhow, bail};
 use application_wrapper::ApplicationWrapper;
 use args::ExecCommand;
-use log::{debug, error, info, LevelFilter};
+use log::{debug, error, info, warn, LevelFilter};
 use netns::NetworkNamespace;
 use network_interface::{get_active_interfaces, NetworkInterface};
 use std::io::{self, Write};
@@ -64,11 +64,12 @@ fn main() -> anyhow::Result<()> {
                 Command::new("sudo").arg("-E").args(args).spawn()?;
                 // Do we want to block here to ensure stdout kept alive? Does it matter?
                 std::process::exit(0);
+            } else {
+                warn!("Running vopono as root user directly!");
             }
 
             exec(cmd)?
-        }
-        args::Command::SetDefaults(cmd) => todo!(),
+        } // args::Command::SetDefaults(cmd) => todo!(),
     }
     Ok(())
 }
@@ -76,6 +77,8 @@ fn main() -> anyhow::Result<()> {
 fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let provider: VpnProvider;
     let server_name: String;
+
+    // TODO: Clean this up and merge with protocol logic below
     if let Some(path) = &command.custom_config {
         if command.protocol.is_none() {
             // TODO: Detect config type from file
@@ -83,34 +86,52 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         }
         provider = VpnProvider::Custom;
         // Could hash filename with CRC and use base64 but chars are limited
-        server_name = String::from(&path.as_path().file_name().unwrap().to_str().unwrap()[0..4]);
+        server_name = String::from(
+            &path
+                .as_path()
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .chars()
+                .into_iter()
+                .filter(|&x| x != ' ' && x != '-')
+                .collect::<String>()[0..4],
+        );
     } else {
-        // Get server and provider (handle default case)
-        provider = command.vpn_provider.unwrap();
+        // Get server and provider
+        // TODO: Handle default case and remove expect()
+        provider = command.vpn_provider.expect("Enter a VPN provider");
         if provider == VpnProvider::Custom {
             bail!("Must provide config file if using custom VPN Provider");
         }
-        server_name = command.server.unwrap();
+        server_name = command.server.expect("Enter a VPN server prefix");
     }
     // Check protocol is valid for provider
     let protocol = get_protocol(&provider, command.protocol)?;
-
-    let serverlist = get_serverlist(&provider)?;
+    let serverlist;
     let server;
     let port;
     let ns_name;
     let server_alias;
 
-    match protocol {
-        Protocol::OpenVpn => {
+    // TODO: Refactor and simplify
+    match (&protocol, &provider) {
+        (Protocol::OpenVpn, VpnProvider::Custom) => {
+            // TODO: Make these unnecessary by moving this inside OpenVpn
+            server = String::new();
+            port = 0;
+            ns_name = format!("{}_{}", provider.alias(), server_name);
+        }
+        (Protocol::OpenVpn, _) => {
+            serverlist = get_serverlist(&provider)?;
             let x = find_host_from_alias(&server_name, &serverlist)?;
             server = x.0;
             port = x.1;
             server_alias = x.2;
-            // (server, port, server_alias) = find_host_from_alias(&server, &serverlist)?;
             ns_name = format!("{}_{}", provider.alias(), server_alias);
         }
-        Protocol::Wireguard => {
+        (Protocol::Wireguard, _) => {
             server = String::new();
             port = 0;
             ns_name = format!("{}_{}", provider.alias(), server_name);
@@ -125,7 +146,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
             get_active_interfaces()?
                 .into_iter()
                 .nth(0)
-                .ok_or_else(|| anyhow!("No active interface"))?,
+                .ok_or_else(|| anyhow!("No active network interface"))?,
         )?),
     }?;
 
@@ -139,6 +160,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         match protocol {
             Protocol::OpenVpn => {
                 if command.custom_config.is_none() {
+                    // TODO: Also handle case where custom config does not provide user-pass
                     get_auth(&provider)?;
                 }
                 ns.add_loopback()?;

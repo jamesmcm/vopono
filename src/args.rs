@@ -24,12 +24,11 @@ pub enum Command {
         about = "Execute an application with the given VPN connection"
     )]
     Create(ExecCommand),
-
-    #[structopt(
-        name = "default",
-        about = "Get or set default VPN provider and server (UNIMPLEMENTED)"
-    )]
-    SetDefaults(SetDefaultsCommand),
+    // #[structopt(
+    //     name = "default",
+    //     about = "Get or set default VPN provider and server (UNIMPLEMENTED)"
+    // )]
+    // SetDefaults(SetDefaultsCommand),
 }
 
 #[derive(StructOpt)]
@@ -62,12 +61,12 @@ pub struct ExecCommand {
     pub custom_config: Option<PathBuf>,
 }
 
-#[derive(StructOpt)]
-pub struct SetDefaultsCommand {
-    #[structopt(long = "provider", short="p", possible_values=&VpnProvider::variants())]
-    pub vpn_provider: Option<VpnProvider>,
+// #[derive(StructOpt)]
+// pub struct SetDefaultsCommand {
+//     #[structopt(long = "provider", short="p", possible_values=&VpnProvider::variants())]
+//     pub vpn_provider: Option<VpnProvider>,
 
-    /// VPN Server (if not given will use default)
-    #[structopt(long = "server", short = "s")]
-    pub server: String,
-}
+//     /// VPN Server (if not given will use default)
+//     #[structopt(long = "server", short = "s")]
+//     pub server: String,
+// }

@@ -5,10 +5,18 @@ network namespaces. This allows you to run only a handful of
 applications through different VPNs whilst keeping your main connection
 as normal.
 
-This is pre-alpha software, currently only PrivateInternetAccess is
-supported, using OpenVPN and iptables. Support for nftables, the
-WireGuard protocol and more VPN providers (Mullvad, etc.) will be added
-soon.
+This is alpha software, currently only Mullvad, TigerVPN and
+PrivateInternetAccess are supported.
+
+At the moment, both iptables and nftables are required.
+
+## Supported Providers
+
+| Provider              | OpenVPN support | Wireguard support | 
+|-----------------------|-----------------|-------------------|
+| Mullvad               | ✅              | ✅                |
+| PrivateInternetAccess | ✅              | ❌                |
+| TigerVPN              | ✅              | ❌                |
 
 ## Etymology
 
@@ -19,7 +27,26 @@ Discord de Rust Programming Language Community.
 
 ## Usage
 
+Applications will be run as the current user by default (you can use
+`sudo -u USERNAME program` as the command to run as another user).
+
+vopono will call sudo if required, it is recommended to run as the
+current user and let vopono call sudo so that the configuration
+directories are correctly inferred and the final command is not run as
+root.
+
+### Wireguard
+
+For Mullvad, download the Wireguard connection configuration files (the
+wg-quick ones), and extract them to `~/.config/vopono/mv/wireguard/`.
+
+```bash
+$ vopono exec --provider mullvad --server se --protocol wireguard "transmission-gtk"
 ```
+
+### OpenVPN
+
+```bash
 $ vopono exec --provider privateinternetaccess --server pl "curl ifconfig.co/country"
 Poland
 ```
@@ -29,14 +56,37 @@ You can also launch graphical applications like `firefox`,
 the application is terminated. Note you may need to run them as your own
 user:
 
-```
-$ vopono exec --provider privateinternetaccess --server mexico "sudo -u $USER firefox"
+```bash
+$ vopono exec --provider privateinternetaccess --server mexico "firefox"
 ```
 
 Place your username and password in
 `~/.config/vopono/pia/openvpn/auth.txt` - the username on the first
 line, and the password on the second (with a newline). Otherwise you
 will be prompted for your credentials.
+
+### Custom Providers
+
+If you use another commercial VPN provider, please open a Pull Request here with
+the necessary configuration and serverlist.
+
+For private VPN connections, you can use a custom provider, by passing
+the complete configuration file to vopono (i.e. an OpenVPN .ovpn config
+file or a Wireguard wg-quick .conf file).
+
+```bash
+$ vopono -v exec --custom ~/custom_wireguard.conf --protocol wireguard "firefox"
+```
+
+```bash
+$ vopono -v exec --custom ./custom_openvpn.ovpn --protocol openvpn "firefox"
+```
+
+Note that in the OpenVPN case the command must be executed in the same
+directory as any accompanying files (CA certificates, authentication
+files, etc.) and the user authentication must be by file (OpenVPN will
+fail to request user and password otherwise, due to being launched in
+the background).
 
 ### Firefox
 
@@ -45,36 +95,24 @@ profiles in order to force Firefox to run them as separate processes.
 
 ### Known issues
 
+* OpenVPN output is not parsed - this means you need to read the output
+  to ensure there are not authentication errors, etc.
 * OpenVPN output is not muted - you will see the output from OpenVPN
   when you run your application, this a pain for command-line
   applications but since it is difficult to handle failures in OpenVPN
   overall I felt it was left to leave this enabled for now (for
   debugging).
 * It is currently not possible to list running vopono network namespaces.
-* Multiple applications cannot currently share the same network
-  namespace. This requires keeping the network namespace alive between
-  different instances of vopono. This will be resolved soon, probably
-  with lockfiles preventing premature clean-up. It is also planned to
-  list currently running applications in vopono and their network namespaces.
-* Only PrivateInternetAccess is supported - will add support for other
-  providers soon.
-* Only OpenVPN is supported - will add support for WireGuard soon.
-* iptables is required - will add support for nftables (and possibly
-  ufw) soon.
-* sudo is required - it is planned to remove all direct commands from
-  vopono and instead request privilege escalation inside vopono directly.
-* Credentials are always stored in plaintext in configuration - will add
+* OpenVPN credentials are always stored in plaintext in configuration - will add
   option to not store credentials soon, but it seems OpenVPN needs them
   provided in plaintext.
-* Applications launch as root by default (including OpenVPN) - will be
-  addressed shortly to make current user the default.
-* Custom VPN servers are not supported - support for custom VPN
-  connections via provided .ovpn files is planned.
 * Cannot set default VPN provider and server - will be added shortly.
-* Configuration of VPN connection is limited - support will be added for
+* Configuration of OpenVPN connection is limited - support will be added for
   different keylengths, etc. in the future.
-
-
+* Split iptables and nftables dependencies so user can choose one or the
+  other.
+* Server lists are maintained in the repo and there is no way to update
+  them from vopono itself.
 
 ## Installation
 
