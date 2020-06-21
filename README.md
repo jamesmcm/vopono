@@ -5,6 +5,8 @@ network namespaces. This allows you to run only a handful of
 applications through different VPNs whilst keeping your main connection
 as normal.
 
+![Screenshot](screenshot.png)
+
 This is alpha software, currently only Mullvad, TigerVPN and
 PrivateInternetAccess are supported.
 
@@ -36,15 +38,15 @@ wg-quick ones), and extract them to `~/.config/vopono/mv/wireguard/`.
 Install vopono and initialise configuration:
 
 ```bash
-yay -S vopono-git
-vopono init
+$ yay -S vopono-git
+$ vopono init
 ```
 
 Copy Wireguard config files:
 
 ```bash
-mkdir -p ~/.config/vopono/mv/wireguard/
-unzip mullvad_wireguard_linux_all_all.zip -d ~/.config/vopono/mv/wireguard/
+$ mkdir -p ~/.config/vopono/mv/wireguard/
+$ unzip mullvad_wireguard_linux_all_all.zip -d ~/.config/vopono/mv/wireguard/
 ```
 
 Run vopono:
@@ -153,8 +155,8 @@ prior to your first execution (i.e. to add Wireguard configuration files),
 or run `vopono init` to have vopono copy them automatically.
 
 ```bash
-yay -S vopono-git
-vopono init
+$ yay -S vopono-git
+$ vopono init
 ```
 
 ### From this repository (with Cargo)
