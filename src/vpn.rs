@@ -4,12 +4,12 @@ use clap::arg_enum;
 use dialoguer::{Input, Password};
 use log::{debug, error, info, warn};
 use rand::seq::SliceRandom;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 
 arg_enum! {
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum VpnProvider {
     PrivateInternetAccess,
     Mullvad,
@@ -35,7 +35,7 @@ pub enum OpenVpnProtocol {
 }
 
 arg_enum! {
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum Protocol {
     OpenVpn,
     Wireguard,
@@ -79,7 +79,7 @@ pub fn get_serverlist(provider: &VpnProvider) -> anyhow::Result<Vec<VpnServer>> 
 
 // OpenVPN
 pub fn find_host_from_alias(
-    alias: &String,
+    alias: &str,
     serverlist: &Vec<VpnServer>,
 ) -> anyhow::Result<(String, u32, String)> {
     let alias = alias.to_lowercase();

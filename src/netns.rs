@@ -4,7 +4,7 @@ use super::network_interface::NetworkInterface;
 use super::openvpn::OpenVpn;
 use super::util::{config_dir, sudo_command};
 use super::veth_pair::VethPair;
-use super::vpn::VpnProvider;
+use super::vpn::{Protocol, VpnProvider};
 use super::wireguard::Wireguard;
 use anyhow::Context;
 use log::{debug, warn};
@@ -14,6 +14,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize, Deserialize)]
 pub struct NetworkNamespace {
@@ -23,6 +24,8 @@ pub struct NetworkNamespace {
     pub openvpn: Option<OpenVpn>,
     pub wireguard: Option<Wireguard>,
     pub iptables: Option<IpTables>,
+    pub provider: VpnProvider,
+    pub protocol: Protocol,
 }
 
 impl NetworkNamespace {
@@ -38,11 +41,12 @@ impl NetworkNamespace {
             .expect("No lockfile")?;
 
         let lockfile = File::open(lockfile.path())?;
-        let ns: Self = ron::de::from_reader(lockfile)?;
+        let lock: Lockfile = ron::de::from_reader(lockfile)?;
+        let ns = lock.ns;
         Ok(ns)
     }
 
-    pub fn new(name: String) -> anyhow::Result<Self> {
+    pub fn new(name: String, provider: VpnProvider, protocol: Protocol) -> anyhow::Result<Self> {
         sudo_command(&["ip", "netns", "add", name.as_str()])
             .with_context(|| format!("Failed to create network namespace: {}", &name))?;
 
@@ -53,6 +57,8 @@ impl NetworkNamespace {
             openvpn: None,
             wireguard: None,
             iptables: None,
+            provider,
+            protocol,
         })
     }
     pub fn exec_no_block(
@@ -110,10 +116,8 @@ impl NetworkNamespace {
 
     pub fn add_veth_pair(&mut self) -> anyhow::Result<()> {
         // TODO: Handle if name taken?
-        // TODO: Can we share veth dest between namespaces?
-        // TODO: Better handle name length limits
-        let source = format!("{}_s", &self.name);
-        let dest = format!("{}_d", &self.name);
+        let source = format!("{}_s", &self.name[6..self.name.len().min(13)]);
+        let dest = format!("{}_d", &self.name[6..self.name.len().min(13)]);
         self.veth_pair = Some(VethPair::new(source, dest, &self)?);
         Ok(())
     }
@@ -170,11 +174,10 @@ impl NetworkNamespace {
     pub fn run_openvpn(
         &mut self,
         provider: &VpnProvider,
-        server: &str,
-        port: u32,
+        server_name: &str,
         custom_config: Option<PathBuf>,
     ) -> anyhow::Result<()> {
-        self.openvpn = Some(OpenVpn::run(&self, provider, server, port, custom_config)?);
+        self.openvpn = Some(OpenVpn::run(&self, provider, server_name, custom_config)?);
         Ok(())
     }
 
@@ -200,28 +203,41 @@ impl NetworkNamespace {
         self.openvpn.as_mut().unwrap().check_if_running()
     }
 
-    pub fn write_lockfile(&self) -> anyhow::Result<()> {
+    pub fn write_lockfile(self, command: &str) -> anyhow::Result<Self> {
         let mut lockfile_path = config_dir()?;
         lockfile_path.push(format!("vopono/locks/{}", self.name));
         std::fs::create_dir_all(&lockfile_path)?;
         debug!("Writing lockfile: {}", lockfile_path.display());
         lockfile_path.push(format!("{}", unistd::getpid()));
-        let lock_string = ron::ser::to_string(self)?;
+        let since_the_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards");
+        let lock: Lockfile = Lockfile {
+            ns: self,
+            command: command.to_string(),
+            start: since_the_epoch.as_secs(),
+        };
+        let lock_string = ron::ser::to_string(&lock)?;
         let mut f = File::create(&lockfile_path)?;
         write!(f, "{}", lock_string)?;
         debug!("Lockfile written: {}", lockfile_path.display());
-        Ok(())
+        Ok(lock.ns)
     }
 }
 
 impl Drop for NetworkNamespace {
     fn drop(&mut self) {
         let mut lockfile_path = config_dir().expect("Failed to get config dir");
+        // Each instance responsible for deleting their own lockfile
         lockfile_path.push(format!("vopono/locks/{}/{}", self.name, unistd::getpid()));
-        match std::fs::remove_file(lockfile_path) {
+        match std::fs::remove_file(&lockfile_path) {
             Ok(_) => {}
             Err(e) => {
-                warn!("Failed to remove lockfile: {:?}", e);
+                warn!(
+                    "Failed to remove lockfile: {}, {:?}",
+                    &lockfile_path.display(),
+                    e
+                );
             }
         };
 
@@ -263,4 +279,11 @@ impl Drop for NetworkNamespace {
             Box::leak(iptables);
         }
     }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Lockfile {
+    pub ns: NetworkNamespace,
+    pub start: u64,
+    pub command: String,
 }

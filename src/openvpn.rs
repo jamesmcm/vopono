@@ -1,7 +1,7 @@
 use super::netns::NetworkNamespace;
 use super::util::check_process_running;
 use super::util::config_dir;
-use super::vpn::VpnProvider;
+use super::vpn::{find_host_from_alias, get_serverlist, VpnProvider};
 use anyhow::anyhow;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
@@ -19,8 +19,7 @@ impl OpenVpn {
     pub fn run(
         netns: &NetworkNamespace,
         provider: &VpnProvider,
-        server: &str,
-        port: u32,
+        server_name: &str,
         custom_config: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         // TODO: Refactor this - move all path handling earlier
@@ -33,6 +32,11 @@ impl OpenVpn {
 
             handle = netns.exec_no_block(&command_vec, None)?;
         } else {
+            let serverlist = get_serverlist(&provider)?;
+            let x = find_host_from_alias(server_name, &serverlist)?;
+            let server = x.0;
+            let port = x.1;
+
             let mut openvpn_config_dir = config_dir()?;
             openvpn_config_dir.push(format!("vopono/{}/openvpn", provider.alias()));
 
@@ -52,7 +56,7 @@ impl OpenVpn {
                 "--config",
                 openvpn_config.as_os_str().to_str().unwrap(),
                 "--remote",
-                server,
+                &server,
                 port_string.as_str(),
                 "--auth-user-pass",
                 openvpn_auth.as_os_str().to_str().unwrap(),

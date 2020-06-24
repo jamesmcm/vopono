@@ -3,7 +3,7 @@ use super::util::sudo_command;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct IpTables {
     ip_mask: String,
     interface: NetworkInterface,

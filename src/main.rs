@@ -2,6 +2,7 @@ mod application_wrapper;
 mod args;
 mod dns_config;
 mod iptables;
+mod list;
 mod netns;
 mod network_interface;
 mod openvpn;
@@ -14,6 +15,7 @@ mod wireguard;
 use anyhow::{anyhow, bail};
 use application_wrapper::ApplicationWrapper;
 use args::ExecCommand;
+use list::output_list;
 use log::{debug, error, info, warn, LevelFilter};
 use netns::NetworkNamespace;
 use network_interface::{get_active_interfaces, NetworkInterface};
@@ -23,7 +25,7 @@ use structopt::StructOpt;
 use sysctl::SysCtl;
 use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet, init_config};
 use vpn::VpnProvider;
-use vpn::{find_host_from_alias, get_auth, get_protocol, get_serverlist, Protocol};
+use vpn::{get_auth, get_protocol, Protocol};
 use wireguard::get_config_from_alias;
 
 // TODO:
@@ -69,13 +71,18 @@ fn main() -> anyhow::Result<()> {
                 // Do we want to block here to ensure stdout kept alive? Does it matter?
                 std::process::exit(0);
             } else {
-                warn!("Running vopono as root user directly!");
+                if std::env::var("SUDO_USER").is_err() {
+                    warn!("Running vopono as root user directly!");
+                }
             }
 
             exec(cmd)?
         }
         args::Command::Init => init_config(true)?,
-        // args::Command::SetDefaults(cmd) => todo!(),
+        args::Command::List => {
+            clean_dead_locks()?;
+            output_list()?;
+        } // args::Command::SetDefaults(cmd) => todo!(),
     }
     Ok(())
 }
@@ -115,37 +122,11 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     }
     // Check protocol is valid for provider
     let protocol = get_protocol(&provider, command.protocol)?;
-    let serverlist;
-    let server;
-    let port;
-    let ns_name;
-    let server_alias;
 
-    // TODO: Refactor and simplify
-    match (&protocol, &provider) {
-        (Protocol::OpenVpn, VpnProvider::Custom) => {
-            // TODO: Make these unnecessary by moving this inside OpenVpn
-            server = String::new();
-            port = 0;
-            ns_name = format!("{}_{}", provider.alias(), server_name);
-        }
-        (Protocol::OpenVpn, _) => {
-            serverlist = get_serverlist(&provider)?;
-            let x = find_host_from_alias(&server_name, &serverlist)?;
-            server = x.0;
-            port = x.1;
-            server_alias = x.2;
-            ns_name = format!("{}_{}", provider.alias(), server_alias);
-        }
-        (Protocol::Wireguard, _) => {
-            server = String::new();
-            port = 0;
-            ns_name = format!("{}_{}", provider.alias(), server_name);
-        }
-    }
+    let ns_name = format!("vopono_{}_{}", provider.alias(), server_name);
+
     let mut ns;
     let _sysctl;
-    let target_subnet;
     let interface: NetworkInterface = match command.interface {
         Some(x) => anyhow::Result::<NetworkInterface>::Ok(x),
         None => Ok(NetworkInterface::new(
@@ -162,7 +143,8 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         // If namespace exists, read its lock config
         ns = NetworkNamespace::from_existing(ns_name.clone())?;
     } else {
-        ns = NetworkNamespace::new(ns_name.clone())?;
+        ns = NetworkNamespace::new(ns_name.clone(), provider.clone(), protocol.clone())?;
+        let target_subnet = get_target_subnet()?;
         match protocol {
             Protocol::OpenVpn => {
                 if command.custom_config.is_none() {
@@ -171,13 +153,12 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 }
                 ns.add_loopback()?;
                 ns.add_veth_pair()?;
-                target_subnet = get_target_subnet()?;
                 ns.add_routing(target_subnet)?;
                 ns.add_iptables_rule(target_subnet, interface)?;
                 _sysctl = SysCtl::enable_ipv4_forwarding();
                 // TODO: Handle custom DNS
                 ns.dns_config(None)?;
-                ns.run_openvpn(&provider, &server, port, command.custom_config)?;
+                ns.run_openvpn(&provider, &server_name, command.custom_config)?;
                 debug!(
                     "Checking that OpenVPN is running in namespace: {}",
                     &ns_name
@@ -200,7 +181,6 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 };
                 ns.add_loopback()?;
                 ns.add_veth_pair()?;
-                target_subnet = get_target_subnet()?;
                 ns.add_routing(target_subnet)?;
                 ns.add_iptables_rule(target_subnet, interface)?;
                 _sysctl = SysCtl::enable_ipv4_forwarding();
@@ -209,7 +189,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         }
     }
 
-    ns.write_lockfile()?;
+    let ns = ns.write_lockfile(&command.application)?;
 
     // User for application command, if None will use root
     let user = if command.user.is_none() {

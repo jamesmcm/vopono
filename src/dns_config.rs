@@ -1,7 +1,7 @@
-use super::util::sudo_command;
 use anyhow::Context;
 use log::warn;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 
 #[derive(Serialize, Deserialize)]
 pub struct DnsConfig {
@@ -10,19 +10,22 @@ pub struct DnsConfig {
 
 impl DnsConfig {
     pub fn new(ns_name: String, server: Option<String>) -> anyhow::Result<Self> {
-        // TODO: Do this by requesting escalated privileges to current binary and use std::fs
-        sudo_command(&["mkdir", "-p", &format!("/etc/netns/{}", ns_name)])
+        std::fs::create_dir_all(format!("/etc/netns/{}", ns_name))
             .with_context(|| format!("Failed to create directory: /etc/netns/{}", ns_name))?;
 
-        sudo_command(&[
-            "sh",
-            "-c",
-            &format!(
-                "echo 'nameserver {}' > /etc/netns/{}/resolv.conf",
-                server.unwrap_or(String::from("8.8.8.8")),
-                ns_name
-            ),
-        ])
+        let mut f = std::fs::File::create(format!("/etc/netns/{}/resolv.conf", ns_name))
+            .with_context(|| {
+                format!(
+                    "Failed to open resolv.conf: /etc/netns/{}/resolv.conf",
+                    ns_name
+                )
+            })?;
+
+        write!(
+            f,
+            "nameserver {}",
+            &server.unwrap_or(String::from("8.8.8.8"))
+        )
         .with_context(|| {
             format!(
                 "Failed to overwrite resolv.conf: /etc/netns/{}/resolv.conf",
@@ -44,9 +47,5 @@ impl Drop for DnsConfig {
                 &path, e
             ),
         }
-        // sudo_command(&["rm", "-rf", &format!("/etc/netns/{}", self.ns_name)]).expect(&format!(
-        //     "Failed to delete resolv.conf for {}",
-        //     self.ns_name
-        // ));
     }
 }

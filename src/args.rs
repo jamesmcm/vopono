@@ -26,6 +26,11 @@ pub enum Command {
     Create(ExecCommand),
     #[structopt(name = "init", about = "Initialise vopono configuration")]
     Init,
+    #[structopt(
+        name = "list",
+        about = "List running vopono namespaces and applications"
+    )]
+    List,
     // #[structopt(
     //     name = "default",
     //     about = "Get or set default VPN provider and server (UNIMPLEMENTED)"
