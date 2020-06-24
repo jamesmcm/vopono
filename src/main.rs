@@ -79,9 +79,9 @@ fn main() -> anyhow::Result<()> {
             exec(cmd)?
         }
         args::Command::Init => init_config(true)?,
-        args::Command::List => {
+        args::Command::List(listcmd) => {
             clean_dead_locks()?;
-            output_list()?;
+            output_list(listcmd)?;
         } // args::Command::SetDefaults(cmd) => todo!(),
     }
     Ok(())

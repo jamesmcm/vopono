@@ -30,7 +30,7 @@ pub enum Command {
         name = "list",
         about = "List running vopono namespaces and applications"
     )]
-    List,
+    List(ListCommand),
     // #[structopt(
     //     name = "default",
     //     about = "Get or set default VPN provider and server (UNIMPLEMENTED)"
@@ -68,6 +68,12 @@ pub struct ExecCommand {
     pub custom_config: Option<PathBuf>,
 }
 
+#[derive(StructOpt)]
+pub struct ListCommand {
+    /// VPN Provider (if not given will use default)
+    #[structopt(possible_values = &["namespaces", "applications"])]
+    pub list_type: Option<String>,
+}
 // #[derive(StructOpt)]
 // pub struct SetDefaultsCommand {
 //     #[structopt(long = "provider", short="p", possible_values=&VpnProvider::variants())]

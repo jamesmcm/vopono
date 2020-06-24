@@ -1,26 +1,84 @@
+use super::args::ListCommand;
 use super::netns::Lockfile;
 use super::util::config_dir;
+use chrono::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
 use walkdir::WalkDir;
 
-pub fn output_list() -> anyhow::Result<()> {
+pub fn output_list(listcmd: ListCommand) -> anyhow::Result<()> {
+    match listcmd.list_type.as_deref() {
+        Some("namespaces") => print_namespaces()?,
+        _ => print_applications()?,
+    }
+
+    Ok(())
+}
+
+pub fn print_applications() -> anyhow::Result<()> {
     let namespaces = get_lock_namespaces()?;
 
     let mut keys = namespaces.keys().into_iter().collect::<Vec<&String>>();
     keys.sort();
 
-    for ns in keys {
-        let first_lock = &namespaces.get(ns).as_ref().unwrap()[0];
-        println!(
-            "{}\t{}\t{}",
-            ns, first_lock.ns.provider, first_lock.ns.protocol
-        );
-        for lock in namespaces.get(ns).unwrap() {
-            println!("{}\t{}", &lock.command, &lock.start);
+    if keys.len() > 0 {
+        println!("namespace\tprovider\tprotocol\tapplication\tuptime");
+        let now = Utc::now();
+        for ns in keys {
+            for lock in namespaces.get(ns).unwrap() {
+                let naive = NaiveDateTime::from_timestamp(lock.start as i64, 0);
+                let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
+                let diff = now - datetime;
+                println!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    &ns,
+                    &lock.ns.provider,
+                    &lock.ns.protocol,
+                    &lock.command,
+                    compound_duration::format_wdhms(diff.to_std().unwrap().as_secs())
+                );
+            }
         }
     }
+    // Avoid triggering Drop for these namespaces
+    let namespaces = Box::new(namespaces);
+    Box::leak(namespaces);
+    Ok(())
+}
 
+// TODO: DRY
+pub fn print_namespaces() -> anyhow::Result<()> {
+    let namespaces = get_lock_namespaces()?;
+
+    let mut keys = namespaces.keys().into_iter().collect::<Vec<&String>>();
+    keys.sort();
+
+    if keys.len() > 0 {
+        let now = Utc::now();
+        println!("namespace\tprovider\tprotocol\tnum_applications\tuptime");
+        for ns in keys {
+            let first_lock = &namespaces.get(ns).as_ref().unwrap()[0];
+
+            let min_time = namespaces
+                .get(ns)
+                .unwrap()
+                .into_iter()
+                .map(|x| x.start)
+                .min()
+                .unwrap();
+            let naive = NaiveDateTime::from_timestamp(min_time as i64, 0);
+            let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
+            let diff = now - datetime;
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                ns,
+                first_lock.ns.provider,
+                first_lock.ns.protocol,
+                namespaces.get(ns).unwrap().len(),
+                compound_duration::format_wdhms(diff.to_std().unwrap().as_secs())
+            );
+        }
+    }
     // Avoid triggering Drop for these namespaces
     let namespaces = Box::new(namespaces);
     Box::leak(namespaces);
