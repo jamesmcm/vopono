@@ -122,6 +122,21 @@ files, etc.) and the user authentication must be by file (OpenVPN will
 fail to request user and password otherwise, due to being launched in
 the background).
 
+### Listing running namespaces and applications
+
+The `vopono list` command lists running applications and namespaces, as
+a tab separated table:
+
+```bash
+$ vopono list namespaces
+namespace       provider        protocol        num_applications        uptime
+vopono_tig_us_losangeles        TigerVpn        OpenVpn 2       28s
+
+$ vopono list applications
+namespace       provider        protocol        application     uptime
+vopono_tig_us_losangeles        TigerVpn        OpenVpn firefox 36s
+vopono_tig_us_losangeles        TigerVpn        OpenVpn lynx    15s
+```
 ### Firefox
 
 Note if running multiple Firefox sessions, they need to run separate
@@ -136,7 +151,6 @@ profiles in order to force Firefox to run them as separate processes.
   applications but since it is difficult to handle failures in OpenVPN
   overall I felt it was left to leave this enabled for now (for
   debugging).
-* It is currently not possible to list running vopono network namespaces.
 * OpenVPN credentials are always stored in plaintext in configuration - will add
   option to not store credentials soon, but it seems OpenVPN needs them
   provided in plaintext.
