@@ -30,6 +30,10 @@ use vpn::{get_auth, get_protocol, Protocol};
 use wireguard::get_config_from_alias;
 
 // TODO:
+// - Disable ipv6 traffic when not routed?
+// - https://am.i.mullvad.net/
+// - tun-ipv6
+// - TigerVPN full: https://docs.google.com/spreadsheets/d/1imcDvBWaI0heW2Fd5DQzrJ3UdS0g_XYCQY9j3wiwCq4/
 // - Test configuration for wireless interface for OpenVPN
 // - Allow OpenVPN UDP (1194) and TCP (443) toggle
 // - Allow custom VPNs (provide .ovpn file?)
@@ -154,7 +158,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 ns.add_iptables_rule(target_subnet, interface)?;
                 _sysctl = SysCtl::enable_ipv4_forwarding();
                 // TODO: Handle custom DNS
-                ns.dns_config(None)?;
+                ns.dns_config(command.dns.unwrap_or(provider.dns()?))?;
                 ns.run_openvpn(&provider, &server_name, command.custom_config)?;
                 debug!(
                     "Checking that OpenVPN is running in namespace: {}",

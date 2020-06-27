@@ -35,6 +35,9 @@ current user and let vopono call sudo so that the configuration
 directories are correctly inferred and the final command is not run as
 root.
 
+Mullvad users can use [am.i.mullvad.net](https://am.i.mullvad.net/) to
+check the security of their browser's connection.
+
 ### Wireguard
 
 For Mullvad, download the [Wireguard connection configuration files](https://mullvad.net/en/account/#/wireguard-config/) (the
@@ -141,6 +144,13 @@ vopono_tig_us_losangeles        TigerVpn        OpenVpn lynx    15s
 
 Note if running multiple Firefox sessions, they need to run separate
 profiles in order to force Firefox to run them as separate processes.
+
+You should also disable DNS over HTTPS as this will send all DNS
+requests to Cloudflare by default. Firefox Options > General >
+Network settings > Settings, then deselect `Enable DNS over HTTPS`.
+
+You may also wish to disable WebRTC - see
+[Mullvad's guide](https://mullvad.net/en/help/webrtc/) for more details.
 
 ### Known issues
 

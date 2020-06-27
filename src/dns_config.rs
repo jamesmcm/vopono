@@ -2,6 +2,7 @@ use anyhow::Context;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use std::net::IpAddr;
 
 #[derive(Serialize, Deserialize)]
 pub struct DnsConfig {
@@ -9,7 +10,7 @@ pub struct DnsConfig {
 }
 
 impl DnsConfig {
-    pub fn new(ns_name: String, server: Option<String>) -> anyhow::Result<Self> {
+    pub fn new(ns_name: String, servers: Vec<IpAddr>) -> anyhow::Result<Self> {
         std::fs::create_dir_all(format!("/etc/netns/{}", ns_name))
             .with_context(|| format!("Failed to create directory: /etc/netns/{}", ns_name))?;
 
@@ -24,19 +25,21 @@ impl DnsConfig {
         debug!(
             "Setting namespace {} DNS server to {}",
             ns_name,
-            server.as_ref().unwrap_or(&String::from("8.8.8.8"))
+            &servers
+                .iter()
+                .map(|x| format!("{}", x))
+                .collect::<Vec<String>>()
+                .join(", ")
         );
-        write!(
-            f,
-            "nameserver {}",
-            &server.unwrap_or(String::from("8.8.8.8"))
-        )
-        .with_context(|| {
-            format!(
-                "Failed to overwrite resolv.conf: /etc/netns/{}/resolv.conf",
-                ns_name
-            )
-        })?;
+
+        for dns in servers {
+            writeln!(f, "nameserver {}", dns).with_context(|| {
+                format!(
+                    "Failed to overwrite resolv.conf: /etc/netns/{}/resolv.conf",
+                    ns_name
+                )
+            })?;
+        }
 
         Ok(Self { ns_name })
     }

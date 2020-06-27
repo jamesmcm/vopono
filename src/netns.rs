@@ -12,6 +12,7 @@ use nix::unistd;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -155,7 +156,7 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn dns_config(&mut self, server: Option<String>) -> anyhow::Result<()> {
+    pub fn dns_config(&mut self, server: Vec<IpAddr>) -> anyhow::Result<()> {
         self.dns_config = Some(DnsConfig::new(self.name.clone(), server)?);
         Ok(())
     }

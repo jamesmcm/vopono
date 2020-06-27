@@ -7,6 +7,8 @@ use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
+use std::net::IpAddr;
+use std::str::FromStr;
 
 arg_enum! {
     #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -26,6 +28,22 @@ impl VpnProvider {
             Self::TigerVpn => String::from("tig"),
             Self::Custom => String::from("cus"),
         }
+    }
+
+    pub fn dns(&self) -> anyhow::Result<Vec<IpAddr>> {
+        let res = match self {
+            Self::PrivateInternetAccess => vec![
+                IpAddr::from_str("209.222.18.222"),
+                IpAddr::from_str("209.222.18.218"),
+            ],
+            Self::Mullvad => vec![IpAddr::from_str("193.138.218.74")],
+            Self::TigerVpn => vec![IpAddr::from_str("8.8.8.8"), IpAddr::from_str("8.8.4.4")],
+            Self::Custom => vec![IpAddr::from_str("8.8.8.8"), IpAddr::from_str("8.8.4.4")],
+        };
+
+        Ok(res
+            .into_iter()
+            .collect::<Result<Vec<IpAddr>, std::net::AddrParseError>>()?)
     }
 }
 

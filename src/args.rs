@@ -1,5 +1,6 @@
 use super::network_interface::NetworkInterface;
 use super::vpn::{Protocol, VpnProvider};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
@@ -66,6 +67,10 @@ pub struct ExecCommand {
     /// Custom VPN Provider - OpenVPN or Wireguard config file
     #[structopt(parse(from_os_str), long = "custom")]
     pub custom_config: Option<PathBuf>,
+
+    /// DNS Server (will override provider's DNS server)
+    #[structopt(long = "dns", short = "d")]
+    pub dns: Option<Vec<IpAddr>>,
 }
 
 #[derive(StructOpt)]

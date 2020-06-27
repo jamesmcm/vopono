@@ -7,7 +7,9 @@ use rand::seq::SliceRandom;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use std::net::IpAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use walkdir::WalkDir;
 
 #[derive(Serialize, Deserialize)]
@@ -141,7 +143,7 @@ impl Wireguard {
             &namespace.name,
         ])?;
 
-        namespace.dns_config(Some(config.interface.dns))?;
+        namespace.dns_config(vec![IpAddr::from_str(config.interface.dns.as_str())?])?;
         let fwmark = "51820";
         namespace.exec(&["wg", "set", &namespace.name, "fwmark", fwmark])?;
         // IPv6
