@@ -5,9 +5,9 @@ use super::vpn::{find_host_from_alias, get_serverlist, VpnProvider};
 use anyhow::anyhow;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
+use std::fs::File;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
-use std::thread::sleep;
-use std::time::Duration;
 use walkdir::WalkDir;
 
 #[derive(Serialize, Deserialize)]
@@ -23,14 +23,25 @@ impl OpenVpn {
         custom_config: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         // TODO: Refactor this - move all path handling earlier
+        // TODO: --status flag
         let handle;
-
+        let log_file_str = format!("/etc/netns/{}/openvpn.log", &netns.name);
+        {
+            File::create(&log_file_str)?;
+        }
         if let Some(config) = custom_config {
             info!("Launching OpenVPN...");
-            let command_vec =
-                (&["openvpn", "--config", config.as_os_str().to_str().unwrap()]).to_vec();
+            let command_vec = (&[
+                "openvpn",
+                "--config",
+                config.as_os_str().to_str().unwrap(),
+                "--machine-readable-output",
+                "--log",
+                log_file_str.as_str(),
+            ])
+                .to_vec();
 
-            handle = netns.exec_no_block(&command_vec, None)?;
+            handle = netns.exec_no_block(&command_vec, None, true)?;
         } else {
             let serverlist = get_serverlist(&provider)?;
             let x = find_host_from_alias(server_name, &serverlist)?;
@@ -60,6 +71,9 @@ impl OpenVpn {
                 port_string.as_str(),
                 "--auth-user-pass",
                 openvpn_auth.as_os_str().to_str().unwrap(),
+                "--machine-readable-output",
+                "--log",
+                log_file_str.as_str(),
             ])
                 .to_vec();
 
@@ -71,21 +85,40 @@ impl OpenVpn {
                 command_vec.push("--crl-verify");
                 command_vec.push(crl.as_os_str().to_str().unwrap());
             }
-            handle = netns.exec_no_block(&command_vec, None)?;
+            handle = netns.exec_no_block(&command_vec, None, true)?;
         }
-        // TODO: How to check for VPN connection or auth error?? OpenVPN silently continues
+
         let id = handle.id();
-        // let mut buffer: Vec<u8> = Vec::with_capacity(20000);
-        // let mut stdout = handle.stdout.unwrap(); // TODO: Need to pass in stdout to use
-        // while buffer.is_empty()
-        //     || !std::str::from_utf8(buffer.as_slice())?
-        //         .contains("Initialization Sequence Completed")
-        // {
-        //     stdout.read(&mut buffer)?;
-        // }
-        sleep(Duration::from_secs(10)); //TODO: Can we do this by parsing stdout
-                                        // Initialization Sequence Completed
-                                        // AUTH: Received control message: AUTH_FAILED
+        let mut buffer = String::with_capacity(1024);
+
+        let mut logfile = BufReader::new(File::open(log_file_str)?);
+        let mut pos: usize = 0;
+
+        // Tail OpenVPN log file
+        loop {
+            let x = logfile.read_line(&mut buffer)?;
+            pos += x;
+
+            if x > 0 {
+                debug!("{:?}", buffer);
+            }
+
+            if buffer.contains("Initialization Sequence Completed")
+                || buffer.contains("AUTH_FAILED")
+            {
+                break;
+            }
+
+            logfile.seek(SeekFrom::Start(pos as u64)).unwrap();
+            buffer.clear();
+        }
+
+        if buffer.contains("AUTH_FAILED") {
+            return Err(anyhow!(
+                "OpenVPN authentication failed, use -v for full log output"
+            ));
+        }
+
         Ok(Self { pid: id })
     }
 

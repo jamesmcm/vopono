@@ -61,48 +61,37 @@ impl NetworkNamespace {
             protocol,
         })
     }
+
     pub fn exec_no_block(
         &self,
         command: &[&str],
         user: Option<String>,
+        silent: bool,
     ) -> anyhow::Result<std::process::Child> {
-        // TODO: DRY
+        let mut handle = Command::new("ip");
+        handle.args(&["netns", "exec", &self.name]);
+        let mut sudo_string = None;
         if user.is_some() {
-            debug!(
-                "ip netns exec {} sudo -u {} {}",
-                &self.name,
-                user.as_ref().unwrap(),
-                command.join(" ")
-            );
-            let handle = Command::new("ip")
-                .args(&["netns", "exec", &self.name])
-                .args(&["sudo", "-u", user.as_ref().unwrap()])
-                .args(command)
-                .spawn()?;
-            Ok(handle)
-        } else {
-            debug!("ip netns exec {} {}", &self.name, command.join(" "));
-            let handle = Command::new("ip")
-                .args(&["netns", "exec", &self.name])
-                .args(command)
-                .spawn()?;
-            Ok(handle)
+            handle.args(&["sudo", "-u", user.as_ref().unwrap()]);
+            sudo_string = Some(format!(" sudo -u {}", user.as_ref().unwrap()));
         }
-    }
+        if silent {
+            handle.stdout(Stdio::null());
+            handle.stderr(Stdio::null());
+        }
 
-    //TODO: DRY
-    pub fn exec_no_block_silent(&self, command: &[&str]) -> anyhow::Result<std::process::Child> {
-        debug!("ip netns exec {} {}", &self.name, command.join(" "));
-        let handle = Command::new("ip")
-            .args(&["netns", "exec", &self.name])
-            .args(command)
-            .stdout(Stdio::null())
-            .spawn()?;
+        debug!(
+            "ip netns exec {}{} {}",
+            &self.name,
+            sudo_string.unwrap_or(String::from("")),
+            command.join(" ")
+        );
+        let handle = handle.args(command).spawn()?;
         Ok(handle)
     }
 
     pub fn exec(&self, command: &[&str]) -> anyhow::Result<()> {
-        self.exec_no_block(command, None)?.wait()?;
+        self.exec_no_block(command, None, false)?.wait()?;
         Ok(())
     }
 
@@ -116,8 +105,8 @@ impl NetworkNamespace {
 
     pub fn add_veth_pair(&mut self) -> anyhow::Result<()> {
         // TODO: Handle if name taken?
-        let source = format!("{}_s", &self.name[6..self.name.len().min(13)]);
-        let dest = format!("{}_d", &self.name[6..self.name.len().min(13)]);
+        let source = format!("{}_s", &self.name[7..self.name.len().min(20)]);
+        let dest = format!("{}_d", &self.name[7..self.name.len().min(20)]);
         self.veth_pair = Some(VethPair::new(source, dest, &self)?);
         Ok(())
     }

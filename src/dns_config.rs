@@ -1,5 +1,5 @@
 use anyhow::Context;
-use log::warn;
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 
@@ -21,6 +21,11 @@ impl DnsConfig {
                 )
             })?;
 
+        debug!(
+            "Setting namespace {} DNS server to {}",
+            ns_name,
+            server.as_ref().unwrap_or(&String::from("8.8.8.8"))
+        );
         write!(
             f,
             "nameserver {}",

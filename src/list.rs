@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use walkdir::WalkDir;
 
+// TODO: Implement read-only namespace struct without Drop?
+
 pub fn output_list(listcmd: ListCommand) -> anyhow::Result<()> {
     match listcmd.list_type.as_deref() {
         Some("namespaces") => print_namespaces()?,

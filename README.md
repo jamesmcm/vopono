@@ -144,13 +144,6 @@ profiles in order to force Firefox to run them as separate processes.
 
 ### Known issues
 
-* OpenVPN output is not parsed - this means you need to read the output
-  to ensure there are not authentication errors, etc.
-* OpenVPN output is not muted - you will see the output from OpenVPN
-  when you run your application, this a pain for command-line
-  applications but since it is difficult to handle failures in OpenVPN
-  overall I felt it was left to leave this enabled for now (for
-  debugging).
 * OpenVPN credentials are always stored in plaintext in configuration - will add
   option to not store credentials soon, but it seems OpenVPN needs them
   provided in plaintext.

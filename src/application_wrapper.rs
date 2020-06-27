@@ -16,6 +16,7 @@ impl ApplicationWrapper {
                 .collect::<Vec<_>>()
                 .as_slice(),
             user,
+            false,
         )?;
         Ok(Self { handle })
     }

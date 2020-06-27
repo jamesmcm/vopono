@@ -23,6 +23,7 @@ use std::io::{self, Write};
 use std::process::Command;
 use structopt::StructOpt;
 use sysctl::SysCtl;
+use util::clean_dead_namespaces;
 use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet, init_config};
 use vpn::VpnProvider;
 use vpn::{get_auth, get_protocol, Protocol};
@@ -30,7 +31,6 @@ use wireguard::get_config_from_alias;
 
 // TODO:
 // - Test configuration for wireless interface for OpenVPN
-// - Parse OpenVPN stdout to check when ready
 // - Allow OpenVPN UDP (1194) and TCP (443) toggle
 // - Allow custom VPNs (provide .ovpn file?)
 // - Allow for not saving OpenVPN creds to config
@@ -38,8 +38,6 @@ use wireguard::get_config_from_alias;
 // - Mullvad Shadowsocks
 // - Handle setting and using default provider and server
 
-// TODO: Allow listing of open network namespaces, applications currently running in network
-// namespaces
 fn main() -> anyhow::Result<()> {
     // Get struct of args using structopt
     let app = args::App::from_args();
@@ -53,8 +51,6 @@ fn main() -> anyhow::Result<()> {
     };
     builder.filter_level(log_level);
     builder.init();
-
-    // TODO: Clean dead namespaces?
 
     match app.cmd {
         args::Command::Create(cmd) => {
@@ -76,6 +72,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
+            clean_dead_namespaces()?;
             exec(cmd)?
         }
         args::Command::Init => init_config(true)?,

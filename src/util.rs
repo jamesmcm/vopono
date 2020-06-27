@@ -1,3 +1,4 @@
+use super::list::get_lock_namespaces;
 use anyhow::{anyhow, Context};
 use directories_next::BaseDirs;
 use log::{debug, info};
@@ -222,5 +223,24 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
         .map(|x| std::fs::remove_dir(x.path()))
         .collect::<Result<(), _>>()
         .ok();
+    Ok(())
+}
+
+pub fn clean_dead_namespaces() -> anyhow::Result<()> {
+    let lock_namespaces = get_lock_namespaces()?;
+    let existing_namespaces = get_existing_namespaces()?;
+
+    existing_namespaces
+        .into_iter()
+        .filter(|x| !lock_namespaces.contains_key(x))
+        .map(|x| {
+            debug!("Removing dead namespace: {}", x);
+            sudo_command(&["ip", "netns", "delete", x.as_str()])
+        })
+        .collect::<Result<(), _>>()?;
+
+    // TODO - deserialize to struct without Drop instead
+    let lock_namespaces = Box::new(lock_namespaces);
+    Box::leak(lock_namespaces);
     Ok(())
 }

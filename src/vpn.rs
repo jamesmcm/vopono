@@ -111,7 +111,7 @@ pub fn find_host_from_alias(
         } else {
             record.port.unwrap()
         };
-        debug!("Chosen server: {}:{}", record.host, port);
+        info!("Chosen server: {}:{}", record.host, port);
         Ok((record.host.clone(), port, record.alias.clone()))
     }
 }

@@ -2,7 +2,7 @@ use super::netns::NetworkNamespace;
 use super::util::{config_dir, sudo_command};
 use super::vpn::VpnProvider;
 use anyhow::anyhow;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use rand::seq::SliceRandom;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -396,7 +396,7 @@ pub fn get_config_from_alias(provider: &VpnProvider, alias: &str) -> anyhow::Res
             .choose(&mut rand::thread_rng())
             .expect("Could not find Wireguard config");
 
-        debug!("Chosen Wireguard config: {}", config.display());
+        info!("Chosen Wireguard config: {}", config.display());
         Ok(config.clone())
     }
 }
