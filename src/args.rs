@@ -71,6 +71,10 @@ pub struct ExecCommand {
     /// DNS Server (will override provider's DNS server)
     #[structopt(long = "dns", short = "d")]
     pub dns: Option<Vec<IpAddr>>,
+
+    /// Disable OpenVPN killswitch
+    #[structopt(long = "no-killswitch")]
+    pub no_killswitch: bool,
 }
 
 #[derive(StructOpt)]

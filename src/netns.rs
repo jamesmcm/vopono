@@ -156,8 +156,8 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn dns_config(&mut self, server: Vec<IpAddr>) -> anyhow::Result<()> {
-        self.dns_config = Some(DnsConfig::new(self.name.clone(), server)?);
+    pub fn dns_config(&mut self, server: &Vec<IpAddr>) -> anyhow::Result<()> {
+        self.dns_config = Some(DnsConfig::new(self.name.clone(), &server)?);
         Ok(())
     }
 
@@ -166,8 +166,17 @@ impl NetworkNamespace {
         provider: &VpnProvider,
         server_name: &str,
         custom_config: Option<PathBuf>,
+        dns: &Vec<IpAddr>,
+        use_killswitch: bool,
     ) -> anyhow::Result<()> {
-        self.openvpn = Some(OpenVpn::run(&self, provider, server_name, custom_config)?);
+        self.openvpn = Some(OpenVpn::run(
+            &self,
+            provider,
+            server_name,
+            custom_config,
+            dns,
+            use_killswitch,
+        )?);
         Ok(())
     }
 

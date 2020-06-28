@@ -8,6 +8,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use walkdir::WalkDir;
@@ -143,7 +144,7 @@ impl Wireguard {
             &namespace.name,
         ])?;
 
-        namespace.dns_config(vec![IpAddr::from_str(config.interface.dns.as_str())?])?;
+        namespace.dns_config(&vec![config.interface.dns])?;
         let fwmark = "51820";
         namespace.exec(&["wg", "set", &namespace.name, "fwmark", fwmark])?;
         // IPv6
@@ -403,14 +404,15 @@ pub fn get_config_from_alias(provider: &VpnProvider, alias: &str) -> anyhow::Res
     }
 }
 
+// TODO: Do we ever have multiple DNS servers?
 #[derive(Deserialize, Debug)]
 struct WireguardInterface {
     #[serde(rename = "PrivateKey")]
     private_key: String,
     #[serde(rename = "Address")]
-    address: String,
+    address: String, // TODO Handle IP with mask
     #[serde(rename = "DNS")]
-    dns: String,
+    dns: IpAddr,
 }
 
 #[derive(Deserialize, Debug)]
@@ -420,7 +422,7 @@ struct WireguardPeer {
     #[serde(rename = "AllowedIPs")]
     allowed_ips: String,
     #[serde(rename = "Endpoint")]
-    endpoint: String,
+    endpoint: SocketAddr,
 }
 
 #[derive(Deserialize, Debug)]

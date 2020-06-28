@@ -8,6 +8,11 @@ as normal.
 This is alpha software, currently only Mullvad, TigerVPN and
 PrivateInternetAccess are supported.
 
+Mullvad users can use [am.i.mullvad.net](https://am.i.mullvad.net/) to
+check the security of their browser's connection. This was used with the
+Mullvad configuration to verify that there is no DNS leaking or
+BitTorrent leaking for both the OpenVPN and Wireguard configurations.
+
 At the moment, both iptables and nftables are required.
 
 ## Screenshot
@@ -34,9 +39,6 @@ vopono will call sudo if required, it is recommended to run as the
 current user and let vopono call sudo so that the configuration
 directories are correctly inferred and the final command is not run as
 root.
-
-Mullvad users can use [am.i.mullvad.net](https://am.i.mullvad.net/) to
-check the security of their browser's connection.
 
 ### Wireguard
 

@@ -1,13 +1,17 @@
 use super::netns::NetworkNamespace;
 use super::util::check_process_running;
 use super::util::config_dir;
+use super::vpn::OpenVpnProtocol;
 use super::vpn::{find_host_from_alias, get_serverlist, VpnProvider};
 use anyhow::anyhow;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::net::IpAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use walkdir::WalkDir;
 
 #[derive(Serialize, Deserialize)]
@@ -21,10 +25,13 @@ impl OpenVpn {
         provider: &VpnProvider,
         server_name: &str,
         custom_config: Option<PathBuf>,
+        dns: &Vec<IpAddr>,
+        mut use_killswitch: bool,
     ) -> anyhow::Result<Self> {
-        // TODO: Refactor this - move all path handling earlier
+        // TODO: Refactor this to separate functions
         // TODO: --status flag
         let handle;
+        let port;
         let log_file_str = format!("/etc/netns/{}/openvpn.log", &netns.name);
         {
             File::create(&log_file_str)?;
@@ -41,12 +48,28 @@ impl OpenVpn {
             ])
                 .to_vec();
 
+            let remotes = get_remotes_from_config(&config)?;
+
+            // TODO: TCP support for killswitch
+            port = match remotes
+                .into_iter()
+                .filter(|x| x.2 == OpenVpnProtocol::UDP)
+                .nth(0)
+            {
+                None => {
+                    warn!("No UDP remote found in OpenVPN config, disabling OpenVPN killswitch!");
+                    use_killswitch = false;
+                    0
+                }
+                Some(x) => x.1,
+            };
+
             handle = netns.exec_no_block(&command_vec, None, true)?;
         } else {
             let serverlist = get_serverlist(&provider)?;
             let x = find_host_from_alias(server_name, &serverlist)?;
             let server = x.0;
-            let port = x.1;
+            port = x.1;
 
             let mut openvpn_config_dir = config_dir()?;
             openvpn_config_dir.push(format!("vopono/{}/openvpn", provider.alias()));
@@ -119,6 +142,10 @@ impl OpenVpn {
             ));
         }
 
+        if use_killswitch {
+            killswitch(netns, dns, port)?;
+        }
+
         Ok(Self { pid: id })
     }
 
@@ -189,4 +216,79 @@ impl Drop for OpenVpn {
             Err(e) => error!("Failed to kill OpenVPN (pid: {}): {:?}", self.pid, e),
         }
     }
+}
+
+pub fn killswitch(netns: &NetworkNamespace, dns: &Vec<IpAddr>, port: u16) -> anyhow::Result<()> {
+    debug!("Setting OpenVPN killswitch....");
+    &netns.exec(&["iptables", "-P", "INPUT", "DROP"])?;
+    &netns.exec(&["iptables", "-P", "FORWARD", "DROP"])?;
+    &netns.exec(&["iptables", "-P", "OUTPUT", "DROP"])?;
+    &netns.exec(&[
+        "iptables",
+        "-A",
+        "INPUT",
+        "-m",
+        "conntrack",
+        "--ctstate",
+        "RELATED,ESTABLISHED",
+        "-j",
+        "ACCEPT",
+    ])?;
+    &netns.exec(&["iptables", "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"])?;
+    &netns.exec(&["iptables", "-A", "INPUT", "-i", "tun+", "-j", "ACCEPT"])?;
+    &netns.exec(&["iptables", "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"])?;
+    for dnsa in dns.iter() {
+        //TODO IPv6 DNS?
+        let dns_mask = format!("{}/32", dnsa.to_string());
+        &netns.exec(&["iptables", "-A", "OUTPUT", "-d", &dns_mask, "-j", "ACCEPT"])?;
+    }
+
+    // TODO: Allow OpenVPN tcp connections
+    // server port here
+    let port_str = format!("{}", port);
+    &netns.exec(&[
+        "iptables",
+        "-A",
+        "OUTPUT",
+        "-p",
+        "udp",
+        "-m",
+        "udp",
+        "--dport",
+        port_str.as_str(),
+        "-j",
+        "ACCEPT",
+    ])?;
+    &netns.exec(&["iptables", "-A", "OUTPUT", "-o", "tun+", "-j", "ACCEPT"])?;
+    &netns.exec(&[
+        "iptables",
+        "-A",
+        "OUTPUT",
+        "-j",
+        "REJECT",
+        "--reject-with",
+        "icmp-net-unreachable",
+    ])?;
+    Ok(())
+}
+
+pub fn get_remotes_from_config(
+    path: &PathBuf,
+) -> anyhow::Result<Vec<(String, u16, OpenVpnProtocol)>> {
+    let file_string = std::fs::read_to_string(path)?;
+    let mut output_vec = Vec::new();
+    // Regex extract
+    let re = Regex::new(r"remote ([^\s]+) ([0-9]+) ([a-z\-]+)")?;
+    let caps = re.captures_iter(&file_string);
+
+    for cap in caps {
+        let cap = cap;
+        output_vec.push((
+            cap.get(1).unwrap().as_str().to_string(),
+            cap.get(2).unwrap().as_str().parse::<u16>()?,
+            OpenVpnProtocol::from_str(cap.get(3).unwrap().as_str())?,
+        ));
+    }
+
+    Ok(output_vec)
 }

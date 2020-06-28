@@ -47,9 +47,23 @@ impl VpnProvider {
     }
 }
 
+#[derive(Debug, PartialEq, Clone)]
 pub enum OpenVpnProtocol {
     UDP,
     TCP,
+}
+
+impl FromStr for OpenVpnProtocol {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "udp" => Ok(Self::UDP),
+            "tcp-client" => Ok(Self::TCP),
+            "tcp" => Ok(Self::TCP),
+            _ => Err(anyhow!("Unknown VPN protocol: {}", s)),
+        }
+    }
 }
 
 arg_enum! {
@@ -71,7 +85,7 @@ pub struct VpnServer {
     name: String,
     alias: String,
     host: String,
-    port: Option<u32>,
+    port: Option<u16>,
 }
 
 pub fn get_serverlist(provider: &VpnProvider) -> anyhow::Result<Vec<VpnServer>> {
@@ -99,7 +113,7 @@ pub fn get_serverlist(provider: &VpnProvider) -> anyhow::Result<Vec<VpnServer>> 
 pub fn find_host_from_alias(
     alias: &str,
     serverlist: &Vec<VpnServer>,
-) -> anyhow::Result<(String, u32, String)> {
+) -> anyhow::Result<(String, u16, String)> {
     let alias = alias.to_lowercase();
     let record = serverlist
         .into_iter()
