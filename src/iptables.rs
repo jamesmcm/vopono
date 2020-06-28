@@ -58,18 +58,3 @@ impl Drop for IpTables {
         ));
     }
 }
-
-// Killswitch
-//:INPUT DROP [0:0]
-// :FORWARD DROP [0:0]
-// :OUTPUT DROP [0:10]
-// -A INPUT -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-// -A INPUT -i lo -j ACCEPT
-// -A INPUT -i tun+ -j ACCEPT
-// -A OUTPUT -o lo -j ACCEPT
-// -A OUTPUT -d 209.222.18.222/32 -j ACCEPT
-// -A OUTPUT -d 209.222.18.218/32 -j ACCEPT
-// -A OUTPUT -p udp -m udp --dport 1197 -j ACCEPT
-// -A OUTPUT -o tun+ -j ACCEPT
-// -A OUTPUT -j REJECT --reject-with icmp-net-unreachable
-// COMMIT

@@ -30,10 +30,9 @@ use vpn::{get_auth, get_protocol, Protocol};
 use wireguard::get_config_from_alias;
 
 // TODO:
+// - Support OpenVPN TCP connection
 // - Support update_resolv_conf with OpenVPN (i.e. get DNS server from OpenVPN headers)
 // - Disable ipv6 traffic when not routed?
-// - tun-ipv6
-// - TigerVPN full: https://docs.google.com/spreadsheets/d/1imcDvBWaI0heW2Fd5DQzrJ3UdS0g_XYCQY9j3wiwCq4/
 // - Test configuration for wireless interface for OpenVPN
 // - Allow OpenVPN UDP (1194) and TCP (443) toggle
 // - Allow for not saving OpenVPN creds to config
