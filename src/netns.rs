@@ -229,23 +229,37 @@ impl Drop for NetworkNamespace {
         let mut lockfile_path = config_dir().expect("Failed to get config dir");
         // Each instance responsible for deleting their own lockfile
         lockfile_path.push(format!("vopono/locks/{}/{}", self.name, unistd::getpid()));
-        match std::fs::remove_file(&lockfile_path) {
-            Ok(_) => {}
-            Err(e) => {
-                warn!(
-                    "Failed to remove lockfile: {}, {:?}",
-                    &lockfile_path.display(),
-                    e
-                );
-            }
-        };
+        if lockfile_path.exists() {
+            match std::fs::remove_file(&lockfile_path) {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        "Failed to remove lockfile: {}, {:?}",
+                        &lockfile_path.display(),
+                        e
+                    );
+                }
+            };
+        }
 
         let mut lockfile_path = config_dir().expect("Failed to get config dir");
         lockfile_path.push(format!("vopono/locks/{}", self.name));
-        let try_delete = std::fs::remove_dir(lockfile_path);
 
-        // TODO: Clean this up - fails to handle case of invalid config dir
-        if try_delete.is_ok() {
+        // Drop if lock directory doesn't exist, or it exists but is empty
+        if !lockfile_path.exists()
+            || (lockfile_path.read_dir().is_ok()
+                && lockfile_path.read_dir().unwrap().next().is_none())
+        {
+            match std::fs::remove_dir(&lockfile_path) {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        "Could not remove locks directory: {}, {:?}",
+                        lockfile_path.display(),
+                        e
+                    );
+                }
+            }
             self.openvpn = None;
             self.veth_pair = None;
             self.dns_config = None;
