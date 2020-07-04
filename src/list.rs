@@ -20,10 +20,10 @@ pub fn output_list(listcmd: ListCommand) -> anyhow::Result<()> {
 pub fn print_applications() -> anyhow::Result<()> {
     let namespaces = get_lock_namespaces()?;
 
-    let mut keys = namespaces.keys().into_iter().collect::<Vec<&String>>();
+    let mut keys = namespaces.keys().collect::<Vec<&String>>();
     keys.sort();
 
-    if keys.len() > 0 {
+    if !keys.is_empty() {
         println!("namespace\tprovider\tprotocol\tapplication\tuptime");
         let now = Utc::now();
         for ns in keys {
@@ -52,10 +52,10 @@ pub fn print_applications() -> anyhow::Result<()> {
 pub fn print_namespaces() -> anyhow::Result<()> {
     let namespaces = get_lock_namespaces()?;
 
-    let mut keys = namespaces.keys().into_iter().collect::<Vec<&String>>();
+    let mut keys = namespaces.keys().collect::<Vec<&String>>();
     keys.sort();
 
-    if keys.len() > 0 {
+    if !keys.is_empty() {
         let now = Utc::now();
         println!("namespace\tprovider\tprotocol\tnum_applications\tuptime");
         for ns in keys {
@@ -64,7 +64,7 @@ pub fn print_namespaces() -> anyhow::Result<()> {
             let min_time = namespaces
                 .get(ns)
                 .unwrap()
-                .into_iter()
+                .iter()
                 .map(|x| x.start)
                 .min()
                 .unwrap();
@@ -102,7 +102,7 @@ pub fn get_lock_namespaces() -> anyhow::Result<HashMap<String, Vec<Lockfile>>> {
             let lock: Lockfile = ron::de::from_reader(lockfile)?;
             namespaces
                 .entry(lock.ns.name.clone())
-                .or_insert(Vec::new())
+                .or_insert_with(Vec::new)
                 .push(lock);
             Ok(())
         })?;

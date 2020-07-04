@@ -48,6 +48,6 @@ impl VethPair {
 impl Drop for VethPair {
     fn drop(&mut self) {
         sudo_command(&["ip", "link", "delete", &self.dest])
-            .expect(&format!("Failed to delete veth pair: {}", &self.dest));
+            .unwrap_or_else(|_| panic!("Failed to delete veth pair: {}", &self.dest));
     }
 }

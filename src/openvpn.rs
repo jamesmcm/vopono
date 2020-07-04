@@ -25,7 +25,7 @@ impl OpenVpn {
         provider: &VpnProvider,
         server_name: &str,
         custom_config: Option<PathBuf>,
-        dns: &Vec<IpAddr>,
+        dns: &[IpAddr],
         mut use_killswitch: bool,
     ) -> anyhow::Result<Self> {
         // TODO: Refactor this to separate functions
@@ -51,11 +51,7 @@ impl OpenVpn {
             let remotes = get_remotes_from_config(&config)?;
 
             // TODO: TCP support for killswitch
-            port = match remotes
-                .into_iter()
-                .filter(|x| x.2 == OpenVpnProtocol::UDP)
-                .nth(0)
-            {
+            port = match remotes.into_iter().find(|x| x.2 == OpenVpnProtocol::UDP) {
                 None => {
                     warn!("No UDP remote found in OpenVPN config, disabling OpenVPN killswitch!");
                     use_killswitch = false;
@@ -158,10 +154,9 @@ impl OpenVpn {
             .into_iter()
             .filter(|x| x.is_ok())
             .map(|x| x.unwrap())
-            .filter(|x| {
+            .find(|x| {
                 x.path().is_file() && x.path().extension() == Some(std::ffi::OsStr::new("crt"))
-            })
-            .nth(0);
+            });
         if path.is_none() {
             return Ok(None);
         }
@@ -174,10 +169,9 @@ impl OpenVpn {
             .into_iter()
             .filter(|x| x.is_ok())
             .map(|x| x.unwrap())
-            .filter(|x| {
+            .find(|x| {
                 x.path().is_file() && x.path().extension() == Some(std::ffi::OsStr::new("pem"))
-            })
-            .nth(0);
+            });
         if path.is_none() {
             return Ok(None);
         }
@@ -189,12 +183,11 @@ impl OpenVpn {
             .into_iter()
             .filter(|x| x.is_ok())
             .map(|x| x.unwrap())
-            .filter(|x| {
+            .find(|x| {
                 x.path().is_file()
                     && (x.path().extension() == Some(std::ffi::OsStr::new("ovpn"))
                         || x.path().extension() == Some(std::ffi::OsStr::new("conf")))
-            })
-            .nth(0);
+            });
         if path.is_none() {
             return Err(anyhow!(
                 "No OpenVPN config found in {}. Looking for .ovpn or .conf file",
@@ -218,12 +211,12 @@ impl Drop for OpenVpn {
     }
 }
 
-pub fn killswitch(netns: &NetworkNamespace, dns: &Vec<IpAddr>, port: u16) -> anyhow::Result<()> {
+pub fn killswitch(netns: &NetworkNamespace, dns: &[IpAddr], port: u16) -> anyhow::Result<()> {
     debug!("Setting OpenVPN killswitch....");
-    &netns.exec(&["iptables", "-P", "INPUT", "DROP"])?;
-    &netns.exec(&["iptables", "-P", "FORWARD", "DROP"])?;
-    &netns.exec(&["iptables", "-P", "OUTPUT", "DROP"])?;
-    &netns.exec(&[
+    netns.exec(&["iptables", "-P", "INPUT", "DROP"])?;
+    netns.exec(&["iptables", "-P", "FORWARD", "DROP"])?;
+    netns.exec(&["iptables", "-P", "OUTPUT", "DROP"])?;
+    netns.exec(&[
         "iptables",
         "-A",
         "INPUT",
@@ -234,19 +227,19 @@ pub fn killswitch(netns: &NetworkNamespace, dns: &Vec<IpAddr>, port: u16) -> any
         "-j",
         "ACCEPT",
     ])?;
-    &netns.exec(&["iptables", "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"])?;
-    &netns.exec(&["iptables", "-A", "INPUT", "-i", "tun+", "-j", "ACCEPT"])?;
-    &netns.exec(&["iptables", "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"])?;
+    netns.exec(&["iptables", "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"])?;
+    netns.exec(&["iptables", "-A", "INPUT", "-i", "tun+", "-j", "ACCEPT"])?;
+    netns.exec(&["iptables", "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"])?;
     for dnsa in dns.iter() {
         //TODO IPv6 DNS?
         let dns_mask = format!("{}/32", dnsa.to_string());
-        &netns.exec(&["iptables", "-A", "OUTPUT", "-d", &dns_mask, "-j", "ACCEPT"])?;
+        netns.exec(&["iptables", "-A", "OUTPUT", "-d", &dns_mask, "-j", "ACCEPT"])?;
     }
 
     // TODO: Allow OpenVPN tcp connections
     // server port here
     let port_str = format!("{}", port);
-    &netns.exec(&[
+    netns.exec(&[
         "iptables",
         "-A",
         "OUTPUT",
@@ -259,8 +252,8 @@ pub fn killswitch(netns: &NetworkNamespace, dns: &Vec<IpAddr>, port: u16) -> any
         "-j",
         "ACCEPT",
     ])?;
-    &netns.exec(&["iptables", "-A", "OUTPUT", "-o", "tun+", "-j", "ACCEPT"])?;
-    &netns.exec(&[
+    netns.exec(&["iptables", "-A", "OUTPUT", "-o", "tun+", "-j", "ACCEPT"])?;
+    netns.exec(&[
         "iptables",
         "-A",
         "OUTPUT",

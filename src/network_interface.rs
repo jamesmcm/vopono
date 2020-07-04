@@ -36,12 +36,11 @@ pub fn get_active_interfaces() -> anyhow::Result<Vec<String>> {
     let output = Command::new("ip")
         .arg("addr")
         .output()
-        .with_context(|| format!("Failed to run command: ip addr"))?
+        .with_context(|| "Failed to run command: ip addr".to_string())?
         .stdout;
 
     let out = std::str::from_utf8(&output)?
-        .split("\n")
-        .into_iter()
+        .split('\n')
         .filter(|x| x.contains("state UP"))
         .map(|x| x.split_whitespace().nth(1))
         .filter(|x| x.is_some())
@@ -49,7 +48,7 @@ pub fn get_active_interfaces() -> anyhow::Result<Vec<String>> {
         .map(|x| String::from(&x[..x.len() - 1]))
         .collect::<Vec<String>>();
 
-    if out.len() > 0 {
+    if !out.is_empty() {
         Ok(out)
     } else {
         Err(anyhow!("Failed to get active network interface"))

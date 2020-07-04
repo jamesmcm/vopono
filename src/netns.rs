@@ -84,7 +84,7 @@ impl NetworkNamespace {
         debug!(
             "ip netns exec {}{} {}",
             &self.name,
-            sudo_string.unwrap_or(String::from("")),
+            sudo_string.unwrap_or_else(|| String::from("")),
             command.join(" ")
         );
         let handle = handle.args(command).spawn()?;
@@ -156,7 +156,7 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn dns_config(&mut self, server: &Vec<IpAddr>) -> anyhow::Result<()> {
+    pub fn dns_config(&mut self, server: &[IpAddr]) -> anyhow::Result<()> {
         self.dns_config = Some(DnsConfig::new(self.name.clone(), &server)?);
         Ok(())
     }
@@ -166,7 +166,7 @@ impl NetworkNamespace {
         provider: &VpnProvider,
         server_name: &str,
         custom_config: Option<PathBuf>,
-        dns: &Vec<IpAddr>,
+        dns: &[IpAddr],
         use_killswitch: bool,
     ) -> anyhow::Result<()> {
         self.openvpn = Some(OpenVpn::run(
@@ -251,10 +251,8 @@ impl Drop for NetworkNamespace {
             self.dns_config = None;
             self.wireguard = None;
             self.iptables = None;
-            sudo_command(&["ip", "netns", "delete", &self.name]).expect(&format!(
-                "Failed to delete network namespace: {}",
-                &self.name
-            ));
+            sudo_command(&["ip", "netns", "delete", &self.name])
+                .unwrap_or_else(|_| panic!("Failed to delete network namespace: {}", &self.name));
         } else {
             debug!("Skipping destructors since other vopono instance using this namespace!");
             let openvpn = self.openvpn.take();

@@ -106,9 +106,8 @@ pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<String>> {
 pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
     let output = Command::new("ip").args(&["netns", "list"]).output()?.stdout;
     let output = std::str::from_utf8(&output)?
-        .split("\n")
-        .into_iter()
-        .map(|x| x.split_whitespace().nth(0))
+        .split('\n')
+        .map(|x| x.split_whitespace().next())
         .filter(|x| x.is_some())
         .map(|x| String::from(x.unwrap()))
         .collect();
@@ -122,7 +121,7 @@ pub fn check_process_running(pid: u32) -> anyhow::Result<bool> {
         .args(&["-p", &pid.to_string(), "-o", "pid:1", "--no-headers"])
         .output()?
         .stdout;
-    let output = std::str::from_utf8(&output)?.split("\n").into_iter().next();
+    let output = std::str::from_utf8(&output)?.split('\n').next();
     if let Some(x) = output {
         Ok(x.trim() == pid.to_string())
     } else {
@@ -136,10 +135,9 @@ pub fn get_all_running_pids() -> anyhow::Result<Vec<u32>> {
         .output()?
         .stdout;
     std::str::from_utf8(&output)?
-        .split("\n")
-        .into_iter()
+        .split('\n')
         .map(|x| x.trim())
-        .filter(|x| x.len() > 0)
+        .filter(|x| !x.is_empty())
         .map(|x| match x.parse::<u32>() {
             Ok(x) => Ok(x),
             Err(_) => Err(anyhow!("Could not parse PID to u32: {:?}", x)),

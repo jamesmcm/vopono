@@ -10,7 +10,7 @@ pub struct DnsConfig {
 }
 
 impl DnsConfig {
-    pub fn new(ns_name: String, servers: &Vec<IpAddr>) -> anyhow::Result<Self> {
+    pub fn new(ns_name: String, servers: &[IpAddr]) -> anyhow::Result<Self> {
         std::fs::create_dir_all(format!("/etc/netns/{}", ns_name))
             .with_context(|| format!("Failed to create directory: /etc/netns/{}", ns_name))?;
 

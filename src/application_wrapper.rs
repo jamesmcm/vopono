@@ -26,9 +26,9 @@ impl ApplicationWrapper {
         Ok(output)
     }
 
-    pub fn check_if_running(&mut self) -> anyhow::Result<bool> {
-        let output = self.handle.try_wait()?;
+    // pub fn check_if_running(&mut self) -> anyhow::Result<bool> {
+    //     let output = self.handle.try_wait()?;
 
-        Ok(output.is_none())
-    }
+    //     Ok(output.is_none())
+    // }
 }

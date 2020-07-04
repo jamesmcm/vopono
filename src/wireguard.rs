@@ -10,7 +10,6 @@ use std::io::Write;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::str::FromStr;
 use walkdir::WalkDir;
 
 #[derive(Serialize, Deserialize)]
@@ -85,11 +84,8 @@ impl Wireguard {
                 f,
                 "{}",
                 config_string
-                    .clone()
-                    .split("\n")
-                    .into_iter()
-                    .filter(|x| !skip_keys
-                        .contains(&x.split_whitespace().into_iter().nth(0).unwrap_or("")))
+                    .split('\n')
+                    .filter(|x| !skip_keys.contains(&x.split_whitespace().next().unwrap_or("")))
                     .collect::<Vec<&str>>()
                     .join("\n")
             )?;
@@ -106,8 +102,8 @@ impl Wireguard {
         namespace.exec(&["wg", "setconf", &namespace.name, "/tmp/vopono_nft.conf"])?;
         std::fs::remove_file("/tmp/vopono_nft.conf")?;
         // Extract addresses
-        for address in config.interface.address.split(",") {
-            if address.contains(":") {
+        for address in config.interface.address.split(',') {
+            if address.contains(':') {
                 // IPv6
                 namespace.exec(&[
                     "ip",
@@ -144,7 +140,7 @@ impl Wireguard {
             &namespace.name,
         ])?;
 
-        namespace.dns_config(&vec![config.interface.dns])?;
+        namespace.dns_config(&[config.interface.dns])?;
         let fwmark = "51820";
         namespace.exec(&["wg", "set", &namespace.name, "fwmark", fwmark])?;
         // IPv6
@@ -190,8 +186,8 @@ impl Wireguard {
             "add chain {} {} postmangle {{ type filter hook prerouting priority -150; }}",
             pf, &nftable
         ));
-        for address in config.interface.address.split(",") {
-            if address.contains(":") {
+        for address in config.interface.address.split(',') {
+            if address.contains(':') {
                 nftcmd.push(format!(
                 "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
                 pf, &nftable, &namespace.name, pf, address
@@ -272,9 +268,9 @@ impl Wireguard {
             "add chain {} {} postmangle {{ type filter hook prerouting priority -150; }}",
             pf, &nftable
         ));
-        for address in config.interface.address.split(",") {
+        for address in config.interface.address.split(',') {
             // TODO: Better split ipv4 and ipv6 cases
-            if address.contains(".") {
+            if address.contains('.') {
                 nftcmd.push(format!(
                 "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
                 pf, &nftable, &namespace.name, pf, address
@@ -378,9 +374,8 @@ pub fn get_config_from_alias(provider: &VpnProvider, alias: &str) -> anyhow::Res
                 x.file_name()
                     .to_str()
                     .expect("No filename")
-                    .split("-")
-                    .into_iter()
-                    .nth(1)
+                    .split('-')
+                    .next()
                     .expect("No - in filename")
                     .to_string(),
             )
@@ -389,7 +384,7 @@ pub fn get_config_from_alias(provider: &VpnProvider, alias: &str) -> anyhow::Res
         .map(|x| PathBuf::from(x.0.path()))
         .collect::<Vec<PathBuf>>();
 
-    if paths.len() == 0 {
+    if paths.is_empty() {
         Err(anyhow!(
             "Could not find Wireguard config file for alias {}",
             &alias

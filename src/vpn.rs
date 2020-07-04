@@ -74,11 +74,11 @@ pub enum Protocol {
 }
 }
 
-pub enum Firewall {
-    IpTables,
-    NfTables,
-    Ufw,
-}
+// pub enum Firewall {
+//     IpTables,
+//     NfTables,
+//     Ufw,
+// }
 
 #[derive(Deserialize)]
 pub struct VpnServer {
@@ -112,11 +112,11 @@ pub fn get_serverlist(provider: &VpnProvider) -> anyhow::Result<Vec<VpnServer>> 
 // OpenVPN
 pub fn find_host_from_alias(
     alias: &str,
-    serverlist: &Vec<VpnServer>,
+    serverlist: &[VpnServer],
 ) -> anyhow::Result<(String, u16, String)> {
     let alias = alias.to_lowercase();
     let record = serverlist
-        .into_iter()
+        .iter()
         .filter(|x| {
             x.name.starts_with(&alias)
                 || x.alias.starts_with(&alias)
@@ -124,7 +124,7 @@ pub fn find_host_from_alias(
         })
         .collect::<Vec<&VpnServer>>();
 
-    if record.len() == 0 {
+    if record.is_empty() {
         Err(anyhow!(
             "Could not find server alias {} in serverlist",
             &alias

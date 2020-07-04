@@ -52,9 +52,11 @@ impl Drop for IpTables {
             "-j",
             "MASQUERADE",
         ])
-        .expect(&format!(
-            "Failed to delete iptables masquerade rule, ip_mask: {}, interface: {}",
-            &self.ip_mask, &self.interface.name
-        ));
+        .unwrap_or_else(|_| {
+            panic!(
+                "Failed to delete iptables masquerade rule, ip_mask: {}, interface: {}",
+                &self.ip_mask, &self.interface.name
+            )
+        });
     }
 }

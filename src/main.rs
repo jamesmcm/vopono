@@ -68,10 +68,8 @@ fn main() -> anyhow::Result<()> {
                 Command::new("sudo").arg("-E").args(args).status()?;
                 // Do we want to block here to ensure stdout kept alive? Does it matter?
                 std::process::exit(0);
-            } else {
-                if std::env::var("SUDO_USER").is_err() {
-                    warn!("Running vopono as root user directly!");
-                }
+            } else if std::env::var("SUDO_USER").is_err() {
+                warn!("Running vopono as root user directly!");
             }
 
             clean_dead_namespaces()?;
@@ -106,7 +104,6 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 .to_str()
                 .unwrap()
                 .chars()
-                .into_iter()
                 .filter(|&x| x != ' ' && x != '-')
                 .collect::<String>()[0..4],
         );
@@ -131,7 +128,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         None => Ok(NetworkInterface::new(
             get_active_interfaces()?
                 .into_iter()
-                .nth(0)
+                .next()
                 .ok_or_else(|| anyhow!("No active network interface"))?,
         )?),
     }?;
@@ -140,7 +137,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // Better to check for lockfile exists?
     if get_existing_namespaces()?.contains(&ns_name) {
         // If namespace exists, read its lock config
-        ns = NetworkNamespace::from_existing(ns_name.clone())?;
+        ns = NetworkNamespace::from_existing(ns_name)?;
     } else {
         ns = NetworkNamespace::new(ns_name.clone(), provider.clone(), protocol.clone())?;
         let target_subnet = get_target_subnet()?;
