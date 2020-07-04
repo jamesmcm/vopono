@@ -71,11 +71,13 @@ impl NetworkNamespace {
     ) -> anyhow::Result<std::process::Child> {
         let mut handle = Command::new("ip");
         handle.args(&["netns", "exec", &self.name]);
-        let mut sudo_string = None;
-        if user.is_some() {
+
+        let sudo_string = if user.is_some() {
             handle.args(&["sudo", "-u", user.as_ref().unwrap()]);
-            sudo_string = Some(format!(" sudo -u {}", user.as_ref().unwrap()));
-        }
+            Some(format!(" sudo -u {}", user.as_ref().unwrap()))
+        } else {
+            None
+        };
         if silent {
             handle.stdout(Stdio::null());
             handle.stderr(Stdio::null());
