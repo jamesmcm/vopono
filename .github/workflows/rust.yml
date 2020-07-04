@@ -19,7 +19,7 @@ jobs:
     - name: Install Clippy
       run: rustup component add clippy rustfmt
     - name: Clippy
-      run: cargo clippy -Dwarnings
+      run: cargo clippy -- -D warnings
     - name: Rustfmt
       run: cargo fmt --all -- --check
     - name: Build
