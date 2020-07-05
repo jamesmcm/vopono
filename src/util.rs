@@ -2,6 +2,7 @@ use super::list::get_lock_namespaces;
 use anyhow::{anyhow, Context};
 use directories_next::BaseDirs;
 use log::{debug, info};
+use nix::unistd::{Group, User};
 use regex::Regex;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -51,11 +52,23 @@ pub fn get_username() -> anyhow::Result<String> {
     }
 }
 
+pub fn get_group(username: &str) -> anyhow::Result<String> {
+    let user = User::from_name(username)?;
+
+    match user {
+        Some(x) => Ok(Group::from_gid(x.gid)?
+            .expect("Failed to use group id")
+            .name),
+        None => Ok(username.to_string()),
+    }
+}
+
 pub fn init_config(skip_dir_check: bool) -> anyhow::Result<()> {
     let config_dir = config_dir()?;
     let mut check_dir = config_dir.clone();
     check_dir.push("vopono");
     let username = get_username()?;
+    let group = get_group(&username)?;
     if skip_dir_check || !check_dir.exists() {
         info!("Initialising vopono config...");
         debug!(
@@ -78,7 +91,7 @@ pub fn init_config(skip_dir_check: bool) -> anyhow::Result<()> {
         sudo_command(&[
             "chgrp",
             "-R",
-            username.as_str(),
+            group.as_str(),
             check_dir.to_str().expect("No valid config dir"),
         ])?;
     }
