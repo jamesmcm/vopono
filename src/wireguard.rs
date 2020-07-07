@@ -369,33 +369,6 @@ pub fn get_config_from_alias(provider: &VpnProvider, alias: &str) -> anyhow::Res
     list_path.push(format!("vopono/{}/wireguard", provider.alias()));
 
     // TODO: Make this more resilient (i.e. missing - etc.)
-    let paths_dbg = WalkDir::new(&list_path)
-        .into_iter()
-        .filter(|x| x.is_ok())
-        .map(|x| x.unwrap())
-        .filter(|x| {
-            x.path().is_file()
-                && x.path().extension().is_some()
-                && x.path().extension().expect("No file extension") == "conf"
-        })
-        .map(|x| {
-            (
-                x.clone(),
-                x.file_name()
-                    .to_str()
-                    .expect("No filename")
-                    .split('-')
-                    .nth(1)
-                    .expect("No - in filename")
-                    .to_string(),
-            )
-        })
-        .map(|x| x.1)
-        .collect::<Vec<String>>();
-
-    debug!("Wireguard config dir: {:?}", paths_dbg);
-    debug!("Wireguard alias: {:?}", alias);
-
     let paths = WalkDir::new(&list_path)
         .into_iter()
         .filter(|x| x.is_ok())
