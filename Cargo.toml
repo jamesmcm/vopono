@@ -20,7 +20,7 @@ clap = "2"
 which = "4"
 users = "0.10"
 nix = "0.17"
-serde = {version = "1", features = ["derive"]}
+serde = {version = "1", features = ["derive", "std"]}
 csv = "1"
 dialoguer = "0.6"
 regex = "1"
@@ -30,3 +30,4 @@ rand = "0.7"
 toml = "0.5"
 chrono = "0.4"
 compound_duration = "1"
+ipnet = {version = "2", features = ["serde"]}

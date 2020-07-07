@@ -2,6 +2,7 @@ use super::netns::NetworkNamespace;
 use super::util::{config_dir, sudo_command};
 use super::vpn::VpnProvider;
 use anyhow::anyhow;
+use ipnet::IpNet;
 use log::{debug, info, warn};
 use rand::seq::SliceRandom;
 use regex::Regex;
@@ -11,7 +12,6 @@ use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use walkdir::WalkDir;
-
 #[derive(Serialize, Deserialize)]
 pub struct Wireguard {
     ns_name: String,
@@ -102,29 +102,30 @@ impl Wireguard {
         namespace.exec(&["wg", "setconf", &namespace.name, "/tmp/vopono_nft.conf"])?;
         std::fs::remove_file("/tmp/vopono_nft.conf")?;
         // Extract addresses
-        for address in config.interface.address.split(',') {
-            if address.contains(':') {
-                // IPv6
-                namespace.exec(&[
-                    "ip",
-                    "-6",
-                    "address",
-                    "add",
-                    address,
-                    "dev",
-                    &namespace.name,
-                ])?;
-            } else {
-                // IPv4
-                namespace.exec(&[
-                    "ip",
-                    "-4",
-                    "address",
-                    "add",
-                    address,
-                    "dev",
-                    &namespace.name,
-                ])?;
+        for address in config.interface.address.iter() {
+            match address {
+                IpNet::V6(address) => {
+                    namespace.exec(&[
+                        "ip",
+                        "-6",
+                        "address",
+                        "add",
+                        &address.to_string(),
+                        "dev",
+                        &namespace.name,
+                    ])?;
+                }
+                IpNet::V4(address) => {
+                    namespace.exec(&[
+                        "ip",
+                        "-4",
+                        "address",
+                        "add",
+                        &address.to_string(),
+                        "dev",
+                        &namespace.name,
+                    ])?;
+                }
             }
         }
 
@@ -143,6 +144,8 @@ impl Wireguard {
         namespace.dns_config(&[config.interface.dns])?;
         let fwmark = "51820";
         namespace.exec(&["wg", "set", &namespace.name, "fwmark", fwmark])?;
+
+        // TODO: Handle case where ipv6 is disabled
         // IPv6
         namespace.exec(&[
             "ip",
@@ -186,14 +189,17 @@ impl Wireguard {
             "add chain {} {} postmangle {{ type filter hook prerouting priority -150; }}",
             pf, &nftable
         ));
-        for address in config.interface.address.split(',') {
-            if address.contains(':') {
+
+        // IPv4 handled below - TODO: DRY
+        for address in config.interface.address.iter() {
+            if let IpNet::V6(address) = address {
                 nftcmd.push(format!(
                 "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
                 pf, &nftable, &namespace.name, pf, address
             ));
             }
         }
+
         nftcmd.push(format!(
             "add rule {} {} postmangle meta l4proto udp mark {} ct mark set mark",
             pf, &nftable, fwmark
@@ -268,15 +274,17 @@ impl Wireguard {
             "add chain {} {} postmangle {{ type filter hook prerouting priority -150; }}",
             pf, &nftable
         ));
-        for address in config.interface.address.split(',') {
-            // TODO: Better split ipv4 and ipv6 cases
-            if address.contains('.') {
+
+        // TODO: Better split ipv4 and ipv6 cases
+        for address in config.interface.address.iter() {
+            if let IpNet::V4(address) = address {
                 nftcmd.push(format!(
                 "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
                 pf, &nftable, &namespace.name, pf, address
             ));
             }
         }
+
         nftcmd.push(format!(
             "add rule {} {} postmangle meta l4proto udp mark {} ct mark set mark",
             pf, &nftable, fwmark
@@ -359,6 +367,35 @@ impl Drop for Wireguard {
 pub fn get_config_from_alias(provider: &VpnProvider, alias: &str) -> anyhow::Result<PathBuf> {
     let mut list_path = config_dir()?;
     list_path.push(format!("vopono/{}/wireguard", provider.alias()));
+
+    // TODO: Make this more resilient (i.e. missing - etc.)
+    let paths_dbg = WalkDir::new(&list_path)
+        .into_iter()
+        .filter(|x| x.is_ok())
+        .map(|x| x.unwrap())
+        .filter(|x| {
+            x.path().is_file()
+                && x.path().extension().is_some()
+                && x.path().extension().expect("No file extension") == "conf"
+        })
+        .map(|x| {
+            (
+                x.clone(),
+                x.file_name()
+                    .to_str()
+                    .expect("No filename")
+                    .split('-')
+                    .nth(1)
+                    .expect("No - in filename")
+                    .to_string(),
+            )
+        })
+        .map(|x| x.1)
+        .collect::<Vec<String>>();
+
+    debug!("Wireguard config dir: {:?}", paths_dbg);
+    debug!("Wireguard alias: {:?}", alias);
+
     let paths = WalkDir::new(&list_path)
         .into_iter()
         .filter(|x| x.is_ok())
@@ -375,7 +412,7 @@ pub fn get_config_from_alias(provider: &VpnProvider, alias: &str) -> anyhow::Res
                     .to_str()
                     .expect("No filename")
                     .split('-')
-                    .next()
+                    .nth(1)
                     .expect("No - in filename")
                     .to_string(),
             )
@@ -404,8 +441,8 @@ pub fn get_config_from_alias(provider: &VpnProvider, alias: &str) -> anyhow::Res
 struct WireguardInterface {
     #[serde(rename = "PrivateKey")]
     private_key: String,
-    #[serde(rename = "Address")]
-    address: String, // TODO Handle IP with mask
+    #[serde(rename = "Address", deserialize_with = "de_vec_ipnet")]
+    address: Vec<IpNet>,
     #[serde(rename = "DNS")]
     dns: IpAddr,
 }
@@ -414,8 +451,8 @@ struct WireguardInterface {
 struct WireguardPeer {
     #[serde(rename = "PublicKey")]
     public_key: String,
-    #[serde(rename = "AllowedIPs")]
-    allowed_ips: String,
+    #[serde(rename = "AllowedIPs", deserialize_with = "de_vec_ipnet")]
+    allowed_ips: Vec<IpNet>,
     #[serde(rename = "Endpoint")]
     endpoint: SocketAddr,
 }
@@ -426,4 +463,23 @@ pub struct WireguardConfig {
     interface: WireguardInterface,
     #[serde(rename = "Peer")]
     peer: WireguardPeer,
+}
+
+fn de_vec_ipnet<'de, D>(deserializer: D) -> Result<Vec<IpNet>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // serde::de::value::StringDeserializer::deserialize_string(deserializer)?;
+    let raw = String::deserialize(deserializer)?;
+    let strings = raw.split(',');
+    match strings
+        .map(|x| x.parse::<IpNet>())
+        .collect::<Result<Vec<IpNet>, ipnet::AddrParseError>>()
+    {
+        Ok(x) => Ok(x),
+        Err(x) => Err(serde::de::Error::custom(anyhow!(
+            "Wireguard IpNet deserialisation error: {:?}",
+            x
+        ))),
+    }
 }

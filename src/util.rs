@@ -1,11 +1,14 @@
 use super::list::get_lock_namespaces;
 use anyhow::{anyhow, Context};
 use directories_next::BaseDirs;
+use ipnet::Ipv4Net;
 use log::{debug, info};
 use nix::unistd::{Group, User};
 use regex::Regex;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 use users::{get_current_uid, get_user_by_uid};
 use walkdir::WalkDir;
 
@@ -98,8 +101,7 @@ pub fn init_config(skip_dir_check: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-// TODO: Create struct for holding IPv4 addresses and use FromStr and Eq with that
-pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<String>> {
+pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<Ipv4Net>> {
     let output = Command::new("ip")
         .args(&["addr", "show", "type", "veth"])
         .output()?
@@ -110,10 +112,25 @@ pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<String>> {
     let re = Regex::new(r"inet\s+(?P<ip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2})").unwrap();
     let mut ips = Vec::new();
     for caps in re.captures_iter(output) {
-        ips.push(String::from(&caps["ip"]));
+        ips.push(Ipv4Net::from_str(&caps["ip"])?);
     }
     debug!("Assigned IPs: {:?}", &ips);
     Ok(ips)
+}
+
+pub fn get_veth_ipv4(if_name: &str) -> anyhow::Result<Option<Ipv4Net>> {
+    let output = Command::new("ip")
+        .args(&["addr", "show", "type", "veth", if_name])
+        .output()?
+        .stdout;
+    let output = std::str::from_utf8(&output)?;
+
+    let re = Regex::new(r"inet\s+(?P<ip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2})").unwrap();
+    let ip = match re.captures_iter(output).next() {
+        None => None,
+        Some(x) => Some(Ipv4Net::from_str(&x["ip"])?),
+    };
+    Ok(ip)
 }
 
 pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
@@ -159,17 +176,20 @@ pub fn get_all_running_pids() -> anyhow::Result<Vec<u32>> {
 }
 
 pub fn get_target_subnet() -> anyhow::Result<u8> {
-    // TODO clean this up
+    // TODO: Fix hard limit of <254 vopono instances
     let assigned_ips = get_allocated_ip_addresses()?;
     let mut target_ip = 1;
-    loop {
-        let ip = format!("10.200.{}.1/24", target_ip);
+    while target_ip <= 254 {
+        let ip = Ipv4Net::new(Ipv4Addr::new(10, 200, target_ip, 1), 24)?;
         if assigned_ips.contains(&ip) {
             target_ip += 1;
         } else {
             return Ok(target_ip);
         }
     }
+    Err(anyhow!(
+        "Could not find free subnet of form: 10.200.xxx.1/24"
+    ))
 }
 
 // TODO: Fix deprecated name

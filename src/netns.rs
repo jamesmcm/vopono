@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Serialize, Deserialize)]
 pub struct NetworkNamespace {
     pub name: String,
-    veth_pair: Option<VethPair>,
+    pub veth_pair: Option<VethPair>,
     dns_config: Option<DnsConfig>,
     pub openvpn: Option<OpenVpn>,
     pub wireguard: Option<Wireguard>,

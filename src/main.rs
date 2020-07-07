@@ -24,6 +24,7 @@ use std::process::Command;
 use structopt::StructOpt;
 use sysctl::SysCtl;
 use util::clean_dead_namespaces;
+use util::get_veth_ipv4;
 use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet, init_config};
 use vpn::VpnProvider;
 use vpn::{get_auth, get_protocol, Protocol};
@@ -188,6 +189,11 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 _sysctl = SysCtl::enable_ipv4_forwarding();
                 ns.run_wireguard(config)?;
             }
+        }
+
+        // Verify routing
+        if get_veth_ipv4(&ns.veth_pair.as_ref().unwrap().dest)?.is_none() {
+            ns.add_routing(target_subnet)?;
         }
     }
 
