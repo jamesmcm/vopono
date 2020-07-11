@@ -133,6 +133,17 @@ impl OpenVpn {
         }
 
         if buffer.contains("AUTH_FAILED") {
+            // TODO: DRY
+            let mut openvpn_config_dir = config_dir()?;
+            openvpn_config_dir.push(format!("vopono/{}/openvpn", provider.alias()));
+            let mut openvpn_auth = openvpn_config_dir.clone();
+            openvpn_auth.push("auth.txt");
+
+            debug!(
+                "OpenVPN authentication failed, deleting {}",
+                openvpn_auth.display()
+            );
+            std::fs::remove_file(openvpn_auth)?;
             return Err(anyhow!(
                 "OpenVPN authentication failed, use -v for full log output"
             ));

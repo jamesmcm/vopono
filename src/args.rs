@@ -32,11 +32,27 @@ pub enum Command {
         about = "List running vopono namespaces and applications"
     )]
     List(ListCommand),
+    #[structopt(
+        name = "sync",
+        about = "Synchronise local server lists with VPN providers - unimplemented"
+    )]
+    Synch(SynchCommand),
     // #[structopt(
     //     name = "default",
     //     about = "Get or set default VPN provider and server (UNIMPLEMENTED)"
     // )]
     // SetDefaults(SetDefaultsCommand),
+}
+
+#[derive(StructOpt)]
+pub struct SynchCommand {
+    /// VPN Provider (if not given will use default)
+    #[structopt(possible_values = &VpnProvider::variants(), case_insensitive = true)]
+    pub vpn_provider: VpnProvider,
+
+    /// VPN Protocol (if not given will use default)
+    #[structopt(long = "protocol", short="c", possible_values = &Protocol::variants(), case_insensitive = true)]
+    pub protocol: Option<Protocol>,
 }
 
 #[derive(StructOpt)]

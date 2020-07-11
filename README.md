@@ -13,6 +13,9 @@ check the security of their browser's connection. This was used with the
 Mullvad configuration to verify that there is no DNS leaking or
 BitTorrent leaking for both the OpenVPN and Wireguard configurations.
 
+Mullvad port forwarding works for both Wireguard and OpenVPN. You will
+need to enable the ports in your [Mullvad account](https://mullvad.net/en/account/#/ports).
+
 At the moment, both iptables and nftables are required.
 
 ## Screenshot
@@ -99,10 +102,7 @@ credentials.
 For TigerVPN you can view your OpenVPN credentials [online on the "geeks" dashboard](https://www.tigervpn.com/dashboard/geeks).
 The OpenVPN credentials are **not** the same as your TigerVPN account credentials.
 
-For Mullvad you can obtain your OpenVPN credentials, by downloading the
-[OpenVPN configuration files](https://mullvad.net/en/account/#/openvpn-config/)
-and checking `mullvad_userpass.txt`. The OpenVPN credentials are **not**
-the same as your Mullvad account credentials.
+For Mullvad your OpenVPN credentials are your account code as your username, and `m` as the password.
 
 ### Custom Providers
 
@@ -146,6 +146,9 @@ vopono_tig_us_losangeles        TigerVpn        OpenVpn lynx    15s
 
 Note if running multiple Firefox sessions, they need to run separate
 profiles in order to force Firefox to run them as separate processes.
+
+Trying to run Firefox normally when there is already an instance running
+will result in a silent error.
 
 You should also disable DNS over HTTPS as this will send all DNS
 requests to Cloudflare by default. Firefox Options > General >

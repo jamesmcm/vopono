@@ -24,7 +24,6 @@ use std::process::Command;
 use structopt::StructOpt;
 use sysctl::SysCtl;
 use util::clean_dead_namespaces;
-use util::get_veth_ipv4;
 use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet, init_config};
 use vpn::VpnProvider;
 use vpn::{get_auth, get_protocol, Protocol};
@@ -80,7 +79,8 @@ fn main() -> anyhow::Result<()> {
         args::Command::List(listcmd) => {
             clean_dead_locks()?;
             output_list(listcmd)?;
-        } // args::Command::SetDefaults(cmd) => todo!(),
+        }
+        args::Command::Synch(_synchcmd) => todo!(), // args::Command::SetDefaults(cmd) => todo!(),
     }
     Ok(())
 }
@@ -190,14 +190,11 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 ns.run_wireguard(config)?;
             }
         }
-
-        // Verify routing
-        if get_veth_ipv4(&ns.veth_pair.as_ref().unwrap().dest)?.is_none() {
-            ns.add_routing(target_subnet)?;
-        }
     }
 
-    let ns = ns.write_lockfile(&command.application)?;
+    let username = util::get_username()?;
+    let group = util::get_group(&username)?;
+    let ns = ns.write_lockfile(&command.application, &username, &group)?;
 
     // User for application command, if None will use root
     let user = if command.user.is_none() {

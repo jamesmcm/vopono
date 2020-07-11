@@ -118,20 +118,20 @@ pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<Ipv4Net>> {
     Ok(ips)
 }
 
-pub fn get_veth_ipv4(if_name: &str) -> anyhow::Result<Option<Ipv4Net>> {
-    let output = Command::new("ip")
-        .args(&["addr", "show", "type", "veth", if_name])
-        .output()?
-        .stdout;
-    let output = std::str::from_utf8(&output)?;
+// pub fn get_veth_ipv4(if_name: &str) -> anyhow::Result<Option<Ipv4Net>> {
+//     let output = Command::new("ip")
+//         .args(&["addr", "show", "type", "veth", if_name])
+//         .output()?
+//         .stdout;
+//     let output = std::str::from_utf8(&output)?;
 
-    let re = Regex::new(r"inet\s+(?P<ip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2})").unwrap();
-    let ip = match re.captures_iter(output).next() {
-        None => None,
-        Some(x) => Some(Ipv4Net::from_str(&x["ip"])?),
-    };
-    Ok(ip)
-}
+//     let re = Regex::new(r"inet\s+(?P<ip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2})").unwrap();
+//     let ip = match re.captures_iter(output).next() {
+//         None => None,
+//         Some(x) => Some(Ipv4Net::from_str(&x["ip"])?),
+//     };
+//     Ok(ip)
+// }
 
 pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
     let output = Command::new("ip").args(&["netns", "list"]).output()?.stdout;
@@ -214,46 +214,49 @@ pub fn sudo_command(command: &[&str]) -> anyhow::Result<()> {
 
 // TODO: Clean this up (can we combine maps and filters?)
 pub fn clean_dead_locks() -> anyhow::Result<()> {
-    debug!("Cleaning dead lock files...");
     let running_processes = get_all_running_pids()?;
     let mut lockfile_path = config_dir()?;
     lockfile_path.push("vopono/locks");
 
-    // Delete files if their PIDs are no longer running
-    std::fs::create_dir_all(&lockfile_path)?;
-    WalkDir::new(&lockfile_path)
-        .into_iter()
-        .filter(|x| x.is_ok())
-        .map(|x| x.unwrap())
-        .filter(|x| x.path().is_file())
-        .map(|x| {
-            (
-                x.clone(),
-                x.file_name()
-                    .to_str()
-                    .expect("Failed to parse file name")
-                    .parse::<u32>()
-                    .ok(),
-            )
-        })
-        .filter(|x| x.1.is_some())
-        .map(|x| (x.0, running_processes.contains(&x.1.unwrap())))
-        .filter(|x| !x.1)
-        .map(|x| {
-            debug!("Removing lockfile: {}", x.0.path().display());
-            std::fs::remove_file(x.0.path())
-        })
-        .collect::<Result<(), _>>()?;
+    if lockfile_path.exists() && !lockfile_path.read_dir()?.next().is_none() {
+        debug!("Cleaning dead lock files...");
+        // Delete files if their PIDs are no longer running
+        std::fs::create_dir_all(&lockfile_path)?;
+        WalkDir::new(&lockfile_path)
+            .into_iter()
+            .filter(|x| x.is_ok())
+            .map(|x| x.unwrap())
+            .filter(|x| x.path().is_file())
+            .map(|x| {
+                (
+                    x.clone(),
+                    x.file_name()
+                        .to_str()
+                        .expect("Failed to parse file name")
+                        .parse::<u32>()
+                        .ok(),
+                )
+            })
+            .filter(|x| x.1.is_some())
+            .map(|x| (x.0, running_processes.contains(&x.1.unwrap())))
+            .filter(|x| !x.1)
+            .map(|x| {
+                debug!("Removing lockfile: {}", x.0.path().display());
+                std::fs::remove_file(x.0.path())
+            })
+            .collect::<Result<(), _>>()?;
 
-    // Delete subdirectories if they contain no locks (ignore errors)
-    WalkDir::new(&lockfile_path)
-        .into_iter()
-        .filter(|x| x.is_ok())
-        .map(|x| x.unwrap())
-        .filter(|x| x.path().is_dir())
-        .map(|x| std::fs::remove_dir(x.path()))
-        .collect::<Result<(), _>>()
-        .ok();
+        // Delete subdirectories if they contain no locks (ignore errors)
+        WalkDir::new(&lockfile_path)
+            .into_iter()
+            .filter(|x| x.is_ok())
+            .map(|x| x.unwrap())
+            .filter(|x| x.path().is_dir())
+            .map(|x| std::fs::remove_dir(x.path()))
+            .collect::<Result<(), _>>()
+            .ok();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
     Ok(())
 }
 

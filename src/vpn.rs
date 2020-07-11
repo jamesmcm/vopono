@@ -150,6 +150,7 @@ pub fn find_host_from_alias(
 
 // TODO: Can we avoid storing plaintext passwords?
 // TODO: Allow not storing credentials
+// OpenVPN only
 pub fn get_auth(provider: &VpnProvider) -> anyhow::Result<()> {
     let mut auth_path = config_dir()?;
     auth_path.push(format!("vopono/{}/openvpn/auth.txt", provider.alias()));
@@ -168,11 +169,34 @@ pub fn get_auth(provider: &VpnProvider) -> anyhow::Result<()> {
                 "No auth file: {} - prompting user",
                 auth_path.to_string_lossy()
             );
-            let username = Input::<String>::new().with_prompt("Username").interact()?;
-            let password = Password::new()
-                .with_prompt("Password")
-                .with_confirmation("Confirm password", "Passwords did not match")
-                .interact()?;
+
+            let user_prompt = match provider {
+                VpnProvider::Mullvad => "Mullvad account number",
+                VpnProvider::TigerVpn => {
+                    "OpenVPN username (see https://www.tigervpn.com/dashboard/geeks )"
+                }
+                VpnProvider::PrivateInternetAccess => "PrivateInternetAccess username",
+                VpnProvider::Custom => "OpenVPN username",
+            };
+            let mut username = Input::<String>::new().with_prompt(user_prompt).interact()?;
+            if *provider == VpnProvider::Mullvad {
+                username.retain(|c| !c.is_whitespace() && c.is_digit(10));
+                if username.len() != 16 {
+                    return Err(anyhow!(
+                        "Mullvad account number should be 16 digits!, parsed: {}",
+                        username
+                    ));
+                }
+            }
+
+            let password = if *provider == VpnProvider::Mullvad {
+                String::from("m")
+            } else {
+                Password::new()
+                    .with_prompt("Password")
+                    .with_confirmation("Confirm password", "Passwords did not match")
+                    .interact()?
+            };
 
             let mut writefile = File::create(&auth_path)
                 .with_context(|| format!("Could not create auth file: {}", auth_path.display()))?;

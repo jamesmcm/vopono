@@ -204,7 +204,12 @@ impl NetworkNamespace {
         self.openvpn.as_mut().unwrap().check_if_running()
     }
 
-    pub fn write_lockfile(self, command: &str) -> anyhow::Result<Self> {
+    pub fn write_lockfile(
+        self,
+        command: &str,
+        username: &str,
+        group: &str,
+    ) -> anyhow::Result<Self> {
         let mut lockfile_path = config_dir()?;
         lockfile_path.push(format!("vopono/locks/{}", self.name));
         std::fs::create_dir_all(&lockfile_path)?;
@@ -222,6 +227,23 @@ impl NetworkNamespace {
         let mut f = File::create(&lockfile_path)?;
         write!(f, "{}", lock_string)?;
         debug!("Lockfile written: {}", lockfile_path.display());
+
+        // TODO: DRY
+        let mut lockfile_path = config_dir()?;
+        lockfile_path.push("vopono/locks/");
+        sudo_command(&[
+            "chown",
+            "-R",
+            username,
+            lockfile_path.to_str().expect("No valid config dir"),
+        ])?;
+        sudo_command(&[
+            "chgrp",
+            "-R",
+            group,
+            lockfile_path.to_str().expect("No valid config dir"),
+        ])?;
+
         Ok(lock.ns)
     }
 }
@@ -252,14 +274,17 @@ impl Drop for NetworkNamespace {
             || (lockfile_path.read_dir().is_ok()
                 && lockfile_path.read_dir().unwrap().next().is_none())
         {
-            match std::fs::remove_dir(&lockfile_path) {
-                Ok(_) => {}
-                Err(e) => {
-                    warn!(
-                        "Could not remove locks directory: {}, {:?}",
-                        lockfile_path.display(),
-                        e
-                    );
+            // Only try to delete if exists
+            if lockfile_path.exists() {
+                match std::fs::remove_dir(&lockfile_path) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(
+                            "Could not remove locks directory: {}, {:?}",
+                            lockfile_path.display(),
+                            e
+                        );
+                    }
                 }
             }
             self.openvpn = None;
