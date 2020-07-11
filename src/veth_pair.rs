@@ -40,7 +40,7 @@ impl VethPair {
 
             let backup_file = if nm_config_path.exists() {
                 // Backup existing unmanaged.conf
-                let mut backup_path = nm_path.clone();
+                let mut backup_path = nm_path;
                 backup_path.push("conf.d/unmanaged.conf.vopono.bak");
                 std::fs::copy(&nm_config_path, &backup_path)?;
                 Some(backup_path)

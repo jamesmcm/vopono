@@ -218,7 +218,7 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
     let mut lockfile_path = config_dir()?;
     lockfile_path.push("vopono/locks");
 
-    if lockfile_path.exists() && !lockfile_path.read_dir()?.next().is_none() {
+    if lockfile_path.exists() && lockfile_path.read_dir()?.next().is_some() {
         debug!("Cleaning dead lock files...");
         // Delete files if their PIDs are no longer running
         std::fs::create_dir_all(&lockfile_path)?;

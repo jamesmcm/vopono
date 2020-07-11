@@ -136,7 +136,7 @@ impl OpenVpn {
             // TODO: DRY
             let mut openvpn_config_dir = config_dir()?;
             openvpn_config_dir.push(format!("vopono/{}/openvpn", provider.alias()));
-            let mut openvpn_auth = openvpn_config_dir.clone();
+            let mut openvpn_auth = openvpn_config_dir;
             openvpn_auth.push("auth.txt");
 
             debug!(
