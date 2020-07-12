@@ -79,6 +79,7 @@ struct Relay {
 pub fn synch(command: SynchCommand) -> anyhow::Result<()> {
     match (command.vpn_provider, command.protocol) {
         (VpnProvider::Mullvad, Some(Protocol::Wireguard)) => mullvad_wireguard(),
+        (VpnProvider::Mullvad, None) => mullvad_wireguard(),
         _ => Err(anyhow!("Unimplemented!")),
     }
 }
