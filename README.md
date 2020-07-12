@@ -45,21 +45,14 @@ root.
 
 ### Wireguard
 
-For Mullvad, download the [Wireguard connection configuration files](https://mullvad.net/en/account/#/wireguard-config/) (the
-wg-quick ones), and extract them to `~/.config/vopono/mv/wireguard/`.
-
-Install vopono and initialise configuration:
+Install vopono and initialise configuration, then use `vopono sync` to
+create the Wireguard configuration files (and generate a keypair if
+necessary):
 
 ```bash
 $ yay -S vopono-git
 $ vopono init
-```
-
-Copy Wireguard config files:
-
-```bash
-$ mkdir -p ~/.config/vopono/mv/wireguard/
-$ unzip mullvad_wireguard_linux_all_all.zip -d ~/.config/vopono/mv/wireguard/
+$ vopono sync mullvad --protocol wireguard
 ```
 
 Run vopono:
@@ -68,8 +61,8 @@ Run vopono:
 $ vopono exec --provider mullvad --server se --protocol wireguard "transmission-gtk"
 ```
 
-The server prefix will be searched against available servers and a
-random one will be chosen (and reported in the terminal).
+The server prefix will be searched against available servers (and
+country names) and a random one will be chosen (and reported in the terminal).
 
 ### OpenVPN
 

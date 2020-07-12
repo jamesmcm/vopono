@@ -48,18 +48,22 @@ impl VethPair {
                 None
             };
 
-            let mut file = if nm_config_path.exists() {
-                OpenOptions::new().append(true).open(nm_config_path)?
-            } else {
-                std::fs::File::create(nm_config_path)?
-            };
+            {
+                let mut file = if nm_config_path.exists() {
+                    OpenOptions::new().append(true).open(nm_config_path)?
+                } else {
+                    std::fs::File::create(nm_config_path)?
+                };
 
-            write!(
-                file,
-                "[keyfile]\nunmanaged-devices=interface-name:{}\n",
-                dest
-            )?;
+                write!(
+                    file,
+                    "[keyfile]\nunmanaged-devices=interface-name:{}\n",
+                    dest
+                )?;
+            }
 
+            sudo_command(&["nmcli", "general", "reload"])
+                .context("Failed to reload NetworkManager configuration")?;
             Some(NetworkManagerUnmanaged { backup_file })
         } else {
             None
@@ -119,5 +123,7 @@ impl Drop for NetworkManagerUnmanaged {
         } else {
             std::fs::remove_file(&nm_path).expect("Failed to delete NetworkManager unmanaged.conf");
         }
+        sudo_command(&["nmcli", "general", "reload"])
+            .expect("Failed to reload NetworkManager configuration");
     }
 }

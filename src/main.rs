@@ -6,6 +6,7 @@ mod list;
 mod netns;
 mod network_interface;
 mod openvpn;
+mod sync;
 mod sysctl;
 mod util;
 mod veth_pair;
@@ -22,6 +23,7 @@ use network_interface::{get_active_interfaces, NetworkInterface};
 use std::io::{self, Write};
 use std::process::Command;
 use structopt::StructOpt;
+use sync::synch;
 use sysctl::SysCtl;
 use util::clean_dead_namespaces;
 use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet, init_config};
@@ -30,6 +32,9 @@ use vpn::{get_auth, get_protocol, Protocol};
 use wireguard::get_config_from_alias;
 
 // TODO:
+// - Finish sync command for OpenVPN Mullvad and PIA
+// - Add Wireguard killswitch
+// - Port and DNS selection in Wireguard config generation
 // - Support OpenVPN TCP connection
 // - Support update_resolv_conf with OpenVPN (i.e. get DNS server from OpenVPN headers)
 // - Disable ipv6 traffic when not routed?
@@ -80,7 +85,7 @@ fn main() -> anyhow::Result<()> {
             clean_dead_locks()?;
             output_list(listcmd)?;
         }
-        args::Command::Synch(_synchcmd) => todo!(), // args::Command::SetDefaults(cmd) => todo!(),
+        args::Command::Synch(synchcmd) => synch(synchcmd)?, // args::Command::SetDefaults(cmd) => todo!(),
     }
     Ok(())
 }

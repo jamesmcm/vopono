@@ -31,3 +31,4 @@ toml = "0.5"
 chrono = "0.4"
 compound_duration = "1"
 ipnet = {version = "2", features = ["serde"]}
+reqwest = {version = "0.10", features = ["blocking", "json"]}
