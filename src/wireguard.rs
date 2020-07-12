@@ -59,7 +59,7 @@ impl Wireguard {
         config_string.push('\n');
         let config: WireguardConfig = toml::from_str(&config_string)?;
         debug!("TOML config: {:?}", config);
-        let if_name = format!("{}", &namespace.name[7..namespace.name.len().min(20)]);
+        let if_name = namespace.name[7..namespace.name.len().min(20)].to_string();
         assert!(
             if_name.len() <= 15,
             "ifname must be <= 15 chars: {}",
@@ -251,7 +251,7 @@ impl Wireguard {
 impl Drop for Wireguard {
     fn drop(&mut self) {
         // TODO: Handle case of only ipv4
-        let if_name = format!("{}", &self.ns_name[7..self.ns_name.len().min(20)]);
+        let if_name = &self.ns_name[7..self.ns_name.len().min(20)];
         match sudo_command(&[
             "ip",
             "netns",

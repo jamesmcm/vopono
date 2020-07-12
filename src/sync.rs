@@ -168,8 +168,7 @@ pub fn mullvad_wireguard() -> anyhow::Result<()> {
                 private: private_key.to_string(),
             }
         }
-    } else {
-        if dialoguer::Confirm::new()
+    } else if dialoguer::Confirm::new()
             .with_prompt(
                 "No Wireguard keys currently exist on your Mullvad account, would you like to generate a new keypair?"
             )
@@ -177,9 +176,9 @@ pub fn mullvad_wireguard() -> anyhow::Result<()> {
             .interact()? {
                 generate_keypair(&client, &auth.auth_token)?
         } else {
-            Err(anyhow!("Wireguard requires a keypair, either upload one to Mullvad or let vopono generate one"))?
+            return Err(anyhow!("Wireguard requires a keypair, either upload one to Mullvad or let vopono generate one"))
     }
-    };
+    ;
 
     debug!("Chosen keypair: {:?}", keypair);
     // Get user info again in case we uploaded new key
@@ -193,12 +192,8 @@ pub fn mullvad_wireguard() -> anyhow::Result<()> {
     let wg_peer = user_info
         .wg_peers
         .iter()
-        .filter(|x| x.key.public == keypair.public)
-        .next()
-        .ok_or(anyhow!(
-            "Did not find key: {} in Mullvad account",
-            keypair.public
-        ))?;
+        .find(|x| x.key.public == keypair.public)
+        .ok_or_else(|| anyhow!("Did not find key: {} in Mullvad account", keypair.public))?;
 
     // TODO: Hardcoded IP - can we scrape this anywhere?
     let dns = std::net::Ipv4Addr::new(193, 138, 218, 74);
@@ -237,9 +232,9 @@ pub fn mullvad_wireguard() -> anyhow::Result<()> {
 
         let host = relay
             .hostname
-            .split("-")
+            .split('-')
             .next()
-            .expect(&format!("Failed to split hostname: {}", relay.hostname));
+            .unwrap_or_else(|| panic!("Failed to split hostname: {}", relay.hostname));
 
         let country = relay.country_name.to_lowercase().replace(' ', "_");
         let mut path = config_path.clone();
