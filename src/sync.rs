@@ -1,17 +1,22 @@
 use super::args::SynchCommand;
 use super::util::config_dir;
+use super::vpn::OpenVpnProtocol;
+use super::vpn::VpnServer;
 use super::vpn::{Protocol, VpnProvider};
 use super::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use anyhow::{anyhow, Context};
-use dialoguer::Input;
+use dialoguer::{Input, MultiSelect};
 use ipnet::IpNet;
-use log::{debug, info};
+use log::{debug, error, info};
+use rand::seq::SliceRandom;
 use regex::Regex;
 use reqwest::blocking::Client;
 use reqwest::header::AUTHORIZATION;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::fs::File;
+use std::include_str;
 use std::io::Write;
 use std::net::IpAddr;
 use std::net::SocketAddr;
@@ -76,24 +81,203 @@ struct Relay {
     socks_name: String,
 }
 
+#[derive(Deserialize, Debug)]
+struct OpenVpnRelay {
+    hostname: String,
+    country_code: String,
+    country_name: String,
+    city_code: String,
+    city_name: String,
+    active: bool,
+    owned: bool,
+    provider: String,
+    ipv4_addr_in: std::net::Ipv4Addr,
+    ipv6_addr_in: std::net::Ipv6Addr,
+}
+
+pub fn sync_menu() -> anyhow::Result<()> {
+    let variants = VpnProvider::variants()
+        .iter()
+        .filter(|x| **x != "Custom")
+        .map(|x| x.to_string())
+        .collect::<Vec<String>>();
+
+    let selection = MultiSelect::new()
+        .with_prompt("Which VPN providers do you wish to synchronise?")
+        .items(variants.as_slice())
+        .interact()?;
+
+    // TODO: Allow for overriding default port here
+    for provider in selection
+        .into_iter()
+        .map(|x| VpnProvider::from_str(&variants[x]))
+        .flatten()
+    {
+        synch(SynchCommand {
+            vpn_provider: Some(provider),
+            protocol: None,
+            port: None,
+        })?;
+    }
+
+    Ok(())
+}
+
 pub fn synch(command: SynchCommand) -> anyhow::Result<()> {
     match (command.vpn_provider, command.protocol) {
-        (VpnProvider::Mullvad, Some(Protocol::Wireguard)) => mullvad_wireguard(),
-        (VpnProvider::Mullvad, None) => mullvad_wireguard(),
+        (None, _) => sync_menu(),
+        (Some(VpnProvider::Mullvad), Some(Protocol::Wireguard)) => mullvad_wireguard(command.port),
+        (Some(VpnProvider::Mullvad), Some(Protocol::OpenVpn)) => mullvad_openvpn(command.port),
+        (Some(VpnProvider::Mullvad), None) => {
+            mullvad_openvpn(command.port)?;
+            mullvad_wireguard(command.port)
+        }
+        (Some(VpnProvider::PrivateInternetAccess), Some(Protocol::OpenVpn)) => {
+            pia_openvpn(command.port)
+        }
+        (Some(VpnProvider::PrivateInternetAccess), None) => pia_openvpn(command.port),
+        (Some(VpnProvider::PrivateInternetAccess), Some(Protocol::Wireguard)) => Err(anyhow!(
+            "Wireguard is not supported for PrivateInternetAccess"
+        )),
+        (Some(VpnProvider::TigerVpn), Some(Protocol::OpenVpn)) => tig_openvpn(command.port),
+        (Some(VpnProvider::TigerVpn), None) => tig_openvpn(command.port),
+        (Some(VpnProvider::TigerVpn), Some(Protocol::Wireguard)) => {
+            Err(anyhow!("Wireguard is not supported for TigerVPN"))
+        }
         _ => Err(anyhow!("Unimplemented!")),
     }
 }
 
-pub fn mullvad_wireguard() -> anyhow::Result<()> {
-    // TODO: DRY
+pub fn mullvad_openvpn(port: Option<u16>) -> anyhow::Result<()> {
+    let mullvad_alias = VpnProvider::Mullvad.alias();
+
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn", mullvad_alias));
+    std::fs::create_dir_all(list_path)?;
+
     let client = Client::new();
-    let relays: Vec<Relay> = client
-        .get("https://api.mullvad.net/www/relays/wireguard/")
+    let relays: Vec<OpenVpnRelay> = client
+        .get("https://api.mullvad.net/www/relays/openvpn/")
         .send()?
         .json()?;
 
-    // debug!("First relay: {:?}", relays.iter().next());
+    let default_ports = vec![1300, 1301, 1302, 1194, 1195, 1196, 1197];
+    let protocol = if port.is_some() {
+        if default_ports.contains(port.as_ref().unwrap()) || port == Some(53) {
+            Ok(OpenVpnProtocol::UDP)
+        } else if port == Some(80) || port == Some(443) {
+            Ok(OpenVpnProtocol::TCP)
+        } else {
+            error!("Mullvad OpenVPN port must be one of [1300, 1301, 1302, 1194, 1195, 1196, 1197, 53] for UDP or [80, 443] for TCP");
+            Err(anyhow!("Mullvad OpenVPN port must be one of [1300, 1301, 1302, 1194, 1195, 1196, 1197, 53] for UDP or [80, 443] for TCP"))
+        }
+    } else {
+        Ok(OpenVpnProtocol::UDP)
+    }?;
 
+    let mut output: Vec<VpnServer> = Vec::with_capacity(relays.len());
+    for relay in relays.into_iter().filter(|x| x.active) {
+        let mut alias = String::with_capacity(16);
+        let mut alias_iter = relay
+            .hostname
+            .split('.')
+            .next()
+            .expect("No . in hostname")
+            .split('-');
+        alias.push_str(alias_iter.next().expect("No - in hostname"));
+        alias.push_str(alias_iter.next().expect("No - in hostname"));
+        alias.push_str(
+            alias_iter
+                .next()
+                .expect("No . in hostname")
+                .trim_start_matches('0'),
+        );
+
+        let port = port.unwrap_or_else(|| {
+            *default_ports
+                .choose(&mut rand::thread_rng())
+                .expect("Could not choose default port")
+        });
+        output.push(VpnServer {
+            name: relay.country_name.to_lowercase().replace(' ', "_"),
+            alias,
+            host: format!("{}.mullvad.net", relay.hostname),
+            port: Some(port),
+            protocol: Some(protocol.clone()),
+        });
+    }
+
+    // Write serverlist
+    // TODO: DRY
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn/serverlist.csv", mullvad_alias));
+    if list_path.exists() {
+        std::fs::remove_file(&list_path)?;
+    }
+
+    {
+        let file = File::create(&list_path).context("Could not create mullvad serverlist")?;
+        let write_buf = std::io::BufWriter::new(file);
+        let mut csv_writer = csv::WriterBuilder::new()
+            .has_headers(false)
+            .from_writer(write_buf);
+
+        output
+            .into_iter()
+            .map(|x| csv_writer.serialize(x))
+            .collect::<Result<(), csv::Error>>()?;
+    }
+
+    // Copy CA cert
+    let ca = include_str!("static/mullvad_ca.crt");
+
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn/mullvad_ca.crt", mullvad_alias));
+    if list_path.exists() {
+        std::fs::remove_file(&list_path)?;
+    }
+
+    {
+        let file = File::create(&list_path).context("Could not create mullvad CA file")?;
+        let mut write_buf = std::io::BufWriter::new(file);
+        write!(write_buf, "{}", ca)?;
+    }
+
+    // Check and write auth file
+    // let mut list_path = config_dir()?;
+    // list_path.push(format!("vopono/{}/openvpn/auth.txt", mullvad_alias));
+    // if list_path.exists() {
+    //     std::fs::remove_file(&list_path)?;
+    // }
+    // {
+    //     // TODO: handle case when syncing both to avoid requesting username twice
+    //     let username = request_mullvad_username()?;
+    //     let file = File::create(&list_path).context("Could not create mullvad auth file")?;
+    //     let mut write_buf = std::io::BufWriter::new(file);
+    //     write!(write_buf, "{}\nm", username)?;
+    // }
+
+    // Write conf file
+    let mullvad_conf = include_str!("static/mullvad_openvpn.conf");
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn/mullvad.conf", mullvad_alias));
+    if list_path.exists() {
+        std::fs::remove_file(&list_path)?;
+    }
+    {
+        let file = File::create(&list_path).context("Could not create mullvad conf file")?;
+        let mut write_buf = std::io::BufWriter::new(file);
+        write!(write_buf, "{}", mullvad_conf)?;
+    }
+
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn", mullvad_alias));
+    info!("Mullvad OpenVPN config written to {}", list_path.display());
+
+    Ok(())
+}
+
+pub fn request_mullvad_username() -> anyhow::Result<String> {
     let mut username = Input::<String>::new()
         .with_prompt("Mullvad account number")
         .interact()?;
@@ -104,7 +288,25 @@ pub fn mullvad_wireguard() -> anyhow::Result<()> {
             username
         ));
     }
+    Ok(username)
+}
 
+pub fn mullvad_wireguard(port: Option<u16>) -> anyhow::Result<()> {
+    // TODO: DRY
+    let mullvad_alias = VpnProvider::Mullvad.alias();
+
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/wireguard", mullvad_alias));
+    std::fs::create_dir_all(list_path)?;
+
+    let client = Client::new();
+    let relays: Vec<Relay> = client
+        .get("https://api.mullvad.net/www/relays/wireguard/")
+        .send()?
+        .json()?;
+
+    // debug!("First relay: {:?}", relays.iter().next());
+    let username = request_mullvad_username()?;
     let auth: AuthToken = client
         .get(&format!(
             "https://api.mullvad.net/www/accounts/{}/",
@@ -206,10 +408,24 @@ pub fn mullvad_wireguard() -> anyhow::Result<()> {
         ],
         dns: IpAddr::from(dns),
     };
-    let port = 51820; // TODO: Allow port specification
+
+    let port = if let Some(x) = port {
+        if x == 53
+            || (x >= 4000 && x <= 33433)
+            || (x >= 33565 && x <= 51820)
+            || (x >= 52000 && x <= 60000)
+        {
+            Ok(x)
+        } else {
+            Err(anyhow!("Invalid port number for Mullvad Wireguard: {}. Port must be 53, 4000-33433, 33565-51820 or 52000-60000."))
+        }
+    } else {
+        Ok(51820)
+    }?;
+
     let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?, IpNet::from_str("::0/0")?];
     let mut config_path = config_dir()?;
-    config_path.push("vopono/mv/wireguard");
+    config_path.push(format!("vopono/{}/wireguard", mullvad_alias));
     std::fs::create_dir_all(&config_path)?;
     // Delete all files in directory
     config_path
@@ -251,6 +467,13 @@ pub fn mullvad_wireguard() -> anyhow::Result<()> {
             write!(f, "{}", toml)?;
         }
     }
+
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/wireguard", mullvad_alias));
+    info!(
+        "Mullvad Wireguard config written to {}",
+        list_path.display()
+    );
     Ok(())
 }
 
@@ -293,12 +516,235 @@ fn generate_public_key(private_key: &str) -> anyhow::Result<String> {
     Ok(std::str::from_utf8(&output)?.trim().to_string())
 }
 
-// TODO:
-// Mullvad OpenVPN:
-// curl https://api.mullvad.net/www/relays/openvpn/
-// Filter for active
-// User pass is token from me request above (same as account ID), m is pass
-//
-// PIA: Parse https://www.privateinternetaccess.com/pages/network/
-//
+pub fn pia_openvpn(port: Option<u16>) -> anyhow::Result<()> {
+    let pia_alias = VpnProvider::PrivateInternetAccess.alias();
+
+    // TODO: DRY
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn", pia_alias));
+    std::fs::create_dir_all(list_path)?;
+
+    let client = Client::new();
+    let relays: String = client
+        .get("https://www.privateinternetaccess.com/pages/network/")
+        .send()?
+        .text()?;
+
+    let protocol = if port.is_some() {
+        if port == Some(1198) {
+            Ok(OpenVpnProtocol::UDP)
+        } else if port == Some(502) {
+            Ok(OpenVpnProtocol::TCP)
+        } else if port == Some(501) || port == Some(1197) {
+            // TODO: Support changing cipher based on port + provider
+            Err(anyhow!("PrivateInternetAccess ports 501 and 1197 require a stronger cipher, this is not currently supported unless you modify the generated configuration files manually"))
+        } else if port == Some(8080) || port == Some(443) {
+            // TODO: Support changing cipher based on port + provider
+            Err(anyhow!("PrivateInternetAccess ports 8080 and 443 use a legacy cipher, this is not currently supported unless you modify the generated configuration files manually"))
+        } else {
+            Err(anyhow!(
+                "PrivateInternetAccess OpenVPN ports must be either 1198 for UDP or 502 for TCP"
+            ))
+        }
+    } else {
+        Ok(OpenVpnProtocol::UDP)
+    }?;
+
+    // TODO: Don't parse HTML with regex
+    let name_regex = Regex::new("class=\"subregionname\">(?P<name>[a-zA-Z\\s]+)</p>")?;
+    let host_regex = Regex::new("class=\"hostname\">(?P<host>[a-zA-Z\\.\\-]+)</p>")?;
+
+    let names: Vec<String> = name_regex
+        .captures_iter(&relays)
+        .map(|x| x["name"].to_string())
+        .collect();
+    let hosts: Vec<String> = host_regex
+        .captures_iter(&relays)
+        .map(|x| x["host"].to_string())
+        .collect();
+
+    let mut output: Vec<VpnServer> = Vec::with_capacity(names.len());
+    for (host, name) in hosts.into_iter().zip(names) {
+        let alias = host
+            .split('.')
+            .next()
+            .expect("No . in hostname")
+            .to_string();
+
+        let port = port.unwrap_or(1198);
+
+        output.push(VpnServer {
+            name: if name.contains(':') {
+                alias.clone()
+            } else {
+                name.to_lowercase().replace(' ', "_")
+            },
+            alias,
+            host,
+            port: Some(port),
+            protocol: Some(protocol.clone()),
+        });
+    }
+
+    // Write serverlist
+    // TODO: DRY
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn/serverlist.csv", pia_alias));
+    if list_path.exists() {
+        std::fs::remove_file(&list_path)?;
+    }
+
+    {
+        let file = File::create(&list_path).context("Could not create PIA serverlist")?;
+        let write_buf = std::io::BufWriter::new(file);
+        let mut csv_writer = csv::WriterBuilder::new()
+            .has_headers(false)
+            .from_writer(write_buf);
+
+        output
+            .into_iter()
+            .map(|x| csv_writer.serialize(x))
+            .collect::<Result<(), csv::Error>>()?;
+    }
+
+    // Write configs
+    let pia_conf = include_str!("static/pia_openvpn.conf");
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn/client.conf", pia_alias));
+    if list_path.exists() {
+        std::fs::remove_file(&list_path)?;
+    }
+    {
+        let file = File::create(&list_path).context("Could not create PIA OpenVPN conf file")?;
+        let mut write_buf = std::io::BufWriter::new(file);
+        write!(write_buf, "{}", pia_conf)?;
+    }
+
+    let pia_conf = include_str!("static/pia_ca.rsa.2048.crt");
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn/ca.rsa.2048.crt", pia_alias));
+    if list_path.exists() {
+        std::fs::remove_file(&list_path)?;
+    }
+    {
+        let file = File::create(&list_path).context("Could not create PIA OpenVPN CA file")?;
+        let mut write_buf = std::io::BufWriter::new(file);
+        write!(write_buf, "{}", pia_conf)?;
+    }
+
+    let pia_conf = include_str!("static/pia_crl.rsa.2048.pem");
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn/crl.rsa.2048.pem", pia_alias));
+    if list_path.exists() {
+        std::fs::remove_file(&list_path)?;
+    }
+    {
+        let file = File::create(&list_path).context("Could not create PIA OpenVPN PEM file")?;
+        let mut write_buf = std::io::BufWriter::new(file);
+        write!(write_buf, "{}", pia_conf)?;
+    }
+
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn", pia_alias));
+    info!(
+        "PrivateInternetAccess OpenVPN config written to {}",
+        list_path.display()
+    );
+    Ok(())
+}
+
 // TigerVPN: Parse https://www.tigervpn.com/dashboard/geeks but behind Captcha :(
+// For now use static list
+pub fn tig_openvpn(port: Option<u16>) -> anyhow::Result<()> {
+    let tig_alias = VpnProvider::TigerVpn.alias();
+
+    // TODO: DRY
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn", tig_alias));
+    std::fs::create_dir_all(list_path)?;
+
+    let protocol = if port.is_some() {
+        if port == Some(1194) {
+            Ok(OpenVpnProtocol::UDP)
+        } else if port == Some(443) {
+            Ok(OpenVpnProtocol::TCP)
+        } else {
+            Err(anyhow!(
+                "TigerVPN OpenVPN ports must be either 1194 for UDP or 443 for TCP"
+            ))
+        }
+    } else {
+        Ok(OpenVpnProtocol::UDP)
+    }?;
+
+    let tig_list = include_str!("static/tig_serverlist.csv");
+    let mut output: Vec<VpnServer> = Vec::with_capacity(16);
+    for line in tig_list.trim_end().split('\n') {
+        let mut iter = line.split(',');
+        let country = iter.next().expect("No country").to_string();
+        let alias = iter.next().expect("No alias").to_string();
+        let host = iter.next().expect("No host").to_string();
+
+        let port = port.unwrap_or(1194);
+
+        output.push(VpnServer {
+            name: country,
+            alias,
+            host,
+            port: Some(port),
+            protocol: Some(protocol.clone()),
+        });
+    }
+
+    // Write serverlist
+    // TODO: DRY
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn/serverlist.csv", tig_alias));
+    if list_path.exists() {
+        std::fs::remove_file(&list_path)?;
+    }
+
+    {
+        let file = File::create(&list_path).context("Could not create TigerVPN serverlist")?;
+        let write_buf = std::io::BufWriter::new(file);
+        let mut csv_writer = csv::WriterBuilder::new()
+            .has_headers(false)
+            .from_writer(write_buf);
+
+        output
+            .into_iter()
+            .map(|x| csv_writer.serialize(x))
+            .collect::<Result<(), csv::Error>>()?;
+    }
+
+    // Write configs
+    let tig_conf = include_str!("static/tig_ca.crt");
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn/ca.crt", tig_alias));
+    if list_path.exists() {
+        std::fs::remove_file(&list_path)?;
+    }
+    {
+        let file = File::create(&list_path).context("Could not create TigerVPN CA file")?;
+        let mut write_buf = std::io::BufWriter::new(file);
+        write!(write_buf, "{}", tig_conf)?;
+    }
+
+    let tig_conf = include_str!("static/tig_openvpn.conf");
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn/config.ovpn", tig_alias));
+    if list_path.exists() {
+        std::fs::remove_file(&list_path)?;
+    }
+    {
+        let file =
+            File::create(&list_path).context("Could not create TigerVPN OpenVPN config file")?;
+        let mut write_buf = std::io::BufWriter::new(file);
+        write!(write_buf, "{}", tig_conf)?;
+    }
+
+    let mut list_path = config_dir()?;
+    list_path.push(format!("vopono/{}/openvpn", tig_alias));
+    info!("TigerVPN OpenVPN config written to {}", list_path.display());
+    Ok(())
+}

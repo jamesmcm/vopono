@@ -34,7 +34,7 @@ pub enum Command {
     List(ListCommand),
     #[structopt(
         name = "sync",
-        about = "Synchronise local server lists with VPN providers - unimplemented"
+        about = "Synchronise local server lists with VPN providers"
     )]
     Synch(SynchCommand),
     // #[structopt(
@@ -46,13 +46,17 @@ pub enum Command {
 
 #[derive(StructOpt)]
 pub struct SynchCommand {
-    /// VPN Provider (if not given will use default)
+    /// VPN Provider - will launch interactive menu if not provided
     #[structopt(possible_values = &VpnProvider::variants(), case_insensitive = true)]
-    pub vpn_provider: VpnProvider,
+    pub vpn_provider: Option<VpnProvider>,
 
-    /// VPN Protocol (if not given will use default)
+    /// VPN Protocol (if not given will try to sync both)
     #[structopt(long = "protocol", short="c", possible_values = &Protocol::variants(), case_insensitive = true)]
     pub protocol: Option<Protocol>,
+
+    /// Port override (must be valid port for provider - use this to set OpenVPN protocol too)
+    #[structopt(long = "port", short = "p")]
+    pub port: Option<u16>,
 }
 
 #[derive(StructOpt)]
@@ -88,7 +92,7 @@ pub struct ExecCommand {
     #[structopt(long = "dns", short = "d")]
     pub dns: Option<Vec<IpAddr>>,
 
-    /// Disable OpenVPN killswitch
+    /// Disable killswitch
     #[structopt(long = "no-killswitch")]
     pub no_killswitch: bool,
 }

@@ -5,6 +5,7 @@ use dialoguer::{Input, Password};
 use log::{debug, error, info, warn};
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
@@ -47,7 +48,7 @@ impl VpnProvider {
     }
 }
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
 pub enum OpenVpnProtocol {
     UDP,
     TCP,
@@ -66,6 +67,16 @@ impl FromStr for OpenVpnProtocol {
     }
 }
 
+impl Display for OpenVpnProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let out = match self {
+            Self::UDP => "udp",
+            Self::TCP => "tcp",
+        };
+        write!(f, "{}", out)
+    }
+}
+
 arg_enum! {
     #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum Protocol {
@@ -80,17 +91,21 @@ pub enum Protocol {
 //     Ufw,
 // }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct VpnServer {
-    name: String,
-    alias: String,
-    host: String,
-    port: Option<u16>,
+    pub name: String,
+    pub alias: String,
+    pub host: String,
+    pub port: Option<u16>,
+    pub protocol: Option<OpenVpnProtocol>,
 }
 
 pub fn get_serverlist(provider: &VpnProvider) -> anyhow::Result<Vec<VpnServer>> {
     let mut list_path = config_dir()?;
-    list_path.push(format!("vopono/{}/serverlist.csv", provider.alias()));
+    list_path.push(format!(
+        "vopono/{}/openvpn/serverlist.csv",
+        provider.alias()
+    ));
     let file = File::open(&list_path).with_context(|| {
         format!(
             "Could not get serverlist for provider: {}, path: {}",
@@ -113,7 +128,7 @@ pub fn get_serverlist(provider: &VpnProvider) -> anyhow::Result<Vec<VpnServer>> 
 pub fn find_host_from_alias(
     alias: &str,
     serverlist: &[VpnServer],
-) -> anyhow::Result<(String, u16, String)> {
+) -> anyhow::Result<(String, u16, String, OpenVpnProtocol)> {
     let alias = alias.to_lowercase();
     let record = serverlist
         .iter()
@@ -143,8 +158,18 @@ pub fn find_host_from_alias(
         } else {
             record.port.unwrap()
         };
-        info!("Chosen server: {}:{}", record.host, port);
-        Ok((record.host.clone(), port, record.alias.clone()))
+
+        let protocol = if record.protocol.is_none() {
+            warn!(
+                "Using UDP as default OpenVPN protocol for {}, as no protocol provided",
+                &record.host
+            );
+            OpenVpnProtocol::UDP
+        } else {
+            record.protocol.clone().unwrap()
+        };
+        info!("Chosen server: {}:{} {}", record.host, port, protocol);
+        Ok((record.host.clone(), port, record.alias.clone(), protocol))
     }
 }
 

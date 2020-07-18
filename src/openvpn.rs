@@ -66,6 +66,11 @@ impl OpenVpn {
             let x = find_host_from_alias(server_name, &serverlist)?;
             let server = x.0;
             port = x.1;
+            let protocol = x.3;
+            let protocol_str = match protocol {
+                OpenVpnProtocol::UDP => "udp",
+                OpenVpnProtocol::TCP => "tcp-client",
+            };
 
             let mut openvpn_config_dir = config_dir()?;
             openvpn_config_dir.push(format!("vopono/{}/openvpn", provider.alias()));
@@ -75,9 +80,9 @@ impl OpenVpn {
 
             // TODO: Make crl-verify and ca depend on VpnProvider - put inside openvpn config file?
 
+            let openvpn_config = OpenVpn::find_config_file(&openvpn_config_dir)?;
             let openvpn_ca = OpenVpn::find_ca_file(&openvpn_config_dir)?;
             let openvpn_crl = OpenVpn::find_crl_file(&openvpn_config_dir)?;
-            let openvpn_config = OpenVpn::find_config_file(&openvpn_config_dir)?;
             debug!("OpenVPN config: {:?}", &openvpn_config);
             info!("Launching OpenVPN...");
             let port_string = port.to_string();
@@ -93,6 +98,8 @@ impl OpenVpn {
                 "--machine-readable-output",
                 "--log",
                 log_file_str.as_str(),
+                "--proto",
+                &protocol_str,
             ])
                 .to_vec();
 
