@@ -15,31 +15,27 @@ mod wireguard;
 
 use anyhow::{anyhow, bail};
 use application_wrapper::ApplicationWrapper;
-use args::ExecCommand;
+use args::{ExecCommand, SynchCommand};
 use list::output_list;
-use log::{debug, error, info, warn, LevelFilter};
+use log::{debug, error, info, LevelFilter};
 use netns::NetworkNamespace;
 use network_interface::{get_active_interfaces, NetworkInterface};
 use std::io::{self, Write};
-use std::process::Command;
 use structopt::StructOpt;
 use sync::synch;
 use sysctl::SysCtl;
 use util::clean_dead_namespaces;
-use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet, init_config};
+use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet};
+use util::{config_dir, elevate_privileges};
 use vpn::VpnProvider;
 use vpn::{get_auth, get_protocol, Protocol};
 use wireguard::get_config_from_alias;
 
 // TODO:
-// - Finish sync command for OpenVPN Mullvad and PIA
-// - Add Wireguard killswitch
-// - Port and DNS selection in Wireguard config generation
-// - Support OpenVPN TCP connection
+// - OpenVPN authentication for custom config
 // - Support update_resolv_conf with OpenVPN (i.e. get DNS server from OpenVPN headers)
 // - Disable ipv6 traffic when not routed?
 // - Test configuration for wireless interface for OpenVPN
-// - Allow OpenVPN UDP (1194) and TCP (443) toggle
 // - Allow for not saving OpenVPN creds to config
 // - Allow for choice between iptables and nftables and avoid mixed dependency
 // - Mullvad Shadowsocks
@@ -60,32 +56,29 @@ fn main() -> anyhow::Result<()> {
     builder.init();
 
     match app.cmd {
-        args::Command::Create(cmd) => {
-            init_config(false)?;
+        args::Command::Exec(cmd) => {
             clean_dead_locks()?;
 
-            // Check if already running as root
-            if nix::unistd::getuid().as_raw() != 0 {
-                info!("Calling sudo for elevated privileges, current user will be used as default user");
-                let args: Vec<String> = std::env::args().collect();
-
-                debug!("Args: {:?}", &args);
-                Command::new("sudo").arg("-E").args(args).status()?;
-                // Do we want to block here to ensure stdout kept alive? Does it matter?
-                std::process::exit(0);
-            } else if std::env::var("SUDO_USER").is_err() {
-                warn!("Running vopono as root user directly!");
-            }
-
+            elevate_privileges()?;
             clean_dead_namespaces()?;
             exec(cmd)?
         }
-        args::Command::Init => init_config(true)?,
+        args::Command::Init => {
+            elevate_privileges()?;
+            synch(SynchCommand {
+                vpn_provider: None,
+                protocol: None,
+                port: None,
+            })?;
+        }
         args::Command::List(listcmd) => {
             clean_dead_locks()?;
             output_list(listcmd)?;
         }
-        args::Command::Synch(synchcmd) => synch(synchcmd)?, // args::Command::SetDefaults(cmd) => todo!(),
+        args::Command::Synch(synchcmd) => {
+            elevate_privileges()?;
+            synch(synchcmd)?;
+        } // args::Command::SetDefaults(cmd) => todo!(),
     }
     Ok(())
 }
@@ -124,6 +117,27 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     }
     // Check protocol is valid for provider
     let protocol = get_protocol(&provider, command.protocol)?;
+    // Check config files exist for provider
+    if provider != VpnProvider::Custom {
+        let mut cdir = config_dir()?;
+        cdir.push(format!(
+            "vopono/{}/{}",
+            provider.alias(),
+            protocol.to_string().to_lowercase()
+        ));
+
+        if !cdir.exists() || cdir.read_dir()?.next().is_none() {
+            info!(
+                "Config files for {} {} do not exist, running vopono sync",
+                provider, protocol
+            );
+            synch(SynchCommand {
+                vpn_provider: Some(provider.clone()),
+                protocol: Some(protocol.clone()),
+                port: None,
+            })?;
+        }
+    }
 
     let ns_name = format!("vopono_{}_{}", provider.alias(), server_name);
 
@@ -192,7 +206,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 ns.add_routing(target_subnet)?;
                 ns.add_iptables_rule(target_subnet, interface)?;
                 _sysctl = SysCtl::enable_ipv4_forwarding();
-                ns.run_wireguard(config)?;
+                ns.run_wireguard(config, !command.no_killswitch)?;
             }
         }
     }

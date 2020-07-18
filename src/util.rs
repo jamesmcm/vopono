@@ -2,7 +2,7 @@ use super::list::get_lock_namespaces;
 use anyhow::{anyhow, Context};
 use directories_next::BaseDirs;
 use ipnet::Ipv4Net;
-use log::{debug, info};
+use log::{debug, info, warn};
 use nix::unistd::{Group, User};
 use regex::Regex;
 use std::net::Ipv4Addr;
@@ -66,38 +66,23 @@ pub fn get_group(username: &str) -> anyhow::Result<String> {
     }
 }
 
-pub fn init_config(skip_dir_check: bool) -> anyhow::Result<()> {
-    let config_dir = config_dir()?;
-    let mut check_dir = config_dir.clone();
+pub fn set_config_permissions() -> anyhow::Result<()> {
+    let mut check_dir = config_dir()?;
     check_dir.push("vopono");
     let username = get_username()?;
     let group = get_group(&username)?;
-    if skip_dir_check || !check_dir.exists() {
-        info!("Initialising vopono config...");
-        debug!(
-            "Copying default config from /usr/share/doc/vopono to {}",
-            config_dir.as_os_str().to_str().expect("Invalid config dir")
-        );
-        // TODO: Migrate these to Rust calls
-        sudo_command(&[
-            "cp",
-            "-r",
-            "/usr/share/doc/vopono",
-            config_dir.to_str().expect("No valid config dir"),
-        ])?;
-        sudo_command(&[
-            "chown",
-            "-R",
-            username.as_str(),
-            check_dir.to_str().expect("No valid config dir"),
-        ])?;
-        sudo_command(&[
-            "chgrp",
-            "-R",
-            group.as_str(),
-            check_dir.to_str().expect("No valid config dir"),
-        ])?;
-    }
+    sudo_command(&[
+        "chown",
+        "-R",
+        username.as_str(),
+        check_dir.to_str().expect("No valid config dir"),
+    ])?;
+    sudo_command(&[
+        "chgrp",
+        "-R",
+        group.as_str(),
+        check_dir.to_str().expect("No valid config dir"),
+    ])?;
     Ok(())
 }
 
@@ -276,5 +261,21 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
     // TODO - deserialize to struct without Drop instead
     let lock_namespaces = Box::new(lock_namespaces);
     Box::leak(lock_namespaces);
+    Ok(())
+}
+
+pub fn elevate_privileges() -> anyhow::Result<()> {
+    // Check if already running as root
+    if nix::unistd::getuid().as_raw() != 0 {
+        info!("Calling sudo for elevated privileges, current user will be used as default user");
+        let args: Vec<String> = std::env::args().collect();
+
+        debug!("Args: {:?}", &args);
+        Command::new("sudo").arg("-E").args(args).status()?;
+        // Do we want to block here to ensure stdout kept alive? Does it matter?
+        std::process::exit(0);
+    } else if std::env::var("SUDO_USER").is_err() {
+        warn!("Running vopono as root user directly!");
+    }
     Ok(())
 }

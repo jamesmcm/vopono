@@ -18,13 +18,12 @@ pub struct Wireguard {
     config_file: PathBuf,
 }
 
-// TODO: Add killswitch support:
-//
-// PostUp = iptables -I OUTPUT ! -o %i -m mark ! --mark $(wg show %i fwmark) -m addrtype ! --dst-type LOCAL -j REJECT && ip6tables -I OUTPUT ! -o %i -m mark ! --mark $(wg show %i fwmark) -m addrtype ! --dst-type LOCAL -j REJECT
-// PreDown = iptables -D OUTPUT ! -o %i -m mark ! --mark $(wg show %i fwmark) -m addrtype ! --dst-type LOCAL -j REJECT && ip6tables -D OUTPUT ! -o %i -m mark ! --mark $(wg show %i fwmark) -m addrtype ! --dst-type LOCAL -j REJECT
-
 impl Wireguard {
-    pub fn run(namespace: &mut NetworkNamespace, config_file: PathBuf) -> anyhow::Result<Self> {
+    pub fn run(
+        namespace: &mut NetworkNamespace,
+        config_file: PathBuf,
+        use_killswitch: bool,
+    ) -> anyhow::Result<Self> {
         let config_string = std::fs::read_to_string(&config_file)?;
         // Create temp conf file
         {
@@ -241,11 +240,61 @@ impl Wireguard {
 
         namespace.exec(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
         std::fs::remove_file("/tmp/vopono_nft.sh")?;
+
+        if use_killswitch {
+            killswitch(&if_name, fwmark, namespace)?;
+        }
         Ok(Self {
             config_file,
             ns_name: namespace.name.clone(),
         })
     }
+}
+
+pub fn killswitch(ifname: &str, fwmark: &str, netns: &NetworkNamespace) -> anyhow::Result<()> {
+    debug!("Setting Wireguard killswitch....");
+    netns.exec(&[
+        "iptables",
+        "-I",
+        "OUTPUT",
+        "!",
+        "-o",
+        ifname,
+        "-m",
+        "mark",
+        "!",
+        "--mark",
+        fwmark,
+        "-m",
+        "addrtype",
+        "!",
+        "--dst-type",
+        "LOCAL",
+        "-j",
+        "REJECT",
+    ])?;
+
+    netns.exec(&[
+        "ip6tables",
+        "-I",
+        "OUTPUT",
+        "!",
+        "-o",
+        ifname,
+        "-m",
+        "mark",
+        "!",
+        "--mark",
+        fwmark,
+        "-m",
+        "addrtype",
+        "!",
+        "--dst-type",
+        "LOCAL",
+        "-j",
+        "REJECT",
+    ])?;
+    Ok(())
 }
 
 impl Drop for Wireguard {

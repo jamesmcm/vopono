@@ -24,7 +24,7 @@ pub enum Command {
         name = "exec",
         about = "Execute an application with the given VPN connection"
     )]
-    Create(ExecCommand),
+    Exec(ExecCommand),
     #[structopt(name = "init", about = "Initialise vopono configuration")]
     Init,
     #[structopt(

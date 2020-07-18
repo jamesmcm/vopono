@@ -4,7 +4,7 @@ use super::util::config_dir;
 use super::vpn::OpenVpnProtocol;
 use super::vpn::{find_host_from_alias, get_serverlist, VpnProvider};
 use anyhow::anyhow;
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -26,11 +26,12 @@ impl OpenVpn {
         server_name: &str,
         custom_config: Option<PathBuf>,
         dns: &[IpAddr],
-        mut use_killswitch: bool,
+        use_killswitch: bool,
     ) -> anyhow::Result<Self> {
         // TODO: Refactor this to separate functions
         // TODO: --status flag
         let handle;
+        let protocol;
         let port;
         let log_file_str = format!("/etc/netns/{}/openvpn.log", &netns.name);
         {
@@ -50,14 +51,22 @@ impl OpenVpn {
 
             let remotes = get_remotes_from_config(&config)?;
 
-            // TODO: TCP support for killswitch
-            port = match remotes.into_iter().find(|x| x.2 == OpenVpnProtocol::UDP) {
+            // TODO: We only consider first remote
+            match remotes.into_iter().next() {
                 None => {
-                    warn!("No UDP remote found in OpenVPN config, disabling OpenVPN killswitch!");
-                    use_killswitch = false;
-                    0
+                    error!(
+                        "No remote found in custom OpenVPN config: {}",
+                        config.display()
+                    );
+                    return Err(anyhow!(
+                        "No remote found in custom OpenVPN config: {}",
+                        config.display()
+                    ));
                 }
-                Some(x) => x.1,
+                Some(x) => {
+                    port = x.1;
+                    protocol = x.2;
+                }
             };
 
             handle = netns.exec_no_block(&command_vec, None, true)?;
@@ -66,7 +75,7 @@ impl OpenVpn {
             let x = find_host_from_alias(server_name, &serverlist)?;
             let server = x.0;
             port = x.1;
-            let protocol = x.3;
+            protocol = x.3;
             let protocol_str = match protocol {
                 OpenVpnProtocol::UDP => "udp",
                 OpenVpnProtocol::TCP => "tcp-client",
@@ -157,7 +166,7 @@ impl OpenVpn {
         }
 
         if use_killswitch {
-            killswitch(netns, dns, port)?;
+            killswitch(netns, dns, port, protocol)?;
         }
 
         Ok(Self { pid: id })
@@ -229,7 +238,12 @@ impl Drop for OpenVpn {
     }
 }
 
-pub fn killswitch(netns: &NetworkNamespace, dns: &[IpAddr], port: u16) -> anyhow::Result<()> {
+pub fn killswitch(
+    netns: &NetworkNamespace,
+    dns: &[IpAddr],
+    port: u16,
+    protocol: OpenVpnProtocol,
+) -> anyhow::Result<()> {
     debug!("Setting OpenVPN killswitch....");
     netns.exec(&["iptables", "-P", "INPUT", "DROP"])?;
     netns.exec(&["iptables", "-P", "FORWARD", "DROP"])?;
@@ -254,17 +268,15 @@ pub fn killswitch(netns: &NetworkNamespace, dns: &[IpAddr], port: u16) -> anyhow
         netns.exec(&["iptables", "-A", "OUTPUT", "-d", &dns_mask, "-j", "ACCEPT"])?;
     }
 
-    // TODO: Allow OpenVPN tcp connections
-    // server port here
     let port_str = format!("{}", port);
     netns.exec(&[
         "iptables",
         "-A",
         "OUTPUT",
         "-p",
-        "udp",
+        &protocol.to_string(),
         "-m",
-        "udp",
+        &protocol.to_string(),
         "--dport",
         port_str.as_str(),
         "-j",
@@ -292,12 +304,26 @@ pub fn get_remotes_from_config(
     let re = Regex::new(r"remote ([^\s]+) ([0-9]+) ([a-z\-]+)")?;
     let caps = re.captures_iter(&file_string);
 
+    let re2 = Regex::new(r"proto ([a-z\-]+)")?;
+    let mut caps2 = re2.captures_iter(&file_string);
+    let default_proto = caps2.next().map(|x| x.get(1)).flatten();
+
     for cap in caps {
-        let cap = cap;
+        let proto = match (cap.get(3), default_proto) {
+            (None, None) => {
+                return Err(anyhow!(
+                    "No protocol given in OpenVPN config: {}",
+                    path.display()
+                ));
+            }
+            (Some(x), _) => OpenVpnProtocol::from_str(x.as_str()),
+            (None, Some(x)) => OpenVpnProtocol::from_str(x.as_str()),
+        }?;
+
         output_vec.push((
             cap.get(1).unwrap().as_str().to_string(),
             cap.get(2).unwrap().as_str().parse::<u16>()?,
-            OpenVpnProtocol::from_str(cap.get(3).unwrap().as_str())?,
+            proto,
         ));
     }
 

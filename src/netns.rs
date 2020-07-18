@@ -182,8 +182,12 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn run_wireguard(&mut self, config_file: PathBuf) -> anyhow::Result<()> {
-        self.wireguard = Some(Wireguard::run(self, config_file)?);
+    pub fn run_wireguard(
+        &mut self,
+        config_file: PathBuf,
+        use_killswitch: bool,
+    ) -> anyhow::Result<()> {
+        self.wireguard = Some(Wireguard::run(self, config_file, use_killswitch)?);
         Ok(())
     }
 

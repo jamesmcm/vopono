@@ -1,10 +1,11 @@
 use super::args::SynchCommand;
 use super::util::config_dir;
+use super::util::set_config_permissions;
 use super::vpn::OpenVpnProtocol;
 use super::vpn::VpnServer;
 use super::vpn::{Protocol, VpnProvider};
 use super::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use dialoguer::{Input, MultiSelect};
 use ipnet::IpNet;
 use log::{debug, error, info};
@@ -103,9 +104,13 @@ pub fn sync_menu() -> anyhow::Result<()> {
         .collect::<Vec<String>>();
 
     let selection = MultiSelect::new()
-        .with_prompt("Which VPN providers do you wish to synchronise?")
+        .with_prompt("Which VPN providers do you wish to synchronise? Press Space to select and Enter to continue")
         .items(variants.as_slice())
         .interact()?;
+
+    if selection.is_empty() {
+        bail!("Must choose at least one VPN provider to sync");
+    }
 
     // TODO: Allow for overriding default port here
     for provider in selection
@@ -145,7 +150,9 @@ pub fn synch(command: SynchCommand) -> anyhow::Result<()> {
             Err(anyhow!("Wireguard is not supported for TigerVPN"))
         }
         _ => Err(anyhow!("Unimplemented!")),
-    }
+    }?;
+    set_config_permissions()?;
+    Ok(())
 }
 
 pub fn mullvad_openvpn(port: Option<u16>) -> anyhow::Result<()> {
