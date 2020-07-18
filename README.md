@@ -5,8 +5,11 @@ network namespaces. This allows you to run only a handful of
 applications through different VPNs simultaneously, whilst keeping your main connection
 as normal.
 
+vopono includes built-in killswitches for both Wireguard and OpenVPN.
+
 This is alpha software, currently only Mullvad, TigerVPN and
-PrivateInternetAccess are supported.
+PrivateInternetAccess are supported, with custom configuration files
+also supported with the `--custom` argument.
 
 Mullvad users can use [am.i.mullvad.net](https://am.i.mullvad.net/) to
 check the security of their browser's connection. This was used with the
@@ -36,23 +39,26 @@ lynx all running through different VPN connections:
 ## Usage
 
 Applications will be run as the current user by default (you can use
-`sudo -u USERNAME program` as the command to run as another user).
+`vopono exec sudo -u USERNAME program` as the command to run as another user).
 
 vopono will call sudo if required, it is recommended to run as the
 current user and let vopono call sudo so that the configuration
 directories are correctly inferred and the final command is not run as
 root.
 
+Note that child processes of the application will also be spawned inside
+the network namespace and so use the same VPN connection, so you can run
+entire shell sessions inside vopono.
+
 ### Wireguard
 
-Install vopono and initialise configuration, then use `vopono sync` to
+Install vopono and use `vopono sync` to
 create the Wireguard configuration files (and generate a keypair if
 necessary):
 
 ```bash
 $ yay -S vopono-git
-$ vopono init
-$ vopono sync mullvad --protocol wireguard
+$ vopono sync
 ```
 
 Run vopono:
@@ -64,10 +70,31 @@ $ vopono exec --provider mullvad --server se --protocol wireguard "transmission-
 The server prefix will be searched against available servers (and
 country names) and a random one will be chosen (and reported in the terminal).
 
-### OpenVPN
+#### Custom Port
+
+Note you can set a custom port in the Wireguard configuration by running
+`vopono sync` with the `--port` argument:
 
 ```bash
-$ vopono exec --provider privateinternetaccess --server pl "curl ifconfig.co/country"
+$ vopono sync --protocol wireguard --port 31337
+```
+
+Valid ports for Mullvad Wireguard are: 53, 4000-33433, 33565-51820 and 52000-60000.
+
+### OpenVPN
+
+Install vopono and use `vopono sync` to
+create the OpenVPN configuration files and server lists.
+
+```bash
+$ yay -S vopono-git
+$ vopono sync
+```
+
+Run vopono:
+
+```bash
+$ vopono exec --provider privateinternetaccess --server poland "curl ifconfig.co/country"
 Poland
 ```
 
@@ -96,6 +123,24 @@ For TigerVPN you can view your OpenVPN credentials [online on the "geeks" dashbo
 The OpenVPN credentials are **not** the same as your TigerVPN account credentials.
 
 For Mullvad your OpenVPN credentials are your account code as your username, and `m` as the password.
+
+#### TCP support and custom ports
+
+By default vopono uses the UDP configuration of the VPN providers.
+
+You can use the TCP configurations by running `vopono sync` with the
+`--port` argument where the port is a valid TCP port for this provider:
+
+```bash
+$ vopono sync --protocol openvpn --port 443 mullvad
+```
+
+For Mullvad, valid ports are: 1300, 1301, 1302, 1194, 1195, 1196, 1197, or 53 for UDP, and 
+80 or 443 for TCP,
+
+For PrivateInternetAccess valid ports are 1198 for UDP and 502 for TCP.
+
+For TigerVPN valid ports are 1194 for UDP or 443 for TCP.
 
 ### Custom Providers
 
@@ -150,18 +195,8 @@ Network settings > Settings, then deselect `Enable DNS over HTTPS`.
 You may also wish to disable WebRTC - see
 [Mullvad's guide](https://mullvad.net/en/help/webrtc/) for more details.
 
-### Known issues
+Similar issues apply to Chromium and Google Chrome.
 
-* OpenVPN credentials are always stored in plaintext in configuration - will add
-  option to not store credentials soon, but it seems OpenVPN needs them
-  provided in plaintext.
-* Cannot set default VPN provider and server - will be added shortly.
-* Configuration of OpenVPN connection is limited - support will be added for
-  different keylengths, etc. in the future.
-* Split iptables and nftables dependencies so user can choose one or the
-  other.
-* Server lists are maintained in the repo and there is no way to update
-  them from vopono itself.
 
 ## Installation
 
@@ -184,6 +219,15 @@ $ vopono init
 Run the install script provided: `install.sh` - this will `cargo
 install` the repository and copy over the configuration files to
 `~/.config/vopono/`
+
+## Known issues
+
+* OpenVPN credentials are always stored in plaintext in configuration - will add
+  option to not store credentials soon, but it seems OpenVPN needs them
+  provided in plaintext.
+* Cannot set default VPN provider and server - will be added shortly.
+* Configuration of OpenVPN connection is limited - support will be added for
+  different keylengths, etc. in the future.
 
 ## License
 

@@ -558,7 +558,7 @@ pub fn pia_openvpn(port: Option<u16>) -> anyhow::Result<()> {
     }?;
 
     // TODO: Don't parse HTML with regex
-    let name_regex = Regex::new("class=\"subregionname\">(?P<name>[a-zA-Z\\s]+)</p>")?;
+    let name_regex = Regex::new("class=\"subregionname\">(?P<name>[a-zA-Z\\s\\.:_]+)</p>")?;
     let host_regex = Regex::new("class=\"hostname\">(?P<host>[a-zA-Z\\.\\-]+)</p>")?;
 
     let names: Vec<String> = name_regex
@@ -582,7 +582,7 @@ pub fn pia_openvpn(port: Option<u16>) -> anyhow::Result<()> {
 
         output.push(VpnServer {
             name: if name.contains(':') {
-                alias.clone()
+                alias.clone().replace('-', "_")
             } else {
                 name.to_lowercase().replace(' ', "_")
             },
