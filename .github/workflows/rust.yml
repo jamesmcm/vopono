@@ -9,11 +9,20 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-jobs:
-  build:
-
+jobs: 
+  quickcheck:
     runs-on: ubuntu-latest
-
+    outputs:
+      version: ${{ steps.rustversion.outputs.rustversion }}
+    steps:
+    - uses: actions/checkout@v2
+    - run: cargo check
+    - run: cargo pkgid
+    - run: 'echo "$(cargo pkgid | cut -d# -f2)"'
+    - id: rustversion
+      run: 'echo "::set-output name=rustversion::$(cargo pkgid | cut -d# -f2)"'
+  build:
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
     - name: Install Clippy
@@ -22,7 +31,181 @@ jobs:
       run: cargo clippy -- -D warnings
     - name: Rustfmt
       run: cargo fmt --all -- --check
-    - name: Build
-      run: cargo build --verbose
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test 
+    - name: Build
+      run: cargo build --verbose --release
+    - name: Upload Vopono Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: x86_64-gcc
+        path: ./target/release/vopono
+  fedorarpmbuild:
+    needs: [build]
+    runs-on: ubuntu-latest
+    name: FedoraRpm
+    steps:
+    - uses: actions/checkout@v2
+    - name: BuildRpm
+      id: buildrpm
+      uses: ebbflow-io/cargo-rpm-amd64-fedora@1.1
+    - name: Upload RPM Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: fedorarpm
+        path: ./target/x86_64-unknown-linux-musl/release/rpmbuild/RPMS/x86_64/*
+  opensuseleaprpmbuild:
+    needs: [build]
+    runs-on: ubuntu-latest
+    name: OpensuseLeapRpm
+    steps:
+    - uses: actions/checkout@v2
+    - name: BuildRpm
+      id: buildrpm
+      uses: ebbflow-io/cargo-rpm-amd64-opensuseleap@1.0
+    - name: Upload RPM Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: opensuserpm
+        path: ./target/x86_64-unknown-linux-musl/release/rpmbuild/RPMS/x86_64/*
+  debbuild:
+    needs: [build]
+    runs-on: ubuntu-latest
+    name: Amd64Deb
+    steps:
+    - uses: actions/checkout@v2
+    - name: BuildDeb
+      id: debbuild
+      uses: ebbflow-io/cargo-deb-amd64-ubuntu@1.0
+    - name: Upload Deb Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: x86_64-musl-deb
+        path: ./target/x86_64-unknown-linux-musl/debian/*
+  raspbianbuild:
+    needs: [build]
+    runs-on: ubuntu-latest
+    name: Armv7Deb
+    steps:
+    - uses: actions/checkout@v2
+    - name: BuildDeb
+      id: debbuild
+      uses: ebbflow-io/cargo-deb-armv7-debian@1.0
+    - name: Upload Deb Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: armv7-deb
+        path: ./target/armv7-unknown-linux-musleabihf/debian/*--verbose
+  amd64binaries:
+    needs: [build, quickcheck]
+    runs-on: ubuntu-latest
+    name: Amd64StaticBinaries
+    steps:
+    - uses: actions/checkout@v2
+    - name: StaticBinaryBuild
+      id: amd64staticbuild
+      uses: ebbflow-io/cargo-deb-amd64-ubuntu@1.0
+      with:
+        cmd: cargo build --release --target=x86_64-unknown-linux-musl
+    - name: Upload Vopono Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: x86_64-musl
+        path: ./target/x86_64-unknown-linux-musl/release/vopono
+  arm7binaries:
+    needs: [build, quickcheck]
+    runs-on: ubuntu-latest
+    name: Armv7StaticBinaries
+    steps:
+    - uses: actions/checkout@v2
+    - name: StaticBinaryBuild
+      id: armv7staticbuild
+      uses: ebbflow-io/cargo-deb-armv7-debian@1.0
+      with:
+        cmd: cargo build --release --target=armv7-unknown-linux-musleabihf
+    - name: Upload Vopono Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: armv7
+        path: ./target/armv7-unknown-linux-musleabihf/release/vopono
+  update_release_draft:
+    needs: [quickcheck, build, arm7binaries, amd64binaries, raspbianbuild, debbuild, opensuseleaprpmbuild, fedorarpmbuild]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
+        with:
+          tag_name: '${{ needs.quickcheck.outputs.version }}'
+          release_name: Release ${{ needs.quickcheck.outputs.version }}
+          body: 'Change Me'
+          draft: true
+          prerelease: false
+      - uses: actions/download-artifact@v2
+      - run: ls -lha
+      - name: Upload amd64 deb Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./amd64deb/vopono_${{needs.quickcheck.outputs.version}}_amd64.deb
+          asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_amd64.deb'
+          asset_content_type: application/vnd.debian.binary-package
+      - name: Upload armv7 deb Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./armv7deb/vopono_${{needs.quickcheck.outputs.version}}_armhf.deb
+          asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_armhf.deb'
+          asset_content_type: application/vnd.debian.binary-package
+      - name: Upload amd64 rpm fedora Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./fedorarpm/vopono-${{needs.quickcheck.outputs.version}}-1.x86_64.rpm
+          asset_name: 'vopono_${{needs.quickcheck.outputs.version}}-1_amd64_fedora.rpm'
+          asset_content_type: application/octet-stream
+      - name: Upload amd64 rpm opensuse Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./opensuserpm/vopono-${{needs.quickcheck.outputs.version}}-1.x86_64.rpm
+          asset_name: 'vopono_${{needs.quickcheck.outputs.version}}-1_amd64_opensuseleap.rpm'
+          asset_content_type: application/octet-stream
+      - name: Upload Armv7 Static Binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./armv7binaries/armv7
+          asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_linux_armv7'
+          asset_content_type: application/octet-stream
+      - name: Upload Amd64 Static Binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./amd64binaries/x86_64-musl
+          asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_linux_x86-64_musl'
+          asset_content_type: application/octet-stream
+      - name: Upload Amd64 Binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./amd64binaries/x86_64-gcc
+          asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_linux_x86-64_gcc'
+          asset_content_type: application/octet-stream

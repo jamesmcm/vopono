@@ -220,13 +220,19 @@ Run the install script provided: `install.sh` - this will `cargo
 install` the repository and copy over the configuration files to
 `~/.config/vopono/`
 
+Note the minimum supported Rust version is 1.43. You can check your
+version with:
+
+```bash
+$ rustc --version
+```
+
 ## Known issues
 
-* OpenVPN credentials are always stored in plaintext in configuration - will add
-  option to not store credentials soon, but it seems OpenVPN needs them
+* OpenVPN credentials are always stored in plaintext in configuration - may add
+  option to not store credentials, but it seems OpenVPN needs them
   provided in plaintext.
-* Cannot set default VPN provider and server - will be added shortly.
-* Configuration of OpenVPN connection is limited - support will be added for
+* Configuration of OpenVPN connection is limited - support may be added for
   different keylengths, etc. in the future.
 
 ## License

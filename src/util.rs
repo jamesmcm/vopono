@@ -254,6 +254,9 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
         .filter(|x| !lock_namespaces.contains_key(x))
         .map(|x| {
             debug!("Removing dead namespace: {}", x);
+            let path = format!("/etc/netns/{}", x);
+            std::fs::remove_dir_all(&path).ok();
+
             sudo_command(&["ip", "netns", "delete", x.as_str()])
         })
         .collect::<Result<(), _>>()?;
