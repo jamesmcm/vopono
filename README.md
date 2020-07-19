@@ -7,8 +7,8 @@ as normal.
 
 vopono includes built-in killswitches for both Wireguard and OpenVPN.
 
-This is alpha software, currently only Mullvad, TigerVPN and
-PrivateInternetAccess are supported, with custom configuration files
+Currently only Mullvad, TigerVPN and
+PrivateInternetAccess are supported directly, with custom configuration files
 also supported with the `--custom` argument.
 
 Mullvad users can use [am.i.mullvad.net](https://am.i.mullvad.net/) to
@@ -204,15 +204,27 @@ Similar issues apply to Chromium and Google Chrome.
 
 Install the `vopono-git` package with your favourite AUR helper.
 
-This will install the default configuration files to `/usr/share/doc/vopono`,
-copy them to `~/.config/vopono` manually if you want to configure vopono
-prior to your first execution (i.e. to add Wireguard configuration files),
-or run `vopono init` to have vopono copy them automatically.
-
 ```bash
 $ yay -S vopono-git
-$ vopono init
+$ vopono sync
 ```
+
+Alternatively use the `vopono-bin` package if you don't want to compile
+from source.
+
+### Debian + Ubuntu
+
+Install the deb package provided on the releases page.
+
+### Fedora + OpenSUSE
+
+Install the rpm package provided on the release page (choose the correct
+version).
+
+### Other Linux
+
+Either use the compiled binaries on the release page, or install from
+source with Cargo as documented below.
 
 ### From this repository (with Cargo)
 
@@ -233,7 +245,8 @@ $ rustc --version
   option to not store credentials, but it seems OpenVPN needs them
   provided in plaintext.
 * Configuration of OpenVPN connection is limited - support may be added for
-  different keylengths, etc. in the future.
+  different keylengths, etc. in the future, for now this can be done by
+  directly editing the generated config files in `~/.config/vopono`
 
 ## License
 
