@@ -149,6 +149,10 @@ jobs:
       - run: ls -lha x86_64-musl-deb
       - run: ls -lha x86_64-musl
       - run: ls -lha x86_64-gcc
+      - run: ls -lha armv7-deb
+      - run: ls -lha armv7
+      - run: ls -lha fedorarpm
+      - run: ls -lha opensuserpm
       - name: Upload amd64 deb Release Asset
         uses: actions/upload-release-asset@v1
         env:
@@ -164,7 +168,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./armv7deb/vopono_${{needs.quickcheck.outputs.version}}_armhf.deb
+          asset_path: ./armv7-deb/vopono_${{needs.quickcheck.outputs.version}}_armhf.deb
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_armhf.deb'
           asset_content_type: application/vnd.debian.binary-package
       - name: Upload amd64 rpm fedora Release Asset
@@ -191,7 +195,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./armv7/armv7
+          asset_path: ./armv7/vopono
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_linux_armv7'
           asset_content_type: application/octet-stream
       - name: Upload Amd64 Static Binary
@@ -200,7 +204,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./x86_64-musl/x86_64-musl
+          asset_path: ./x86_64-musl/vopono
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_linux_x86-64_musl'
           asset_content_type: application/octet-stream
       - name: Upload Amd64 Binary
@@ -209,6 +213,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./x86_64-gcc/x86_64-gcc
+          asset_path: ./x86_64-gcc/vopono
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_linux_x86-64_gcc'
           asset_content_type: application/octet-stream
