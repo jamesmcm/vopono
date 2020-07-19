@@ -177,7 +177,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./fedorarpm/vopono-${{needs.quickcheck.outputs.version}}-1.x86_64.rpm
+          asset_path: ./fedorarpm/vopono-${{needs.quickcheck.outputs.version}}-1.fc32.x86_64.rpm
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}-1_amd64_fedora.rpm'
           asset_content_type: application/octet-stream
       - name: Upload amd64 rpm opensuse Release Asset
