@@ -31,4 +31,13 @@ toml = "0.5"
 chrono = "0.4"
 compound_duration = "1"
 ipnet = {version = "2", features = ["serde"]}
-reqwest = {version = "0.10", features = ["blocking", "json"]}
+reqwest = {default-features = false, version = "0.10", features = ["blocking", "json", "rustls-tls"]}
+
+[package.metadata.rpm]
+package = "vopono"
+
+[package.metadata.rpm.cargo]
+buildflags = ["--release"]
+
+[package.metadata.rpm.targets]
+vopono = { path = "/usr/bin/vopono" }
