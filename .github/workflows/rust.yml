@@ -53,7 +53,7 @@ jobs:
       uses: actions/upload-artifact@v2
       with:
         name: fedorarpm
-        path: ./target/x86_64-unknown-linux-musl/release/rpmbuild/RPMS/x86_64/*
+        path: ./target/release/rpmbuild/RPMS/x86_64/*
   opensuseleaprpmbuild:
     needs: [build]
     runs-on: ubuntu-latest
@@ -67,7 +67,7 @@ jobs:
       uses: actions/upload-artifact@v2
       with:
         name: opensuserpm
-        path: ./target/x86_64-unknown-linux-musl/release/rpmbuild/RPMS/x86_64/*
+        path: ./target/release/rpmbuild/RPMS/x86_64/*
   debbuild:
     needs: [build]
     runs-on: ubuntu-latest
@@ -95,7 +95,7 @@ jobs:
       uses: actions/upload-artifact@v2
       with:
         name: armv7-deb
-        path: ./target/armv7-unknown-linux-musleabihf/debian/*--verbose
+        path: ./target/armv7-unknown-linux-musleabihf/debian/*
   amd64binaries:
     needs: [build, quickcheck]
     runs-on: ubuntu-latest
@@ -146,13 +146,16 @@ jobs:
           prerelease: false
       - uses: actions/download-artifact@v2
       - run: ls -lha
+      - run: ls -lha x86_64-musl-deb
+      - run: ls -lha x86_64-musl
+      - run: ls -lha x86_64-gcc
       - name: Upload amd64 deb Release Asset
         uses: actions/upload-release-asset@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./amd64deb/vopono_${{needs.quickcheck.outputs.version}}_amd64.deb
+          asset_path: ./x86_64-musl-deb/vopono_${{needs.quickcheck.outputs.version}}_amd64.deb
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_amd64.deb'
           asset_content_type: application/vnd.debian.binary-package
       - name: Upload armv7 deb Release Asset
@@ -188,7 +191,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./armv7binaries/armv7
+          asset_path: ./armv7/armv7
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_linux_armv7'
           asset_content_type: application/octet-stream
       - name: Upload Amd64 Static Binary
@@ -197,7 +200,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./amd64binaries/x86_64-musl
+          asset_path: ./x86_64-musl/x86_64-musl
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_linux_x86-64_musl'
           asset_content_type: application/octet-stream
       - name: Upload Amd64 Binary
@@ -206,6 +209,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./amd64binaries/x86_64-gcc
+          asset_path: ./x86_64-gcc/x86_64-gcc
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_linux_x86-64_gcc'
           asset_content_type: application/octet-stream
