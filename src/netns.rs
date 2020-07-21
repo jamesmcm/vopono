@@ -204,8 +204,8 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn check_openvpn_running(&mut self) -> anyhow::Result<bool> {
-        self.openvpn.as_mut().unwrap().check_if_running()
+    pub fn check_openvpn_running(&self) -> bool {
+        self.openvpn.as_ref().unwrap().check_if_running()
     }
 
     pub fn write_lockfile(

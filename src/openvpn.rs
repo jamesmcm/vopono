@@ -172,7 +172,7 @@ impl OpenVpn {
         Ok(Self { pid: id })
     }
 
-    pub fn check_if_running(&mut self) -> anyhow::Result<bool> {
+    pub fn check_if_running(&self) -> bool {
         check_process_running(self.pid)
     }
 

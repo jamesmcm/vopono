@@ -9,6 +9,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
+use sysinfo::{RefreshKind, System, SystemExt};
 use users::{get_current_uid, get_user_by_uid};
 use walkdir::WalkDir;
 
@@ -131,33 +132,14 @@ pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
     Ok(output)
 }
 
-pub fn check_process_running(pid: u32) -> anyhow::Result<bool> {
-    let output = Command::new("ps")
-        .args(&["-p", &pid.to_string(), "-o", "pid:1", "--no-headers"])
-        .output()?
-        .stdout;
-    let output = std::str::from_utf8(&output)?.split('\n').next();
-    if let Some(x) = output {
-        Ok(x.trim() == pid.to_string())
-    } else {
-        Ok(false)
-    }
+pub fn check_process_running(pid: u32) -> bool {
+    let s = System::new_with_specifics(RefreshKind::new().with_processes());
+    s.get_process(pid as i32).is_some()
 }
 
-pub fn get_all_running_pids() -> anyhow::Result<Vec<u32>> {
-    let output = Command::new("ps")
-        .args(&["a", "-o", "pid:1", "--no-headers"])
-        .output()?
-        .stdout;
-    std::str::from_utf8(&output)?
-        .split('\n')
-        .map(|x| x.trim())
-        .filter(|x| !x.is_empty())
-        .map(|x| match x.parse::<u32>() {
-            Ok(x) => Ok(x),
-            Err(_) => Err(anyhow!("Could not parse PID to u32: {:?}", x)),
-        })
-        .collect()
+pub fn get_all_running_pids() -> Vec<u32> {
+    let s = System::new_with_specifics(RefreshKind::new().with_processes());
+    s.get_processes().keys().map(|x| *x as u32).collect()
 }
 
 pub fn get_target_subnet() -> anyhow::Result<u8> {
@@ -199,7 +181,7 @@ pub fn sudo_command(command: &[&str]) -> anyhow::Result<()> {
 
 // TODO: Clean this up (can we combine maps and filters?)
 pub fn clean_dead_locks() -> anyhow::Result<()> {
-    let running_processes = get_all_running_pids()?;
+    let running_processes = get_all_running_pids();
     let mut lockfile_path = config_dir()?;
     lockfile_path.push("vopono/locks");
 

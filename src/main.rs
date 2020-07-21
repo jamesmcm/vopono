@@ -185,7 +185,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     "Checking that OpenVPN is running in namespace: {}",
                     &ns_name
                 );
-                if !ns.check_openvpn_running()? {
+                if !ns.check_openvpn_running() {
                     error!(
             "OpenVPN not running in network namespace {}, probable dead lock file or authentication error",
             &ns_name
