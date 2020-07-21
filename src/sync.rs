@@ -6,7 +6,6 @@ use super::vpn::VpnServer;
 use super::vpn::{Protocol, VpnProvider};
 use super::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use anyhow::{anyhow, bail, Context};
-use base64;
 use dialoguer::{Input, MultiSelect};
 use ipnet::IpNet;
 use log::{debug, error, info};
