@@ -6,9 +6,11 @@ use super::vpn::VpnServer;
 use super::vpn::{Protocol, VpnProvider};
 use super::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use anyhow::{anyhow, bail, Context};
+use base64;
 use dialoguer::{Input, MultiSelect};
 use ipnet::IpNet;
 use log::{debug, error, info};
+use rand::rngs::OsRng;
 use rand::seq::SliceRandom;
 use regex::Regex;
 use reqwest::blocking::Client;
@@ -21,8 +23,8 @@ use std::include_str;
 use std::io::Write;
 use std::net::IpAddr;
 use std::net::SocketAddr;
-use std::process::{Command, Stdio};
 use std::str::FromStr;
+use x25519_dalek::{PublicKey, StaticSecret};
 
 #[derive(Deserialize, Debug)]
 struct AuthToken {
@@ -486,10 +488,11 @@ pub fn mullvad_wireguard(port: Option<u16>) -> anyhow::Result<()> {
 
 fn generate_keypair(client: &Client, auth_token: &str) -> anyhow::Result<WgKey> {
     // Generate new keypair
-    let output = Command::new("wg").arg("genkey").output()?.stdout;
-    let private_key = std::str::from_utf8(&output)?.trim().to_string();
+    let private = StaticSecret::new(&mut OsRng);
+    let public = PublicKey::from(&private);
+    let public_key = base64::encode(public.as_bytes());
+    let private_key = base64::encode(&private.to_bytes());
 
-    let public_key = generate_public_key(&private_key)?;
     let keypair = WgKey {
         public: public_key,
         private: private_key,
@@ -510,17 +513,14 @@ fn generate_keypair(client: &Client, auth_token: &str) -> anyhow::Result<WgKey> 
 }
 
 fn generate_public_key(private_key: &str) -> anyhow::Result<String> {
-    let mut child = Command::new("wg")
-        .arg("pubkey")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()?;
-    {
-        write!(child.stdin.as_mut().unwrap(), "{}", &private_key)?;
-    }
+    let private_bytes = base64::decode(private_key)?;
+    let mut byte_array = [0; 32];
+    byte_array.copy_from_slice(&private_bytes);
 
-    let output = child.wait_with_output()?.stdout;
-    Ok(std::str::from_utf8(&output)?.trim().to_string())
+    let private = StaticSecret::from(byte_array);
+    let public = PublicKey::from(&private);
+    let public_key = base64::encode(public.as_bytes());
+    Ok(public_key)
 }
 
 pub fn pia_openvpn(port: Option<u16>) -> anyhow::Result<()> {

@@ -1,7 +1,7 @@
 use super::netns::NetworkNamespace;
 use super::util::{config_dir, sudo_command};
 use super::vpn::VpnProvider;
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use ipnet::IpNet;
 use log::{debug, info, warn};
 use rand::seq::SliceRandom;
@@ -67,7 +67,9 @@ impl Wireguard {
 
         namespace.exec(&["ip", "link", "add", &if_name, "type", "wireguard"])?;
 
-        namespace.exec(&["wg", "setconf", &if_name, "/tmp/vopono_nft.conf"])?;
+        namespace
+            .exec(&["wg", "setconf", &if_name, "/tmp/vopono_nft.conf"])
+            .context("Failed to run wg setconf - is wireguard-tools installed?")?;
         std::fs::remove_file("/tmp/vopono_nft.conf")?;
         // Extract addresses
         for address in config.interface.address.iter() {

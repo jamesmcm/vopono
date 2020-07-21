@@ -3,7 +3,7 @@ use super::util::check_process_running;
 use super::util::config_dir;
 use super::vpn::OpenVpnProtocol;
 use super::vpn::{find_host_from_alias, get_serverlist, VpnProvider};
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use log::{debug, error, info};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -69,7 +69,9 @@ impl OpenVpn {
                 }
             };
 
-            handle = netns.exec_no_block(&command_vec, None, true)?;
+            handle = netns
+                .exec_no_block(&command_vec, None, true)
+                .context("Failed to launch OpenVPN - is openvpn installed?")?;
         } else {
             let serverlist = get_serverlist(&provider)?;
             let x = find_host_from_alias(server_name, &serverlist)?;
@@ -120,7 +122,9 @@ impl OpenVpn {
                 command_vec.push("--crl-verify");
                 command_vec.push(crl.as_os_str().to_str().unwrap());
             }
-            handle = netns.exec_no_block(&command_vec, None, true)?;
+            handle = netns
+                .exec_no_block(&command_vec, None, true)
+                .context("Failed to launch OpenVPN - is openvpn installed?")?;
         }
 
         let id = handle.id();

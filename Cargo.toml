@@ -33,6 +33,8 @@ compound_duration = "1"
 ipnet = {version = "2", features = ["serde"]}
 reqwest = {default-features = false, version = "0.10", features = ["blocking", "json", "rustls-tls"]}
 sysinfo = "0.14"
+base64 = "0.12"
+x25519-dalek = "0.6"
 
 [package.metadata.rpm]
 package = "vopono"
