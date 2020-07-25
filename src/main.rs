@@ -211,9 +211,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         }
     }
 
-    let username = util::get_username()?;
-    let group = util::get_group(&username)?;
-    let ns = ns.write_lockfile(&command.application, &username, &group)?;
+    let ns = ns.write_lockfile(&command.application)?;
 
     // User for application command, if None will use root
     let user = if command.user.is_none() {

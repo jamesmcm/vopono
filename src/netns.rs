@@ -2,7 +2,7 @@ use super::dns_config::DnsConfig;
 use super::iptables::IpTables;
 use super::network_interface::NetworkInterface;
 use super::openvpn::OpenVpn;
-use super::util::{config_dir, sudo_command};
+use super::util::{config_dir, set_config_permissions, sudo_command};
 use super::veth_pair::VethPair;
 use super::vpn::{Protocol, VpnProvider};
 use super::wireguard::Wireguard;
@@ -208,12 +208,7 @@ impl NetworkNamespace {
         self.openvpn.as_ref().unwrap().check_if_running()
     }
 
-    pub fn write_lockfile(
-        self,
-        command: &str,
-        username: &str,
-        group: &str,
-    ) -> anyhow::Result<Self> {
+    pub fn write_lockfile(self, command: &str) -> anyhow::Result<Self> {
         let mut lockfile_path = config_dir()?;
         lockfile_path.push(format!("vopono/locks/{}", self.name));
         std::fs::create_dir_all(&lockfile_path)?;
@@ -232,22 +227,7 @@ impl NetworkNamespace {
         write!(f, "{}", lock_string)?;
         debug!("Lockfile written: {}", lockfile_path.display());
 
-        // TODO: DRY
-        let mut lockfile_path = config_dir()?;
-        lockfile_path.push("vopono/locks/");
-        sudo_command(&[
-            "chown",
-            "-R",
-            username,
-            lockfile_path.to_str().expect("No valid config dir"),
-        ])?;
-        sudo_command(&[
-            "chgrp",
-            "-R",
-            group,
-            lockfile_path.to_str().expect("No valid config dir"),
-        ])?;
-
+        set_config_permissions()?;
         Ok(lock.ns)
     }
 }

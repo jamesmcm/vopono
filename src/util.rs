@@ -72,18 +72,14 @@ pub fn set_config_permissions() -> anyhow::Result<()> {
     check_dir.push("vopono");
     let username = get_username()?;
     let group = get_group(&username)?;
-    sudo_command(&[
-        "chown",
-        "-R",
-        username.as_str(),
-        check_dir.to_str().expect("No valid config dir"),
-    ])?;
-    sudo_command(&[
-        "chgrp",
-        "-R",
-        group.as_str(),
-        check_dir.to_str().expect("No valid config dir"),
-    ])?;
+
+    let group = nix::unistd::Group::from_name(&group)?.map(|x| x.gid);
+    let user = nix::unistd::User::from_name(&username)?.map(|x| x.uid);
+    for entry in WalkDir::new(check_dir).into_iter().filter_map(|e| e.ok()) {
+        if entry.path().is_file() {
+            nix::unistd::chown(entry.path(), user, group)?;
+        }
+    }
     Ok(())
 }
 
