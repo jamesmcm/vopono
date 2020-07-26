@@ -212,6 +212,40 @@ $ vopono sync
 Alternatively use the `vopono-bin` package if you don't want to compile
 from source.
 
+### Raspberry Pi (Raspbian)
+
+Download and install the `vopono_x.y.z_armhf.deb` package from the
+releases page:
+
+```bash
+$ sudo dpkg -i vopono_0.2.1_armhf.deb
+```
+
+You will need to install OpenVPN (available in the Raspbian repos):
+
+```bash
+$ sudo apt install openvpn
+```
+
+You can then use vopono as above (note that the Chromium binary is
+`chromium-browser`):
+
+```bash
+$ vopono sync --protocol openvpn mullvad
+$ vopono exec --provider mullvad --server sweden chromium-browser
+```
+
+Screenshot of vopono with OpenVPN running on Raspbian:
+
+![Raspbian Screenshot](rpi_screen.png)
+
+Note Wireguard is not in the Raspbian repositories, so installing it is
+not trivial. You can follow [this guide](https://www.sigmdel.ca/michel/ha/wireguard/wireguard_02_en.html) to attempt it, but note that
+not only do you need to install Wireguard and `wireguard-tools` to have `wg`
+available, but also the `linux-headers` to ensure it works correctly
+(i.e. you don't just get `Protocol not supported` errors when trying to
+establish a connection).
+
 ### Debian + Ubuntu
 
 Install the deb package provided on the releases page.
