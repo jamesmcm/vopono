@@ -6,6 +6,7 @@ mod list;
 mod netns;
 mod network_interface;
 mod openvpn;
+mod providers;
 mod sync;
 mod sysctl;
 mod util;

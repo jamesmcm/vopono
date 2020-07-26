@@ -43,6 +43,12 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
     Ok(pathbuf)
 }
 
+pub fn vopono_dir() -> anyhow::Result<PathBuf> {
+    let mut dir = config_dir()?;
+    dir.push("vopono");
+    Ok(dir)
+}
+
 // TODO: DRY with above
 pub fn get_username() -> anyhow::Result<String> {
     if let Ok(user) = std::env::var("SUDO_USER") {
