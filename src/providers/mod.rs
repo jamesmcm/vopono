@@ -1,8 +1,12 @@
+mod pia;
+
 use crate::util::vopono_dir;
 use clap::arg_enum;
 use serde::{Deserialize, Serialize};
-use std::net::Ipv4Addr;
+use std::fmt::Display;
+use std::net::IpAddr;
 use std::path::PathBuf;
+use std::string::ToString;
 
 // Command-line arguments use VpnProvider enum
 // We pattern match on that to build an instance of the actual provider struct
@@ -52,11 +56,46 @@ pub trait WireguardProvider: Provider {
 pub trait OpenVpnProvider: Provider {
     /// This method must create the OpenVPN .ovpn config files
     fn create_openvpn_config(&self) -> anyhow::Result<()>;
-    fn provider_dns(&self) -> Option<Ipv4Addr>;
+    fn provider_dns(&self) -> Option<Vec<IpAddr>>;
 
     fn openvpn_dir(&self) -> anyhow::Result<PathBuf> {
         let mut dir = self.provider_dir()?;
         dir.push("openvpn");
         Ok(dir)
+    }
+}
+
+/// Implement this trait for enums used as configuration choices e.g. when deciding which set of
+/// config files to generate
+/// The default option will be used if generated in non-interactive mode
+pub trait ConfigurationChoice: Display + Sized + Default {
+    /// Get all enum variants (this order will be used for other methods)
+    fn variants(&self) -> Vec<Self>;
+
+    /// Descriptions are a user-friendly descriptions for each enum variant
+    fn description(&self) -> Option<String>;
+
+    /// Launches a dialoguer single select menu for the enum
+    fn choose_one(&self) -> anyhow::Result<Self> {
+        let mut variants = self.variants();
+        let display_names = variants.iter().map(|x| x.to_string());
+        let descriptions = variants.iter().map(|x| x.description());
+        let index = dialoguer::Select::new()
+            .items(
+                display_names
+                    .into_iter()
+                    .zip(descriptions)
+                    .map(|x| {
+                        if x.1.is_some() {
+                            format!("{}: {}", x.0, x.1.unwrap())
+                        } else {
+                            x.0
+                        }
+                    })
+                    .collect::<Vec<String>>()
+                    .as_slice(),
+            )
+            .interact()?;
+        Ok(variants.remove(index))
     }
 }

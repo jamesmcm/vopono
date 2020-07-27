@@ -35,6 +35,8 @@ reqwest = {default-features = false, version = "0.10", features = ["blocking", "
 sysinfo = "0.14"
 base64 = "0.12"
 x25519-dalek = "0.6"
+strum = "0.18"
+strum_macros = "0.18"
 
 [package.metadata.rpm]
 package = "vopono"
