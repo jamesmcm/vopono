@@ -69,18 +69,22 @@ pub trait OpenVpnProvider: Provider {
 /// config files to generate
 /// The default option will be used if generated in non-interactive mode
 pub trait ConfigurationChoice: Display + Sized + Default {
+    /// Prompt string for the selector (automatically terminates in ':')
+    fn prompt() -> String;
+
     /// Get all enum variants (this order will be used for other methods)
-    fn variants(&self) -> Vec<Self>;
+    fn variants() -> Vec<Self>;
 
     /// Descriptions are a user-friendly descriptions for each enum variant
     fn description(&self) -> Option<String>;
 
     /// Launches a dialoguer single select menu for the enum
-    fn choose_one(&self) -> anyhow::Result<Self> {
-        let mut variants = self.variants();
+    fn choose_one() -> anyhow::Result<Self> {
+        let mut variants = Self::variants();
         let display_names = variants.iter().map(|x| x.to_string());
         let descriptions = variants.iter().map(|x| x.description());
         let index = dialoguer::Select::new()
+            .with_prompt(Self::prompt())
             .items(
                 display_names
                     .into_iter()
