@@ -1,19 +1,15 @@
-use super::{ConfigurationChoice, OpenVpnProvider, Provider};
+use super::PrivateInternetAccess;
+use super::{ConfigurationChoice, OpenVpnProvider};
+use log::debug;
 use reqwest::Url;
 use std::fmt::Display;
-use std::io::{Cursor, Read};
+use std::fs::create_dir_all;
+use std::fs::File;
+use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use zip::ZipArchive;
-
-pub struct PrivateInternetAccess {}
-
-impl Provider for PrivateInternetAccess {
-    fn alias(&self) -> String {
-        "pia".to_string()
-    }
-}
 
 impl OpenVpnProvider for PrivateInternetAccess {
     fn provider_dns(&self) -> Option<Vec<IpAddr>> {
@@ -27,22 +23,30 @@ impl OpenVpnProvider for PrivateInternetAccess {
         let config_choice = ConfigType::choose_one()?;
         let zipfile = reqwest::blocking::get(config_choice.url()?)?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
+        let openvpn_dir = self.openvpn_dir()?;
+        create_dir_all(&openvpn_dir)?;
         for i in 0..zip.len() {
             // For each file, detect if ovpn, crl or crt
             // Modify auth line for config
             // Write to config dir
             // TODO: Note we need to run OpenVPN with the working directory as this config dir so
             // it detects the crt and crl files
+            let mut file_contents: Vec<u8> = Vec::with_capacity(2048);
             let mut file = zip.by_index(i).unwrap();
-            println!("Filename: {}", file.name());
-            let first_byte = file.bytes().next().unwrap()?;
-            println!("{}", first_byte);
+            file.read_to_end(&mut file_contents)?;
+
+            let filename = file.name();
+            debug!("Reading file: {}", file.name());
+            // TODO: May need to remove auth-user-pass line if argument does not override
+            let mut outfile =
+                File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
+            outfile.write(file_contents.as_slice())?;
         }
         Ok(())
     }
 }
 
-#[derive(EnumIter)]
+#[derive(EnumIter, PartialEq)]
 enum ConfigType {
     DefaultConf,
     Ip,

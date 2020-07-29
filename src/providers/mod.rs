@@ -1,3 +1,4 @@
+mod mullvad;
 mod pia;
 
 use crate::util::vopono_dir;
@@ -68,7 +69,7 @@ pub trait OpenVpnProvider: Provider {
 /// Implement this trait for enums used as configuration choices e.g. when deciding which set of
 /// config files to generate
 /// The default option will be used if generated in non-interactive mode
-pub trait ConfigurationChoice: Display + Sized + Default {
+pub trait ConfigurationChoice: Display + Sized + Default + PartialEq {
     /// Prompt string for the selector (automatically terminates in ':')
     fn prompt() -> String;
 
@@ -99,6 +100,7 @@ pub trait ConfigurationChoice: Display + Sized + Default {
                     .collect::<Vec<String>>()
                     .as_slice(),
             )
+            .default(variants.iter().position(|x| *x == Self::default()).unwrap())
             .interact()?;
         Ok(variants.remove(index))
     }
