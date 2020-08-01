@@ -1,3 +1,5 @@
+pub mod wireguard;
+
 use super::list::get_lock_namespaces;
 use anyhow::{anyhow, Context};
 use directories_next::BaseDirs;
@@ -264,5 +266,13 @@ pub fn elevate_privileges() -> anyhow::Result<()> {
     } else if std::env::var("SUDO_USER").is_err() {
         warn!("Running vopono as root user directly!");
     }
+    Ok(())
+}
+
+pub fn delete_all_files_in_dir(dir: &PathBuf) -> anyhow::Result<()> {
+    dir.read_dir()?
+        .flatten()
+        .map(|x| std::fs::remove_file(x.path()))
+        .collect::<Result<Vec<()>, std::io::Error>>()?;
     Ok(())
 }

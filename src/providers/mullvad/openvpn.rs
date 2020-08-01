@@ -1,14 +1,16 @@
 use super::Mullvad;
 use super::{ConfigurationChoice, OpenVpnProvider};
 use crate::vpn::OpenVpnProtocol;
-use log::{debug, warn};
+use anyhow::Context;
+use log::warn;
 use rand::seq::SliceRandom;
 use reqwest::blocking::Client;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::create_dir_all;
 use std::fs::File;
-use std::io::{Cursor, Read, Write};
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -45,7 +47,7 @@ impl OpenVpnProvider for Mullvad {
 
     fn create_openvpn_config(&self) -> anyhow::Result<()> {
         let openvpn_dir = self.openvpn_dir()?;
-        create_dir_all(openvpn_dir)?;
+        create_dir_all(&openvpn_dir)?;
 
         let client = Client::new();
         let relays: Vec<OpenVpnRelay> = client
@@ -93,19 +95,72 @@ impl OpenVpnProvider for Mullvad {
         // Group relays by country
         // Generate config file per relay given options
         // Naming: country_name-hostalias.ovpn
+        let mut file_set: HashMap<String, Vec<String>> = HashMap::with_capacity(64);
+        for relay in relays.into_iter().filter(|x| x.active) {
+            let file_name = format!(
+                "{}-{}.ovpn",
+                relay.country_name.to_lowercase().replace(' ', "_"),
+                relay.country_code
+            );
 
-        // if using bridges, add all bridges
-        // route ${b.ipv4_addr_in} 255.255.255.255 net_gateway # ${b.hostname}
-        //
-        // if using IPs
-        // remote ${r.ipv4_addr_in} ${port} # ${r.hostname}
-        // else
-        // remote ${r.hostname}.mullvad.net ${port}
-        //
-        // if relays.len() > 1
-        // remote-random
+            let remote_string = if use_ips {
+                format!(
+                    "remote {} {} # {}",
+                    relay.ipv4_addr_in, port, relay.hostname
+                )
+            } else {
+                format!("remote {}.mullvad.net {}", relay.hostname, port)
+            };
 
-        // Write config files
+            file_set
+                .entry(file_name)
+                .or_insert(vec![])
+                .push(remote_string);
+        }
+
+        let bridge_vec = if use_bridges {
+            let bridges: Vec<OpenVpnRelay> = client
+                .get("https://api.mullvad.net/www/relays/bridge/")
+                .send()?
+                .json()?;
+            bridges
+                .into_iter()
+                .filter(|x| x.active)
+                .map(|x| {
+                    format!(
+                        "route {} 255.255.255.255 net_gateway # {}",
+                        x.ipv4_addr_in, x.hostname
+                    )
+                })
+                .collect::<Vec<String>>()
+        } else {
+            Vec::new()
+        };
+
+        for (file_name, remote_vec) in file_set.into_iter() {
+            let mut file = File::create(&openvpn_dir.join(file_name))?;
+            write!(file, "{}", settings.join("\n"))?;
+
+            write!(file, "{}", remote_vec.join("\n"))?;
+            if remote_vec.len() > 1 {
+                write!(file, "{}", "remote-random")?;
+            }
+
+            if bridge_vec.len() > 0 {
+                write!(file, "{}", bridge_vec.join("\n"))?;
+            }
+        }
+
+        // Write CA cert
+
+        let ca = include_str!("mullvad_ca.crt");
+        {
+            let file = File::create(openvpn_dir.join("mullvad_ca.crt"))
+                .context("Could not create mullvad CA file")?;
+            let mut write_buf = std::io::BufWriter::new(file);
+            write!(write_buf, "{}", ca)?;
+        }
+
         Ok(())
     }
 }

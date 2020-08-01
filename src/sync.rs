@@ -26,47 +26,6 @@ use std::str::FromStr;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 #[derive(Deserialize, Debug)]
-struct AuthToken {
-    auth_token: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct WgKey {
-    public: String,
-    private: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct WgPeer {
-    key: WgKey,
-    ipv4_address: ipnet::Ipv4Net,
-    ipv6_address: ipnet::Ipv6Net,
-    ports: Vec<u16>,
-    can_add_ports: bool,
-}
-
-impl Display for WgPeer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.key.public)
-    }
-}
-
-#[derive(Deserialize, Debug)]
-struct UserInfo {
-    max_ports: u8,
-    active: bool,
-    max_wg_peers: u8,
-    can_add_wg_peers: bool,
-    wg_peers: Vec<WgPeer>,
-}
-
-// TODO: use Json::Value to remove this?
-#[derive(Deserialize, Debug)]
-struct UserResponse {
-    account: UserInfo,
-}
-
-#[derive(Deserialize, Debug)]
 struct Relay {
     hostname: String,
     country_code: String,
@@ -483,43 +442,6 @@ pub fn mullvad_wireguard(port: Option<u16>) -> anyhow::Result<()> {
         list_path.display()
     );
     Ok(())
-}
-
-fn generate_keypair(client: &Client, auth_token: &str) -> anyhow::Result<WgKey> {
-    // Generate new keypair
-    let private = StaticSecret::new(&mut OsRng);
-    let public = PublicKey::from(&private);
-    let public_key = base64::encode(public.as_bytes());
-    let private_key = base64::encode(&private.to_bytes());
-
-    let keypair = WgKey {
-        public: public_key,
-        private: private_key,
-    };
-    debug!("Generated keypair: {:?}", keypair);
-    // Submit public key to Mullvad
-    let mut map = HashMap::new();
-    map.insert("pubkey", keypair.public.clone());
-    client
-        .post("https://api.mullvad.net/www/wg-pubkeys/add/")
-        .header(AUTHORIZATION, format!("Token {}", auth_token))
-        .json(&map)
-        .send()?
-        .error_for_status()
-        .context("Failed to upload keypair to Mullvad")?;
-    info!("Generated keypair submitted to Mullvad. Private key will be saved in generated config files.");
-    Ok(keypair)
-}
-
-fn generate_public_key(private_key: &str) -> anyhow::Result<String> {
-    let private_bytes = base64::decode(private_key)?;
-    let mut byte_array = [0; 32];
-    byte_array.copy_from_slice(&private_bytes);
-
-    let private = StaticSecret::from(byte_array);
-    let public = PublicKey::from(&private);
-    let public_key = base64::encode(public.as_bytes());
-    Ok(public_key)
 }
 
 pub fn pia_openvpn(port: Option<u16>) -> anyhow::Result<()> {
