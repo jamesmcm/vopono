@@ -1,5 +1,6 @@
 mod mullvad;
 mod pia;
+mod tigervpn;
 
 use crate::util::vopono_dir;
 use clap::arg_enum;

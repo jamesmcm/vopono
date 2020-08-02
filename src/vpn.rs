@@ -1,3 +1,4 @@
+use super::providers::ConfigurationChoice;
 use super::util::config_dir;
 use anyhow::{anyhow, Context};
 use clap::arg_enum;
@@ -10,6 +11,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::net::IpAddr;
 use std::str::FromStr;
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
 
 arg_enum! {
     #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
@@ -48,10 +51,30 @@ impl VpnProvider {
     }
 }
 
-#[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Clone, Deserialize, Serialize, EnumIter)]
 pub enum OpenVpnProtocol {
     UDP,
     TCP,
+}
+
+impl Default for OpenVpnProtocol {
+    fn default() -> Self {
+        Self::UDP
+    }
+}
+
+impl ConfigurationChoice for OpenVpnProtocol {
+    fn prompt() -> String {
+        "Which OpenVPN connection protocol do you wish to use".to_string()
+    }
+
+    fn variants() -> Vec<Self> {
+        OpenVpnProtocol::iter().collect()
+    }
+
+    fn description(&self) -> Option<String> {
+        None
+    }
 }
 
 impl FromStr for OpenVpnProtocol {
