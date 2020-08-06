@@ -3,6 +3,7 @@ mod pia;
 mod tigervpn;
 
 use crate::util::vopono_dir;
+use anyhow::anyhow;
 use clap::arg_enum;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -39,6 +40,26 @@ impl VpnProvider {
             Self::Mullvad => Box::new(mullvad::Mullvad {}),
             Self::TigerVpn => Box::new(tigervpn::TigerVPN {}),
             Self::Custom => todo!(),
+        }
+    }
+
+    // TODO: Make OpenVPN return Result too
+    pub fn get_dyn_openvpn_provider(&self) -> Box<dyn OpenVpnProvider> {
+        match self {
+            Self::PrivateInternetAccess => Box::new(pia::PrivateInternetAccess {}),
+            Self::Mullvad => Box::new(mullvad::Mullvad {}),
+            Self::TigerVpn => Box::new(tigervpn::TigerVPN {}),
+            Self::Custom => todo!(),
+        }
+    }
+
+    pub fn get_dyn_wireguard_provider(&self) -> anyhow::Result<Box<dyn WireguardProvider>> {
+        match self {
+            Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
+            Self::Custom => todo!(),
+            _ => Err(anyhow!(
+                "Wireguard not implemented for PrivateInternetAccess"
+            )),
         }
     }
 }

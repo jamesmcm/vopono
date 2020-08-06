@@ -34,13 +34,23 @@ pub fn sync_menu() -> anyhow::Result<()> {
 }
 
 pub fn synch(provider: VpnProvider, protocol: Option<Protocol>) -> anyhow::Result<()> {
-    let provider = provider.get_dyn_provider();
     match protocol {
         Some(Protocol::OpenVpn) => {
+            let provider = provider.get_dyn_openvpn_provider();
+            provider.create_openvpn_config()?;
             // downcast?
         }
-        Some(Protocol::Wireguard) => {}
-        None => todo!(),
+        Some(Protocol::Wireguard) => {
+            let provider = provider.get_dyn_wireguard_provider()?;
+            provider.create_wireguard_config()?;
+        }
+        None => {
+            if let Ok(p) = provider.get_dyn_wireguard_provider() {
+                p.create_wireguard_config()?;
+            }
+            let provider = provider.get_dyn_openvpn_provider();
+            provider.create_openvpn_config()?;
+        }
     }
 
     set_config_permissions()?;

@@ -21,6 +21,7 @@ use list::output_list;
 use log::{debug, error, info, LevelFilter};
 use netns::NetworkNamespace;
 use network_interface::{get_active_interfaces, NetworkInterface};
+use providers::VpnProvider;
 use std::io::{self, Write};
 use structopt::StructOpt;
 use sync::synch;
@@ -28,8 +29,7 @@ use sysctl::SysCtl;
 use util::clean_dead_namespaces;
 use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet};
 use util::{config_dir, elevate_privileges};
-use vpn::VpnProvider;
-use vpn::{get_auth, get_protocol, Protocol};
+use vpn::{get_auth, Protocol};
 use wireguard::get_config_from_alias;
 
 // TODO:
