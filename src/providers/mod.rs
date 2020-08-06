@@ -31,6 +31,18 @@ pub enum VpnProvider {
 }
 }
 
+// TODO: Handle custom provider here
+impl VpnProvider {
+    pub fn get_dyn_provider(&self) -> Box<dyn Provider> {
+        match self {
+            Self::PrivateInternetAccess => Box::new(pia::PrivateInternetAccess {}),
+            Self::Mullvad => Box::new(mullvad::Mullvad {}),
+            Self::TigerVpn => Box::new(tigervpn::TigerVPN {}),
+            Self::Custom => todo!(),
+        }
+    }
+}
+
 /// The base trait for any VPN provider
 pub trait Provider {
     fn alias(&self) -> String;

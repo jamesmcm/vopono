@@ -3,53 +3,15 @@ use super::util::config_dir;
 use anyhow::{anyhow, Context};
 use clap::arg_enum;
 use dialoguer::{Input, Password};
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
-use std::net::IpAddr;
 use std::str::FromStr;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
-
-arg_enum! {
-    #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
-pub enum VpnProvider {
-    PrivateInternetAccess,
-    Mullvad,
-    TigerVpn,
-    Custom,
-}
-}
-
-impl VpnProvider {
-    pub fn alias(&self) -> String {
-        match self {
-            Self::PrivateInternetAccess => String::from("pia"),
-            Self::Mullvad => String::from("mv"),
-            Self::TigerVpn => String::from("tig"),
-            Self::Custom => String::from("cus"),
-        }
-    }
-
-    pub fn dns(&self) -> anyhow::Result<Vec<IpAddr>> {
-        let res = match self {
-            Self::PrivateInternetAccess => vec![
-                IpAddr::from_str("209.222.18.222"),
-                IpAddr::from_str("209.222.18.218"),
-            ],
-            Self::Mullvad => vec![IpAddr::from_str("193.138.218.74")],
-            Self::TigerVpn => vec![IpAddr::from_str("8.8.8.8"), IpAddr::from_str("8.8.4.4")],
-            Self::Custom => vec![IpAddr::from_str("8.8.8.8"), IpAddr::from_str("8.8.4.4")],
-        };
-
-        Ok(res
-            .into_iter()
-            .collect::<Result<Vec<IpAddr>, std::net::AddrParseError>>()?)
-    }
-}
 
 #[derive(Debug, PartialEq, Clone, Deserialize, Serialize, EnumIter)]
 pub enum OpenVpnProtocol {
@@ -121,30 +83,6 @@ pub struct VpnServer {
     pub host: String,
     pub port: Option<u16>,
     pub protocol: Option<OpenVpnProtocol>,
-}
-
-pub fn get_serverlist(provider: &VpnProvider) -> anyhow::Result<Vec<VpnServer>> {
-    let mut list_path = config_dir()?;
-    list_path.push(format!(
-        "vopono/{}/openvpn/serverlist.csv",
-        provider.alias()
-    ));
-    let file = File::open(&list_path).with_context(|| {
-        format!(
-            "Could not get serverlist for provider: {}, path: {}",
-            provider.to_string(),
-            list_path.to_string_lossy()
-        )
-    })?;
-    let mut rdr = csv::ReaderBuilder::new()
-        .has_headers(false)
-        .from_reader(file);
-    let mut resultvec = Vec::new();
-
-    for row in rdr.deserialize() {
-        resultvec.push(row?);
-    }
-    Ok(resultvec)
 }
 
 // OpenVPN
@@ -252,36 +190,5 @@ pub fn get_auth(provider: &VpnProvider) -> anyhow::Result<()> {
             info!("Credentials written to: {}", auth_path.to_string_lossy());
             Ok(())
         }
-    }
-}
-
-// TODO: For providers that provide both, check if system has wireguard capability first for
-// default
-pub fn get_protocol(
-    provider: &VpnProvider,
-    protocol: Option<Protocol>,
-) -> anyhow::Result<Protocol> {
-    match protocol {
-        Some(Protocol::Wireguard) => match provider {
-            VpnProvider::Mullvad => Ok(Protocol::Wireguard),
-            VpnProvider::TigerVpn => {
-                error!("Wireguard not implemented for TigerVPN");
-                Err(anyhow!("Wireguard not implemented for TigerVPN"))
-            }
-            VpnProvider::PrivateInternetAccess => {
-                error!("Wireguard not implemented for PrivateInternetAccess");
-                Err(anyhow!(
-                    "Wireguard not implemented for PrivateInternetAccess"
-                ))
-            }
-            VpnProvider::Custom => Ok(Protocol::Wireguard),
-        },
-        Some(Protocol::OpenVpn) => Ok(Protocol::OpenVpn),
-        None => match provider {
-            VpnProvider::Mullvad => Ok(Protocol::Wireguard),
-            VpnProvider::TigerVpn => Ok(Protocol::OpenVpn),
-            VpnProvider::PrivateInternetAccess => Ok(Protocol::OpenVpn),
-            VpnProvider::Custom => Ok(Protocol::Wireguard),
-        },
     }
 }
