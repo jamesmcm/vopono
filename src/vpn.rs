@@ -4,7 +4,6 @@ use anyhow::{anyhow, Context};
 use clap::arg_enum;
 use dialoguer::{Input, Password};
 use log::{debug, info, warn};
-use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fs::File;
@@ -83,55 +82,6 @@ pub struct VpnServer {
     pub host: String,
     pub port: Option<u16>,
     pub protocol: Option<OpenVpnProtocol>,
-}
-
-// OpenVPN
-pub fn find_host_from_alias(
-    alias: &str,
-    serverlist: &[VpnServer],
-) -> anyhow::Result<(String, u16, String, OpenVpnProtocol)> {
-    let alias = alias.to_lowercase();
-    let record = serverlist
-        .iter()
-        .filter(|x| {
-            x.name.starts_with(&alias)
-                || x.alias.starts_with(&alias)
-                || x.name.replace("_", "-").starts_with(&alias)
-        })
-        .collect::<Vec<&VpnServer>>();
-
-    if record.is_empty() {
-        Err(anyhow!(
-            "Could not find server alias {} in serverlist",
-            &alias
-        ))
-    } else {
-        let record = record
-            .choose(&mut rand::thread_rng())
-            .expect("Could not find server alias");
-
-        let port = if record.port.is_none() {
-            warn!(
-                "Using default OpenVPN port 1194 for {}, as no port provided",
-                &record.host
-            );
-            1194
-        } else {
-            record.port.unwrap()
-        };
-
-        let protocol = if record.protocol.is_none() {
-            warn!(
-                "Using UDP as default OpenVPN protocol for {}, as no protocol provided",
-                &record.host
-            );
-            OpenVpnProtocol::UDP
-        } else {
-            record.protocol.clone().unwrap()
-        };
-        info!("Chosen server: {}:{} {}", record.host, port, protocol);
-        Ok((record.host.clone(), port, record.alias.clone(), protocol))
-    }
 }
 
 // TODO: Can we avoid storing plaintext passwords?

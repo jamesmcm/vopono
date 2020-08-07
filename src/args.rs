@@ -1,5 +1,6 @@
 use super::network_interface::NetworkInterface;
-use super::vpn::{Protocol, VpnProvider};
+use super::providers::VpnProvider;
+use super::vpn::Protocol;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use structopt::StructOpt;
@@ -25,8 +26,6 @@ pub enum Command {
         about = "Execute an application with the given VPN connection"
     )]
     Exec(ExecCommand),
-    #[structopt(name = "init", about = "Initialise vopono configuration")]
-    Init,
     #[structopt(
         name = "list",
         about = "List running vopono namespaces and applications"
@@ -37,11 +36,6 @@ pub enum Command {
         about = "Synchronise local server lists with VPN providers"
     )]
     Synch(SynchCommand),
-    // #[structopt(
-    //     name = "default",
-    //     about = "Get or set default VPN provider and server (UNIMPLEMENTED)"
-    // )]
-    // SetDefaults(SetDefaultsCommand),
 }
 
 #[derive(StructOpt)]
@@ -103,12 +97,3 @@ pub struct ListCommand {
     #[structopt(possible_values = &["namespaces", "applications"])]
     pub list_type: Option<String>,
 }
-// #[derive(StructOpt)]
-// pub struct SetDefaultsCommand {
-//     #[structopt(long = "provider", short="p", possible_values=&VpnProvider::variants())]
-//     pub vpn_provider: Option<VpnProvider>,
-
-//     /// VPN Server (if not given will use default)
-//     #[structopt(long = "server", short = "s")]
-//     pub server: String,
-// }

@@ -3,6 +3,7 @@ mod pia;
 mod tigervpn;
 
 use crate::util::vopono_dir;
+use crate::vpn::Protocol;
 use anyhow::anyhow;
 use clap::arg_enum;
 use serde::{Deserialize, Serialize};
@@ -44,11 +45,11 @@ impl VpnProvider {
     }
 
     // TODO: Make OpenVPN return Result too
-    pub fn get_dyn_openvpn_provider(&self) -> Box<dyn OpenVpnProvider> {
+    pub fn get_dyn_openvpn_provider(&self) -> anyhow::Result<Box<dyn OpenVpnProvider>> {
         match self {
-            Self::PrivateInternetAccess => Box::new(pia::PrivateInternetAccess {}),
-            Self::Mullvad => Box::new(mullvad::Mullvad {}),
-            Self::TigerVpn => Box::new(tigervpn::TigerVPN {}),
+            Self::PrivateInternetAccess => Ok(Box::new(pia::PrivateInternetAccess {})),
+            Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
+            Self::TigerVpn => Ok(Box::new(tigervpn::TigerVPN {})),
             Self::Custom => todo!(),
         }
     }
@@ -68,10 +69,10 @@ impl VpnProvider {
 pub trait Provider {
     fn alias(&self) -> String;
 
+    fn default_protocol(&self) -> Protocol;
+
     fn provider_dir(&self) -> anyhow::Result<PathBuf> {
-        let mut dir = vopono_dir()?;
-        dir.push(self.alias());
-        Ok(dir)
+        Ok(vopono_dir()?.join(self.alias()))
     }
 }
 
@@ -81,9 +82,7 @@ pub trait WireguardProvider: Provider {
     fn create_wireguard_config(&self) -> anyhow::Result<()>;
 
     fn wireguard_dir(&self) -> anyhow::Result<PathBuf> {
-        let mut dir = self.provider_dir()?;
-        dir.push("wireguard");
-        Ok(dir)
+        Ok(self.provider_dir()?.join("wireguard"))
     }
 }
 
@@ -94,9 +93,7 @@ pub trait OpenVpnProvider: Provider {
     fn provider_dns(&self) -> Option<Vec<IpAddr>>;
 
     fn openvpn_dir(&self) -> anyhow::Result<PathBuf> {
-        let mut dir = self.provider_dir()?;
-        dir.push("openvpn");
-        Ok(dir)
+        Ok(self.provider_dir()?.join("openvpn"))
     }
 }
 

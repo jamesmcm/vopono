@@ -1,5 +1,6 @@
 use super::{ConfigurationChoice, OpenVpnProvider, Provider};
 use crate::vpn::OpenVpnProtocol;
+use crate::vpn::Protocol;
 use anyhow::Context;
 use serde::Deserialize;
 use std::fs::create_dir_all;
@@ -56,6 +57,10 @@ impl TigerVPN {
 impl Provider for TigerVPN {
     fn alias(&self) -> String {
         "tig".to_string()
+    }
+
+    fn default_protocol(&self) -> Protocol {
+        Protocol::OpenVpn
     }
 }
 

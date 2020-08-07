@@ -3,6 +3,7 @@ mod wireguard;
 
 use super::{ConfigurationChoice, OpenVpnProvider, Provider, WireguardProvider};
 use crate::util::wireguard::WgPeer;
+use crate::vpn::Protocol;
 use anyhow::anyhow;
 use dialoguer::Input;
 use serde::Deserialize;
@@ -32,6 +33,9 @@ pub struct Mullvad {}
 impl Provider for Mullvad {
     fn alias(&self) -> String {
         "mv".to_string()
+    }
+    fn default_protocol(&self) -> Protocol {
+        Protocol::Wireguard
     }
 }
 
