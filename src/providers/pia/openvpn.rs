@@ -47,7 +47,6 @@ impl OpenVpnProvider for PrivateInternetAccess {
             // For each file, detect if ovpn, crl or crt
             // Modify auth line for config
             // Write to config dir
-            // TODO: Note we need to run OpenVPN with the working directory as this config dir so
             // it detects the crt and crl files
             let mut file_contents: Vec<u8> = Vec::with_capacity(2048);
             let mut file = zip.by_index(i).unwrap();
@@ -55,7 +54,6 @@ impl OpenVpnProvider for PrivateInternetAccess {
 
             let filename = file.name();
             debug!("Reading file: {}", file.name());
-            // TODO: May need to remove auth-user-pass line if argument does not override
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
             outfile.write_all(file_contents.as_slice())?;

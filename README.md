@@ -21,7 +21,8 @@ need to enable the ports in your [Mullvad account](https://mullvad.net/en/accoun
 
 At the moment, both iptables and nftables are required. OpenVPN must be
 installed for using OpenVPN providers, and wireguard-tools must be
-installed for using Wireguard providers.
+installed for using Wireguard providers. shadowsocks-libev must be
+installed for Shadowsocks support (Mullvad OpenVPN bridges).
 
 ## Screenshot
 

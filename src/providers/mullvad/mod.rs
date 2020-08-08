@@ -13,7 +13,7 @@ struct AuthToken {
     auth_token: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct UserInfo {
     max_ports: u8,
     active: bool,

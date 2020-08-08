@@ -3,13 +3,13 @@ use serde::Deserialize;
 use std::fmt::Display;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct WgKey {
     pub public: String,
     pub private: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct WgPeer {
     pub key: WgKey,
     pub ipv4_address: ipnet::Ipv4Net,

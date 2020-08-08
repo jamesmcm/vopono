@@ -65,7 +65,7 @@ impl WireguardProvider for Mullvad {
         let user_info = user_info.account;
         debug!("Received user info: {:?}", user_info);
 
-        let keypair: WgKey = prompt_for_wg_key(&user_info, &client, &auth.auth_token)?;
+        let keypair: WgKey = prompt_for_wg_key(user_info, &client, &auth.auth_token)?;
 
         debug!("Chosen keypair: {:?}", keypair);
         // Get user info again in case we uploaded new key
@@ -158,7 +158,7 @@ struct WireguardRelay {
 }
 
 fn prompt_for_wg_key(
-    user_info: &UserInfo,
+    user_info: UserInfo,
     client: &Client,
     auth_token: &str,
 ) -> anyhow::Result<WgKey> {
@@ -182,31 +182,36 @@ fn prompt_for_wg_key(
             Mullvad::upload_wg_key(&client, auth_token, &keypair)?;
             Ok(keypair)
         } else {
+            let info_clone = user_info.clone();
             let private_key = Input::<String>::new()
                 .with_prompt(format!(
                     "Private key for {}",
                     user_info.wg_peers[selection].key.public
                 ))
-                .interact()?;
+        .validate_with(move |private_key: &str| -> Result<(), &str> {
 
             let private_key = private_key.trim();
 
             if private_key.len() != 44 {
-                return Err(anyhow!(
-                    "Expected private key length of 44 characters, received {}",
-                    private_key.len()
-                ));
+                return Err("Expected private key length of 44 characters"
+                );
             }
+            
+            match generate_public_key(private_key) {
+                Ok(public_key) => {
+            if public_key != info_clone.wg_peers[selection].key.public {
+                return Err("Private key does not match public key");
+            }
+            Ok(())
+                }
+                Err(_) => Err("Failed to generate public key")
+        }})
+                .interact()?;
 
-            let public_key = generate_public_key(private_key)?;
-            if public_key != user_info.wg_peers[selection].key.public {
-                // TODO: Allow user to try again?
-                return Err(anyhow!("Private key does not match public key",));
-            }
 
             Ok(WgKey {
                 public: user_info.wg_peers[selection].key.public.clone(),
-                private: private_key.to_string(),
+                private: private_key,
             })
         }
     } else if dialoguer::Confirm::new()

@@ -245,6 +245,7 @@ impl ConfigurationChoice for ConfigType {
     }
 }
 
+// Note we ignore ipv6 addr here
 #[derive(Deserialize, Debug)]
 struct OpenVpnRelay {
     hostname: String,
@@ -256,5 +257,4 @@ struct OpenVpnRelay {
     owned: bool,
     provider: String,
     ipv4_addr_in: std::net::Ipv4Addr,
-    ipv6_addr_in: std::net::Ipv6Addr,
 }

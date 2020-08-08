@@ -3,6 +3,7 @@ use super::util::set_config_permissions;
 use super::vpn::Protocol;
 use anyhow::bail;
 use dialoguer::MultiSelect;
+use log::info;
 use std::str::FromStr;
 
 pub fn sync_menu() -> anyhow::Result<()> {
@@ -36,19 +37,23 @@ pub fn sync_menu() -> anyhow::Result<()> {
 pub fn synch(provider: VpnProvider, protocol: Option<Protocol>) -> anyhow::Result<()> {
     match protocol {
         Some(Protocol::OpenVpn) => {
+            info!("Starting OpenVPN configuration...");
             let provider = provider.get_dyn_openvpn_provider()?;
             provider.create_openvpn_config()?;
             // downcast?
         }
         Some(Protocol::Wireguard) => {
+            info!("Starting Wireguard configuration...");
             let provider = provider.get_dyn_wireguard_provider()?;
             provider.create_wireguard_config()?;
         }
         None => {
             if let Ok(p) = provider.get_dyn_wireguard_provider() {
+                info!("Starting Wireguard configuration...");
                 p.create_wireguard_config()?;
             }
             if let Ok(p) = provider.get_dyn_openvpn_provider() {
+                info!("Starting OpenVPN configuration...");
                 p.create_openvpn_config()?;
             }
         }
