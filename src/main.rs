@@ -34,13 +34,11 @@ use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet};
 use vpn::{verify_auth, Protocol};
 
 // TODO:
-// - OpenVPN authentication for custom config
 // - Support update_resolv_conf with OpenVPN (i.e. get DNS server from OpenVPN headers)
 // - Disable ipv6 traffic when not routed?
 // - Test configuration for wireless interface for OpenVPN
 // - Allow for not saving OpenVPN creds to config
 // - Allow for choice between iptables and nftables and avoid mixed dependency
-// - Make provider and server prefix mandatory (not optional args)
 
 fn main() -> anyhow::Result<()> {
     // Get struct of args using structopt
@@ -134,11 +132,12 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         }
     }
 
-    let ns_name = format!(
-        "vopono_{}_{}",
-        provider.get_dyn_provider().alias(),
-        server_name
-    );
+    let alias = match provider {
+        VpnProvider::Custom => "custom".to_string(),
+        _ => provider.get_dyn_provider().alias(),
+    };
+
+    let ns_name = format!("vopono_{}_{}", alias, server_name);
 
     let mut ns;
     let _sysctl;
@@ -186,7 +185,13 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
 
                 let dns = command
                     .dns
-                    .or(provider.get_dyn_openvpn_provider()?.provider_dns())
+                    .or_else(|| {
+                        provider
+                            .get_dyn_openvpn_provider()
+                            .ok()
+                            .map(|x| x.provider_dns())
+                            .flatten()
+                    })
                     .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
                 ns.dns_config(&dns)?;

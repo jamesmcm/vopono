@@ -33,14 +33,13 @@ pub enum VpnProvider {
 }
 }
 
-// TODO: Handle custom provider here
 impl VpnProvider {
     pub fn get_dyn_provider(&self) -> Box<dyn Provider> {
         match self {
             Self::PrivateInternetAccess => Box::new(pia::PrivateInternetAccess {}),
             Self::Mullvad => Box::new(mullvad::Mullvad {}),
             Self::TigerVpn => Box::new(tigervpn::TigerVPN {}),
-            Self::Custom => todo!(),
+            Self::Custom => unimplemented!("Custom provider uses separate logic"),
         }
     }
 
@@ -50,14 +49,14 @@ impl VpnProvider {
             Self::PrivateInternetAccess => Ok(Box::new(pia::PrivateInternetAccess {})),
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
             Self::TigerVpn => Ok(Box::new(tigervpn::TigerVPN {})),
-            Self::Custom => todo!(),
+            Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
         }
     }
 
     pub fn get_dyn_wireguard_provider(&self) -> anyhow::Result<Box<dyn WireguardProvider>> {
         match self {
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
-            Self::Custom => todo!(),
+            Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
             _ => Err(anyhow!(
                 "Wireguard not implemented for PrivateInternetAccess"
             )),

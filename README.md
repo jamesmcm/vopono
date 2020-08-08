@@ -19,7 +19,9 @@ BitTorrent leaking for both the OpenVPN and Wireguard configurations.
 Mullvad port forwarding works for both Wireguard and OpenVPN. You will
 need to enable the ports in your [Mullvad account](https://mullvad.net/en/account/#/ports).
 
-At the moment, both iptables and nftables are required.
+At the moment, both iptables and nftables are required. OpenVPN must be
+installed for using OpenVPN providers, and wireguard-tools must be
+installed for using Wireguard providers.
 
 ## Screenshot
 
@@ -64,20 +66,16 @@ $ vopono sync
 Run vopono:
 
 ```bash
-$ vopono exec --provider mullvad --server se --protocol wireguard "transmission-gtk"
+$ vopono exec --provider mullvad --server sweden --protocol wireguard "transmission-gtk"
 ```
 
 The server prefix will be searched against available servers (and
 country names) and a random one will be chosen (and reported in the terminal).
 
-#### Custom Port
+#### Custom Settings
 
-Note you can set a custom port in the Wireguard configuration by running
-`vopono sync` with the `--port` argument:
-
-```bash
-$ vopono sync --protocol wireguard --port 31337
-```
+The sync menu will prompt you for any custom settings (i.e. ports used,
+and connection protocol for OpenVPN, etc.)
 
 Valid ports for Mullvad Wireguard are: 53, 4000-33433, 33565-51820 and 52000-60000.
 
@@ -108,13 +106,12 @@ $ vopono exec --provider privateinternetaccess --server mexico "firefox"
 ```
 
 The server prefix will be searched against available servers (both
-server names and aliases in the provider's `serverlist.csv`) and a
+server names and aliases in the provider's configuration files) and a
 random one will be chosen (and reported in the terminal).
 
-Place your username and password in
-`~/.config/vopono/pia/openvpn/auth.txt` - the username on the first
-line, and the password on the second (with a newline). Otherwise you
-will be prompted for your credentials.
+The sync process will save your credentials to a file in the
+config directory of the provider, so it can be passed to OpenVPN.
+If it is missing you will be prompted for your credentials.
 
 For PrivateInternetAccess these should be the same as your account
 credentials.
@@ -128,12 +125,8 @@ For Mullvad your OpenVPN credentials are your account code as your username, and
 
 By default vopono uses the UDP configuration of the VPN providers.
 
-You can use the TCP configurations by running `vopono sync` with the
-`--port` argument where the port is a valid TCP port for this provider:
-
-```bash
-$ vopono sync --protocol openvpn --port 443 mullvad
-```
+You can use the TCP configurations by running `vopono sync` and choosing
+that option from the provider configuration.
 
 For Mullvad, valid ports are: 1300, 1301, 1302, 1194, 1195, 1196, 1197, or 53 for UDP, and 
 80 or 443 for TCP,
@@ -159,11 +152,10 @@ $ vopono -v exec --custom ~/custom_wireguard.conf --protocol wireguard "firefox"
 $ vopono -v exec --custom ./custom_openvpn.ovpn --protocol openvpn "firefox"
 ```
 
-Note that in the OpenVPN case the command must be executed in the same
-directory as any accompanying files (CA certificates, authentication
-files, etc.) and the user authentication must be by file (OpenVPN will
-fail to request user and password otherwise, due to being launched in
-the background).
+Note that in the OpenVPN case the vopono will execute OpenVPN from the same
+directory as the config file itself. So any accompanying files (CA certificates, authentication
+files, etc.) must be in the same directory with the file if using
+relative paths in the config file.
 
 ### Listing running namespaces and applications
 
@@ -278,9 +270,6 @@ $ rustc --version
 * OpenVPN credentials are always stored in plaintext in configuration - may add
   option to not store credentials, but it seems OpenVPN needs them
   provided in plaintext.
-* Configuration of OpenVPN connection is limited - support may be added for
-  different keylengths, etc. in the future, for now this can be done by
-  directly editing the generated config files in `~/.config/vopono`
 
 ## License
 

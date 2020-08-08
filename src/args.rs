@@ -47,15 +47,11 @@ pub struct SynchCommand {
     /// VPN Protocol (if not given will try to sync both)
     #[structopt(long = "protocol", short="c", possible_values = &Protocol::variants(), case_insensitive = true)]
     pub protocol: Option<Protocol>,
-
-    /// Port override (must be valid port for provider - use this to set OpenVPN protocol too)
-    #[structopt(long = "port", short = "p")]
-    pub port: Option<u16>,
 }
 
 #[derive(StructOpt)]
 pub struct ExecCommand {
-    /// VPN Provider (if not given will use default)
+    /// VPN Provider (must be given unless using custom config)
     #[structopt(long = "provider", short="p", possible_values = &VpnProvider::variants(), case_insensitive = true)]
     pub vpn_provider: Option<VpnProvider>,
 
@@ -67,7 +63,7 @@ pub struct ExecCommand {
     #[structopt(long = "interface", short = "i", case_insensitive = true)]
     pub interface: Option<NetworkInterface>,
 
-    /// VPN Server (if not given will use default)
+    /// VPN Server prefix (must be given unless using custom config)
     #[structopt(long = "server", short = "s")]
     pub server: Option<String>,
 
@@ -78,7 +74,7 @@ pub struct ExecCommand {
     #[structopt(long = "user", short = "u")]
     pub user: Option<String>,
 
-    /// Custom VPN Provider - OpenVPN or Wireguard config file
+    /// Custom VPN Provider - OpenVPN or Wireguard config file (will override other settings)
     #[structopt(parse(from_os_str), long = "custom")]
     pub custom_config: Option<PathBuf>,
 

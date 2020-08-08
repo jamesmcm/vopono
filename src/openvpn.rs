@@ -94,6 +94,7 @@ impl OpenVpn {
             ));
         }
         if buffer.contains("Options error") {
+            error!("OpenVPN options error: {}", buffer);
             return Err(anyhow!("OpenVPN options error, use -v for full log output"));
         }
 
