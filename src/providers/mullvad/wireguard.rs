@@ -1,5 +1,5 @@
 use super::Mullvad;
-use super::{request_mullvad_username, AuthToken, UserInfo, UserResponse, WireguardProvider};
+use super::{AuthToken, UserInfo, UserResponse, WireguardProvider};
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::{generate_keypair, generate_public_key, WgKey};
 use crate::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
@@ -47,7 +47,7 @@ impl WireguardProvider for Mullvad {
             .send()?
             .json()?;
 
-        let username = request_mullvad_username()?;
+        let username = self.request_mullvad_username()?;
         let auth: AuthToken = client
             .get(&format!(
                 "https://api.mullvad.net/www/accounts/{}/",
@@ -219,7 +219,7 @@ fn prompt_for_wg_key(
                 Mullvad::upload_wg_key(client, auth_token, &keypair)?;
                 Ok(keypair)
         } else {
-            return Err(anyhow!("Wireguard requires a keypair, either upload one to Mullvad or let vopono generate one"))
+            Err(anyhow!("Wireguard requires a keypair, either upload one to Mullvad or let vopono generate one"))
     }
 }
 

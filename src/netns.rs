@@ -4,8 +4,9 @@ use super::network_interface::NetworkInterface;
 use super::openvpn::OpenVpn;
 use super::util::{config_dir, set_config_permissions, sudo_command};
 use super::veth_pair::VethPair;
-use super::vpn::{Protocol, VpnProvider};
+use super::vpn::Protocol;
 use super::wireguard::Wireguard;
+use crate::providers::VpnProvider;
 use anyhow::Context;
 use log::{debug, warn};
 use nix::unistd;
@@ -68,10 +69,13 @@ impl NetworkNamespace {
         command: &[&str],
         user: Option<String>,
         silent: bool,
+        set_dir: Option<PathBuf>,
     ) -> anyhow::Result<std::process::Child> {
         let mut handle = Command::new("ip");
         handle.args(&["netns", "exec", &self.name]);
-
+        if let Some(cdir) = set_dir {
+            handle.current_dir(cdir);
+        }
         let sudo_string = if user.is_some() {
             handle.args(&["sudo", "-u", user.as_ref().unwrap()]);
             Some(format!(" sudo -u {}", user.as_ref().unwrap()))
@@ -94,7 +98,7 @@ impl NetworkNamespace {
     }
 
     pub fn exec(&self, command: &[&str]) -> anyhow::Result<()> {
-        self.exec_no_block(command, None, false)?.wait()?;
+        self.exec_no_block(command, None, false, None)?.wait()?;
         Ok(())
     }
 
@@ -165,17 +169,15 @@ impl NetworkNamespace {
 
     pub fn run_openvpn(
         &mut self,
-        provider: &VpnProvider,
-        server_name: &str,
-        custom_config: Option<PathBuf>,
+        config_file: PathBuf,
+        auth_file: Option<PathBuf>,
         dns: &[IpAddr],
         use_killswitch: bool,
     ) -> anyhow::Result<()> {
         self.openvpn = Some(OpenVpn::run(
             &self,
-            provider,
-            server_name,
-            custom_config,
+            config_file,
+            auth_file,
             dns,
             use_killswitch,
         )?);

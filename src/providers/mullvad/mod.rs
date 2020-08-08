@@ -39,26 +39,27 @@ impl Provider for Mullvad {
     }
 }
 
-fn request_mullvad_username() -> anyhow::Result<String> {
-    let mut username = Input::<String>::new()
-        .with_prompt("Mullvad account number")
-        .validate_with(|username: &str| -> Result<(), &str> {
-            username
-                .to_string()
-                .retain(|c| !c.is_whitespace() && c.is_digit(10));
-            if username.len() != 16 {
-                return Err("Mullvad account number should be 16 digits!");
-            }
-            Ok(())
-        })
-        .interact()?;
+impl Mullvad {
+    fn request_mullvad_username(&self) -> anyhow::Result<String> {
+        let mut username = Input::<String>::new()
+            .with_prompt("Mullvad account number")
+            .validate_with(|username: &str| -> Result<(), &str> {
+                let mut username = username.to_string();
+                username.retain(|c| !c.is_whitespace() && c.is_digit(10));
+                if username.len() != 16 {
+                    return Err("Mullvad account number should be 16 digits!");
+                }
+                Ok(())
+            })
+            .interact()?;
 
-    username.retain(|c| !c.is_whitespace() && c.is_digit(10));
-    if username.len() != 16 {
-        return Err(anyhow!(
-            "Mullvad account number should be 16 digits!, parsed: {}",
-            username
-        ));
+        username.retain(|c| !c.is_whitespace() && c.is_digit(10));
+        if username.len() != 16 {
+            return Err(anyhow!(
+                "Mullvad account number should be 16 digits!, parsed: {}",
+                username
+            ));
+        }
+        Ok(username)
     }
-    Ok(username)
 }

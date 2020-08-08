@@ -10,6 +10,7 @@ impl ApplicationWrapper {
         application: &str,
         user: Option<String>,
     ) -> anyhow::Result<Self> {
+        // TODO: Could allow user to set custom working directory here
         let handle = netns.exec_no_block(
             application
                 .split_whitespace()
@@ -17,6 +18,7 @@ impl ApplicationWrapper {
                 .as_slice(),
             user,
             false,
+            None,
         )?;
         Ok(Self { handle })
     }
@@ -25,10 +27,4 @@ impl ApplicationWrapper {
         let output = self.handle.wait_with_output()?;
         Ok(output)
     }
-
-    // pub fn check_if_running(&mut self) -> anyhow::Result<bool> {
-    //     let output = self.handle.try_wait()?;
-
-    //     Ok(output.is_none())
-    // }
 }

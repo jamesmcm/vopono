@@ -91,6 +91,8 @@ pub trait OpenVpnProvider: Provider {
     /// This method must create the OpenVPN .ovpn config files
     fn create_openvpn_config(&self) -> anyhow::Result<()>;
     fn provider_dns(&self) -> Option<Vec<IpAddr>>;
+    fn prompt_for_auth(&self) -> anyhow::Result<(String, String)>;
+    fn auth_file_path(&self) -> anyhow::Result<PathBuf>;
 
     fn openvpn_dir(&self) -> anyhow::Result<PathBuf> {
         Ok(self.provider_dir()?.join("openvpn"))

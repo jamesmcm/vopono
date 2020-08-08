@@ -1,5 +1,6 @@
 use super::PrivateInternetAccess;
 use super::{ConfigurationChoice, OpenVpnProvider};
+use dialoguer::{Input, Password};
 use log::debug;
 use reqwest::Url;
 use std::fmt::Display;
@@ -7,6 +8,7 @@ use std::fs::create_dir_all;
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use zip::ZipArchive;
@@ -17,6 +19,22 @@ impl OpenVpnProvider for PrivateInternetAccess {
             IpAddr::V4(Ipv4Addr::new(209, 222, 18, 222)),
             IpAddr::V4(Ipv4Addr::new(209, 222, 18, 218)),
         ])
+    }
+
+    fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
+        let username = Input::<String>::new()
+            .with_prompt("PrivateInternetAccess username")
+            .interact()?;
+
+        let password = Password::new()
+            .with_prompt("Password")
+            .with_confirmation("Confirm password", "Passwords did not match")
+            .interact()?;
+        Ok((username, password))
+    }
+
+    fn auth_file_path(&self) -> anyhow::Result<PathBuf> {
+        Ok(self.openvpn_dir()?.join("auth.txt"))
     }
 
     fn create_openvpn_config(&self) -> anyhow::Result<()> {
@@ -40,8 +58,13 @@ impl OpenVpnProvider for PrivateInternetAccess {
             // TODO: May need to remove auth-user-pass line if argument does not override
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
-            outfile.write(file_contents.as_slice())?;
+            outfile.write_all(file_contents.as_slice())?;
         }
+
+        // Write OpenVPN credentials file
+        let (user, pass) = self.prompt_for_auth()?;
+        let mut outfile = File::create(self.auth_file_path()?)?;
+        write!(outfile, "{}\n{}", user, pass)?;
         Ok(())
     }
 }

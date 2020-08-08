@@ -29,9 +29,9 @@ use sync::{sync_menu, synch};
 use sysctl::SysCtl;
 use util::clean_dead_namespaces;
 use util::elevate_privileges;
+use util::get_config_from_alias;
 use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet};
-use vpn::{get_auth, Protocol};
-use wireguard::get_config_from_alias;
+use vpn::{verify_auth, Protocol};
 
 // TODO:
 // - OpenVPN authentication for custom config
@@ -117,7 +117,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // Check protocol is valid for provider
     let protocol = command
         .protocol
-        .unwrap_or(provider.get_dyn_provider().default_protocol());
+        .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
 
     if provider != VpnProvider::Custom {
         // Check config files exist for provider
@@ -151,8 +151,18 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow!("No active network interface"))?,
         )?),
     }?;
-
     debug!("Interface: {}", &interface.name);
+
+    let config_file = if provider != VpnProvider::Custom {
+        let cdir = match protocol {
+            Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
+            Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
+        }?;
+        get_config_from_alias(&cdir, &server_name)?
+    } else {
+        command.custom_config.expect("No custom config provided")
+    };
+
     // Better to check for lockfile exists?
     if get_existing_namespaces()?.contains(&ns_name) {
         // If namespace exists, read its lock config
@@ -160,37 +170,28 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     } else {
         ns = NetworkNamespace::new(ns_name.clone(), provider.clone(), protocol.clone())?;
         let target_subnet = get_target_subnet()?;
+        ns.add_loopback()?;
+        ns.add_veth_pair()?;
+        ns.add_routing(target_subnet)?;
+        ns.add_iptables_rule(target_subnet, interface)?;
+        _sysctl = SysCtl::enable_ipv4_forwarding();
         match protocol {
             Protocol::OpenVpn => {
-                if command.custom_config.is_none() {
-                    // TODO: Also handle case where custom config does not provide user-pass
-                    get_auth(&provider)?;
-                }
-                ns.add_loopback()?;
-                ns.add_veth_pair()?;
-                ns.add_routing(target_subnet)?;
-                ns.add_iptables_rule(target_subnet, interface)?;
-                _sysctl = SysCtl::enable_ipv4_forwarding();
-                // TODO: Clean up nested unwrap
-                let dns = command.dns.unwrap_or(
-                    provider
-                        .get_dyn_openvpn_provider()?
-                        .provider_dns()
-                        .unwrap_or(vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]),
-                );
+                // Handle authentication check
+                let auth_file = if provider != VpnProvider::Custom {
+                    Some(verify_auth(provider.get_dyn_openvpn_provider()?)?)
+                } else {
+                    None
+                };
+
+                let dns = command
+                    .dns
+                    .or(provider.get_dyn_openvpn_provider()?.provider_dns())
+                    .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
                 ns.dns_config(&dns)?;
-                // TODO Change these calls to take config file path directly
-                // Put call to get config file from prefix above
-                // Then can use same call for custom and standard config? (deal with
-                // authentication for OpenVPN)
-                ns.run_openvpn(
-                    &provider,
-                    &server_name,
-                    command.custom_config,
-                    &dns,
-                    !command.no_killswitch,
-                )?;
+
+                ns.run_openvpn(config_file, auth_file, &dns, !command.no_killswitch)?;
                 debug!(
                     "Checking that OpenVPN is running in namespace: {}",
                     &ns_name
@@ -206,17 +207,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 }
             }
             Protocol::Wireguard => {
-                let config = if command.custom_config.is_some() {
-                    command.custom_config.unwrap()
-                } else {
-                    get_config_from_alias(&provider, &server_name)?
-                };
-                ns.add_loopback()?;
-                ns.add_veth_pair()?;
-                ns.add_routing(target_subnet)?;
-                ns.add_iptables_rule(target_subnet, interface)?;
-                _sysctl = SysCtl::enable_ipv4_forwarding();
-                ns.run_wireguard(config, !command.no_killswitch)?;
+                ns.run_wireguard(config_file, !command.no_killswitch)?;
             }
         }
     }

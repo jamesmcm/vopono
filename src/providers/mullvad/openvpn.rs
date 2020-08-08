@@ -12,6 +12,7 @@ use std::fs::create_dir_all;
 use std::fs::File;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
@@ -43,6 +44,15 @@ impl Mullvad {
 impl OpenVpnProvider for Mullvad {
     fn provider_dns(&self) -> Option<Vec<IpAddr>> {
         Some(vec![IpAddr::V4(Ipv4Addr::new(193, 138, 218, 74))])
+    }
+
+    fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
+        let username = self.request_mullvad_username()?;
+        Ok((username, "m".to_string()))
+    }
+
+    fn auth_file_path(&self) -> anyhow::Result<PathBuf> {
+        Ok(self.openvpn_dir()?.join("mullvad_userpass.txt"))
     }
 
     fn create_openvpn_config(&self) -> anyhow::Result<()> {
@@ -95,7 +105,7 @@ impl OpenVpnProvider for Mullvad {
         // Group relays by country
         // Generate config file per relay given options
         // Naming: country_name-hostalias.ovpn
-        let mut file_set: HashMap<String, Vec<String>> = HashMap::with_capacity(64);
+        let mut file_set: HashMap<String, Vec<String>> = HashMap::with_capacity(128);
         for relay in relays.into_iter().filter(|x| x.active) {
             let file_name = format!(
                 "{}-{}.ovpn",
@@ -114,7 +124,7 @@ impl OpenVpnProvider for Mullvad {
 
             file_set
                 .entry(file_name)
-                .or_insert(vec![])
+                .or_insert_with(Vec::new)
                 .push(remote_string);
         }
 
@@ -137,22 +147,26 @@ impl OpenVpnProvider for Mullvad {
             Vec::new()
         };
 
-        for (file_name, remote_vec) in file_set.into_iter() {
+        for (file_name, mut remote_vec) in file_set.into_iter() {
             let mut file = File::create(&openvpn_dir.join(file_name))?;
-            write!(file, "{}", settings.join("\n"))?;
+            writeln!(file, "{}", settings.join("\n"))?;
 
-            write!(file, "{}", remote_vec.join("\n"))?;
+            remote_vec.shuffle(&mut rand::thread_rng());
+            writeln!(
+                file,
+                "{}",
+                remote_vec[0..remote_vec.len().min(64)].join("\n")
+            )?;
             if remote_vec.len() > 1 {
-                write!(file, "{}", "remote-random")?;
+                writeln!(file, "remote-random")?;
             }
 
-            if bridge_vec.len() > 0 {
-                write!(file, "{}", bridge_vec.join("\n"))?;
+            if !bridge_vec.is_empty() {
+                writeln!(file, "{}", bridge_vec.join("\n"))?;
             }
         }
 
         // Write CA cert
-
         let ca = include_str!("mullvad_ca.crt");
         {
             let file = File::create(openvpn_dir.join("mullvad_ca.crt"))
@@ -161,6 +175,10 @@ impl OpenVpnProvider for Mullvad {
             write!(write_buf, "{}", ca)?;
         }
 
+        // Write OpenVPN credentials file
+        let (user, pass) = self.prompt_for_auth()?;
+        let mut outfile = File::create(self.auth_file_path()?)?;
+        write!(outfile, "{}\n{}", user, pass)?;
         Ok(())
     }
 }

@@ -1,13 +1,13 @@
 use super::providers::ConfigurationChoice;
-use super::util::config_dir;
+use crate::providers::OpenVpnProvider;
 use anyhow::{anyhow, Context};
 use clap::arg_enum;
-use dialoguer::{Input, Password};
-use log::{debug, info, warn};
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::str::FromStr;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -69,12 +69,6 @@ pub enum Protocol {
 }
 }
 
-// pub enum Firewall {
-//     IpTables,
-//     NfTables,
-//     Ufw,
-// }
-
 #[derive(Serialize, Deserialize)]
 pub struct VpnServer {
     pub name: String,
@@ -87,58 +81,32 @@ pub struct VpnServer {
 // TODO: Can we avoid storing plaintext passwords?
 // TODO: Allow not storing credentials
 // OpenVPN only
-pub fn get_auth(provider: &VpnProvider) -> anyhow::Result<()> {
-    let mut auth_path = config_dir()?;
-    auth_path.push(format!("vopono/{}/openvpn/auth.txt", provider.alias()));
-    let file = File::open(&auth_path);
+pub fn verify_auth(provider: Box<dyn OpenVpnProvider>) -> anyhow::Result<PathBuf> {
+    let auth_file = provider.auth_file_path()?;
+    let file = File::open(&auth_file);
     match file {
         Ok(f) => {
-            debug!("Read auth file: {}", auth_path.to_string_lossy());
+            debug!("Read auth file: {}", auth_file.to_string_lossy());
             let bufreader = BufReader::new(f);
             let mut iter = bufreader.lines();
+            // TODO: If thise fail, re-gen auth file
             let _username = iter.next().with_context(|| "No username")??;
             let _password = iter.next().with_context(|| "No password")??;
-            Ok(())
+            Ok(auth_file)
         }
         Err(_) => {
             debug!(
                 "No auth file: {} - prompting user",
-                auth_path.to_string_lossy()
+                auth_file.to_string_lossy()
             );
 
-            let user_prompt = match provider {
-                VpnProvider::Mullvad => "Mullvad account number",
-                VpnProvider::TigerVpn => {
-                    "OpenVPN username (see https://www.tigervpn.com/dashboard/geeks )"
-                }
-                VpnProvider::PrivateInternetAccess => "PrivateInternetAccess username",
-                VpnProvider::Custom => "OpenVPN username",
-            };
-            let mut username = Input::<String>::new().with_prompt(user_prompt).interact()?;
-            if *provider == VpnProvider::Mullvad {
-                username.retain(|c| !c.is_whitespace() && c.is_digit(10));
-                if username.len() != 16 {
-                    return Err(anyhow!(
-                        "Mullvad account number should be 16 digits!, parsed: {}",
-                        username
-                    ));
-                }
-            }
+            // Write OpenVPN credentials file
+            let (user, pass) = provider.prompt_for_auth()?;
+            let mut outfile = File::create(provider.auth_file_path()?)?;
+            write!(outfile, "{}\n{}", user, pass)?;
 
-            let password = if *provider == VpnProvider::Mullvad {
-                String::from("m")
-            } else {
-                Password::new()
-                    .with_prompt("Password")
-                    .with_confirmation("Confirm password", "Passwords did not match")
-                    .interact()?
-            };
-
-            let mut writefile = File::create(&auth_path)
-                .with_context(|| format!("Could not create auth file: {}", auth_path.display()))?;
-            write!(writefile, "{}\n{}\n", username, password)?;
-            info!("Credentials written to: {}", auth_path.to_string_lossy());
-            Ok(())
+            info!("Credentials written to: {}", auth_file.to_string_lossy());
+            Ok(auth_file)
         }
     }
 }

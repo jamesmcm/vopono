@@ -1,5 +1,4 @@
 use rand::rngs::OsRng;
-use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::fmt::Display;
 use x25519_dalek::{PublicKey, StaticSecret};

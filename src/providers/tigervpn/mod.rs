@@ -2,12 +2,14 @@ use super::{ConfigurationChoice, OpenVpnProvider, Provider};
 use crate::vpn::OpenVpnProtocol;
 use crate::vpn::Protocol;
 use anyhow::Context;
+use dialoguer::{Input, Password};
 use serde::Deserialize;
 use std::fs::create_dir_all;
 use std::fs::File;
 use std::include_str;
 use std::io::{Cursor, Write};
 use std::net::IpAddr;
+use std::path::PathBuf;
 
 pub struct TigerVPN {}
 
@@ -42,7 +44,9 @@ impl TigerVPN {
 
     fn get_serverlist() -> anyhow::Result<Vec<Server>> {
         let serverlist = include_str!("serverlist.csv");
-        let mut rdr = csv::Reader::from_reader(Cursor::new(serverlist));
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .from_reader(Cursor::new(serverlist));
         let mut out = Vec::with_capacity(16);
         for result in rdr.deserialize() {
             // Notice that we need to provide a type hint for automatic
@@ -69,11 +73,28 @@ impl OpenVpnProvider for TigerVPN {
         None
     }
 
+    fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
+        let username = Input::<String>::new()
+            .with_prompt(
+                "TigerVPN OpenVPN username (see https://www.tigervpn.com/dashboard/geeks )",
+            )
+            .interact()?;
+
+        let password = Password::new()
+            .with_prompt("Password")
+            .with_confirmation("Confirm password", "Passwords did not match")
+            .interact()?;
+        Ok((username, password))
+    }
+
+    fn auth_file_path(&self) -> anyhow::Result<PathBuf> {
+        Ok(self.openvpn_dir()?.join("auth.txt"))
+    }
     fn create_openvpn_config(&self) -> anyhow::Result<()> {
         let openvpn_dir = self.openvpn_dir()?;
-        create_dir_all(&openvpn_dir);
+        create_dir_all(&openvpn_dir)?;
         let protocol = OpenVpnProtocol::choose_one()?;
-        let mut settings = Self::get_default_openvpn_settings();
+        let settings = Self::get_default_openvpn_settings();
 
         let (port, proto_str) = match protocol {
             OpenVpnProtocol::UDP => ("1194", "udp"),
@@ -82,7 +103,7 @@ impl OpenVpnProvider for TigerVPN {
 
         for server in Self::get_serverlist()? {
             let filename = format!("{}-{}.ovpn", server.country_name, server.country_alias);
-            let file = File::create(openvpn_dir.join(filename))?;
+            let mut file = File::create(openvpn_dir.join(filename))?;
             let mut this_settings = settings.clone();
 
             let remote_str = format!("remote {} {} {}", server.hostname, port, proto_str);
@@ -98,6 +119,11 @@ impl OpenVpnProvider for TigerVPN {
             let mut write_buf = std::io::BufWriter::new(file);
             write!(write_buf, "{}", ca)?;
         }
+
+        // Write OpenVPN credentials file
+        let (user, pass) = self.prompt_for_auth()?;
+        let mut outfile = File::create(self.auth_file_path()?)?;
+        write!(outfile, "{}\n{}", user, pass)?;
         Ok(())
     }
 }
