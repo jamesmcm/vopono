@@ -47,6 +47,10 @@ Use the `include_str` macro to include any files that cannot be
 downloaded (i.e. if they are behind a captcha). Only do this when
 absolutely necessary as it will increase the binary size.
 
+The `ShadowsocksProvider` trait is provided for providers that allow
+proxying with Shadowsocks. Note that only Mullvad implements this at the
+moment so it may need further development when adding another provider.
+
 Note that since Mullvad is the only Wireguard provider at the moment,
 adding a new Wireguard provider may require more changes (i.e. if the
 MTU differs, etc.)

@@ -2,7 +2,7 @@ use super::netns::NetworkNamespace;
 use super::util::sudo_command;
 use anyhow::{anyhow, Context};
 use ipnet::IpNet;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -22,6 +22,14 @@ impl Wireguard {
         config_file: PathBuf,
         use_killswitch: bool,
     ) -> anyhow::Result<Self> {
+        if let Err(x) = which::which("wg") {
+            error!("wg binary not found. Is wireguard-tools installed and on PATH?");
+            return Err(anyhow!(
+                "wg binary not found. Is wireguard-tools installed and on PATH?: {:?}",
+                x
+            ));
+        }
+
         let config_string = std::fs::read_to_string(&config_file)?;
         // Create temp conf file
         {

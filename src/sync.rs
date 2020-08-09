@@ -22,7 +22,6 @@ pub fn sync_menu() -> anyhow::Result<()> {
         bail!("Must choose at least one VPN provider to sync");
     }
 
-    // TODO: Allow for overriding default port here
     for provider in selection
         .into_iter()
         .map(|x| VpnProvider::from_str(&variants[x]))
@@ -47,6 +46,7 @@ pub fn synch(provider: VpnProvider, protocol: Option<Protocol>) -> anyhow::Resul
             let provider = provider.get_dyn_wireguard_provider()?;
             provider.create_wireguard_config()?;
         }
+        // TODO: Fix this asking for same credentials twice
         None => {
             if let Ok(p) = provider.get_dyn_wireguard_provider() {
                 info!("Starting Wireguard configuration...");

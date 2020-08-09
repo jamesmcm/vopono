@@ -2,6 +2,7 @@ use super::dns_config::DnsConfig;
 use super::iptables::IpTables;
 use super::network_interface::NetworkInterface;
 use super::openvpn::OpenVpn;
+use super::shadowsocks::Shadowsocks;
 use super::util::{config_dir, set_config_permissions, sudo_command};
 use super::veth_pair::VethPair;
 use super::vpn::Protocol;
@@ -26,6 +27,7 @@ pub struct NetworkNamespace {
     pub openvpn: Option<OpenVpn>,
     pub wireguard: Option<Wireguard>,
     pub iptables: Option<IpTables>,
+    pub shadowsocks: Option<Shadowsocks>,
     pub provider: VpnProvider,
     pub protocol: Protocol,
 }
@@ -37,7 +39,6 @@ impl NetworkNamespace {
 
         std::fs::create_dir_all(&lockfile_path)?;
         debug!("Trying to read lockfile: {}", lockfile_path.display());
-        // TODO: Make this more robust - delete existing namespace if no lockfile
         let lockfile = std::fs::read_dir(lockfile_path)?
             .next()
             .expect("No lockfile")?;
@@ -59,6 +60,7 @@ impl NetworkNamespace {
             openvpn: None,
             wireguard: None,
             iptables: None,
+            shadowsocks: None,
             provider,
             protocol,
         })
@@ -180,6 +182,25 @@ impl NetworkNamespace {
             auth_file,
             dns,
             use_killswitch,
+        )?);
+        Ok(())
+    }
+
+    pub fn run_shadowsocks(
+        &mut self,
+        config_file: &PathBuf,
+        ss_host: IpAddr,
+        listen_port: u16,
+        password: &str,
+        encrypt_method: &str,
+    ) -> anyhow::Result<()> {
+        self.shadowsocks = Some(Shadowsocks::run(
+            &self,
+            config_file,
+            ss_host,
+            listen_port,
+            password,
+            encrypt_method,
         )?);
         Ok(())
     }

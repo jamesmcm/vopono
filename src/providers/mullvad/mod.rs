@@ -1,7 +1,9 @@
 mod openvpn;
 mod wireguard;
 
-use super::{ConfigurationChoice, OpenVpnProvider, Provider, WireguardProvider};
+use super::{
+    ConfigurationChoice, OpenVpnProvider, Provider, ShadowsocksProvider, WireguardProvider,
+};
 use crate::util::wireguard::WgPeer;
 use crate::vpn::Protocol;
 use anyhow::anyhow;
@@ -61,5 +63,16 @@ impl Mullvad {
             ));
         }
         Ok(username)
+    }
+}
+
+impl ShadowsocksProvider for Mullvad {
+    // Hardcoded password from documentation
+    fn password(&self) -> String {
+        "23#dfsbbb".to_string()
+    }
+    // TODO: Make this use enum
+    fn encrypt_method(&self) -> String {
+        "chacha20".to_string()
     }
 }

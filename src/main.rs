@@ -7,6 +7,7 @@ mod netns;
 mod network_interface;
 mod openvpn;
 mod providers;
+mod shadowsocks;
 mod sync;
 mod sysctl;
 mod util;
@@ -18,10 +19,11 @@ use anyhow::{anyhow, bail};
 use application_wrapper::ApplicationWrapper;
 use args::ExecCommand;
 use list::output_list;
-use log::{debug, error, info, LevelFilter};
+use log::{debug, error, info, warn, LevelFilter};
 use netns::NetworkNamespace;
 use network_interface::{get_active_interfaces, NetworkInterface};
 use providers::VpnProvider;
+use shadowsocks::uses_shadowsocks;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use structopt::StructOpt;
@@ -36,7 +38,6 @@ use vpn::{verify_auth, Protocol};
 // TODO:
 // - Support update_resolv_conf with OpenVPN (i.e. get DNS server from OpenVPN headers)
 // - Disable ipv6 traffic when not routed?
-// - Test configuration for wireless interface for OpenVPN
 // - Allow for not saving OpenVPN creds to config
 // - Allow for choice between iptables and nftables and avoid mixed dependency
 
@@ -84,7 +85,6 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let provider: VpnProvider;
     let server_name: String;
 
-    // TODO: Clean this up and merge with protocol logic below
     if let Some(path) = &command.custom_config {
         if command.protocol.is_none() {
             // TODO: Detect config type from file
@@ -195,6 +195,24 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
                 ns.dns_config(&dns)?;
+
+                // Check if using Shadowsocks
+                if let Some((ss_host, ss_lport)) = uses_shadowsocks(&config_file)? {
+                    if provider == VpnProvider::Custom {
+                        warn!("Custom provider specifies socks-proxy, if this is local you must run it yourself (e.g. shadowsocks)");
+                    } else {
+                        let dyn_ss_provider = provider.get_dyn_shadowsocks_provider()?;
+                        let password = dyn_ss_provider.password();
+                        let encrypt_method = dyn_ss_provider.encrypt_method();
+                        ns.run_shadowsocks(
+                            &config_file,
+                            ss_host,
+                            ss_lport,
+                            &password,
+                            &encrypt_method,
+                        )?;
+                    }
+                }
 
                 ns.run_openvpn(config_file, auth_file, &dns, !command.no_killswitch)?;
                 debug!(

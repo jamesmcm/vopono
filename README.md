@@ -136,6 +136,19 @@ For PrivateInternetAccess valid ports are 1198 for UDP and 502 for TCP.
 
 For TigerVPN valid ports are 1194 for UDP or 443 for TCP.
 
+#### Shadowsocks socks-proxy
+
+Mullvad supports proxying via Shadowsocks, if that configuration is
+chosen with `vopono sync`. Note you must use a TCP connection on port
+443 in this case.
+
+Respond with `Y` when asked `Connect via a bridge?` during the `vopono
+sync` configuration for Mullvad OpenVPN to enable this configuration. It
+is not used by default.
+
+If you are using a custom provider config file, you must run the socks
+proxy server yourself (i.e. `ss-local`) if using a socks-proxy.
+
 ### Custom Providers
 
 If you use another commercial VPN provider, please open a Pull Request here with

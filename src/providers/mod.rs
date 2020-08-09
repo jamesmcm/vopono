@@ -33,6 +33,7 @@ pub enum VpnProvider {
 }
 }
 
+// Do this since we can't downcast from Provider to other trait objects
 impl VpnProvider {
     pub fn get_dyn_provider(&self) -> Box<dyn Provider> {
         match self {
@@ -43,7 +44,6 @@ impl VpnProvider {
         }
     }
 
-    // TODO: Make OpenVPN return Result too
     pub fn get_dyn_openvpn_provider(&self) -> anyhow::Result<Box<dyn OpenVpnProvider>> {
         match self {
             Self::PrivateInternetAccess => Ok(Box::new(pia::PrivateInternetAccess {})),
@@ -57,9 +57,15 @@ impl VpnProvider {
         match self {
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
-            _ => Err(anyhow!(
-                "Wireguard not implemented for PrivateInternetAccess"
-            )),
+            _ => Err(anyhow!("Wireguard not implemented")),
+        }
+    }
+
+    pub fn get_dyn_shadowsocks_provider(&self) -> anyhow::Result<Box<dyn ShadowsocksProvider>> {
+        match self {
+            Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
+            Self::Custom => Err(anyhow!("Start Shadowsocks manually for custom provider")),
+            _ => Err(anyhow!("Shadowsocks not supported")),
         }
     }
 }
@@ -96,6 +102,12 @@ pub trait OpenVpnProvider: Provider {
     fn openvpn_dir(&self) -> anyhow::Result<PathBuf> {
         Ok(self.provider_dir()?.join("openvpn"))
     }
+}
+
+/// This trait is implemented if the provider has a Shadowsocks server
+pub trait ShadowsocksProvider: Provider {
+    fn password(&self) -> String;
+    fn encrypt_method(&self) -> String;
 }
 
 /// Implement this trait for enums used as configuration choices e.g. when deciding which set of

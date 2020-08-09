@@ -26,6 +26,15 @@ impl OpenVpn {
     ) -> anyhow::Result<Self> {
         // TODO: Refactor this to separate functions
         // TODO: --status flag
+
+        if let Err(x) = which::which("openvpn") {
+            error!("OpenVPN not found. Is OpenVPN installed and on PATH?");
+            return Err(anyhow!(
+                "OpenVPN not found. Is OpenVPN installed and on PATH?: {:?}",
+                x
+            ));
+        }
+
         let handle;
         let log_file_str = format!("/etc/netns/{}/openvpn.log", &netns.name);
         {
@@ -112,7 +121,6 @@ impl OpenVpn {
 
 impl Drop for OpenVpn {
     fn drop(&mut self) {
-        // Do we need to handle child processes?
         match nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(self.pid as i32),
             nix::sys::signal::Signal::SIGKILL,
@@ -224,6 +232,6 @@ pub fn get_remotes_from_config(path: &PathBuf) -> anyhow::Result<Vec<Remote>> {
 #[derive(Debug)]
 pub struct Remote {
     _host: String,
-    port: u16,
+    pub port: u16,
     protocol: OpenVpnProtocol,
 }
