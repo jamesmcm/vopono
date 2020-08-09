@@ -196,7 +196,7 @@ fn prompt_for_wg_key(
                 return Err("Expected private key length of 44 characters"
                 );
             }
-            
+
             match generate_public_key(private_key) {
                 Ok(public_key) => {
             if public_key != info_clone.wg_peers[selection].key.public {
