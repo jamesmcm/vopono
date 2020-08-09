@@ -132,7 +132,6 @@ pub trait ConfigurationChoice: Display + Sized + Default + PartialEq {
             .with_prompt(Self::prompt())
             .items(
                 display_names
-                    .into_iter()
                     .zip(descriptions)
                     .map(|x| {
                         if x.1.is_some() {
