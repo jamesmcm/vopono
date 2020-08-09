@@ -62,7 +62,7 @@ impl VethPair {
                 )?;
             }
 
-            sudo_command(&["nmcli", "general", "reload"])
+            sudo_command(&["nmcli", "connection", "reload"])
                 .context("Failed to reload NetworkManager configuration")?;
             Some(NetworkManagerUnmanaged { backup_file })
         } else {
