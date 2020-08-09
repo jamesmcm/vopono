@@ -1,9 +1,12 @@
+pub mod wireguard;
+
 use super::list::get_lock_namespaces;
 use anyhow::{anyhow, Context};
 use directories_next::BaseDirs;
 use ipnet::Ipv4Net;
 use log::{debug, info, warn};
 use nix::unistd::{Group, User};
+use rand::seq::SliceRandom;
 use regex::Regex;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -43,6 +46,10 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
     Ok(pathbuf)
 }
 
+pub fn vopono_dir() -> anyhow::Result<PathBuf> {
+    Ok(config_dir()?.join("vopono"))
+}
+
 // TODO: DRY with above
 pub fn get_username() -> anyhow::Result<String> {
     if let Ok(user) = std::env::var("SUDO_USER") {
@@ -68,8 +75,7 @@ pub fn get_group(username: &str) -> anyhow::Result<String> {
 }
 
 pub fn set_config_permissions() -> anyhow::Result<()> {
-    let mut check_dir = config_dir()?;
-    check_dir.push("vopono");
+    let check_dir = vopono_dir()?;
     let username = get_username()?;
     let group = get_group(&username)?;
 
@@ -99,21 +105,6 @@ pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<Ipv4Net>> {
     debug!("Assigned IPs: {:?}", &ips);
     Ok(ips)
 }
-
-// pub fn get_veth_ipv4(if_name: &str) -> anyhow::Result<Option<Ipv4Net>> {
-//     let output = Command::new("ip")
-//         .args(&["addr", "show", "type", "veth", if_name])
-//         .output()?
-//         .stdout;
-//     let output = std::str::from_utf8(&output)?;
-
-//     let re = Regex::new(r"inet\s+(?P<ip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2})").unwrap();
-//     let ip = match re.captures_iter(output).next() {
-//         None => None,
-//         Some(x) => Some(Ipv4Net::from_str(&x["ip"])?),
-//     };
-//     Ok(ip)
-// }
 
 pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
     let output = Command::new("ip").args(&["netns", "list"]).output()?.stdout;
@@ -259,4 +250,58 @@ pub fn elevate_privileges() -> anyhow::Result<()> {
         warn!("Running vopono as root user directly!");
     }
     Ok(())
+}
+
+pub fn delete_all_files_in_dir(dir: &PathBuf) -> anyhow::Result<()> {
+    dir.read_dir()?
+        .flatten()
+        .map(|x| std::fs::remove_file(x.path()))
+        .collect::<Result<Vec<()>, std::io::Error>>()?;
+    Ok(())
+}
+
+pub fn get_config_from_alias(list_path: &PathBuf, alias: &str) -> anyhow::Result<PathBuf> {
+    let paths = WalkDir::new(&list_path)
+        .into_iter()
+        .filter(|x| x.is_ok())
+        .map(|x| x.unwrap())
+        .filter(|x| {
+            x.path().is_file()
+                && x.path().extension().is_some()
+                && (x.path().extension().expect("No file extension") == "conf"
+                    || x.path().extension().expect("No file extension") == "ovpn")
+        })
+        .map(|x| {
+            (
+                x.clone(),
+                x.file_name()
+                    .to_str()
+                    .expect("No filename")
+                    .split('-')
+                    .next()
+                    .expect("No - in filename")
+                    .to_string(),
+                x.file_name()
+                    .to_str()
+                    .expect("No filename")
+                    .split('-')
+                    .nth(1)
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        })
+        .filter(|x| x.2.starts_with(alias) || (x.1.starts_with(alias)))
+        .map(|x| PathBuf::from(x.0.path()))
+        .collect::<Vec<PathBuf>>();
+
+    if paths.is_empty() {
+        Err(anyhow!("Could not find config file for alias {}", &alias))
+    } else {
+        let config = paths
+            .choose(&mut rand::thread_rng())
+            .expect("Could not find config");
+
+        info!("Chosen config: {}", config.display());
+        Ok(config.clone())
+    }
 }

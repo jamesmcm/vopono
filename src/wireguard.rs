@@ -1,17 +1,15 @@
 use super::netns::NetworkNamespace;
-use super::util::{config_dir, sudo_command};
-use super::vpn::VpnProvider;
+use super::util::sudo_command;
 use anyhow::{anyhow, Context};
 use ipnet::IpNet;
-use log::{debug, info, warn};
-use rand::seq::SliceRandom;
+use log::{debug, error, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use walkdir::WalkDir;
+
 #[derive(Serialize, Deserialize)]
 pub struct Wireguard {
     ns_name: String,
@@ -24,6 +22,14 @@ impl Wireguard {
         config_file: PathBuf,
         use_killswitch: bool,
     ) -> anyhow::Result<Self> {
+        if let Err(x) = which::which("wg") {
+            error!("wg binary not found. Is wireguard-tools installed and on PATH?");
+            return Err(anyhow!(
+                "wg binary not found. Is wireguard-tools installed and on PATH?: {:?}",
+                x
+            ));
+        }
+
         let config_string = std::fs::read_to_string(&config_file)?;
         // Create temp conf file
         {
@@ -346,58 +352,6 @@ impl Drop for Wireguard {
             Ok(_) => {}
             Err(e) => warn!("Failed to delete nft ipv6 table: {}: {:?}", self.ns_name, e),
         };
-    }
-}
-
-pub fn get_config_from_alias(provider: &VpnProvider, alias: &str) -> anyhow::Result<PathBuf> {
-    let mut list_path = config_dir()?;
-    list_path.push(format!("vopono/{}/wireguard", provider.alias()));
-
-    // TODO: Make this more resilient (i.e. missing - etc.)
-    let paths = WalkDir::new(&list_path)
-        .into_iter()
-        .filter(|x| x.is_ok())
-        .map(|x| x.unwrap())
-        .filter(|x| {
-            x.path().is_file()
-                && x.path().extension().is_some()
-                && x.path().extension().expect("No file extension") == "conf"
-        })
-        .map(|x| {
-            (
-                x.clone(),
-                x.file_name()
-                    .to_str()
-                    .expect("No filename")
-                    .split('-')
-                    .next()
-                    .expect("No - in filename")
-                    .to_string(),
-                x.file_name()
-                    .to_str()
-                    .expect("No filename")
-                    .split('-')
-                    .nth(1)
-                    .expect("No - in filename")
-                    .to_string(),
-            )
-        })
-        .filter(|x| x.2.starts_with(alias) || (x.1 != "mullvad" && x.1.starts_with(alias)))
-        .map(|x| PathBuf::from(x.0.path()))
-        .collect::<Vec<PathBuf>>();
-
-    if paths.is_empty() {
-        Err(anyhow!(
-            "Could not find Wireguard config file for alias {}",
-            &alias
-        ))
-    } else {
-        let config = paths
-            .choose(&mut rand::thread_rng())
-            .expect("Could not find Wireguard config");
-
-        info!("Chosen Wireguard config: {}", config.display());
-        Ok(config.clone())
     }
 }
 

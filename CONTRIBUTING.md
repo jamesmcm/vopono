@@ -17,34 +17,43 @@ $ cargo clippy --all-features --all-targets
 
 ## Adding a new VPN provider
 
-To add support for a new VPN provider, the main task is to add functions
-to generate their OpenVPN and/or Wireguard config files in
-`src/sync.rs`.
+Adding support for a new VPN provider is as simple as adding the
+relevant files to `src/providers/` defining Structs which implement the
+base `Provider` trait and at least one of the `OpenVpnProvider` or
+`WireguardProvider` traits.
 
-Then add the provider name to the VpnProvider enum, and add logic to the
-implementations in `src/vpn.rs` for the new provider.
+See the existing entries in that directory for examples.
 
-For Wireguard we parse wg-quick config files. 
+The main methods to implement are `create_openvpn_config()` and
+`create_wireguard_config()` respectively, which must generate all of the
+provider's config files (prompting the user for any options), and write
+the credentials to an authentication file for OpenVPN. For OpenVPN these
+will be `.ovpn` config files, for Wireguard they will be wg-quick
+`.conf` files.
 
-For OpenVPN we create: 
-* A serverlist CSV with host, port and protocol
-* The general OpenVPN config file (for use across all of that provider's
-servers - remove any references to `remote` or `proto` in this file)
-* The CA cert of the VPN provider
-* If used, the Certificate Revocation List (CRL) for the provider too.
+Note the `ConfigurationChoice` trait is provided to make it easier to
+provide an enum of choices to the user (i.e. selecting between different
+configurations- TCP vs. UDP, etc.).
+
+The new provider must also be added to the `VpnProvider` enum in
+`src/providers/mod.rs` to be able to convert from the StructOpt provider
+argument to the structs implementing the traits above.
+
+Note that for OpenVPN it is also necessary to create any additional
+files that the config files refer to, such as the CA certificate or CRL
+file.
 
 Use the `include_str` macro to include any files that cannot be
 downloaded (i.e. if they are behind a captcha). Only do this when
 absolutely necessary as it will increase the binary size.
 
+The `ShadowsocksProvider` trait is provided for providers that allow
+proxying with Shadowsocks. Note that only Mullvad implements this at the
+moment so it may need further development when adding another provider.
+
 Note that since Mullvad is the only Wireguard provider at the moment,
 adding a new Wireguard provider may require more changes (i.e. if the
 MTU differs, etc.)
-
-In the future, this may be modified to use a struct per VpnProvider with
-traits for OpenVPN and Wireguard support respectively, to encapsulate
-the logic for each provider separately and make it easier to add new
-providers from examples.
 
 ## Other code contributions
 

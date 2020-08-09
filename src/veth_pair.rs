@@ -30,7 +30,7 @@ impl VethPair {
         // Avoids NM overriding our IP assignment
         // TODO: Check with systemd?
         let nm_path = PathBuf::from_str("/etc/NetworkManager")?;
-        let nm_unmanaged = if nm_path.exists() {
+        let nm_unmanaged = if nm_path.exists() && which::which("nmcli").is_ok() {
             debug!(
                 "NetworkManager detected, adding {} to unmanaged devices",
                 &dest

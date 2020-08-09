@@ -6,6 +6,8 @@ mod list;
 mod netns;
 mod network_interface;
 mod openvpn;
+mod providers;
+mod shadowsocks;
 mod sync;
 mod sysctl;
 mod util;
@@ -15,31 +17,29 @@ mod wireguard;
 
 use anyhow::{anyhow, bail};
 use application_wrapper::ApplicationWrapper;
-use args::{ExecCommand, SynchCommand};
+use args::ExecCommand;
 use list::output_list;
-use log::{debug, error, info, LevelFilter};
+use log::{debug, error, info, warn, LevelFilter};
 use netns::NetworkNamespace;
 use network_interface::{get_active_interfaces, NetworkInterface};
+use providers::VpnProvider;
+use shadowsocks::uses_shadowsocks;
 use std::io::{self, Write};
+use std::net::{IpAddr, Ipv4Addr};
 use structopt::StructOpt;
-use sync::synch;
+use sync::{sync_menu, synch};
 use sysctl::SysCtl;
 use util::clean_dead_namespaces;
+use util::elevate_privileges;
+use util::get_config_from_alias;
 use util::{clean_dead_locks, get_existing_namespaces, get_target_subnet};
-use util::{config_dir, elevate_privileges};
-use vpn::VpnProvider;
-use vpn::{get_auth, get_protocol, Protocol};
-use wireguard::get_config_from_alias;
+use vpn::{verify_auth, Protocol};
 
 // TODO:
-// - OpenVPN authentication for custom config
 // - Support update_resolv_conf with OpenVPN (i.e. get DNS server from OpenVPN headers)
 // - Disable ipv6 traffic when not routed?
-// - Test configuration for wireless interface for OpenVPN
 // - Allow for not saving OpenVPN creds to config
 // - Allow for choice between iptables and nftables and avoid mixed dependency
-// - Mullvad Shadowsocks
-// - Handle setting and using default provider and server
 
 fn main() -> anyhow::Result<()> {
     // Get struct of args using structopt
@@ -63,31 +63,28 @@ fn main() -> anyhow::Result<()> {
             clean_dead_namespaces()?;
             exec(cmd)?
         }
-        args::Command::Init => {
-            elevate_privileges()?;
-            synch(SynchCommand {
-                vpn_provider: None,
-                protocol: None,
-                port: None,
-            })?;
-        }
         args::Command::List(listcmd) => {
             clean_dead_locks()?;
             output_list(listcmd)?;
         }
         args::Command::Synch(synchcmd) => {
             elevate_privileges()?;
-            synch(synchcmd)?;
-        } // args::Command::SetDefaults(cmd) => todo!(),
+            // If provider given then sync that, else prompt with menu
+            if synchcmd.vpn_provider.is_none() {
+                sync_menu()?;
+            } else {
+                synch(synchcmd.vpn_provider.unwrap(), synchcmd.protocol)?;
+            }
+        }
     }
     Ok(())
 }
 
+// TODO: Move this to separate file
 fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let provider: VpnProvider;
     let server_name: String;
 
-    // TODO: Clean this up and merge with protocol logic below
     if let Some(path) = &command.custom_config {
         if command.protocol.is_none() {
             // TODO: Detect config type from file
@@ -116,30 +113,31 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         server_name = command.server.expect("Enter a VPN server prefix");
     }
     // Check protocol is valid for provider
-    let protocol = get_protocol(&provider, command.protocol)?;
-    // Check config files exist for provider
-    if provider != VpnProvider::Custom {
-        let mut cdir = config_dir()?;
-        cdir.push(format!(
-            "vopono/{}/{}",
-            provider.alias(),
-            protocol.to_string().to_lowercase()
-        ));
+    let protocol = command
+        .protocol
+        .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
 
+    if provider != VpnProvider::Custom {
+        // Check config files exist for provider
+        let cdir = match protocol {
+            Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
+            Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
+        }?;
         if !cdir.exists() || cdir.read_dir()?.next().is_none() {
             info!(
                 "Config files for {} {} do not exist, running vopono sync",
                 provider, protocol
             );
-            synch(SynchCommand {
-                vpn_provider: Some(provider.clone()),
-                protocol: Some(protocol.clone()),
-                port: None,
-            })?;
+            synch(provider.clone(), Some(protocol.clone()))?;
         }
     }
 
-    let ns_name = format!("vopono_{}_{}", provider.alias(), server_name);
+    let alias = match provider {
+        VpnProvider::Custom => "custom".to_string(),
+        _ => provider.get_dyn_provider().alias(),
+    };
+
+    let ns_name = format!("vopono_{}_{}", alias, server_name);
 
     let mut ns;
     let _sysctl;
@@ -152,8 +150,18 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow!("No active network interface"))?,
         )?),
     }?;
-
     debug!("Interface: {}", &interface.name);
+
+    let config_file = if provider != VpnProvider::Custom {
+        let cdir = match protocol {
+            Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
+            Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
+        }?;
+        get_config_from_alias(&cdir, &server_name)?
+    } else {
+        command.custom_config.expect("No custom config provided")
+    };
+
     // Better to check for lockfile exists?
     if get_existing_namespaces()?.contains(&ns_name) {
         // If namespace exists, read its lock config
@@ -161,26 +169,52 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     } else {
         ns = NetworkNamespace::new(ns_name.clone(), provider.clone(), protocol.clone())?;
         let target_subnet = get_target_subnet()?;
+        ns.add_loopback()?;
+        ns.add_veth_pair()?;
+        ns.add_routing(target_subnet)?;
+        ns.add_iptables_rule(target_subnet, interface)?;
+        _sysctl = SysCtl::enable_ipv4_forwarding();
         match protocol {
             Protocol::OpenVpn => {
-                if command.custom_config.is_none() {
-                    // TODO: Also handle case where custom config does not provide user-pass
-                    get_auth(&provider)?;
-                }
-                ns.add_loopback()?;
-                ns.add_veth_pair()?;
-                ns.add_routing(target_subnet)?;
-                ns.add_iptables_rule(target_subnet, interface)?;
-                _sysctl = SysCtl::enable_ipv4_forwarding();
-                let dns = command.dns.unwrap_or(provider.dns()?);
+                // Handle authentication check
+                let auth_file = if provider != VpnProvider::Custom {
+                    Some(verify_auth(provider.get_dyn_openvpn_provider()?)?)
+                } else {
+                    None
+                };
+
+                let dns = command
+                    .dns
+                    .or_else(|| {
+                        provider
+                            .get_dyn_openvpn_provider()
+                            .ok()
+                            .map(|x| x.provider_dns())
+                            .flatten()
+                    })
+                    .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
+
                 ns.dns_config(&dns)?;
-                ns.run_openvpn(
-                    &provider,
-                    &server_name,
-                    command.custom_config,
-                    &dns,
-                    !command.no_killswitch,
-                )?;
+
+                // Check if using Shadowsocks
+                if let Some((ss_host, ss_lport)) = uses_shadowsocks(&config_file)? {
+                    if provider == VpnProvider::Custom {
+                        warn!("Custom provider specifies socks-proxy, if this is local you must run it yourself (e.g. shadowsocks)");
+                    } else {
+                        let dyn_ss_provider = provider.get_dyn_shadowsocks_provider()?;
+                        let password = dyn_ss_provider.password();
+                        let encrypt_method = dyn_ss_provider.encrypt_method();
+                        ns.run_shadowsocks(
+                            &config_file,
+                            ss_host,
+                            ss_lport,
+                            &password,
+                            &encrypt_method,
+                        )?;
+                    }
+                }
+
+                ns.run_openvpn(config_file, auth_file, &dns, !command.no_killswitch)?;
                 debug!(
                     "Checking that OpenVPN is running in namespace: {}",
                     &ns_name
@@ -196,17 +230,7 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 }
             }
             Protocol::Wireguard => {
-                let config = if command.custom_config.is_some() {
-                    command.custom_config.unwrap()
-                } else {
-                    get_config_from_alias(&provider, &server_name)?
-                };
-                ns.add_loopback()?;
-                ns.add_veth_pair()?;
-                ns.add_routing(target_subnet)?;
-                ns.add_iptables_rule(target_subnet, interface)?;
-                _sysctl = SysCtl::enable_ipv4_forwarding();
-                ns.run_wireguard(config, !command.no_killswitch)?;
+                ns.run_wireguard(config_file, !command.no_killswitch)?;
             }
         }
     }

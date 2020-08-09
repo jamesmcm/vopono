@@ -1,5 +1,6 @@
 use super::network_interface::NetworkInterface;
-use super::vpn::{Protocol, VpnProvider};
+use super::providers::VpnProvider;
+use super::vpn::Protocol;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use structopt::StructOpt;
@@ -25,8 +26,6 @@ pub enum Command {
         about = "Execute an application with the given VPN connection"
     )]
     Exec(ExecCommand),
-    #[structopt(name = "init", about = "Initialise vopono configuration")]
-    Init,
     #[structopt(
         name = "list",
         about = "List running vopono namespaces and applications"
@@ -37,11 +36,6 @@ pub enum Command {
         about = "Synchronise local server lists with VPN providers"
     )]
     Synch(SynchCommand),
-    // #[structopt(
-    //     name = "default",
-    //     about = "Get or set default VPN provider and server (UNIMPLEMENTED)"
-    // )]
-    // SetDefaults(SetDefaultsCommand),
 }
 
 #[derive(StructOpt)]
@@ -53,15 +47,11 @@ pub struct SynchCommand {
     /// VPN Protocol (if not given will try to sync both)
     #[structopt(long = "protocol", short="c", possible_values = &Protocol::variants(), case_insensitive = true)]
     pub protocol: Option<Protocol>,
-
-    /// Port override (must be valid port for provider - use this to set OpenVPN protocol too)
-    #[structopt(long = "port", short = "p")]
-    pub port: Option<u16>,
 }
 
 #[derive(StructOpt)]
 pub struct ExecCommand {
-    /// VPN Provider (if not given will use default)
+    /// VPN Provider (must be given unless using custom config)
     #[structopt(long = "provider", short="p", possible_values = &VpnProvider::variants(), case_insensitive = true)]
     pub vpn_provider: Option<VpnProvider>,
 
@@ -73,7 +63,7 @@ pub struct ExecCommand {
     #[structopt(long = "interface", short = "i", case_insensitive = true)]
     pub interface: Option<NetworkInterface>,
 
-    /// VPN Server (if not given will use default)
+    /// VPN Server prefix (must be given unless using custom config)
     #[structopt(long = "server", short = "s")]
     pub server: Option<String>,
 
@@ -84,7 +74,7 @@ pub struct ExecCommand {
     #[structopt(long = "user", short = "u")]
     pub user: Option<String>,
 
-    /// Custom VPN Provider - OpenVPN or Wireguard config file
+    /// Custom VPN Provider - OpenVPN or Wireguard config file (will override other settings)
     #[structopt(parse(from_os_str), long = "custom")]
     pub custom_config: Option<PathBuf>,
 
@@ -103,12 +93,3 @@ pub struct ListCommand {
     #[structopt(possible_values = &["namespaces", "applications"])]
     pub list_type: Option<String>,
 }
-// #[derive(StructOpt)]
-// pub struct SetDefaultsCommand {
-//     #[structopt(long = "provider", short="p", possible_values=&VpnProvider::variants())]
-//     pub vpn_provider: Option<VpnProvider>,
-
-//     /// VPN Server (if not given will use default)
-//     #[structopt(long = "server", short = "s")]
-//     pub server: String,
-// }
