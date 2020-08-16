@@ -7,7 +7,7 @@ as normal.
 
 vopono includes built-in killswitches for both Wireguard and OpenVPN.
 
-Currently only Mullvad, TigerVPN and
+Currently only Mullvad, TigerVPN, ProtonVPN and
 PrivateInternetAccess are supported directly, with custom configuration files
 also supported with the `--custom` argument.
 
@@ -38,6 +38,7 @@ lynx all running through different VPN connections:
 | Mullvad               | ✅              | ✅                |
 | PrivateInternetAccess | ✅              | ❌                |
 | TigerVPN              | ✅              | ❌                |
+| ProtonVPN             | ✅              | ❌                |
 
 ## Usage
 
@@ -121,6 +122,9 @@ For TigerVPN you can view your OpenVPN credentials [online on the "geeks" dashbo
 The OpenVPN credentials are **not** the same as your TigerVPN account credentials.
 
 For Mullvad your OpenVPN credentials are your account code as your username, and `m` as the password.
+
+For ProtonVPN you can view your OpenVPN credentials [online on your account dashboard](https://account.protonvpn.com/account#openvpn).
+The OpenVPN credentials are **not** the same as your ProtonVPN account credentials.
 
 #### TCP support and custom ports
 
@@ -284,6 +288,8 @@ $ rustc --version
 * OpenVPN credentials are always stored in plaintext in configuration - may add
   option to not store credentials, but it seems OpenVPN needs them
   provided in plaintext.
+* ProtonVPN DNS servers do not reliably connect, so Google's DNS is used
+  for now (you can override this with the `--dns` argument.
 
 ## License
 

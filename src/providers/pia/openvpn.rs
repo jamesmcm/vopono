@@ -1,5 +1,6 @@
 use super::PrivateInternetAccess;
 use super::{ConfigurationChoice, OpenVpnProvider};
+use crate::util::delete_all_files_in_dir;
 use dialoguer::{Input, Password};
 use log::debug;
 use reqwest::Url;
@@ -43,6 +44,7 @@ impl OpenVpnProvider for PrivateInternetAccess {
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
         let openvpn_dir = self.openvpn_dir()?;
         create_dir_all(&openvpn_dir)?;
+        delete_all_files_in_dir(&openvpn_dir)?;
         for i in 0..zip.len() {
             // For each file, detect if ovpn, crl or crt
             // Modify auth line for config

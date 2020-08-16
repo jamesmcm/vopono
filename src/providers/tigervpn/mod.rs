@@ -1,4 +1,5 @@
 use super::{ConfigurationChoice, OpenVpnProvider, Provider};
+use crate::util::delete_all_files_in_dir;
 use crate::vpn::OpenVpnProtocol;
 use crate::vpn::Protocol;
 use anyhow::Context;
@@ -93,6 +94,7 @@ impl OpenVpnProvider for TigerVPN {
     fn create_openvpn_config(&self) -> anyhow::Result<()> {
         let openvpn_dir = self.openvpn_dir()?;
         create_dir_all(&openvpn_dir)?;
+        delete_all_files_in_dir(&openvpn_dir)?;
         let protocol = OpenVpnProtocol::choose_one()?;
         let settings = Self::get_default_openvpn_settings();
 

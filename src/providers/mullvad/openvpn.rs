@@ -1,5 +1,6 @@
 use super::Mullvad;
 use super::{ConfigurationChoice, OpenVpnProvider};
+use crate::util::delete_all_files_in_dir;
 use crate::vpn::OpenVpnProtocol;
 use anyhow::Context;
 use log::warn;
@@ -58,6 +59,7 @@ impl OpenVpnProvider for Mullvad {
     fn create_openvpn_config(&self) -> anyhow::Result<()> {
         let openvpn_dir = self.openvpn_dir()?;
         create_dir_all(&openvpn_dir)?;
+        delete_all_files_in_dir(&openvpn_dir)?;
 
         let client = Client::new();
         let relays: Vec<OpenVpnRelay> = client

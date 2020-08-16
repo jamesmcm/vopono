@@ -1,5 +1,6 @@
 mod mullvad;
 mod pia;
+mod protonvpn;
 mod tigervpn;
 
 use crate::util::vopono_dir;
@@ -29,6 +30,7 @@ pub enum VpnProvider {
     PrivateInternetAccess,
     Mullvad,
     TigerVpn,
+    ProtonVpn,
     Custom,
 }
 }
@@ -40,6 +42,7 @@ impl VpnProvider {
             Self::PrivateInternetAccess => Box::new(pia::PrivateInternetAccess {}),
             Self::Mullvad => Box::new(mullvad::Mullvad {}),
             Self::TigerVpn => Box::new(tigervpn::TigerVPN {}),
+            Self::ProtonVpn => Box::new(protonvpn::ProtonVPN {}),
             Self::Custom => unimplemented!("Custom provider uses separate logic"),
         }
     }
@@ -49,6 +52,7 @@ impl VpnProvider {
             Self::PrivateInternetAccess => Ok(Box::new(pia::PrivateInternetAccess {})),
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
             Self::TigerVpn => Ok(Box::new(tigervpn::TigerVPN {})),
+            Self::ProtonVpn => Ok(Box::new(protonvpn::ProtonVPN {})),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
         }
     }
