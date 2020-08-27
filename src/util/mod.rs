@@ -1,3 +1,4 @@
+pub mod country_map;
 pub mod wireguard;
 
 use super::list::get_lock_namespaces;

@@ -43,6 +43,7 @@ impl OpenVpnProvider for PrivateInternetAccess {
         let zipfile = reqwest::blocking::get(config_choice.url()?)?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
         let openvpn_dir = self.openvpn_dir()?;
+        let country_map = crate::util::country_map::country_to_code_map();
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
         for i in 0..zip.len() {
@@ -54,7 +55,30 @@ impl OpenVpnProvider for PrivateInternetAccess {
             let mut file = zip.by_index(i).unwrap();
             file.read_to_end(&mut file_contents)?;
 
-            let filename = file.name();
+            // Convert country name to country code
+            // TODO: Handle cases where already code_city
+            // uk_london.ovpn
+            // uae.ovpn
+
+            let filename = if let Some("ovpn") = file
+                .sanitized_name()
+                .extension()
+                .map(|x| x.to_str().expect("Could not convert OsStr"))
+            {
+                let fname = file.name();
+                let country = fname.to_lowercase().replace(' ', "_");
+                let country = country.split('.').next().unwrap();
+                let code = country_map.get(country);
+                if code.is_none() {
+                    debug!("Could not find country in country map: {}", country);
+                    file.name().to_string()
+                } else {
+                    format!("{}-{}.ovpn", country, code.unwrap())
+                }
+            } else {
+                file.name().to_string()
+            };
+
             debug!("Reading file: {}", file.name());
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;

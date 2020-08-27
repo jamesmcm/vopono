@@ -38,6 +38,7 @@ x25519-dalek = "0.6"
 strum = "0.18"
 strum_macros = "0.18"
 zip = "0.5"
+maplit = "1.0.2"
 
 [package.metadata.rpm]
 package = "vopono"

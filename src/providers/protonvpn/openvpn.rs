@@ -69,6 +69,7 @@ impl OpenVpnProvider for ProtonVPN {
 
     fn create_openvpn_config(&self) -> anyhow::Result<()> {
         let openvpn_dir = self.openvpn_dir()?;
+        let code_map = crate::util::country_map::code_to_country_map();
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
         let tier = Tier::choose_one()?;
@@ -93,7 +94,20 @@ impl OpenVpnProvider for ProtonVPN {
                 .collect::<Vec<&str>>()
                 .join("\n");
 
-            let filename = file.name();
+            let filename = if let Some("ovpn") = file
+                .sanitized_name()
+                .extension()
+                .map(|x| x.to_str().expect("Could not convert OsStr"))
+            {
+                let code = file.name().split('.').next().unwrap();
+                let country = code_map
+                    .get(code)
+                    .unwrap_or_else(|| panic!("Could not find code in map: {}", code));
+                format!("{}-{}.ovpn", country, code)
+            } else {
+                file.name().to_string()
+            };
+
             debug!("Reading file: {}", file.name());
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
