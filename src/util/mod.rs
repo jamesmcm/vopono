@@ -13,7 +13,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
-use sysinfo::{RefreshKind, System, SystemExt};
+use sysinfo::{ProcessExt, RefreshKind, System, SystemExt};
 use users::{get_current_uid, get_user_by_uid};
 use walkdir::WalkDir;
 
@@ -128,6 +128,14 @@ pub fn check_process_running(pid: u32) -> bool {
 pub fn get_all_running_pids() -> Vec<u32> {
     let s = System::new_with_specifics(RefreshKind::new().with_processes());
     s.get_processes().keys().map(|x| *x as u32).collect()
+}
+
+pub fn get_all_running_process_names() -> Vec<String> {
+    let s = System::new_with_specifics(RefreshKind::new().with_processes());
+    s.get_processes()
+        .values()
+        .map(|x| x.name().to_string())
+        .collect()
 }
 
 pub fn get_target_subnet() -> anyhow::Result<u8> {
