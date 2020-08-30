@@ -3,6 +3,7 @@ mod args;
 mod dns_config;
 mod iptables;
 mod list;
+mod list_configs;
 mod netns;
 mod network_interface;
 mod openvpn;
@@ -19,6 +20,7 @@ use anyhow::{anyhow, bail};
 use application_wrapper::ApplicationWrapper;
 use args::ExecCommand;
 use list::output_list;
+use list_configs::print_configs;
 use log::{debug, error, info, warn, LevelFilter};
 use netns::NetworkNamespace;
 use network_interface::{get_active_interfaces, NetworkInterface};
@@ -75,6 +77,9 @@ fn main() -> anyhow::Result<()> {
             } else {
                 synch(synchcmd.vpn_provider.unwrap(), synchcmd.protocol)?;
             }
+        }
+        args::Command::Servers(serverscmd) => {
+            print_configs(serverscmd)?;
         }
     }
     Ok(())

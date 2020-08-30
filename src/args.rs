@@ -36,6 +36,11 @@ pub enum Command {
         about = "Synchronise local server lists with VPN providers"
     )]
     Synch(SynchCommand),
+    #[structopt(
+        name = "servers",
+        about = "List possible server configs for VPN provider, beginning with prefix"
+    )]
+    Servers(ServersCommand),
 }
 
 #[derive(StructOpt)]
@@ -92,4 +97,19 @@ pub struct ListCommand {
     /// VPN Provider (if not given will use default)
     #[structopt(possible_values = &["namespaces", "applications"])]
     pub list_type: Option<String>,
+}
+
+#[derive(StructOpt)]
+pub struct ServersCommand {
+    /// VPN Provider
+    #[structopt(possible_values = &VpnProvider::variants(), case_insensitive = true)]
+    pub vpn_provider: VpnProvider,
+
+    /// VPN Protocol (if not given will list all)
+    #[structopt(long = "protocol", short="c", possible_values = &Protocol::variants(), case_insensitive = true)]
+    pub protocol: Option<Protocol>,
+
+    /// VPN Server prefix
+    #[structopt(long = "prefix", short = "s")]
+    pub prefix: Option<String>,
 }

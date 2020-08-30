@@ -269,8 +269,8 @@ pub fn delete_all_files_in_dir(dir: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn get_config_from_alias(list_path: &PathBuf, alias: &str) -> anyhow::Result<PathBuf> {
-    let paths = WalkDir::new(&list_path)
+pub fn get_configs_from_alias(list_path: &PathBuf, alias: &str) -> Vec<PathBuf> {
+    WalkDir::new(&list_path)
         .into_iter()
         .filter(|x| x.is_ok())
         .map(|x| x.unwrap())
@@ -301,8 +301,11 @@ pub fn get_config_from_alias(list_path: &PathBuf, alias: &str) -> anyhow::Result
         })
         .filter(|x| x.2.starts_with(alias) || (x.1.starts_with(alias)))
         .map(|x| PathBuf::from(x.0.path()))
-        .collect::<Vec<PathBuf>>();
+        .collect::<Vec<PathBuf>>()
+}
 
+pub fn get_config_from_alias(list_path: &PathBuf, alias: &str) -> anyhow::Result<PathBuf> {
+    let paths = get_configs_from_alias(list_path, alias);
     if paths.is_empty() {
         Err(anyhow!("Could not find config file for alias {}", &alias))
     } else {
