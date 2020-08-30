@@ -7,7 +7,7 @@ as normal.
 
 vopono includes built-in killswitches for both Wireguard and OpenVPN.
 
-Currently only Mullvad, TigerVPN, ProtonVPN and
+Currently Mullvad, MozillaVPN, TigerVPN, ProtonVPN and
 PrivateInternetAccess are supported directly, with custom configuration files
 also supported with the `--custom` argument.
 
@@ -39,6 +39,7 @@ lynx all running through different VPN connections:
 | PrivateInternetAccess | ✅              | ❌                |
 | TigerVPN              | ✅              | ❌                |
 | ProtonVPN             | ✅              | ❌                |
+| MozillaVPN            | ❌              | ✅                |
 
 ## Usage
 
@@ -80,6 +81,8 @@ The sync menu will prompt you for any custom settings (i.e. ports used,
 and connection protocol for OpenVPN, etc.)
 
 Valid ports for Mullvad Wireguard are: 53, 4000-33433, 33565-51820 and 52000-60000.
+The same is true for MozillaVPN since it is mostly a wrapper around Mullvad's
+Wireguard services.
 
 ### OpenVPN
 
@@ -290,6 +293,8 @@ $ rustc --version
   provided in plaintext.
 * ProtonVPN DNS servers do not reliably connect, so Google's DNS is used
   for now (you can override this with the `--dns` argument.
+* There is no easy way to delete MozillaVPN devices (Wireguard
+  keypairs) - unlike Mullvad this _cannot_ be done on the webpage. I recommend using [MozWire](https://github.com/NilsIrl/MozWire) to manage this.
 
 ## License
 
@@ -308,3 +313,6 @@ Discord de Rust Programming Language Community.
 Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, will be licensed under the GPLv3 (or
 above), without any additional terms or conditions.
+
+Many thanks to NilIrl's [MozWire](https://github.com/NilsIrl/MozWire)
+for the investigation of the MozillaVPN API.

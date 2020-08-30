@@ -83,9 +83,7 @@ pub fn set_config_permissions() -> anyhow::Result<()> {
     let group = nix::unistd::Group::from_name(&group)?.map(|x| x.gid);
     let user = nix::unistd::User::from_name(&username)?.map(|x| x.uid);
     for entry in WalkDir::new(check_dir).into_iter().filter_map(|e| e.ok()) {
-        if entry.path().is_file() {
-            nix::unistd::chown(entry.path(), user, group)?;
-        }
+        nix::unistd::chown(entry.path(), user, group)?;
     }
     Ok(())
 }

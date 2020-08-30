@@ -1,3 +1,4 @@
+mod mozilla;
 mod mullvad;
 mod pia;
 mod protonvpn;
@@ -31,6 +32,7 @@ pub enum VpnProvider {
     Mullvad,
     TigerVpn,
     ProtonVpn,
+    MozillaVpn,
     Custom,
 }
 }
@@ -43,6 +45,7 @@ impl VpnProvider {
             Self::Mullvad => Box::new(mullvad::Mullvad {}),
             Self::TigerVpn => Box::new(tigervpn::TigerVPN {}),
             Self::ProtonVpn => Box::new(protonvpn::ProtonVPN {}),
+            Self::MozillaVpn => Box::new(mozilla::MozillaVPN {}),
             Self::Custom => unimplemented!("Custom provider uses separate logic"),
         }
     }
@@ -53,6 +56,7 @@ impl VpnProvider {
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
             Self::TigerVpn => Ok(Box::new(tigervpn::TigerVPN {})),
             Self::ProtonVpn => Ok(Box::new(protonvpn::ProtonVPN {})),
+            Self::MozillaVpn => Err(anyhow!("MozillaVPN only supports Wireguard!")),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
         }
     }
@@ -60,6 +64,7 @@ impl VpnProvider {
     pub fn get_dyn_wireguard_provider(&self) -> anyhow::Result<Box<dyn WireguardProvider>> {
         match self {
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
+            Self::MozillaVpn => Ok(Box::new(mozilla::MozillaVPN {})),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
             _ => Err(anyhow!("Wireguard not implemented")),
         }

@@ -41,7 +41,6 @@ use vpn::{verify_auth, Protocol};
 // - Support update_resolv_conf with OpenVPN (i.e. get DNS server from OpenVPN headers)
 // - Disable ipv6 traffic when not routed?
 // - Allow for not saving OpenVPN creds to config
-// - Allow for choice between iptables and nftables and avoid mixed dependency
 
 fn main() -> anyhow::Result<()> {
     // Get struct of args using structopt
