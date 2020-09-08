@@ -1,6 +1,6 @@
 use super::validate_hostname;
 use super::MozillaVPN;
-use super::{Device, Error, User};
+use super::{Error, User};
 use super::{Login, WireguardProvider};
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::{generate_keypair, generate_public_key, WgKey};
@@ -43,10 +43,10 @@ impl MozillaVPN {
 
     fn prompt_for_wg_key(
         &self,
-        devices: Vec<Device>,
         client: &Client,
         login: &Login,
     ) -> anyhow::Result<(NewDevice, WgKey)> {
+        let devices = &login.user.devices;
         if !devices.is_empty() {
         let selection = dialoguer::Select::new()
             .with_prompt(
@@ -62,13 +62,12 @@ impl MozillaVPN {
             self.upload_new_device(&device, client, login)?;
             Ok((device, keypair))
         } else {
-            let devices_clone = devices.clone();
             let private_key = Input::<String>::new()
                 .with_prompt(format!(
                     "Private key for {}",
                     &devices[selection].pubkey
                 ))
-        .validate_with(move |private_key: &str| -> Result<(), &str> {
+        .validate_with(|private_key: &String| -> Result<(), &str> {
             let private_key = private_key.trim();
             if private_key.len() != 44 {
                 return Err("Expected private key length of 44 characters"
@@ -86,7 +85,7 @@ impl MozillaVPN {
         }})
                 .interact()?;
             // TODO: Fix clones here
-            let device = devices_clone[selection].clone();
+            let device = devices[selection].clone();
             Ok((NewDevice { name: device.name.clone(), pubkey: device.pubkey.clone()},
             WgKey {public: device.pubkey, private: private_key  } ))
         }
@@ -125,8 +124,7 @@ impl WireguardProvider for MozillaVPN {
         let login = self.get_login(&client)?;
         debug!("Received user info: {:?}", &login);
 
-        let (_device, keypair) =
-            self.prompt_for_wg_key(login.user.devices.clone(), &client, &login)?;
+        let (_device, keypair) = self.prompt_for_wg_key(&client, &login)?;
 
         debug!("Chosen keypair: {:?}", keypair);
 
@@ -206,7 +204,7 @@ fn generate_device() -> anyhow::Result<(NewDevice, WgKey)> {
     let keypair = generate_keypair()?;
     let name = Input::<String>::new()
         .with_prompt("Please enter name for new device")
-        .validate_with(|x: &str| {
+        .validate_with(|x: &String| {
             if validate_hostname(x) {
                 Ok(())
             } else {
@@ -229,22 +227,16 @@ fn generate_device() -> anyhow::Result<(NewDevice, WgKey)> {
 fn request_port() -> anyhow::Result<u16> {
     let port = Input::<u16>::new()
         .with_prompt("Enter port number:")
-        .validate_with(|x: &str| -> Result<(), &str> {
-            let p = x.parse::<u16>();
-            match p {
-                Ok(n) => {
-                    if n == 53
-                        || (n >= 4000 && n <= 33433)
-                        || (n >= 33565 && n <= 51820)
-                        || (n >= 52000 && n <= 60000)
-                    {
-                        Ok(())
-                    } else {
-                        Err("
+        .validate_with(|n: &u16| -> Result<(), &str> {
+            if *n == 53
+                || (*n >= 4000 && *n <= 33433)
+                || (*n >= 33565 && *n <= 51820)
+                || (*n >= 52000 && *n <= 60000)
+            {
+                Ok(())
+            } else {
+                Err("
         Port must be 53, or in range 4000-33433, 33565-51820, 52000-60000")
-                    }
-                }
-                Err(_) => Err("Invalid number"),
             }
         })
         .default(51820)
