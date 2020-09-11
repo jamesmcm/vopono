@@ -11,7 +11,7 @@ Currently Mullvad, MozillaVPN, TigerVPN, ProtonVPN and
 PrivateInternetAccess are supported directly, with custom configuration files
 also supported with the `--custom` argument.
 
-Mullvad users can use [am.i.mullvad.net](https://am.i.mullvad.net/) to
+Mullvad users can use [mullvad.net/en/check](https://mullvad.net/en/check/) to
 check the security of their browser's connection. This was used with the
 Mullvad configuration to verify that there is no DNS leaking or
 BitTorrent leaking for both the OpenVPN and Wireguard configurations.
