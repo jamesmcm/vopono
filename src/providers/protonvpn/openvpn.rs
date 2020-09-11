@@ -94,6 +94,8 @@ impl OpenVpnProvider for ProtonVPN {
                 .collect::<Vec<&str>>()
                 .join("\n");
 
+            // TODO: sanitized_name is now deprecated but there is not a simple alternative
+            #[allow(deprecated)]
             let filename = if let Some("ovpn") = file
                 .sanitized_name()
                 .extension()
