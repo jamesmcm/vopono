@@ -7,7 +7,7 @@ as normal.
 
 vopono includes built-in killswitches for both Wireguard and OpenVPN.
 
-Currently Mullvad, MozillaVPN, TigerVPN, ProtonVPN and
+Currently Mullvad, AzireVPN, MozillaVPN, TigerVPN, ProtonVPN and
 PrivateInternetAccess are supported directly, with custom configuration files
 also supported with the `--custom` argument.
 
@@ -15,6 +15,11 @@ Mullvad users can use [mullvad.net/en/check](https://mullvad.net/en/check/) to
 check the security of their browser's connection. This was used with the
 Mullvad configuration to verify that there is no DNS leaking or
 BitTorrent leaking for both the OpenVPN and Wireguard configurations.
+
+AzireVPN users can use [their security check page](https://www.azirevpn.com/check)
+for the same (note the instructions on disabling WebRTC). I noticed that
+when using IPv6 with OpenVPN it incorrectly states you are not connected
+via AzireVPN though (Wireguard works correctly).
 
 Mullvad port forwarding works for both Wireguard and OpenVPN. You will
 need to enable the ports in your [Mullvad account](https://mullvad.net/en/account/#/ports).
@@ -36,6 +41,7 @@ lynx all running through different VPN connections:
 | Provider              | OpenVPN support | Wireguard support | 
 |-----------------------|-----------------|-------------------|
 | Mullvad               | ✅              | ✅                |
+| AzireVPN              | ✅              | ✅                |
 | PrivateInternetAccess | ✅              | ❌                |
 | TigerVPN              | ✅              | ❌                |
 | ProtonVPN             | ✅              | ❌                |
@@ -118,7 +124,7 @@ The sync process will save your credentials to a file in the
 config directory of the provider, so it can be passed to OpenVPN.
 If it is missing you will be prompted for your credentials.
 
-For PrivateInternetAccess these should be the same as your account
+For PrivateInternetAccess and AzireVPN these should be the same as your account
 credentials.
 
 For TigerVPN you can view your OpenVPN credentials [online on the "geeks" dashboard](https://www.tigervpn.com/dashboard/geeks).

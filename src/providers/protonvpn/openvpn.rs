@@ -3,7 +3,7 @@ use super::{ConfigurationChoice, OpenVpnProvider};
 use crate::util::delete_all_files_in_dir;
 use crate::vpn::OpenVpnProtocol;
 use dialoguer::{Input, Password};
-use log::debug;
+use log::{debug, info};
 use reqwest::Url;
 use std::fmt::Display;
 use std::fs::create_dir_all;
@@ -130,6 +130,10 @@ impl OpenVpnProvider for ProtonVPN {
         let (user, pass) = self.prompt_for_auth()?;
         let mut outfile = File::create(self.auth_file_path()?)?;
         write!(outfile, "{}\n{}", user, pass)?;
+        info!(
+            "ProtonVPN OpenVPN config written to {}",
+            openvpn_dir.display()
+        );
         Ok(())
     }
 }
