@@ -21,11 +21,7 @@ impl WireguardProvider for AzireVPN {
         let client = Client::new();
 
         // TODO: Hardcoded list, can this be retrieved from the API?
-        let aliases = vec![
-            "ca1", "dk1", "fr1", "de1", "it1", "es1", "nl1", "no1", "ro1", "se1", "se2", "ch1",
-            "th1", "us1", "us2", "uk1",
-        ];
-
+        let aliases = self.server_aliases();
         let country_map = code_to_country_map();
         let (username, password) = self.request_userpass()?;
         let keypair: WgKey = generate_keypair()?;

@@ -59,7 +59,7 @@ impl VpnProvider {
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
             Self::TigerVPN => Ok(Box::new(tigervpn::TigerVPN {})),
             Self::ProtonVPN => Ok(Box::new(protonvpn::ProtonVPN {})),
-            Self::AzireVPN => Err(anyhow!("AzireVPN not yet implemented")),
+            Self::AzireVPN => Ok(Box::new(azirevpn::AzireVPN {})),
             Self::MozillaVPN => Err(anyhow!("MozillaVPN only supports Wireguard!")),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
         }

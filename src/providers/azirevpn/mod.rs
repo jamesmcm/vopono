@@ -1,4 +1,4 @@
-// TODO mod openvpn;
+mod openvpn;
 mod wireguard;
 
 use super::{ConfigurationChoice, OpenVpnProvider, Provider, WireguardProvider};
@@ -7,10 +7,20 @@ use crate::wireguard::{de_socketaddr, de_vec_ipaddr, de_vec_ipnet};
 use dialoguer::{Input, Password};
 use ipnet::IpNet;
 use serde::Deserialize;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
+
+// AzireVPN details: https://www.azirevpn.com/docs/servers
 
 pub struct AzireVPN {}
 
+impl AzireVPN {
+    fn server_aliases(&self) -> &[&str] {
+        &[
+            "ca1", "dk1", "fr1", "de1", "it1", "es1", "nl1", "no1", "ro1", "se1", "se2", "ch1",
+            "th1", "us1", "us2", "uk1",
+        ]
+    }
+}
 impl Provider for AzireVPN {
     fn alias(&self) -> String {
         "azire".to_string()
