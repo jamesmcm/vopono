@@ -41,11 +41,13 @@ impl OpenVpn {
             File::create(&log_file_str)?;
         }
 
+        let config_file_path = config_file.canonicalize().context("Invalid path given")?;
+
         info!("Launching OpenVPN...");
         let mut command_vec = (&[
             "openvpn",
             "--config",
-            config_file.as_os_str().to_str().unwrap(),
+            config_file_path.to_str().unwrap(),
             "--machine-readable-output",
             "--log",
             log_file_str.as_str(),
@@ -59,7 +61,7 @@ impl OpenVpn {
 
         let remotes = get_remotes_from_config(&config_file)?;
         debug!("Found remotes: {:?}", &remotes);
-        let working_dir = PathBuf::from(config_file.as_path().parent().unwrap());
+        let working_dir = PathBuf::from(config_file_path.parent().unwrap());
 
         handle = netns
             .exec_no_block(&command_vec, None, true, Some(working_dir))
