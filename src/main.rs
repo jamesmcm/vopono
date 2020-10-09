@@ -102,7 +102,9 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let protocol: Protocol;
 
     if let Some(path) = &command.custom_config {
-        protocol = command.protocol.unwrap_or_else(|| get_config_file_protocol(path));
+        protocol = command
+            .protocol
+            .unwrap_or_else(|| get_config_file_protocol(path));
         provider = VpnProvider::Custom;
         // Could hash filename with CRC and use base64 but chars are limited
         server_name = String::from(
@@ -126,7 +128,8 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
         server_name = command.server.expect("Enter a VPN server prefix");
 
         // Check protocol is valid for provider
-        protocol = command.protocol
+        protocol = command
+            .protocol
             .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
     }
 
