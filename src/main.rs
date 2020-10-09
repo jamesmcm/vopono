@@ -26,8 +26,10 @@ use netns::NetworkNamespace;
 use network_interface::{get_active_interfaces, NetworkInterface};
 use providers::VpnProvider;
 use shadowsocks::uses_shadowsocks;
+use std::fs;
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 use structopt::StructOpt;
 use sync::{sync_menu, synch};
 use sysctl::SysCtl;
@@ -84,16 +86,25 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn get_config_file_protocol(config_file: &PathBuf) -> Protocol {
+    let content = fs::read_to_string(config_file).unwrap();
+    if content.contains(&"[Interface]") {
+        Protocol::Wireguard
+    } else {
+        Protocol::OpenVpn
+    }
+}
+
 // TODO: Move this to separate file
 fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let provider: VpnProvider;
     let server_name: String;
+    let protocol: Protocol;
 
     if let Some(path) = &command.custom_config {
-        if command.protocol.is_none() {
-            // TODO: Detect config type from file
-            bail!("Must specify protocol when using custom config");
-        }
+        protocol = command
+            .protocol
+            .unwrap_or_else(|| get_config_file_protocol(path));
         provider = VpnProvider::Custom;
         // Could hash filename with CRC and use base64 but chars are limited
         server_name = String::from(
@@ -115,11 +126,12 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
             bail!("Must provide config file if using custom VPN Provider");
         }
         server_name = command.server.expect("Enter a VPN server prefix");
+
+        // Check protocol is valid for provider
+        protocol = command
+            .protocol
+            .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
     }
-    // Check protocol is valid for provider
-    let protocol = command
-        .protocol
-        .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
 
     if provider != VpnProvider::Custom {
         // Check config files exist for provider
@@ -225,9 +237,9 @@ fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 );
                 if !ns.check_openvpn_running() {
                     error!(
-            "OpenVPN not running in network namespace {}, probable dead lock file or authentication error",
-            &ns_name
-        );
+                        "OpenVPN not running in network namespace {}, probable dead lock file or authentication error",
+                        &ns_name
+                    );
                     return Err(anyhow!(
             "OpenVPN not running in network namespace, probable dead lock file authentication error"
         ));
