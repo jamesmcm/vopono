@@ -8,7 +8,7 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/jamesmcm/vopono"
 homepage = "https://github.com/jamesmcm/vopono"
 readme = "README.md"
-keywords = ["vopono", "vpn", "wireguard", "openvpn", "namespace", "netns"]
+keywords = ["vopono", "vpn", "wireguard", "openvpn", "netns"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
