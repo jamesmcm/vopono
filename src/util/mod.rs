@@ -1,5 +1,8 @@
 pub mod country_map;
+mod open_ports;
 pub mod wireguard;
+
+use crate::vpn::Protocol;
 
 use super::list::get_lock_namespaces;
 use anyhow::{anyhow, Context};
@@ -7,8 +10,10 @@ use directories_next::BaseDirs;
 use ipnet::Ipv4Net;
 use log::{debug, info, warn};
 use nix::unistd::{Group, User};
+pub use open_ports::open_ports;
 use rand::seq::SliceRandom;
 use regex::Regex;
+use std::fs;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -313,5 +318,14 @@ pub fn get_config_from_alias(list_path: &PathBuf, alias: &str) -> anyhow::Result
 
         info!("Chosen config: {}", config.display());
         Ok(config.clone())
+    }
+}
+
+pub fn get_config_file_protocol(config_file: &PathBuf) -> Protocol {
+    let content = fs::read_to_string(config_file).unwrap();
+    if content.contains(&"[Interface]") {
+        Protocol::Wireguard
+    } else {
+        Protocol::OpenVpn
     }
 }

@@ -1,13 +1,14 @@
 [package]
 name = "vopono"
 description = "Launch applications via VPN tunnels using temporary network namespaces"
-version = "0.4.1"
+version = "0.5.0"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2018"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/jamesmcm/vopono"
 homepage = "https://github.com/jamesmcm/vopono"
 readme = "README.md"
+keywords = ["vopono", "vpn", "wireguard", "openvpn", "namespace", "netns"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -18,7 +19,7 @@ log = "0.4"
 pretty_env_logger = "0.4"
 clap = "2"
 which = "4"
-users = "0.10"
+users = "0.11"
 nix = "0.18"
 serde = {version = "1", features = ["derive", "std"]}
 csv = "1"
@@ -40,6 +41,8 @@ strum_macros = "0.19"
 zip = "0.5"
 maplit = "1"
 webbrowser = "0.5"
+basic_tcp_proxy = "0.1"
+ctrlc = "3"
 
 [package.metadata.rpm]
 package = "vopono"

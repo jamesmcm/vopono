@@ -23,6 +23,7 @@ impl OpenVpn {
         auth_file: Option<PathBuf>,
         dns: &[IpAddr],
         use_killswitch: bool,
+        forward_ports: Option<&Vec<u16>>,
     ) -> anyhow::Result<Self> {
         // TODO: Refactor this to separate functions
         // TODO: --status flag
@@ -107,6 +108,11 @@ impl OpenVpn {
         if buffer.contains("Options error") {
             error!("OpenVPN options error: {}", buffer);
             return Err(anyhow!("OpenVPN options error, use -v for full log output"));
+        }
+
+        // Allow input to and output from forwarded ports
+        if let Some(forwards) = forward_ports {
+            super::util::open_ports(&netns, forwards.as_slice())?;
         }
 
         if use_killswitch {

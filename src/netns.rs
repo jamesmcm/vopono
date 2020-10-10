@@ -9,7 +9,7 @@ use super::vpn::Protocol;
 use super::wireguard::Wireguard;
 use crate::providers::VpnProvider;
 use anyhow::Context;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use nix::unistd;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -28,8 +28,15 @@ pub struct NetworkNamespace {
     pub wireguard: Option<Wireguard>,
     pub iptables: Option<IpTables>,
     pub shadowsocks: Option<Shadowsocks>,
+    pub veth_pair_ips: Option<VethPairIPs>,
     pub provider: VpnProvider,
     pub protocol: Protocol,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct VethPairIPs {
+    pub host_ip: IpAddr,
+    pub namespace_ip: IpAddr,
 }
 
 impl NetworkNamespace {
@@ -46,12 +53,14 @@ impl NetworkNamespace {
         let lockfile = File::open(lockfile.path())?;
         let lock: Lockfile = ron::de::from_reader(lockfile)?;
         let ns = lock.ns;
+        info!("Using existing network namespace: {}", &name);
         Ok(ns)
     }
 
     pub fn new(name: String, provider: VpnProvider, protocol: Protocol) -> anyhow::Result<Self> {
         sudo_command(&["ip", "netns", "add", name.as_str()])
             .with_context(|| format!("Failed to create network namespace: {}", &name))?;
+        info!("Created new network namespace: {}", &name);
 
         Ok(Self {
             name,
@@ -61,6 +70,7 @@ impl NetworkNamespace {
             wireguard: None,
             iptables: None,
             shadowsocks: None,
+            veth_pair_ips: None,
             provider,
             protocol,
         })
@@ -120,8 +130,8 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn add_routing(&self, target_subnet: u8) -> anyhow::Result<()> {
-        // TODO: Handle case where IP address taken
+    pub fn add_routing(&mut self, target_subnet: u8) -> anyhow::Result<()> {
+        // TODO: Handle case where IP address taken in better way i.e. don't just change subnet
         let veth_dest = &self
             .veth_pair
             .as_ref()
@@ -137,6 +147,7 @@ impl NetworkNamespace {
         let ip = format!("10.200.{}.1/24", target_subnet);
         let ip_nosub = format!("10.200.{}.1", target_subnet);
         let veth_source_ip = format!("10.200.{}.2/24", target_subnet);
+        let veth_source_ip_nosub = format!("10.200.{}.2", target_subnet);
 
         sudo_command(&["ip", "addr", "add", &ip, "dev", veth_dest]).with_context(|| {
             format!(
@@ -161,6 +172,15 @@ impl NetworkNamespace {
         ])
         .with_context(|| format!("Failed to assign static IP to veth source: {}", veth_source))?;
 
+        info!(
+            "IP address of namespace as seen from host: {}",
+            veth_source_ip_nosub
+        );
+        info!("IP address of host as seen from namespace: {}", ip_nosub);
+        self.veth_pair_ips = Some(VethPairIPs {
+            host_ip: ip_nosub.parse()?,
+            namespace_ip: veth_source_ip_nosub.parse()?,
+        });
         Ok(())
     }
 
@@ -175,6 +195,7 @@ impl NetworkNamespace {
         auth_file: Option<PathBuf>,
         dns: &[IpAddr],
         use_killswitch: bool,
+        forward_ports: Option<&Vec<u16>>,
     ) -> anyhow::Result<()> {
         self.openvpn = Some(OpenVpn::run(
             &self,
@@ -182,6 +203,7 @@ impl NetworkNamespace {
             auth_file,
             dns,
             use_killswitch,
+            forward_ports,
         )?);
         Ok(())
     }
@@ -209,11 +231,18 @@ impl NetworkNamespace {
         &mut self,
         config_file: PathBuf,
         use_killswitch: bool,
+        forward_ports: Option<&Vec<u16>>,
     ) -> anyhow::Result<()> {
-        self.wireguard = Some(Wireguard::run(self, config_file, use_killswitch)?);
+        self.wireguard = Some(Wireguard::run(
+            self,
+            config_file,
+            use_killswitch,
+            forward_ports,
+        )?);
         Ok(())
     }
 
+    // TODO: Add nftables option
     pub fn add_iptables_rule(
         &mut self,
         target_subnet: u8,
