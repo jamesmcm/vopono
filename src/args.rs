@@ -90,6 +90,18 @@ pub struct ExecCommand {
     /// Disable killswitch
     #[structopt(long = "no-killswitch")]
     pub no_killswitch: bool,
+
+    /// Keep-alive - do not close network namespace when launched process terminates
+    #[structopt(long = "keep-alive", short = "k")]
+    pub keep_alive: bool,
+
+    /// List of ports to forward from network namespace - usefuel for running servers and daemons
+    #[structopt(long = "forward", short = "f")]
+    pub forward_ports: Option<Vec<u16>>,
+
+    /// Disable proxying to host machine when forwarding ports
+    #[structopt(long = "no-proxy")]
+    pub no_proxy: bool,
 }
 
 #[derive(StructOpt)]

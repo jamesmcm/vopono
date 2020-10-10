@@ -3,7 +3,7 @@ use crate::util::get_all_running_process_names;
 use log::warn;
 
 pub struct ApplicationWrapper {
-    handle: std::process::Child,
+    pub handle: std::process::Child,
 }
 
 impl ApplicationWrapper {

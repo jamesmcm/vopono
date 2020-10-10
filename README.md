@@ -217,6 +217,30 @@ You may also wish to disable WebRTC - see
 Similar issues apply to Chromium and Google Chrome.
 
 
+### Daemons and servers
+
+If running servers and daemons inside of vopono, you can you use the 
+`-f $PORT` argument to allow incoming connections to a TCP port inside the namespace, by default this
+port will also be proxied to your host machine at the same port number.
+Note for same daemons you may need to use the `-k` keep-alive option in
+case the process ID changes.
+
+For example, to launch `transmission-daemon` that is externally
+accessible at `127.0.0.1:9091` (with outward connections via AzireVPN with Wireguard and a VPN server in Norway):
+
+```bash
+$ vopono -v exec -k -f 9091 --provider azirevpn --server norway "transmission-daemon -a *.*.*.*"
+```
+
+Note in the case of `transmission-daemon` the `-a *.*.*.*` argument is
+required to allow external connections to the daemon's web portal (your
+host machine will now count as external to the network namespace).
+
+By default, vopono runs a small TCP proxy to proxy the ports on your
+host machine to the ports on the network namespace - if you do not want
+this to run use the `--no-proxy` flag.
+
+
 ## Installation
 
 ### AUR (Arch Linux)

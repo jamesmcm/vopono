@@ -22,6 +22,7 @@ impl Wireguard {
         namespace: &mut NetworkNamespace,
         config_file: PathBuf,
         use_killswitch: bool,
+        forward_ports: Option<&Vec<u16>>,
     ) -> anyhow::Result<Self> {
         if let Err(x) = which::which("wg") {
             error!("wg binary not found. Is wireguard-tools installed and on PATH?");
@@ -250,6 +251,11 @@ impl Wireguard {
         namespace.exec(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
         std::fs::remove_file("/tmp/vopono_nft.sh")?;
 
+        // Allow input to and output from forwarded ports
+        if let Some(forwards) = forward_ports {
+            super::util::open_ports(&namespace, forwards.as_slice())?;
+        }
+
         if use_killswitch {
             killswitch(&if_name, fwmark, namespace)?;
         }
@@ -264,7 +270,7 @@ pub fn killswitch(ifname: &str, fwmark: &str, netns: &NetworkNamespace) -> anyho
     debug!("Setting Wireguard killswitch....");
     netns.exec(&[
         "iptables",
-        "-I",
+        "-A",
         "OUTPUT",
         "!",
         "-o",
@@ -285,7 +291,7 @@ pub fn killswitch(ifname: &str, fwmark: &str, netns: &NetworkNamespace) -> anyho
 
     netns.exec(&[
         "ip6tables",
-        "-I",
+        "-A",
         "OUTPUT",
         "!",
         "-o",
