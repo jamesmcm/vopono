@@ -2,7 +2,7 @@ mod application_wrapper;
 mod args;
 mod dns_config;
 mod exec;
-mod iptables;
+mod host_masquerade;
 mod list;
 mod list_configs;
 mod netns;

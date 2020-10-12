@@ -8,7 +8,7 @@ use super::sync::synch;
 use super::sysctl::SysCtl;
 use super::util::{get_config_file_protocol, get_config_from_alias};
 use super::util::{get_existing_namespaces, get_target_subnet};
-use super::vpn::{verify_auth, Protocol};
+use super::vpn::{verify_auth, Firewall, Protocol};
 use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
 use std::io::{self, Write};
@@ -18,6 +18,11 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let provider: VpnProvider;
     let server_name: String;
     let protocol: Protocol;
+
+    let firewall: Firewall = command
+        .firewall
+        .ok_or_else(|| anyhow!(""))
+        .or_else(|_x| crate::util::get_firewall())?;
 
     if let Some(path) = &command.custom_config {
         protocol = command
@@ -101,12 +106,17 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         // If namespace exists, read its lock config
         ns = NetworkNamespace::from_existing(ns_name)?;
     } else {
-        ns = NetworkNamespace::new(ns_name.clone(), provider.clone(), protocol.clone())?;
+        ns = NetworkNamespace::new(
+            ns_name.clone(),
+            provider.clone(),
+            protocol.clone(),
+            firewall,
+        )?;
         let target_subnet = get_target_subnet()?;
         ns.add_loopback()?;
         ns.add_veth_pair()?;
         ns.add_routing(target_subnet)?;
-        ns.add_iptables_rule(target_subnet, interface)?;
+        ns.add_host_masquerade(target_subnet, interface, firewall)?;
         _sysctl = SysCtl::enable_ipv4_forwarding();
         match protocol {
             Protocol::OpenVpn => {
@@ -189,6 +199,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     };
 
     let application = ApplicationWrapper::new(&ns, &command.application, user)?;
+
+    // Launch TCP proxy server on other threads if forwarding ports
     let mut proxy = Vec::new();
     if let Some(f) = command.forward_ports {
         if !(command.no_proxy || f.is_empty()) {
@@ -205,6 +217,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             }
         }
     }
+
     let pid = application.handle.id();
     info!(
         "Application {} launched in network namespace {} with pid {}",
@@ -228,12 +241,14 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     Ok(())
 }
 
+// Block waiting for SIGINT
 fn stay_alive(pid: u32) -> anyhow::Result<()> {
     let recv = ctrl_channel(pid);
     recv?.recv().unwrap();
     Ok(())
 }
 
+// Handle waiting for SIGINT
 fn ctrl_channel(pid: u32) -> Result<std::sync::mpsc::Receiver<()>, ctrlc::Error> {
     let (sender, receiver) = std::sync::mpsc::channel();
     ctrlc::set_handler(move || {

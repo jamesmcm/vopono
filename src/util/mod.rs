@@ -329,3 +329,15 @@ pub fn get_config_file_protocol(config_file: &PathBuf) -> Protocol {
         Protocol::OpenVpn
     }
 }
+
+use crate::vpn::Firewall;
+use which::which;
+pub fn get_firewall() -> anyhow::Result<Firewall> {
+    if which("nft").is_ok() {
+        Ok(Firewall::NfTables)
+    } else if which("iptables").is_ok() {
+        Ok(Firewall::IpTables)
+    } else {
+        Err(anyhow!("Neither nftables nor iptables is installed!"))
+    }
+}

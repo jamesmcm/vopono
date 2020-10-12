@@ -1,6 +1,6 @@
 use super::network_interface::NetworkInterface;
 use super::providers::VpnProvider;
-use super::vpn::Protocol;
+use super::vpn::{Firewall, Protocol};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use structopt::StructOpt;
@@ -102,6 +102,10 @@ pub struct ExecCommand {
     /// Disable proxying to host machine when forwarding ports
     #[structopt(long = "no-proxy")]
     pub no_proxy: bool,
+
+    /// VPN Protocol (if not given will use default)
+    #[structopt(long = "firewall",  possible_values = &Firewall::variants(), case_insensitive = true)]
+    pub firewall: Option<Firewall>,
 }
 
 #[derive(StructOpt)]

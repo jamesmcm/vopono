@@ -1,11 +1,11 @@
 use super::dns_config::DnsConfig;
-use super::iptables::IpTables;
+use super::host_masquerade::HostMasquerade;
 use super::network_interface::NetworkInterface;
 use super::openvpn::OpenVpn;
 use super::shadowsocks::Shadowsocks;
 use super::util::{config_dir, set_config_permissions, sudo_command};
 use super::veth_pair::VethPair;
-use super::vpn::Protocol;
+use super::vpn::{Firewall, Protocol};
 use super::wireguard::Wireguard;
 use crate::providers::VpnProvider;
 use anyhow::Context;
@@ -26,11 +26,12 @@ pub struct NetworkNamespace {
     dns_config: Option<DnsConfig>,
     pub openvpn: Option<OpenVpn>,
     pub wireguard: Option<Wireguard>,
-    pub iptables: Option<IpTables>,
+    pub host_masquerade: Option<HostMasquerade>,
     pub shadowsocks: Option<Shadowsocks>,
     pub veth_pair_ips: Option<VethPairIPs>,
     pub provider: VpnProvider,
     pub protocol: Protocol,
+    pub firewall: Firewall,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -57,7 +58,12 @@ impl NetworkNamespace {
         Ok(ns)
     }
 
-    pub fn new(name: String, provider: VpnProvider, protocol: Protocol) -> anyhow::Result<Self> {
+    pub fn new(
+        name: String,
+        provider: VpnProvider,
+        protocol: Protocol,
+        firewall: Firewall,
+    ) -> anyhow::Result<Self> {
         sudo_command(&["ip", "netns", "add", name.as_str()])
             .with_context(|| format!("Failed to create network namespace: {}", &name))?;
         info!("Created new network namespace: {}", &name);
@@ -68,11 +74,12 @@ impl NetworkNamespace {
             dns_config: None,
             openvpn: None,
             wireguard: None,
-            iptables: None,
+            host_masquerade: None,
             shadowsocks: None,
             veth_pair_ips: None,
             provider,
             protocol,
+            firewall,
         })
     }
 
@@ -242,15 +249,16 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    // TODO: Add nftables option
-    pub fn add_iptables_rule(
+    pub fn add_host_masquerade(
         &mut self,
         target_subnet: u8,
         interface: NetworkInterface,
+        firewall: Firewall,
     ) -> anyhow::Result<()> {
-        self.iptables = Some(IpTables::add_masquerade_rule(
+        self.host_masquerade = Some(HostMasquerade::add_masquerade_rule(
             format!("10.200.{}.0/24", target_subnet),
             interface,
+            firewall,
         )?);
 
         Ok(())
@@ -327,11 +335,12 @@ impl Drop for NetworkNamespace {
             self.veth_pair = None;
             self.dns_config = None;
             self.wireguard = None;
-            self.iptables = None;
+            self.host_masquerade = None;
             sudo_command(&["ip", "netns", "delete", &self.name])
                 .unwrap_or_else(|_| panic!("Failed to delete network namespace: {}", &self.name));
         } else {
             debug!("Skipping destructors since other vopono instance using this namespace!");
+            // TODO: Test std::mem::forget(self) here
             let openvpn = self.openvpn.take();
             let openvpn = Box::new(openvpn);
             Box::leak(openvpn);
@@ -348,9 +357,9 @@ impl Drop for NetworkNamespace {
             let wireguard = Box::new(wireguard);
             Box::leak(wireguard);
 
-            let iptables = self.iptables.take();
-            let iptables = Box::new(iptables);
-            Box::leak(iptables);
+            let host_masquerade = self.host_masquerade.take();
+            let host_masquerade = Box::new(host_masquerade);
+            Box::leak(host_masquerade);
         }
     }
 }

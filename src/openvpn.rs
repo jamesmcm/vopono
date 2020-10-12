@@ -1,6 +1,6 @@
 use super::netns::NetworkNamespace;
 use super::util::check_process_running;
-use super::vpn::OpenVpnProtocol;
+use super::vpn::{Firewall, OpenVpnProtocol};
 use anyhow::{anyhow, Context};
 use log::{debug, error, info};
 use regex::Regex;
@@ -24,6 +24,7 @@ impl OpenVpn {
         dns: &[IpAddr],
         use_killswitch: bool,
         forward_ports: Option<&Vec<u16>>,
+        firewall: Firewall,
     ) -> anyhow::Result<Self> {
         // TODO: Refactor this to separate functions
         // TODO: --status flag
@@ -112,11 +113,11 @@ impl OpenVpn {
 
         // Allow input to and output from forwarded ports
         if let Some(forwards) = forward_ports {
-            super::util::open_ports(&netns, forwards.as_slice())?;
+            super::util::open_ports(&netns, forwards.as_slice(), firewall)?;
         }
 
         if use_killswitch {
-            killswitch(netns, dns, remotes.as_slice())?;
+            killswitch(netns, dns, remotes.as_slice(), firewall)?;
         }
 
         Ok(Self { pid: id })
@@ -143,58 +144,99 @@ pub fn killswitch(
     netns: &NetworkNamespace,
     dns: &[IpAddr],
     remotes: &[Remote],
+    firewall: Firewall,
+    disable_ipv6: bool,
 ) -> anyhow::Result<()> {
     debug!("Setting OpenVPN killswitch....");
-    netns.exec(&["iptables", "-P", "INPUT", "DROP"])?;
-    netns.exec(&["iptables", "-P", "FORWARD", "DROP"])?;
-    netns.exec(&["iptables", "-P", "OUTPUT", "DROP"])?;
-    netns.exec(&[
-        "iptables",
-        "-A",
-        "INPUT",
-        "-m",
-        "conntrack",
-        "--ctstate",
-        "RELATED,ESTABLISHED",
-        "-j",
-        "ACCEPT",
-    ])?;
-    netns.exec(&["iptables", "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"])?;
-    netns.exec(&["iptables", "-A", "INPUT", "-i", "tun+", "-j", "ACCEPT"])?;
-    netns.exec(&["iptables", "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"])?;
-    for dnsa in dns.iter() {
-        //TODO IPv6 DNS?
-        let dns_mask = format!("{}/32", dnsa.to_string());
-        netns.exec(&["iptables", "-A", "OUTPUT", "-d", &dns_mask, "-j", "ACCEPT"])?;
-    }
 
-    for remote in remotes {
-        let port_str = format!("{}", remote.port);
-        netns.exec(&[
-            "iptables",
-            "-A",
-            "OUTPUT",
-            "-p",
-            &remote.protocol.to_string(),
-            "-m",
-            &remote.protocol.to_string(),
-            "--dport",
-            port_str.as_str(),
-            "-j",
-            "ACCEPT",
-        ])?;
-    }
+    match firewall {
+        Firewall::IpTables => {
+            let ipcmds = if disable_ipv6 {
+                netns.exec(&["ip6tables", "-P", "INPUT", "DROP"])?;
+                netns.exec(&["ip6tables", "-P", "FORWARD", "DROP"])?;
+                netns.exec(&["ip6tables", "-P", "OUTPUT", "DROP"])?;
+                &["iptables"].into_iter()
+            } else {
+                &["iptables", "ip6tables"].into_iter()
+            };
 
-    netns.exec(&["iptables", "-A", "OUTPUT", "-o", "tun+", "-j", "ACCEPT"])?;
-    netns.exec(&[
-        "iptables",
-        "-A",
-        "OUTPUT",
-        "-j",
-        "REJECT",
-        "--reject-with",
-        "icmp-net-unreachable",
-    ])?;
+            for ipcmd in ipcmds.into_iter() {
+                netns.exec(&[ipcmd, "-P", "INPUT", "DROP"])?;
+                netns.exec(&[ipcmd, "-P", "FORWARD", "DROP"])?;
+                netns.exec(&[ipcmd, "-P", "OUTPUT", "DROP"])?;
+                netns.exec(&[
+                    ipcmd,
+                    "-A",
+                    "INPUT",
+                    "-m",
+                    "conntrack",
+                    "--ctstate",
+                    "RELATED,ESTABLISHED",
+                    "-j",
+                    "ACCEPT",
+                ])?;
+                netns.exec(&[ipcmd, "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"])?;
+                netns.exec(&[ipcmd, "-A", "INPUT", "-i", "tun+", "-j", "ACCEPT"])?;
+                netns.exec(&[ipcmd, "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"])?;
+                for dnsa in dns.iter() {
+                    match dnsa {
+                        // TODO: Tidy this up
+                        IpAddr::V4(addr) => {
+                            if ipcmd == &"iptables" {
+                                let dns_mask = format!("{}/32", addr.to_string());
+                                netns.exec(&[
+                                    ipcmd, "-A", "OUTPUT", "-d", &dns_mask, "-j", "ACCEPT",
+                                ])?;
+                            }
+                        }
+                        IpAddr::V6(addr) => {
+                            if ipcmd == &"ip6tables" && !disable_ipv6 {
+                                let dns_mask = format!("{}/128", addr.to_string());
+                                netns.exec(&[
+                                    ipcmd, "-A", "OUTPUT", "-d", &dns_mask, "-j", "ACCEPT",
+                                ])?;
+                            }
+                        }
+                    }
+                }
+
+                if !(disable_ipv6 && ipcmd == &"ip6tables") {
+                    for remote in remotes {
+                        // TODO: Does this work for ip6tables if remote is given as IPv4 address
+                        // and vice versa?
+                        let port_str = format!("{}", remote.port);
+                        netns.exec(&[
+                            ipcmd,
+                            "-A",
+                            "OUTPUT",
+                            "-p",
+                            &remote.protocol.to_string(),
+                            "-m",
+                            &remote.protocol.to_string(),
+                            "--dport",
+                            port_str.as_str(),
+                            "-j",
+                            "ACCEPT",
+                        ])?;
+                    }
+                }
+
+                netns.exec(&[ipcmd, "-A", "OUTPUT", "-o", "tun+", "-j", "ACCEPT"])?;
+                netns.exec(&[
+                    ipcmd,
+                    "-A",
+                    "OUTPUT",
+                    "-j",
+                    "REJECT",
+                    "--reject-with",
+                    "icmp-net-unreachable",
+                ])?;
+            }
+        }
+        Firewall::NfTables => {
+            // TODO:
+        }
+    }
     Ok(())
 }
 
@@ -239,7 +281,16 @@ pub fn get_remotes_from_config(path: &PathBuf) -> anyhow::Result<Vec<Remote>> {
 
 #[derive(Debug)]
 pub struct Remote {
-    _host: String,
+    _host: Host,
     pub port: u16,
     protocol: OpenVpnProtocol,
 }
+
+#[derive(Debug)]
+pub enum Host {
+    IPv4(std::net::Ipv4Addr),
+    IPv6(std::net::Ipv6Addr),
+    Hostname(String),
+}
+
+impl FromStr for Host {}
