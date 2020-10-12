@@ -1,5 +1,6 @@
 use super::netns::NetworkNamespace;
 use super::util::sudo_command;
+use super::vpn::Firewall;
 use anyhow::{anyhow, Context};
 use ipnet::IpNet;
 use log::{debug, error, warn};
@@ -23,6 +24,8 @@ impl Wireguard {
         config_file: PathBuf,
         use_killswitch: bool,
         forward_ports: Option<&Vec<u16>>,
+        firewall: Firewall,
+        disable_ipv6: bool,
     ) -> anyhow::Result<Self> {
         if let Err(x) = which::which("wg") {
             error!("wg binary not found. Is wireguard-tools installed and on PATH?");
@@ -253,7 +256,7 @@ impl Wireguard {
 
         // Allow input to and output from forwarded ports
         if let Some(forwards) = forward_ports {
-            super::util::open_ports(&namespace, forwards.as_slice())?;
+            super::util::open_ports(&namespace, forwards.as_slice(), firewall)?;
         }
 
         if use_killswitch {

@@ -7,6 +7,7 @@ pub fn open_ports(
     firewall: Firewall,
 ) -> anyhow::Result<()> {
     // TODO: Allow UDP port forwarding?
+    // IPv6 forwarding?
     for port in ports {
         match firewall {
             Firewall::IpTables => {
@@ -34,21 +35,21 @@ pub fn open_ports(
                 ])?;
             }
             Firewall::NfTables => {
-                netns.exec(&["nft", "add", "table", "ip", &netns.name])?;
+                netns.exec(&["nft", "add", "table", "inet", &netns.name])?;
                 netns.exec(&[
                     "nft",
                     "add",
                     "chain",
-                    "ip",
+                    "inet",
                     &netns.name,
                     "input",
-                    "'{ type filter hook input priority 100 ; }'",
+                    "{ type filter hook input priority 100 ; }",
                 ])?;
                 netns.exec(&[
                     "nft",
                     "insert",
                     "rule",
-                    "ip",
+                    "inet",
                     &netns.name,
                     "input",
                     "tcp",
@@ -61,16 +62,16 @@ pub fn open_ports(
                     "nft",
                     "add",
                     "chain",
-                    "ip",
+                    "inet",
                     &netns.name,
                     "output",
-                    "'{ type filter hook output priority 100 ; }'",
+                    "{ type filter hook output priority 100 ; }",
                 ])?;
                 netns.exec(&[
                     "nft",
                     "insert",
                     "rule",
-                    "ip",
+                    "inet",
                     &netns.name,
                     "output",
                     "tcp",

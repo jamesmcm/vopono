@@ -40,17 +40,17 @@ impl HostMasquerade {
                 })?;
             }
             Firewall::NfTables => {
-                sudo_command(&["nft", "add", "table", "ip", "vopono_nat"])
+                sudo_command(&["nft", "add", "table", "inet", "vopono_nat"])
                     .context("Failed to create nft table vopono_nat")?;
 
-                sudo_command(&["nft", "'add chain ip vopono_nat postrouting { type nat hook postrouting priority 100 ; }'"])
+                sudo_command(&["nft", "add chain inet vopono_nat postrouting { type nat hook postrouting priority 100 ; }"])
                     .context("Failed to create nft postrouting chain in vopono_nat")?;
 
                 sudo_command(&[
                     "nft",
                     "add",
                     "rule",
-                    "ip",
+                    "inet",
                     "vopono_nat",
                     "postrouting",
                     "oifname",
@@ -102,7 +102,7 @@ impl Drop for HostMasquerade {
                 });
             }
             Firewall::NfTables => {
-                sudo_command(&["nft", "delete", "table", "ip", "vopono_nat"]).unwrap_or_else(
+                sudo_command(&["nft", "delete", "table", "inet", "vopono_nat"]).unwrap_or_else(
                     |_| {
                         panic!(
                             "Failed to delete nftables masquerade rule, ip_mask: {}, interface: {}",

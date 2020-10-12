@@ -196,6 +196,7 @@ impl NetworkNamespace {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run_openvpn(
         &mut self,
         config_file: PathBuf,
@@ -203,6 +204,8 @@ impl NetworkNamespace {
         dns: &[IpAddr],
         use_killswitch: bool,
         forward_ports: Option<&Vec<u16>>,
+        firewall: Firewall,
+        disable_ipv6: bool,
     ) -> anyhow::Result<()> {
         self.openvpn = Some(OpenVpn::run(
             &self,
@@ -211,6 +214,8 @@ impl NetworkNamespace {
             dns,
             use_killswitch,
             forward_ports,
+            firewall,
+            disable_ipv6,
         )?);
         Ok(())
     }
@@ -239,12 +244,16 @@ impl NetworkNamespace {
         config_file: PathBuf,
         use_killswitch: bool,
         forward_ports: Option<&Vec<u16>>,
+        firewall: Firewall,
+        disable_ipv6: bool,
     ) -> anyhow::Result<()> {
         self.wireguard = Some(Wireguard::run(
             self,
             config_file,
             use_killswitch,
             forward_ports,
+            firewall,
+            disable_ipv6,
         )?);
         Ok(())
     }

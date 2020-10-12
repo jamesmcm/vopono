@@ -17,6 +17,7 @@ pub struct OpenVpn {
 }
 
 impl OpenVpn {
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         netns: &NetworkNamespace,
         config_file: PathBuf,
@@ -25,6 +26,7 @@ impl OpenVpn {
         use_killswitch: bool,
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
+        disable_ipv6: bool,
     ) -> anyhow::Result<Self> {
         // TODO: Refactor this to separate functions
         // TODO: --status flag
@@ -117,7 +119,7 @@ impl OpenVpn {
         }
 
         if use_killswitch {
-            killswitch(netns, dns, remotes.as_slice(), firewall)?;
+            killswitch(netns, dns, remotes.as_slice(), firewall, disable_ipv6)?;
         }
 
         Ok(Self { pid: id })
@@ -155,12 +157,12 @@ pub fn killswitch(
                 netns.exec(&["ip6tables", "-P", "INPUT", "DROP"])?;
                 netns.exec(&["ip6tables", "-P", "FORWARD", "DROP"])?;
                 netns.exec(&["ip6tables", "-P", "OUTPUT", "DROP"])?;
-                &["iptables"].into_iter()
+                vec!["iptables"]
             } else {
-                &["iptables", "ip6tables"].into_iter()
+                vec!["iptables", "ip6tables"]
             };
 
-            for ipcmd in ipcmds.into_iter() {
+            for ipcmd in ipcmds {
                 netns.exec(&[ipcmd, "-P", "INPUT", "DROP"])?;
                 netns.exec(&[ipcmd, "-P", "FORWARD", "DROP"])?;
                 netns.exec(&[ipcmd, "-P", "OUTPUT", "DROP"])?;
@@ -182,42 +184,95 @@ pub fn killswitch(
                     match dnsa {
                         // TODO: Tidy this up
                         IpAddr::V4(addr) => {
-                            if ipcmd == &"iptables" {
-                                let dns_mask = format!("{}/32", addr.to_string());
+                            if ipcmd == "iptables" {
                                 netns.exec(&[
-                                    ipcmd, "-A", "OUTPUT", "-d", &dns_mask, "-j", "ACCEPT",
+                                    ipcmd,
+                                    "-A",
+                                    "OUTPUT",
+                                    "-d",
+                                    &addr.to_string(),
+                                    "-j",
+                                    "ACCEPT",
                                 ])?;
                             }
                         }
                         IpAddr::V6(addr) => {
-                            if ipcmd == &"ip6tables" && !disable_ipv6 {
-                                let dns_mask = format!("{}/128", addr.to_string());
+                            if ipcmd == "ip6tables" && !disable_ipv6 {
                                 netns.exec(&[
-                                    ipcmd, "-A", "OUTPUT", "-d", &dns_mask, "-j", "ACCEPT",
+                                    ipcmd,
+                                    "-A",
+                                    "OUTPUT",
+                                    "-d",
+                                    &addr.to_string(),
+                                    "-j",
+                                    "ACCEPT",
                                 ])?;
                             }
                         }
                     }
                 }
 
-                if !(disable_ipv6 && ipcmd == &"ip6tables") {
-                    for remote in remotes {
-                        // TODO: Does this work for ip6tables if remote is given as IPv4 address
-                        // and vice versa?
-                        let port_str = format!("{}", remote.port);
-                        netns.exec(&[
-                            ipcmd,
-                            "-A",
-                            "OUTPUT",
-                            "-p",
-                            &remote.protocol.to_string(),
-                            "-m",
-                            &remote.protocol.to_string(),
-                            "--dport",
-                            port_str.as_str(),
-                            "-j",
-                            "ACCEPT",
-                        ])?;
+                // TODO: Tidy this up - remote can be IPv4 or IPv6 address or hostname
+                for remote in remotes {
+                    let port_str = format!("{}", remote.port);
+                    match &remote.host {
+                        // TODO: Fix this to specify destination address - but need hostname
+                        // resolution working
+                        Host::IPv4(ip) => {
+                            if ipcmd == "iptables" {
+                                netns.exec(&[
+                                    ipcmd,
+                                    "-A",
+                                    "OUTPUT",
+                                    "-p",
+                                    &remote.protocol.to_string(),
+                                    "-m",
+                                    &remote.protocol.to_string(),
+                                    // "-d",
+                                    // &ip.to_string(),
+                                    "--dport",
+                                    port_str.as_str(),
+                                    "-j",
+                                    "ACCEPT",
+                                ])?;
+                            }
+                        }
+                        Host::IPv6(ip) => {
+                            if ipcmd == "ip6tables" {
+                                netns.exec(&[
+                                    ipcmd,
+                                    "-A",
+                                    "OUTPUT",
+                                    "-p",
+                                    &remote.protocol.to_string(),
+                                    "-m",
+                                    &remote.protocol.to_string(),
+                                    // "-d",
+                                    // &ip.to_string(),
+                                    "--dport",
+                                    port_str.as_str(),
+                                    "-j",
+                                    "ACCEPT",
+                                ])?;
+                            }
+                        }
+                        Host::Hostname(name) => {
+                            netns.exec(&[
+                                ipcmd,
+                                "-A",
+                                "OUTPUT",
+                                "-p",
+                                &remote.protocol.to_string(),
+                                // "-d",
+                                // &name.to_string(),
+                                "-m",
+                                &remote.protocol.to_string(),
+                                "--dport",
+                                port_str.as_str(),
+                                "-j",
+                                "ACCEPT",
+                            ])?;
+                        }
                     }
                 }
 
@@ -234,7 +289,239 @@ pub fn killswitch(
             }
         }
         Firewall::NfTables => {
+            if disable_ipv6 {
+                netns.exec(&["nft", "add", "table", "ip6", &netns.name])?;
+                netns.exec(&[
+                    "nft",
+                    "add",
+                    "chain",
+                    "ip6",
+                    &netns.name,
+                    "drop_ipv6_input",
+                    "{ type filter hook input priority -1 ; policy drop; }",
+                ])?;
+                netns.exec(&[
+                    "nft",
+                    "add",
+                    "chain",
+                    "ip6",
+                    &netns.name,
+                    "drop_ipv6_output",
+                    "{ type filter hook output priority -1 ; policy drop; }",
+                ])?;
+                netns.exec(&[
+                    "nft",
+                    "add",
+                    "chain",
+                    "ip6",
+                    &netns.name,
+                    "drop_ipv6_forward",
+                    "{ type filter hook forward priority -1 ; policy drop; }",
+                ])?;
+            }
             // TODO:
+            netns.exec(&["nft", "add", "table", "inet", &netns.name])?;
+            netns.exec(&[
+                "nft",
+                "add",
+                "chain",
+                "inet",
+                &netns.name,
+                "input",
+                "{ type filter hook input priority 100 ; policy drop; }",
+            ])?;
+            netns.exec(&[
+                "nft",
+                "add",
+                "chain",
+                "inet",
+                &netns.name,
+                "forward",
+                "{ type filter hook forward priority 100 ; policy drop; }",
+            ])?;
+            netns.exec(&[
+                "nft",
+                "add",
+                "chain",
+                "inet",
+                &netns.name,
+                "output",
+                "{ type filter hook output priority 100 ; policy drop; }",
+            ])?;
+            netns.exec(&[
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "input",
+                "ct",
+                "state",
+                "related,established",
+                "counter",
+                "accept",
+            ])?;
+            netns.exec(&[
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "input",
+                "iifname",
+                "\"lo\"",
+                "counter",
+                "accept",
+            ])?;
+            netns.exec(&[
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "input",
+                "iifname",
+                "\"tun*\"",
+                "counter",
+                "accept",
+            ])?;
+            netns.exec(&[
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "output",
+                "oifname",
+                "\"lo\"",
+                "counter",
+                "accept",
+            ])?;
+            for dnsa in dns.iter() {
+                match dnsa {
+                    IpAddr::V4(addr) => {
+                        netns.exec(&[
+                            "nft",
+                            "add",
+                            "rule",
+                            "inet",
+                            &netns.name,
+                            "output",
+                            "ip",
+                            "daddr",
+                            &addr.to_string(),
+                            "counter",
+                            "accept",
+                        ])?;
+                    }
+                    IpAddr::V6(addr) => {
+                        netns.exec(&[
+                            "nft",
+                            "add",
+                            "rule",
+                            "inet",
+                            &netns.name,
+                            "output",
+                            "ip6",
+                            "daddr",
+                            &addr.to_string(),
+                            "counter",
+                            "accept",
+                        ])?;
+                    }
+                };
+            }
+
+            for remote in remotes {
+                let port_str = format!("{}", remote.port);
+                match &remote.host {
+                    // TODO: Fix this to specify destination address - but need hostname
+                    // resolution working
+                    Host::IPv4(ip) => {
+                        netns.exec(&[
+                            "nft",
+                            "add",
+                            "rule",
+                            "inet",
+                            &netns.name,
+                            "output",
+                            // "ip",
+                            // "daddr",
+                            // &ip.to_string(),
+                            &remote.protocol.to_string(),
+                            "dport",
+                            port_str.as_str(),
+                            "counter",
+                            "accept",
+                        ])?;
+                    }
+                    Host::IPv6(ip) => {
+                        netns.exec(&[
+                            "nft",
+                            "add",
+                            "rule",
+                            "inet",
+                            &netns.name,
+                            "output",
+                            // "ip6",
+                            // "daddr",
+                            // &ip.to_string(),
+                            &remote.protocol.to_string(),
+                            "dport",
+                            port_str.as_str(),
+                            "counter",
+                            "accept",
+                        ])?;
+                    }
+                    Host::Hostname(name) => {
+                        // TODO: Does this work with nftables?
+                        netns.exec(&[
+                            "nft",
+                            "add",
+                            "rule",
+                            "inet",
+                            &netns.name,
+                            "output",
+                            // "ip",
+                            // "daddr",
+                            // &name.to_string(),
+                            &remote.protocol.to_string(),
+                            "dport",
+                            port_str.as_str(),
+                            "counter",
+                            "accept",
+                        ])?;
+                    }
+                }
+            }
+
+            netns.exec(&[
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "output",
+                "oifname",
+                "\"tun*\"",
+                "counter",
+                "accept",
+            ])?;
+
+            netns.exec(&[
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "output",
+                "counter",
+                "reject",
+                "with",
+                "icmp",
+                "type",
+                "net-unreachable",
+            ])?;
         }
     }
     Ok(())
@@ -264,7 +551,7 @@ pub fn get_remotes_from_config(path: &PathBuf) -> anyhow::Result<Vec<Remote>> {
         }?;
 
         output_vec.push(Remote {
-            _host: cap.get(1).unwrap().as_str().to_string(),
+            host: Host::from_str(cap.get(1).unwrap().as_str()).expect("Could not convert hostname"),
             port: cap.get(2).unwrap().as_str().parse::<u16>()?,
             protocol: proto,
         });
@@ -281,7 +568,7 @@ pub fn get_remotes_from_config(path: &PathBuf) -> anyhow::Result<Vec<Remote>> {
 
 #[derive(Debug)]
 pub struct Remote {
-    _host: Host,
+    host: Host,
     pub port: u16,
     protocol: OpenVpnProtocol,
 }
@@ -293,4 +580,16 @@ pub enum Host {
     Hostname(String),
 }
 
-impl FromStr for Host {}
+impl FromStr for Host {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(x) = s.parse() {
+            Ok(Host::IPv4(x))
+        } else if let Ok(x) = s.parse() {
+            Ok(Host::IPv6(x))
+        } else {
+            Ok(Host::Hostname(s.to_string()))
+        }
+    }
+}

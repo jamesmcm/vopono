@@ -104,6 +104,10 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // Better to check for lockfile exists?
     if get_existing_namespaces()?.contains(&ns_name) {
         // If namespace exists, read its lock config
+        info!(
+            "Using existing namespace: {}, will not modify firewall rules",
+            &ns_name
+        );
         ns = NetworkNamespace::from_existing(ns_name)?;
     } else {
         ns = NetworkNamespace::new(
@@ -164,6 +168,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     &dns,
                     !command.no_killswitch,
                     command.forward_ports.as_ref(),
+                    firewall,
+                    command.disable_ipv6,
                 )?;
                 debug!(
                     "Checking that OpenVPN is running in namespace: {}",
@@ -184,6 +190,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     config_file,
                     !command.no_killswitch,
                     command.forward_ports.as_ref(),
+                    firewall,
+                    command.disable_ipv6,
                 )?;
             }
         }
