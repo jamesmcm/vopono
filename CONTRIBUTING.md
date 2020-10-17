@@ -8,10 +8,11 @@ Note the minimum supported Rust version is 1.43.
 
 ### Clippy
 
-Please run clippy before submitting a PR:
+Please run rustfmt and clippy before submitting a PR:
 
 ```bash
 $ cargo clean
+$ cargo fmt
 $ cargo clippy --all-features --all-targets
 ```
 

@@ -1,5 +1,6 @@
 use super::application_wrapper::ApplicationWrapper;
 use super::args::ExecCommand;
+use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use super::network_interface::{get_active_interfaces, NetworkInterface};
 use super::providers::VpnProvider;
@@ -8,7 +9,7 @@ use super::sync::synch;
 use super::sysctl::SysCtl;
 use super::util::{get_config_file_protocol, get_config_from_alias};
 use super::util::{get_existing_namespaces, get_target_subnet};
-use super::vpn::{verify_auth, Firewall, Protocol};
+use super::vpn::{verify_auth, Protocol};
 use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
 use std::io::{self, Write};

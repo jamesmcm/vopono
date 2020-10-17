@@ -69,14 +69,6 @@ pub enum Protocol {
 }
 }
 
-arg_enum! {
-    #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy)]
-pub enum Firewall {
-    IpTables,
-    NfTables,
-}
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct VpnServer {
     pub name: String,

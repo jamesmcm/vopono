@@ -1,5 +1,5 @@
+use crate::firewall::Firewall;
 use crate::netns::NetworkNamespace;
-use crate::vpn::Firewall;
 
 pub fn open_ports(
     netns: &NetworkNamespace,

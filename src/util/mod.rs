@@ -330,7 +330,7 @@ pub fn get_config_file_protocol(config_file: &PathBuf) -> Protocol {
     }
 }
 
-use crate::vpn::Firewall;
+use crate::firewall::Firewall;
 use which::which;
 pub fn get_firewall() -> anyhow::Result<Firewall> {
     if which("nft").is_ok() {

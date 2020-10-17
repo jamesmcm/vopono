@@ -1,11 +1,12 @@
 use super::dns_config::DnsConfig;
+use super::firewall::Firewall;
 use super::host_masquerade::HostMasquerade;
 use super::network_interface::NetworkInterface;
 use super::openvpn::OpenVpn;
 use super::shadowsocks::Shadowsocks;
 use super::util::{config_dir, set_config_permissions, sudo_command};
 use super::veth_pair::VethPair;
-use super::vpn::{Firewall, Protocol};
+use super::vpn::Protocol;
 use super::wireguard::Wireguard;
 use crate::providers::VpnProvider;
 use anyhow::Context;

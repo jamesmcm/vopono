@@ -1,6 +1,7 @@
+use super::firewall::Firewall;
 use super::network_interface::NetworkInterface;
 use super::providers::VpnProvider;
-use super::vpn::{Firewall, Protocol};
+use super::vpn::Protocol;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use structopt::StructOpt;

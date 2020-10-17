@@ -1,6 +1,6 @@
+use super::firewall::Firewall;
 use super::network_interface::NetworkInterface;
 use super::util::sudo_command;
-use super::vpn::Firewall;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 

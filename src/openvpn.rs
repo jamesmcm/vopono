@@ -1,6 +1,7 @@
+use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use super::util::check_process_running;
-use super::vpn::{Firewall, OpenVpnProtocol};
+use super::vpn::OpenVpnProtocol;
 use anyhow::{anyhow, Context};
 use log::{debug, error, info};
 use regex::Regex;
@@ -154,9 +155,7 @@ pub fn killswitch(
     match firewall {
         Firewall::IpTables => {
             let ipcmds = if disable_ipv6 {
-                netns.exec(&["ip6tables", "-P", "INPUT", "DROP"])?;
-                netns.exec(&["ip6tables", "-P", "FORWARD", "DROP"])?;
-                netns.exec(&["ip6tables", "-P", "OUTPUT", "DROP"])?;
+                crate::firewall::disable_ipv6(netns, firewall)?;
                 vec!["iptables"]
             } else {
                 vec!["iptables", "ip6tables"]
@@ -218,7 +217,7 @@ pub fn killswitch(
                     match &remote.host {
                         // TODO: Fix this to specify destination address - but need hostname
                         // resolution working
-                        Host::IPv4(ip) => {
+                        Host::IPv4(_ip) => {
                             if ipcmd == "iptables" {
                                 netns.exec(&[
                                     ipcmd,
@@ -237,7 +236,7 @@ pub fn killswitch(
                                 ])?;
                             }
                         }
-                        Host::IPv6(ip) => {
+                        Host::IPv6(_ip) => {
                             if ipcmd == "ip6tables" {
                                 netns.exec(&[
                                     ipcmd,
@@ -256,7 +255,7 @@ pub fn killswitch(
                                 ])?;
                             }
                         }
-                        Host::Hostname(name) => {
+                        Host::Hostname(_name) => {
                             netns.exec(&[
                                 ipcmd,
                                 "-A",
@@ -290,34 +289,7 @@ pub fn killswitch(
         }
         Firewall::NfTables => {
             if disable_ipv6 {
-                netns.exec(&["nft", "add", "table", "ip6", &netns.name])?;
-                netns.exec(&[
-                    "nft",
-                    "add",
-                    "chain",
-                    "ip6",
-                    &netns.name,
-                    "drop_ipv6_input",
-                    "{ type filter hook input priority -1 ; policy drop; }",
-                ])?;
-                netns.exec(&[
-                    "nft",
-                    "add",
-                    "chain",
-                    "ip6",
-                    &netns.name,
-                    "drop_ipv6_output",
-                    "{ type filter hook output priority -1 ; policy drop; }",
-                ])?;
-                netns.exec(&[
-                    "nft",
-                    "add",
-                    "chain",
-                    "ip6",
-                    &netns.name,
-                    "drop_ipv6_forward",
-                    "{ type filter hook forward priority -1 ; policy drop; }",
-                ])?;
+                crate::firewall::disable_ipv6(netns, firewall)?;
             }
             // TODO:
             netns.exec(&["nft", "add", "table", "inet", &netns.name])?;
@@ -437,7 +409,7 @@ pub fn killswitch(
                 match &remote.host {
                     // TODO: Fix this to specify destination address - but need hostname
                     // resolution working
-                    Host::IPv4(ip) => {
+                    Host::IPv4(_ip) => {
                         netns.exec(&[
                             "nft",
                             "add",
@@ -455,7 +427,7 @@ pub fn killswitch(
                             "accept",
                         ])?;
                     }
-                    Host::IPv6(ip) => {
+                    Host::IPv6(_ip) => {
                         netns.exec(&[
                             "nft",
                             "add",
@@ -473,7 +445,7 @@ pub fn killswitch(
                             "accept",
                         ])?;
                     }
-                    Host::Hostname(name) => {
+                    Host::Hostname(_name) => {
                         // TODO: Does this work with nftables?
                         netns.exec(&[
                             "nft",
