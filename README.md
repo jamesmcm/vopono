@@ -49,7 +49,7 @@ connections - if your VPN provider allows it). Commands launched with
 the same server prefix and VPN provider will share the same network
 namespace.
 
-See the [vopono User Guide]() for much more detailed usage instructions
+See the [vopono User Guide](USERGUIDE.md) for much more detailed usage instructions
 (including handling daemons and servers).
 
 ## Installation
