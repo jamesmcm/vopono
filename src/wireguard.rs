@@ -1,3 +1,4 @@
+use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use super::util::sudo_command;
 use anyhow::{anyhow, Context};
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 pub struct Wireguard {
     ns_name: String,
     config_file: PathBuf,
+    firewall: Firewall,
 }
 
 impl Wireguard {
@@ -23,6 +25,8 @@ impl Wireguard {
         config_file: PathBuf,
         use_killswitch: bool,
         forward_ports: Option<&Vec<u16>>,
+        firewall: Firewall,
+        disable_ipv6: bool,
     ) -> anyhow::Result<Self> {
         if let Err(x) = which::which("wg") {
             error!("wg binary not found. Is wireguard-tools installed and on PATH?");
@@ -114,72 +118,7 @@ impl Wireguard {
         let fwmark = "51820";
         namespace.exec(&["wg", "set", &if_name, "fwmark", fwmark])?;
 
-        // TODO: Handle case where ipv6 is disabled
-        // IPv6
-        namespace.exec(&[
-            "ip", "-6", "route", "add", "::/0", "dev", &if_name, "table", fwmark,
-        ])?;
-        namespace.exec(&[
-            "ip", "-6", "rule", "add", "not", "fwmark", fwmark, "table", fwmark,
-        ])?;
-        namespace.exec(&[
-            "ip",
-            "-6",
-            "rule",
-            "add",
-            "table",
-            "main",
-            "suppress_prefixlength",
-            "0",
-        ])?;
-
-        // nft ipv6
-        let nftable = namespace.name.clone();
-        let pf = "ip6";
-        let mut nftcmd: Vec<String> = Vec::with_capacity(16);
-        nftcmd.push(format!("add table {} {}", pf, &nftable));
-        nftcmd.push(format!(
-            "add chain {} {} preraw {{ type filter hook prerouting priority -300; }}",
-            pf, &nftable
-        ));
-        nftcmd.push(format!(
-            "add chain {} {} premangle {{ type filter hook prerouting priority -150; }}",
-            pf, &nftable
-        ));
-        nftcmd.push(format!(
-            "add chain {} {} postmangle {{ type filter hook prerouting priority -150; }}",
-            pf, &nftable
-        ));
-
-        // IPv4 handled below - TODO: DRY
-        for address in config.interface.address.iter() {
-            if let IpNet::V6(address) = address {
-                nftcmd.push(format!(
-                "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
-                pf, &nftable, &if_name, pf, address
-            ));
-            }
-        }
-
-        nftcmd.push(format!(
-            "add rule {} {} postmangle meta l4proto udp mark {} ct mark set mark",
-            pf, &nftable, fwmark
-        ));
-        nftcmd.push(format!(
-            "add rule {} {} premangle meta l4proto udp meta mark set ct mark",
-            pf, &nftable
-        ));
-
-        let nftcmd = nftcmd.join("\n");
-        {
-            let mut f = std::fs::File::create("/tmp/vopono_nft.sh")?;
-            write!(f, "{}", nftcmd)?;
-        }
-
-        namespace.exec(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
-        std::fs::remove_file("/tmp/vopono_nft.sh")?;
-
-        // IPv4
+        // IPv4 routes
         namespace.exec(&[
             "ip",
             "-4",
@@ -205,116 +144,273 @@ impl Wireguard {
             "0",
         ])?;
         sudo_command(&["sysctl", "-q", "net.ipv4.conf.all.src_valid_mark=1"])?;
+        // IPv6
+        if disable_ipv6 {
+            crate::firewall::disable_ipv6(namespace, firewall)?;
+        } else {
+            namespace.exec(&[
+                "ip", "-6", "route", "add", "::/0", "dev", &if_name, "table", fwmark,
+            ])?;
+            namespace.exec(&[
+                "ip", "-6", "rule", "add", "not", "fwmark", fwmark, "table", fwmark,
+            ])?;
+            namespace.exec(&[
+                "ip",
+                "-6",
+                "rule",
+                "add",
+                "table",
+                "main",
+                "suppress_prefixlength",
+                "0",
+            ])?;
+        }
 
-        //nft ipv4  -TODO: DRY
-        let nftable = namespace.name.clone();
-        let pf = "ip";
-        let mut nftcmd: Vec<String> = Vec::with_capacity(16);
-        nftcmd.push(format!("add table {} {}", pf, &nftable));
-        nftcmd.push(format!(
-            "add chain {} {} preraw {{ type filter hook prerouting priority -300; }}",
-            pf, &nftable
-        ));
-        nftcmd.push(format!(
-            "add chain {} {} premangle {{ type filter hook prerouting priority -150; }}",
-            pf, &nftable
-        ));
-        nftcmd.push(format!(
-            "add chain {} {} postmangle {{ type filter hook prerouting priority -150; }}",
-            pf, &nftable
-        ));
-
-        for address in config.interface.address.iter() {
-            if let IpNet::V4(address) = address {
+        match firewall {
+            Firewall::NfTables => {
+                // nft
+                let nftable = namespace.name.clone();
+                let pf = "inet";
+                let mut nftcmd: Vec<String> = Vec::with_capacity(16);
+                nftcmd.push(format!("add table {} {}", pf, &nftable));
                 nftcmd.push(format!(
+                    "add chain {} {} preraw {{ type filter hook prerouting priority -300; }}",
+                    pf, &nftable
+                ));
+                nftcmd.push(format!(
+                    "add chain {} {} premangle {{ type filter hook prerouting priority -150; }}",
+                    pf, &nftable
+                ));
+                nftcmd.push(format!(
+                    "add chain {} {} postmangle {{ type filter hook prerouting priority -150; }}",
+                    pf, &nftable
+                ));
+
+                for address in config.interface.address.iter() {
+                    match address {
+                        IpNet::V6(address) => {
+                            nftcmd.push(format!(
                 "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
-                pf, &nftable, &if_name, pf, address
+                pf, &nftable, &if_name, "ip6", address
             ));
+                        }
+
+                        IpNet::V4(address) => {
+                            nftcmd.push(format!(
+                "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
+                pf, &nftable, &if_name, "ip", address
+            ));
+                        }
+                    }
+                }
+
+                nftcmd.push(format!(
+                    "add rule {} {} postmangle meta l4proto udp mark {} ct mark set mark",
+                    pf, &nftable, fwmark
+                ));
+                nftcmd.push(format!(
+                    "add rule {} {} premangle meta l4proto udp meta mark set ct mark",
+                    pf, &nftable
+                ));
+
+                let nftcmd = nftcmd.join("\n");
+                {
+                    let mut f = std::fs::File::create("/tmp/vopono_nft.sh")?;
+                    write!(f, "{}", nftcmd)?;
+                }
+
+                namespace.exec(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
+                std::fs::remove_file("/tmp/vopono_nft.sh")?;
             }
-        }
+            Firewall::IpTables => {
+                for address in config.interface.address.iter() {
+                    match address {
+                        IpNet::V6(address) => {
+                            namespace.exec(&[
+                                "ip6tables",
+                                "-t",
+                                "nat",
+                                "-A",
+                                "PREROUTING",
+                                "!",
+                                "-i",
+                                &if_name,
+                                "-d",
+                                &address.to_string(),
+                                "addrtype",
+                                "!",
+                                "--src-type",
+                                "LOCAL",
+                                "-j",
+                                "REJECT",
+                            ])?;
+                        }
 
-        nftcmd.push(format!(
-            "add rule {} {} postmangle meta l4proto udp mark {} ct mark set mark",
-            pf, &nftable, fwmark
-        ));
-        nftcmd.push(format!(
-            "add rule {} {} premangle meta l4proto udp meta mark set ct mark",
-            pf, &nftable
-        ));
+                        IpNet::V4(address) => {
+                            namespace.exec(&[
+                                "iptables",
+                                "-t",
+                                "nat",
+                                "-A",
+                                "PREROUTING",
+                                "!",
+                                "-i",
+                                &if_name,
+                                "-d",
+                                &address.to_string(),
+                                "addrtype",
+                                "!",
+                                "--src-type",
+                                "LOCAL",
+                                "-j",
+                                "REJECT",
+                            ])?;
+                        }
+                    }
+                }
 
-        let nftcmd = nftcmd.join("\n");
-        {
-            let mut f = std::fs::File::create("/tmp/vopono_nft.sh")?;
-            write!(f, "{}", nftcmd)?;
-        }
+                let ipcmds = if disable_ipv6 {
+                    vec!["iptables"]
+                } else {
+                    vec!["iptables", "ip6tables"]
+                };
 
-        namespace.exec(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
-        std::fs::remove_file("/tmp/vopono_nft.sh")?;
+                for ipcmd in ipcmds {
+                    namespace.exec(&[
+                        ipcmd,
+                        "-t",
+                        "mangle",
+                        "-A",
+                        "POSTROUTING",
+                        "-p",
+                        "udp",
+                        "-j",
+                        "MARK",
+                        "--set-mark",
+                        fwmark,
+                    ])?;
+                    namespace.exec(&[
+                        ipcmd,
+                        "-t",
+                        "mangle",
+                        "-A",
+                        "PREROUTING",
+                        "-p",
+                        "udp",
+                        "-j",
+                        "CONNMARK",
+                        "--save-mark",
+                    ])?;
+                }
+            }
+        };
 
         // Allow input to and output from forwarded ports
         if let Some(forwards) = forward_ports {
-            super::util::open_ports(&namespace, forwards.as_slice())?;
+            super::util::open_ports(&namespace, forwards.as_slice(), firewall)?;
         }
 
         if use_killswitch {
-            killswitch(&if_name, fwmark, namespace)?;
+            killswitch(&if_name, fwmark, namespace, firewall)?;
         }
         Ok(Self {
             config_file,
             ns_name: namespace.name.clone(),
+            firewall,
         })
     }
 }
 
-pub fn killswitch(ifname: &str, fwmark: &str, netns: &NetworkNamespace) -> anyhow::Result<()> {
+pub fn killswitch(
+    ifname: &str,
+    fwmark: &str,
+    netns: &NetworkNamespace,
+    firewall: Firewall,
+) -> anyhow::Result<()> {
     debug!("Setting Wireguard killswitch....");
-    netns.exec(&[
-        "iptables",
-        "-A",
-        "OUTPUT",
-        "!",
-        "-o",
-        ifname,
-        "-m",
-        "mark",
-        "!",
-        "--mark",
-        fwmark,
-        "-m",
-        "addrtype",
-        "!",
-        "--dst-type",
-        "LOCAL",
-        "-j",
-        "REJECT",
-    ])?;
+    match firewall {
+        Firewall::IpTables => {
+            netns.exec(&[
+                "iptables",
+                "-A",
+                "OUTPUT",
+                "!",
+                "-o",
+                ifname,
+                "-m",
+                "mark",
+                "!",
+                "--mark",
+                fwmark,
+                "-m",
+                "addrtype",
+                "!",
+                "--dst-type",
+                "LOCAL",
+                "-j",
+                "REJECT",
+            ])?;
 
-    netns.exec(&[
-        "ip6tables",
-        "-A",
-        "OUTPUT",
-        "!",
-        "-o",
-        ifname,
-        "-m",
-        "mark",
-        "!",
-        "--mark",
-        fwmark,
-        "-m",
-        "addrtype",
-        "!",
-        "--dst-type",
-        "LOCAL",
-        "-j",
-        "REJECT",
-    ])?;
+            netns.exec(&[
+                "ip6tables",
+                "-A",
+                "OUTPUT",
+                "!",
+                "-o",
+                ifname,
+                "-m",
+                "mark",
+                "!",
+                "--mark",
+                fwmark,
+                "-m",
+                "addrtype",
+                "!",
+                "--dst-type",
+                "LOCAL",
+                "-j",
+                "REJECT",
+            ])?;
+        }
+        Firewall::NfTables => {
+            netns.exec(&["nft", "add", "table", "inet", &netns.name])?;
+            netns.exec(&[
+                "nft",
+                "add",
+                "chain",
+                "inet",
+                &netns.name,
+                "output",
+                "{ type filter hook output priority -500 ; policy accept; }",
+            ])?;
+            netns.exec(&[
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "output",
+                "oifname",
+                "!=",
+                ifname,
+                "mark",
+                "!=",
+                fwmark,
+                "fib",
+                "daddr",
+                "type",
+                "!=",
+                "local",
+                "counter",
+                "reject",
+            ])?;
+        }
+    }
     Ok(())
 }
 
 impl Drop for Wireguard {
     fn drop(&mut self) {
-        // TODO: Handle case of only ipv4
         let if_name = &self.ns_name[7..self.ns_name.len().min(20)];
         match sudo_command(&[
             "ip",
@@ -330,35 +426,22 @@ impl Drop for Wireguard {
             Err(e) => warn!("Failed to delete ip link {}: {:?}", &self.ns_name, e),
         };
 
-        match sudo_command(&[
-            "ip",
-            "netns",
-            "exec",
-            &self.ns_name,
-            "nft",
-            "delete",
-            "table",
-            "ip",
-            &self.ns_name,
-        ]) {
-            Ok(_) => {}
-            Err(e) => warn!("Failed to delete nft ipv4 table: {}: {:?}", self.ns_name, e),
-        };
-
-        match sudo_command(&[
-            "ip",
-            "netns",
-            "exec",
-            &self.ns_name,
-            "nft",
-            "delete",
-            "table",
-            "ip6",
-            &self.ns_name,
-        ]) {
-            Ok(_) => {}
-            Err(e) => warn!("Failed to delete nft ipv6 table: {}: {:?}", self.ns_name, e),
-        };
+        if let Firewall::NfTables = self.firewall {
+            match sudo_command(&[
+                "ip",
+                "netns",
+                "exec",
+                &self.ns_name,
+                "nft",
+                "delete",
+                "table",
+                "inet",
+                &self.ns_name,
+            ]) {
+                Ok(_) => {}
+                Err(e) => warn!("Failed to delete nft table: {}: {:?}", self.ns_name, e),
+            };
+        }
     }
 }
 

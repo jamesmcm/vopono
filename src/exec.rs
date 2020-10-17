@@ -1,5 +1,6 @@
 use super::application_wrapper::ApplicationWrapper;
 use super::args::ExecCommand;
+use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use super::network_interface::{get_active_interfaces, NetworkInterface};
 use super::providers::VpnProvider;
@@ -18,6 +19,11 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let provider: VpnProvider;
     let server_name: String;
     let protocol: Protocol;
+
+    let firewall: Firewall = command
+        .firewall
+        .ok_or_else(|| anyhow!(""))
+        .or_else(|_x| crate::util::get_firewall())?;
 
     if let Some(path) = &command.custom_config {
         protocol = command
@@ -99,14 +105,23 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // Better to check for lockfile exists?
     if get_existing_namespaces()?.contains(&ns_name) {
         // If namespace exists, read its lock config
+        info!(
+            "Using existing namespace: {}, will not modify firewall rules",
+            &ns_name
+        );
         ns = NetworkNamespace::from_existing(ns_name)?;
     } else {
-        ns = NetworkNamespace::new(ns_name.clone(), provider.clone(), protocol.clone())?;
+        ns = NetworkNamespace::new(
+            ns_name.clone(),
+            provider.clone(),
+            protocol.clone(),
+            firewall,
+        )?;
         let target_subnet = get_target_subnet()?;
         ns.add_loopback()?;
         ns.add_veth_pair()?;
         ns.add_routing(target_subnet)?;
-        ns.add_iptables_rule(target_subnet, interface)?;
+        ns.add_host_masquerade(target_subnet, interface, firewall)?;
         _sysctl = SysCtl::enable_ipv4_forwarding();
         match protocol {
             Protocol::OpenVpn => {
@@ -154,6 +169,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     &dns,
                     !command.no_killswitch,
                     command.forward_ports.as_ref(),
+                    firewall,
+                    command.disable_ipv6,
                 )?;
                 debug!(
                     "Checking that OpenVPN is running in namespace: {}",
@@ -174,6 +191,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     config_file,
                     !command.no_killswitch,
                     command.forward_ports.as_ref(),
+                    firewall,
+                    command.disable_ipv6,
                 )?;
             }
         }
@@ -189,6 +208,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     };
 
     let application = ApplicationWrapper::new(&ns, &command.application, user)?;
+
+    // Launch TCP proxy server on other threads if forwarding ports
     let mut proxy = Vec::new();
     if let Some(f) = command.forward_ports {
         if !(command.no_proxy || f.is_empty()) {
@@ -205,6 +226,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             }
         }
     }
+
     let pid = application.handle.id();
     info!(
         "Application {} launched in network namespace {} with pid {}",
@@ -228,12 +250,14 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     Ok(())
 }
 
+// Block waiting for SIGINT
 fn stay_alive(pid: u32) -> anyhow::Result<()> {
     let recv = ctrl_channel(pid);
     recv?.recv().unwrap();
     Ok(())
 }
 
+// Handle waiting for SIGINT
 fn ctrl_channel(pid: u32) -> Result<std::sync::mpsc::Receiver<()>, ctrlc::Error> {
     let (sender, receiver) = std::sync::mpsc::channel();
     ctrlc::set_handler(move || {

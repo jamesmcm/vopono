@@ -1,3 +1,4 @@
+use super::firewall::Firewall;
 use super::network_interface::NetworkInterface;
 use super::providers::VpnProvider;
 use super::vpn::Protocol;
@@ -102,6 +103,14 @@ pub struct ExecCommand {
     /// Disable proxying to host machine when forwarding ports
     #[structopt(long = "no-proxy")]
     pub no_proxy: bool,
+
+    /// VPN Protocol (if not given will use default)
+    #[structopt(long = "firewall",  possible_values = &Firewall::variants(), case_insensitive = true)]
+    pub firewall: Option<Firewall>,
+
+    /// Block all IPv6 traffic
+    #[structopt(long = "disable-ipv6")]
+    pub disable_ipv6: bool,
 }
 
 #[derive(StructOpt)]
