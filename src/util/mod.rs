@@ -243,8 +243,7 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
         .collect::<Result<(), _>>()?;
 
     // TODO - deserialize to struct without Drop instead
-    let lock_namespaces = Box::new(lock_namespaces);
-    Box::leak(lock_namespaces);
+    std::mem::forget(lock_namespaces);
     Ok(())
 }
 
@@ -326,6 +325,7 @@ pub fn get_config_file_protocol(config_file: &PathBuf) -> Protocol {
     if content.contains(&"[Interface]") {
         Protocol::Wireguard
     } else {
+        // TODO: Don't always assume OpenVPN
         Protocol::OpenVpn
     }
 }

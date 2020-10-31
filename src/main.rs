@@ -8,6 +8,7 @@ mod list;
 mod list_configs;
 mod netns;
 mod network_interface;
+mod openconnect;
 mod openvpn;
 mod providers;
 mod shadowsocks;
