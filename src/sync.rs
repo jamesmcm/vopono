@@ -3,7 +3,7 @@ use super::util::set_config_permissions;
 use super::vpn::Protocol;
 use anyhow::bail;
 use dialoguer::MultiSelect;
-use log::info;
+use log::{error, info};
 use std::str::FromStr;
 
 pub fn sync_menu() -> anyhow::Result<()> {
@@ -45,6 +45,9 @@ pub fn synch(provider: VpnProvider, protocol: Option<Protocol>) -> anyhow::Resul
             info!("Starting Wireguard configuration...");
             let provider = provider.get_dyn_wireguard_provider()?;
             provider.create_wireguard_config()?;
+        }
+        Some(Protocol::OpenConnect) => {
+            error!("vopono sync not supported for OpenConnect protocol");
         }
         // TODO: Fix this asking for same credentials twice
         None => {

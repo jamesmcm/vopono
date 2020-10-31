@@ -62,6 +62,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         let cdir = match protocol {
             Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
             Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
+            Protocol::OpenConnect => bail!("OpenConnect must use Custom provider"),
         }?;
         if !cdir.exists() || cdir.read_dir()?.next().is_none() {
             info!(
@@ -96,10 +97,16 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         let cdir = match protocol {
             Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
             Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
+            Protocol::OpenConnect => bail!("OpenConnect must use Custom provider"),
         }?;
-        get_config_from_alias(&cdir, &server_name)?
+        Some(get_config_from_alias(&cdir, &server_name)?)
     } else {
-        command.custom_config.expect("No custom config provided")
+        // Config file required for non OpenConnect custom providers
+        if protocol != Protocol::OpenConnect {
+            Some(command.custom_config.expect("No custom config provided"))
+        } else {
+            None
+        }
     };
 
     // Better to check for lockfile exists?
@@ -146,7 +153,9 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 ns.dns_config(&dns)?;
 
                 // Check if using Shadowsocks
-                if let Some((ss_host, ss_lport)) = uses_shadowsocks(&config_file)? {
+                if let Some((ss_host, ss_lport)) =
+                    uses_shadowsocks(config_file.as_ref().expect("No config file provided"))?
+                {
                     if provider == VpnProvider::Custom {
                         warn!("Custom provider specifies socks-proxy, if this is local you must run it yourself (e.g. shadowsocks)");
                     } else {
@@ -154,7 +163,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                         let password = dyn_ss_provider.password();
                         let encrypt_method = dyn_ss_provider.encrypt_method();
                         ns.run_shadowsocks(
-                            &config_file,
+                            config_file.as_ref().expect("No config file provided"),
                             ss_host,
                             ss_lport,
                             &password,
@@ -164,7 +173,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 }
 
                 ns.run_openvpn(
-                    config_file,
+                    config_file.expect("No config file provided"),
                     auth_file,
                     &dns,
                     !command.no_killswitch,
@@ -188,11 +197,23 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             }
             Protocol::Wireguard => {
                 ns.run_wireguard(
-                    config_file,
+                    config_file.expect("No config file provided"),
                     !command.no_killswitch,
                     command.forward_ports.as_ref(),
                     firewall,
                     command.disable_ipv6,
+                )?;
+            }
+            Protocol::OpenConnect => {
+                let dns = command
+                    .dns
+                    .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
+                ns.dns_config(&dns)?;
+                ns.run_openconnect(
+                    config_file,
+                    command.forward_ports.as_ref(),
+                    firewall,
+                    &server_name,
                 )?;
             }
         }

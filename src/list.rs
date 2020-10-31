@@ -43,8 +43,7 @@ pub fn print_applications() -> anyhow::Result<()> {
         }
     }
     // Avoid triggering Drop for these namespaces
-    let namespaces = Box::new(namespaces);
-    Box::leak(namespaces);
+    std::mem::forget(namespaces);
     Ok(())
 }
 
@@ -82,8 +81,7 @@ pub fn print_namespaces() -> anyhow::Result<()> {
         }
     }
     // Avoid triggering Drop for these namespaces
-    let namespaces = Box::new(namespaces);
-    Box::leak(namespaces);
+    std::mem::forget(namespaces);
     Ok(())
 }
 

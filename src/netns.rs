@@ -2,6 +2,7 @@ use super::dns_config::DnsConfig;
 use super::firewall::Firewall;
 use super::host_masquerade::HostMasquerade;
 use super::network_interface::NetworkInterface;
+use super::openconnect::OpenConnect;
 use super::openvpn::OpenVpn;
 use super::shadowsocks::Shadowsocks;
 use super::util::{config_dir, set_config_permissions, sudo_command};
@@ -30,6 +31,7 @@ pub struct NetworkNamespace {
     pub host_masquerade: Option<HostMasquerade>,
     pub shadowsocks: Option<Shadowsocks>,
     pub veth_pair_ips: Option<VethPairIPs>,
+    pub openconnect: Option<OpenConnect>,
     pub provider: VpnProvider,
     pub protocol: Protocol,
     pub firewall: Firewall,
@@ -78,6 +80,7 @@ impl NetworkNamespace {
             host_masquerade: None,
             shadowsocks: None,
             veth_pair_ips: None,
+            openconnect: None,
             provider,
             protocol,
             firewall,
@@ -221,6 +224,23 @@ impl NetworkNamespace {
         Ok(())
     }
 
+    pub fn run_openconnect(
+        &mut self,
+        config_file: Option<PathBuf>,
+        forward_ports: Option<&Vec<u16>>,
+        firewall: Firewall,
+        server: &str,
+    ) -> anyhow::Result<()> {
+        self.openconnect = Some(OpenConnect::run(
+            &self,
+            config_file,
+            forward_ports,
+            firewall,
+            server,
+        )?);
+        Ok(())
+    }
+
     pub fn run_shadowsocks(
         &mut self,
         config_file: &PathBuf,
@@ -350,26 +370,12 @@ impl Drop for NetworkNamespace {
                 .unwrap_or_else(|_| panic!("Failed to delete network namespace: {}", &self.name));
         } else {
             debug!("Skipping destructors since other vopono instance using this namespace!");
-            // TODO: Test std::mem::forget(self) here
-            let openvpn = self.openvpn.take();
-            let openvpn = Box::new(openvpn);
-            Box::leak(openvpn);
-
-            let veth_pair = self.veth_pair.take();
-            let veth_pair = Box::new(veth_pair);
-            Box::leak(veth_pair);
-
-            let dns_config = self.dns_config.take();
-            let dns_config = Box::new(dns_config);
-            Box::leak(dns_config);
-
-            let wireguard = self.wireguard.take();
-            let wireguard = Box::new(wireguard);
-            Box::leak(wireguard);
-
-            let host_masquerade = self.host_masquerade.take();
-            let host_masquerade = Box::new(host_masquerade);
-            Box::leak(host_masquerade);
+            std::mem::forget(self.openvpn.take());
+            std::mem::forget(self.veth_pair.take());
+            std::mem::forget(self.dns_config.take());
+            std::mem::forget(self.wireguard.take());
+            std::mem::forget(self.host_masquerade.take());
+            std::mem::forget(self.openconnect.take());
         }
     }
 }
