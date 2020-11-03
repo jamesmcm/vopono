@@ -150,8 +150,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     })
                     .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
-                ns.dns_config(&dns)?;
-
+                // TODO: Don't rely on Google DNS here - could copy local one?
+                ns.dns_config(&[IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))])?;
                 // Check if using Shadowsocks
                 if let Some((ss_host, ss_lport)) =
                     uses_shadowsocks(config_file.as_ref().expect("No config file provided"))?
@@ -172,7 +172,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     }
                 }
 
-                ns.run_openvpn(
+                let openvpn_dns: Option<Vec<IpAddr>> = ns.run_openvpn(
                     config_file.expect("No config file provided"),
                     auth_file,
                     &dns,
@@ -194,6 +194,9 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             "OpenVPN not running in network namespace, probable dead lock file authentication error"
         ));
                 }
+
+                // Set DNS with OpenVPN server response if present
+                ns.dns_config(&openvpn_dns.unwrap_or(dns))?;
             }
             Protocol::Wireguard => {
                 ns.run_wireguard(

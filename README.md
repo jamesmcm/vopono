@@ -18,6 +18,10 @@ lynx all running through different VPN connections:
 
 ![Screenshot](screenshot.png)
 
+### asciinema example
+
+[![asciicast](https://asciinema.org/a/369367.png)](https://asciinema.org/a/369367)
+
 ## Supported Providers
 
 | Provider              | OpenVPN support | Wireguard support | 

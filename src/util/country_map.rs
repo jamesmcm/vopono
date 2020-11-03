@@ -190,6 +190,7 @@ pub fn code_to_country_map() -> HashMap<&'static str, &'static str> {
         "ye" => "yemen",
         "dz" => "algeria",
         "us" => "united_states",
+        "usa" => "united_states",
         "uy" => "uruguay",
         "yt" => "mayotte",
         "lb" => "lebanon",

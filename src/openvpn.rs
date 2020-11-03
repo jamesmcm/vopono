@@ -77,6 +77,9 @@ impl OpenVpn {
         let mut logfile = BufReader::with_capacity(64, File::open(log_file_str)?);
         let mut pos: usize = 0;
 
+        // TODO: Override DNS with DNS response if present
+        // PUSH: Received control message: \'PUSH_REPLY,redirect-gateway def1,explicit-exit-notify 3,comp-lzo no,route-gateway 10.73.40.1,topology subnet,ping 10,ping-restart 60,dhcp-option DNS 10.73.40.1
+
         // Tail OpenVPN log file
         loop {
             let x = logfile.read_line(&mut buffer)?;
