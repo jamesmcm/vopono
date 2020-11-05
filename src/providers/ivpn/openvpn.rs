@@ -8,7 +8,7 @@ use reqwest::Url;
 use std::fs::create_dir_all;
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use zip::ZipArchive;
 
