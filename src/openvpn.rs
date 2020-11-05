@@ -15,6 +15,7 @@ use std::str::FromStr;
 #[derive(Serialize, Deserialize)]
 pub struct OpenVpn {
     pid: u32,
+    pub openvpn_dns: Option<IpAddr>,
 }
 
 impl OpenVpn {
@@ -80,6 +81,8 @@ impl OpenVpn {
         // TODO: Override DNS with DNS response if present
         // PUSH: Received control message: \'PUSH_REPLY,redirect-gateway def1,explicit-exit-notify 3,comp-lzo no,route-gateway 10.73.40.1,topology subnet,ping 10,ping-restart 60,dhcp-option DNS 10.73.40.1
 
+        let dns_regex = Regex::new(r"dhcp-option DNS ([0-9.]+)").unwrap();
+        let mut openvpn_dns: Option<IpAddr> = None;
         // Tail OpenVPN log file
         loop {
             let x = logfile.read_line(&mut buffer)?;
@@ -87,6 +90,19 @@ impl OpenVpn {
 
             if x > 0 {
                 debug!("{:?}", buffer);
+            }
+
+            if openvpn_dns.is_none() {
+                if let Some(cap) = dns_regex.captures(&buffer) {
+                    if let Some(ipstr) = cap.get(1) {
+                        debug!("Found OpenVPN DNS response: {}", ipstr.as_str());
+                        let ipaddr = IpAddr::from_str(ipstr.as_str());
+                        if let Ok(ip) = ipaddr {
+                            openvpn_dns = Some(ip);
+                            debug!("Set OpenVPN DNS to: {:?}", ip);
+                        }
+                    }
+                }
             }
 
             if buffer.contains("Initialization Sequence Completed")
@@ -126,7 +142,10 @@ impl OpenVpn {
             killswitch(netns, dns, remotes.as_slice(), firewall, disable_ipv6)?;
         }
 
-        Ok(Self { pid: id })
+        Ok(Self {
+            pid: id,
+            openvpn_dns,
+        })
     }
 
     pub fn check_if_running(&self) -> bool {
