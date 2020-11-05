@@ -27,6 +27,7 @@ impl ProtonVPN {
 }
 impl OpenVpnProvider for ProtonVPN {
     fn provider_dns(&self) -> Option<Vec<IpAddr>> {
+        // None will use DNS from OpenVPN headers if present
         None
         // TODO: ProtonVPN DNS servers do not respond
         // let path = self.openvpn_dir().ok()?.join("dns.txt");

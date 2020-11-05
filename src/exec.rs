@@ -199,6 +199,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 // Set DNS with OpenVPN server response if present
                 if command.dns.is_none() {
                     if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns {
+                        let old_dns = ns.dns_config.take();
+                        std::mem::forget(old_dns);
                         ns.dns_config(&[newdns])?;
                     }
                 }

@@ -25,7 +25,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct NetworkNamespace {
     pub name: String,
     pub veth_pair: Option<VethPair>,
-    dns_config: Option<DnsConfig>,
+    pub dns_config: Option<DnsConfig>,
     pub openvpn: Option<OpenVpn>,
     pub wireguard: Option<Wireguard>,
     pub host_masquerade: Option<HostMasquerade>,

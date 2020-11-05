@@ -29,7 +29,8 @@ impl OpenVpnProvider for IVPN {
     fn provider_dns(&self) -> Option<Vec<IpAddr>> {
         // https://www.ivpn.net/setup/gnu-linux-terminal.html
         // Some(vec![IpAddr::V4(Ipv4Addr::new(10, 0, 254, 1))])
-        Some(vec![IpAddr::V4(Ipv4Addr::new(10, 73, 40, 1))])
+        // Return None and we will read from OpenVPN headers
+        None
     }
 
     fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {

@@ -30,8 +30,6 @@ use util::clean_dead_namespaces;
 use util::elevate_privileges;
 
 // TODO:
-// - Support update_resolv_conf with OpenVPN (i.e. get DNS server from OpenVPN headers)
-// - Disable ipv6 traffic when not routed?
 // - Allow for not saving OpenVPN creds to config
 
 fn main() -> anyhow::Result<()> {
