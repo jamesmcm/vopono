@@ -1,6 +1,7 @@
 mod openvpn;
+mod wireguard;
 
-use super::{ConfigurationChoice, OpenVpnProvider, Provider};
+use super::{ConfigurationChoice, OpenVpnProvider, Provider, WireguardProvider};
 use crate::vpn::Protocol;
 
 pub struct IVPN {}
@@ -11,7 +12,6 @@ impl Provider for IVPN {
     }
 
     fn default_protocol(&self) -> Protocol {
-        // TODO: Change to Wireguard
-        Protocol::OpenVpn
+        Protocol::Wireguard
     }
 }
