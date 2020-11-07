@@ -24,6 +24,7 @@ impl Wireguard {
         namespace: &mut NetworkNamespace,
         config_file: PathBuf,
         use_killswitch: bool,
+        open_ports: Option<&Vec<u16>>,
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
         disable_ipv6: bool,
@@ -304,6 +305,11 @@ impl Wireguard {
                 }
             }
         };
+
+        // Allow input to and output from open ports (for port forwarding in tunnel)
+        if let Some(opens) = open_ports {
+            super::util::open_ports(&namespace, opens.as_slice(), firewall)?;
+        }
 
         // Allow input to and output from forwarded ports
         if let Some(forwards) = forward_ports {

@@ -16,6 +16,7 @@ impl OpenConnect {
     pub fn run(
         netns: &NetworkNamespace,
         config_file: Option<PathBuf>,
+        open_ports: Option<&Vec<u16>>,
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
         server: &str,
@@ -48,6 +49,11 @@ impl OpenConnect {
             .exec_no_block(&command_vec, None, false, None)
             .context("Failed to launch OpenConnect - is openconnect installed?")?;
         let id = handle.id();
+
+        // Allow input to and output from open ports (for port forwarding in tunnel)
+        if let Some(opens) = open_ports {
+            super::util::open_ports(&netns, opens.as_slice(), firewall)?;
+        }
 
         // Allow input to and output from forwarded ports
         if let Some(forwards) = forward_ports {

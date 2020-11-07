@@ -96,7 +96,12 @@ pub struct ExecCommand {
     #[structopt(long = "keep-alive", short = "k")]
     pub keep_alive: bool,
 
-    /// List of ports to forward from network namespace - usefuel for running servers and daemons
+    /// List of ports to open on network namespace (to allow port forwarding through the tunnel,
+    /// e.g. for BitTorrent, etc.)
+    #[structopt(long = "open-ports", short = "o")]
+    pub open_ports: Option<Vec<u16>>,
+
+    /// List of ports to forward from network namespace to host - useful for running servers and daemons
     #[structopt(long = "forward", short = "f")]
     pub forward_ports: Option<Vec<u16>>,
 
@@ -115,7 +120,7 @@ pub struct ExecCommand {
 
 #[derive(StructOpt)]
 pub struct ListCommand {
-    /// VPN Provider (if not given will use default)
+    /// VPN Provider
     #[structopt(possible_values = &["namespaces", "applications"])]
     pub list_type: Option<String>,
 }

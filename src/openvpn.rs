@@ -15,6 +15,7 @@ use std::str::FromStr;
 #[derive(Serialize, Deserialize)]
 pub struct OpenVpn {
     pid: u32,
+    pub openvpn_dns: Option<IpAddr>,
 }
 
 impl OpenVpn {
@@ -25,6 +26,7 @@ impl OpenVpn {
         auth_file: Option<PathBuf>,
         dns: &[IpAddr],
         use_killswitch: bool,
+        open_ports: Option<&Vec<u16>>,
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
         disable_ipv6: bool,
@@ -77,6 +79,9 @@ impl OpenVpn {
         let mut logfile = BufReader::with_capacity(64, File::open(log_file_str)?);
         let mut pos: usize = 0;
 
+        // Parse DNS header from OpenVPN response
+        let dns_regex = Regex::new(r"dhcp-option DNS ([0-9.]+)").unwrap();
+        let mut openvpn_dns: Option<IpAddr> = None;
         // Tail OpenVPN log file
         loop {
             let x = logfile.read_line(&mut buffer)?;
@@ -84,6 +89,19 @@ impl OpenVpn {
 
             if x > 0 {
                 debug!("{:?}", buffer);
+            }
+
+            if openvpn_dns.is_none() {
+                if let Some(cap) = dns_regex.captures(&buffer) {
+                    if let Some(ipstr) = cap.get(1) {
+                        debug!("Found OpenVPN DNS response: {}", ipstr.as_str());
+                        let ipaddr = IpAddr::from_str(ipstr.as_str());
+                        if let Ok(ip) = ipaddr {
+                            openvpn_dns = Some(ip);
+                            debug!("Set OpenVPN DNS to: {:?}", ip);
+                        }
+                    }
+                }
             }
 
             if buffer.contains("Initialization Sequence Completed")
@@ -114,7 +132,12 @@ impl OpenVpn {
             return Err(anyhow!("OpenVPN options error, use -v for full log output"));
         }
 
-        // Allow input to and output from forwarded ports
+        // Allow input to and output from open ports (for port forwarding in tunnel)
+        if let Some(opens) = open_ports {
+            super::util::open_ports(&netns, opens.as_slice(), firewall)?;
+        }
+
+        // Allow input to and output from forwarded ports (will be proxied to host)
         if let Some(forwards) = forward_ports {
             super::util::open_ports(&netns, forwards.as_slice(), firewall)?;
         }
@@ -123,7 +146,10 @@ impl OpenVpn {
             killswitch(netns, dns, remotes.as_slice(), firewall, disable_ipv6)?;
         }
 
-        Ok(Self { pid: id })
+        Ok(Self {
+            pid: id,
+            openvpn_dns,
+        })
     }
 
     pub fn check_if_running(&self) -> bool {

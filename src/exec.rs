@@ -141,6 +141,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
 
                 let dns = command
                     .dns
+                    .clone()
                     .or_else(|| {
                         provider
                             .get_dyn_openvpn_provider()
@@ -150,8 +151,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     })
                     .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
+                // TODO: Don't rely on Google DNS here - could copy local one?
                 ns.dns_config(&dns)?;
-
                 // Check if using Shadowsocks
                 if let Some((ss_host, ss_lport)) =
                     uses_shadowsocks(config_file.as_ref().expect("No config file provided"))?
@@ -177,6 +178,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     auth_file,
                     &dns,
                     !command.no_killswitch,
+                    command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
                     firewall,
                     command.disable_ipv6,
@@ -194,11 +196,21 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             "OpenVPN not running in network namespace, probable dead lock file authentication error"
         ));
                 }
+
+                // Set DNS with OpenVPN server response if present
+                if command.dns.is_none() {
+                    if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns {
+                        let old_dns = ns.dns_config.take();
+                        std::mem::forget(old_dns);
+                        ns.dns_config(&[newdns])?;
+                    }
+                }
             }
             Protocol::Wireguard => {
                 ns.run_wireguard(
                     config_file.expect("No config file provided"),
                     !command.no_killswitch,
+                    command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
                     firewall,
                     command.disable_ipv6,
@@ -211,6 +223,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 ns.dns_config(&dns)?;
                 ns.run_openconnect(
                     config_file,
+                    command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
                     firewall,
                     &server_name,

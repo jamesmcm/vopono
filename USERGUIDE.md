@@ -1,5 +1,9 @@
 # vopono User Guide
 
+## asciinema example
+
+[![asciicast](https://asciinema.org/a/369367.png)](https://asciinema.org/a/369367)
+
 ## Usage
 
 Applications will be run as the current user by default (you can use
@@ -259,8 +263,36 @@ for the same (note the instructions on disabling WebRTC). I noticed that
 when using IPv6 with OpenVPN it incorrectly states you are not connected
 via AzireVPN though (Wireguard works correctly).
 
-Mullvad port forwarding works for both Wireguard and OpenVPN. You will
-need to enable the ports in your [Mullvad account](https://mullvad.net/en/account/#/ports).
+
+### VPN Provider limitations 
+
+#### MozillaVPN
+
+There is no easy way to delete MozillaVPN devices (Wireguard keypairs),
+unlike Mullvad this _cannot_ be done on the webpage.
+I recommend using [MozWire](https://github.com/NilsIrl/MozWire) to manage this.
+
+#### iVPN
+
+iVPN Wireguard keypairs must be uploaded manually, as the Client Area is
+behind a captcha login.
+
+### Tunnel Port Forwarding 
+
+Some providers allow port forwarding inside the tunnel, so you can open
+some ports inside the network namespace which can be accessed via the
+Wireguard/OpenVPN tunnel (this can be important for BitTorrent
+connectivity, etc.).
+
+Mullvad tunnel port forwarding works for both Wireguard and OpenVPN. You will
+need to enable the ports in your [Mullvad account](https://mullvad.net/en/account/#/ports). 
+Remember to open the port with the `-o PORTNUMBER` argument to 
+`vopono exec` if you have the killswitch enabled!
+
+For iVPN port forwarding also works the same way, however it is __only
+supported for OpenVPN__ on iVPN's side. So remember to pass 
+`--protocol openvpn -o PORTNUMBER` when trying it! Enable port
+forwarding in the [Port Forwarding page in the iVPN client area](https://www.ivpn.net/clientarea/vpn/273887).
 
 ## Dependencies
 
