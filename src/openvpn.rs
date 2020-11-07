@@ -26,6 +26,7 @@ impl OpenVpn {
         auth_file: Option<PathBuf>,
         dns: &[IpAddr],
         use_killswitch: bool,
+        open_ports: Option<&Vec<u16>>,
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
         disable_ipv6: bool,
@@ -78,9 +79,7 @@ impl OpenVpn {
         let mut logfile = BufReader::with_capacity(64, File::open(log_file_str)?);
         let mut pos: usize = 0;
 
-        // TODO: Override DNS with DNS response if present
-        // PUSH: Received control message: \'PUSH_REPLY,redirect-gateway def1,explicit-exit-notify 3,comp-lzo no,route-gateway 10.73.40.1,topology subnet,ping 10,ping-restart 60,dhcp-option DNS 10.73.40.1
-
+        // Parse DNS header from OpenVPN response
         let dns_regex = Regex::new(r"dhcp-option DNS ([0-9.]+)").unwrap();
         let mut openvpn_dns: Option<IpAddr> = None;
         // Tail OpenVPN log file
@@ -133,7 +132,12 @@ impl OpenVpn {
             return Err(anyhow!("OpenVPN options error, use -v for full log output"));
         }
 
-        // Allow input to and output from forwarded ports
+        // Allow input to and output from open ports (for port forwarding in tunnel)
+        if let Some(opens) = open_ports {
+            super::util::open_ports(&netns, opens.as_slice(), firewall)?;
+        }
+
+        // Allow input to and output from forwarded ports (will be proxied to host)
         if let Some(forwards) = forward_ports {
             super::util::open_ports(&netns, forwards.as_slice(), firewall)?;
         }

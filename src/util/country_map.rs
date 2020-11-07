@@ -428,6 +428,7 @@ pub fn country_to_code_map() -> HashMap<&'static str, &'static str> {
         "yemen" => "ye",
         "algeria" => "dz",
         "united_states" => "us",
+        "usa" => "us",
         "uruguay" => "uy",
         "mayotte" => "yt",
         "lebanon" => "lb",

@@ -7,7 +7,7 @@ as normal.
 
 vopono includes built-in killswitches for both Wireguard and OpenVPN.
 
-Currently Mullvad, AzireVPN, MozillaVPN, TigerVPN, ProtonVPN and
+Currently Mullvad, AzireVPN, MozillaVPN, TigerVPN, ProtonVPN, iVPN and
 PrivateInternetAccess are supported directly, with custom configuration files
 also supported with the `--custom` argument.
 
@@ -18,16 +18,13 @@ lynx all running through different VPN connections:
 
 ![Screenshot](screenshot.png)
 
-### asciinema example
-
-[![asciicast](https://asciinema.org/a/369367.png)](https://asciinema.org/a/369367)
-
 ## Supported Providers
 
 | Provider              | OpenVPN support | Wireguard support | 
 |-----------------------|-----------------|-------------------|
 | Mullvad               | ✅              | ✅                |
 | AzireVPN              | ✅              | ✅                |
+| iVPN                  | ✅              | ✅                |
 | PrivateInternetAccess | ✅              | ❌                |
 | TigerVPN              | ✅              | ❌                |
 | ProtonVPN             | ✅              | ❌                |
@@ -137,11 +134,15 @@ $ rustc --version
 
 ## Known issues
 
+* When launching a new application in an existing vopono namespace, any
+  modifications to the firewall rules (i.e. forwarding and opening
+  ports) will not be applied.
+* Connections to the host's PulseAudio and D-bus servers will likely
+  fail since the connection from the network namespace will not appear as a localhost
+  connection. See [issue #38](https://github.com/jamesmcm/vopono/issues/38) for work on solving this.
 * OpenVPN credentials are always stored in plaintext in configuration - may add
   option to not store credentials, but it seems OpenVPN needs them
   provided in plaintext.
-* ProtonVPN DNS servers do not reliably connect, so Google's DNS is used
-  for now (you can override this with the `--dns` argument.
 * There is no easy way to delete MozillaVPN devices (Wireguard
   keypairs) - unlike Mullvad this _cannot_ be done on the webpage. I recommend using [MozWire](https://github.com/NilsIrl/MozWire) to manage this.
 

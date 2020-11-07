@@ -178,6 +178,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     auth_file,
                     &dns,
                     !command.no_killswitch,
+                    command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
                     firewall,
                     command.disable_ipv6,
@@ -209,6 +210,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 ns.run_wireguard(
                     config_file.expect("No config file provided"),
                     !command.no_killswitch,
+                    command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
                     firewall,
                     command.disable_ipv6,
@@ -221,6 +223,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 ns.dns_config(&dns)?;
                 ns.run_openconnect(
                     config_file,
+                    command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
                     firewall,
                     &server_name,

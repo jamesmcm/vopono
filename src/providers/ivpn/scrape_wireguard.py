@@ -17,6 +17,8 @@ with open("ivpn_wg.html", "r") as file:
             country = b.contents[4].strip()
             country = country.replace(",", "-").replace(" ", "")
             country = country.lower()
+            # Fix GB -> UK country code
+            country = country.replace("gb-", "uk-")
             b = b.find_next("div", {"class": "col-xs-6 col-md-3"})
             hostname = b.contents[2].strip()
             b = b.find_next("div", {"class": "col-xs-6 col-md-2"})
@@ -26,13 +28,13 @@ with open("ivpn_wg.html", "r") as file:
             key = b.text.strip()
             print(f"{country}|{hostname}|{ip}|{key}")
             hosts.append(
-                {"country": country, "hostname": hostname, "ip": ip, "key": key}
+                {"country": country, "hostname": hostname, "ip": ip, "pubkey": key}
             )
         else:
             break
 
     with open("ivpn_wg_hosts.csv", "w") as csvfile:
-        fieldnames = ["country", "hostname", "ip", "key"]
+        fieldnames = ["country", "hostname", "ip", "pubkey"]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         for host in hosts:

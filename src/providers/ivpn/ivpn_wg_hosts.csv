@@ -1,4 +1,4 @@
-country,hostname,ip,key
+country,hostname,ip,pubkey
 at-vienna,at1.wg.ivpn.net,185.244.212.69,83LUBnP97SFpnS0y1MpEAFcg8MIiQJgW1FRv/8Mc40g=
 au-sydney,au-nsw1.wg.ivpn.net,46.102.153.246,KmSrG48t5xw9CJCPlYLBG3JnmiY0CnUgyRM5TUEwZhM=
 be-brussels,be1.wg.ivpn.net,194.187.251.13,awriP5lpdxEMWKuG+A1DOg+vb1M5jd3WhynIMB61BhU=
@@ -20,10 +20,10 @@ dk-copenhagen,dk1.wg.ivpn.net,185.245.84.229,jTsV5gOD7lT4egDj9rhKwO2OO2X7bKs2EQP
 es-madrid,es1.wg.ivpn.net,84.17.62.98,w7umiArTtlJ4Pk6Ii9WX5VXK5vw/Qu+Z37/icKlIYWo=
 fi-helsinki,fi1.wg.ivpn.net,194.34.134.63,mIxEzfjZ2wV6jJVj30w38ECd2LSH4bw/HLMnM2ICHiI=
 fr-paris,fr1.wg.ivpn.net,185.93.2.132,g7BuMzj3r/noLiLR4qhQMcvU6GSIY8RGEnaYtdYsFX4=
-gb-london,gb1.wg.ivpn.net,81.92.202.114,7+jos+Eg+hMEOQE4Std6OJ+WVnCcmbqS1/EbPwn9w3s=
-gb-london,gb2.wg.ivpn.net,185.59.221.225,x0BTRaxsdxAd58ZyU2YMX4bmuj+Eg+8/urT2F3Vs1n8=
-gb-london,gb1.wg.ivpn.net,185.59.221.140,yKK5x+D17Jr3Q12T/UBaDjNVmNdZBsqpvTqH6YfsGHg=
-gb-manchester,gb-man1.wg.ivpn.net,89.238.141.231,+hf4DYilNEIjTdSOuCNcWdqVyaRoxGzXw7wvNl7f7Rg=
+uk-london,gb1.wg.ivpn.net,81.92.202.114,7+jos+Eg+hMEOQE4Std6OJ+WVnCcmbqS1/EbPwn9w3s=
+uk-london,gb2.wg.ivpn.net,185.59.221.225,x0BTRaxsdxAd58ZyU2YMX4bmuj+Eg+8/urT2F3Vs1n8=
+uk-london,gb1.wg.ivpn.net,185.59.221.140,yKK5x+D17Jr3Q12T/UBaDjNVmNdZBsqpvTqH6YfsGHg=
+uk-manchester,gb-man1.wg.ivpn.net,89.238.141.231,+hf4DYilNEIjTdSOuCNcWdqVyaRoxGzXw7wvNl7f7Rg=
 hk-hongkong,hk1.wg.ivpn.net,209.58.189.105,MbqqGy6TI2WVxHYdMa7X1LJoIEQNElhYXMGlMqtwtS0=
 hu-budapest,hu1.wg.ivpn.net,185.189.114.189,G30fNdXrnlqtqqOLF23QXWzFdLIKDxLW60HoYPvqml8=
 il-telaviv,il1.wg.ivpn.net,185.191.207.197,HR9gAjpxXU3YVt6kehBw5n8yVYVE0iIgJdc4HTqOzEE=
