@@ -11,6 +11,7 @@ mod network_interface;
 mod openconnect;
 mod openvpn;
 mod providers;
+mod pulseaudio;
 mod shadowsocks;
 mod sync;
 mod sysctl;
@@ -21,13 +22,14 @@ mod wireguard;
 
 use list::output_list;
 use list_configs::print_configs;
-use log::LevelFilter;
+use log::{debug, LevelFilter};
 use netns::NetworkNamespace;
 use structopt::StructOpt;
 use sync::{sync_menu, synch};
 use util::clean_dead_locks;
 use util::clean_dead_namespaces;
 use util::elevate_privileges;
+use which::which;
 
 // TODO:
 // - Allow for not saving OpenVPN creds to config
@@ -49,7 +51,12 @@ fn main() -> anyhow::Result<()> {
     match app.cmd {
         args::Command::Exec(cmd) => {
             clean_dead_locks()?;
-
+            if which("pactl").is_ok() {
+                let pa = pulseaudio::get_pulseaudio_server()?;
+                std::env::set_var("PULSE_SERVER", pa);
+            } else {
+                debug!("pactl not found, will not set PULSE_SERVER");
+            }
             elevate_privileges()?;
             clean_dead_namespaces()?;
             exec::exec(cmd)?

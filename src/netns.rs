@@ -100,8 +100,8 @@ impl NetworkNamespace {
             handle.current_dir(cdir);
         }
         let sudo_string = if user.is_some() {
-            handle.args(&["sudo", "-u", user.as_ref().unwrap()]);
-            Some(format!(" sudo -u {}", user.as_ref().unwrap()))
+            handle.args(&["sudo", "-Eu", user.as_ref().unwrap()]);
+            Some(format!(" sudo -Eu {}", user.as_ref().unwrap()))
         } else {
             None
         };
