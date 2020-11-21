@@ -1,4 +1,4 @@
-# vopono
+![vopono logo](logos/vopono_basic.png)
 
 vopono is a tool to run applications through VPN tunnels via temporary
 network namespaces. This allows you to run only a handful of
@@ -20,8 +20,8 @@ lynx all running through different VPN connections:
 
 ## Supported Providers
 
-| Provider              | OpenVPN support | Wireguard support | 
-|-----------------------|-----------------|-------------------|
+| Provider              | OpenVPN support | Wireguard support |
+| --------------------- | --------------- | ----------------- |
 | Mullvad               | ✅              | ✅                |
 | AzireVPN              | ✅              | ✅                |
 | iVPN                  | ✅              | ✅                |
@@ -121,8 +121,7 @@ source with Cargo as documented below.
 
 ### From this repository (with Cargo)
 
-Run the install script provided: `install.sh` - this will `cargo
-install` the repository and copy over the configuration files to
+Run the install script provided: `install.sh` - this will `cargo install` the repository and copy over the configuration files to
 `~/.config/vopono/`
 
 Note the minimum supported Rust version is 1.43. You can check your
@@ -134,16 +133,16 @@ $ rustc --version
 
 ## Known issues
 
-* When launching a new application in an existing vopono namespace, any
+- When launching a new application in an existing vopono namespace, any
   modifications to the firewall rules (i.e. forwarding and opening
   ports) will not be applied.
-* Connections to the host's PulseAudio and D-bus servers will likely
+- Connections to the host's PulseAudio and D-bus servers will likely
   fail since the connection from the network namespace will not appear as a localhost
   connection. See [issue #38](https://github.com/jamesmcm/vopono/issues/38) for work on solving this.
-* OpenVPN credentials are always stored in plaintext in configuration - may add
+- OpenVPN credentials are always stored in plaintext in configuration - may add
   option to not store credentials, but it seems OpenVPN needs them
   provided in plaintext.
-* There is no easy way to delete MozillaVPN devices (Wireguard
+- There is no easy way to delete MozillaVPN devices (Wireguard
   keypairs) - unlike Mullvad this _cannot_ be done on the webpage. I recommend using [MozWire](https://github.com/NilsIrl/MozWire) to manage this.
 
 ## License
