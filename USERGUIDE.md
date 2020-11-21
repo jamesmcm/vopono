@@ -99,7 +99,7 @@ By default vopono uses the UDP configuration of the VPN providers.
 You can use the TCP configurations by running `vopono sync` and choosing
 that option from the provider configuration.
 
-For Mullvad, valid ports are: 1300, 1301, 1302, 1194, 1195, 1196, 1197, or 53 for UDP, and 
+For Mullvad, valid ports are: 1300, 1301, 1302, 1194, 1195, 1196, 1197, or 53 for UDP, and
 80 or 443 for TCP,
 
 For PrivateInternetAccess valid ports are 1198 for UDP and 502 for TCP.
@@ -112,8 +112,7 @@ Mullvad supports proxying via Shadowsocks, if that configuration is
 chosen with `vopono sync`. Note you must use a TCP connection on port
 443 in this case.
 
-Respond with `Y` when asked `Connect via a bridge?` during the `vopono
-sync` configuration for Mullvad OpenVPN to enable this configuration. It
+Respond with `Y` when asked `Connect via a bridge?` during the `vopono sync` configuration for Mullvad OpenVPN to enable this configuration. It
 is not used by default.
 
 If you are using a custom provider config file, you must run the socks
@@ -158,10 +157,9 @@ You may also wish to disable WebRTC - see
 
 Similar issues apply to Chromium and Google Chrome.
 
-
 ### Daemons and servers
 
-If running servers and daemons inside of vopono, you can you use the 
+If running servers and daemons inside of vopono, you can you use the
 `-f $PORT` argument to allow incoming connections to a TCP port inside the namespace, by default this
 port will also be proxied to your host machine at the same port number.
 Note for same daemons you may need to use the `-k` keep-alive option in
@@ -197,7 +195,7 @@ Here is an example using AzireVPN and Wireguard (where the privoxy user
 was already created in the normal installation process):
 
 ```bash
-$ vopono -v exec --provider azirevpn -k -u root -f 8118 --server norway  "privoxy --chroot --user privoxy /etc/privoxy/config" 
+$ vopono -v exec --provider azirevpn -k -u root -f 8118 --server norway  "privoxy --chroot --user privoxy /etc/privoxy/config"
 ```
 
 Note we need to specify `-u root` so that privoxy has the permissions to
@@ -205,8 +203,8 @@ chroot later.
 
 Port 8118 is then forwarded to the local host, so you can use the proxy
 server normal. Note that just like with the transmission-daemon example
-above, Privoxy __must__ be configured to allow remote connections,
-specifically in the config file you must __not__ specify an IP address in
+above, Privoxy **must** be configured to allow remote connections,
+specifically in the config file you must **not** specify an IP address in
 the `listen-address`:
 
 ```
@@ -263,8 +261,7 @@ for the same (note the instructions on disabling WebRTC). I noticed that
 when using IPv6 with OpenVPN it incorrectly states you are not connected
 via AzireVPN though (Wireguard works correctly).
 
-
-### VPN Provider limitations 
+### VPN Provider limitations
 
 #### MozillaVPN
 
@@ -277,7 +274,7 @@ I recommend using [MozWire](https://github.com/NilsIrl/MozWire) to manage this.
 iVPN Wireguard keypairs must be uploaded manually, as the Client Area is
 behind a captcha login.
 
-### Tunnel Port Forwarding 
+### Tunnel Port Forwarding
 
 Some providers allow port forwarding inside the tunnel, so you can open
 some ports inside the network namespace which can be accessed via the
@@ -285,12 +282,12 @@ Wireguard/OpenVPN tunnel (this can be important for BitTorrent
 connectivity, etc.).
 
 Mullvad tunnel port forwarding works for both Wireguard and OpenVPN. You will
-need to enable the ports in your [Mullvad account](https://mullvad.net/en/account/#/ports). 
-Remember to open the port with the `-o PORTNUMBER` argument to 
+need to enable the ports in your [Mullvad account](https://mullvad.net/en/account/#/ports).
+Remember to open the port with the `-o PORTNUMBER` argument to
 `vopono exec` if you have the killswitch enabled!
 
-For iVPN port forwarding also works the same way, however it is __only
-supported for OpenVPN__ on iVPN's side. So remember to pass 
+For iVPN port forwarding also works the same way, however it is **only
+supported for OpenVPN** on iVPN's side. So remember to pass
 `--protocol openvpn -o PORTNUMBER` when trying it! Enable port
 forwarding in the [Port Forwarding page in the iVPN client area](https://www.ivpn.net/clientarea/vpn/273887).
 
@@ -303,3 +300,35 @@ OpenVPN must be installed for using OpenVPN providers, and wireguard-tools must 
 installed for using Wireguard providers.
 
 shadowsocks-libev must be installed for Shadowsocks support (Mullvad OpenVPN bridges).
+
+## Troubleshooting
+
+If you have any issues please create a Github issue with details of the
+problem.
+
+If the issue is networking related, please include the output of the
+following commands. On the host machine:
+
+```bash
+ip addr
+ip link
+ping 10.200.1.2
+sudo nft list tables
+sudo nft list table nat
+sudo iptables -t nat -L
+```
+
+And on the network namespace, replacing `vopono_*` with your specific generated
+namespace name e.g. `vopono_azire_norway`:
+
+```bash
+sudo ip netns exec vopono_* ip addr
+sudo ip netns exec vopono_* ip link
+sudo ip netns exec vopono_* nft list tables
+sudo ip netns exec vopono_* nft list table vopono_*
+sudo ip netns exec vopono_* iptables -L
+sudo ip netns exec ping 10.200.1.1
+sudo ip netns exec ping 8.8.8.8
+```
+
+See issues #40, #24, #2, and #1 for previous troubleshooting of issues.
