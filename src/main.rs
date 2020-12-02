@@ -22,7 +22,7 @@ mod wireguard;
 
 use list::output_list;
 use list_configs::print_configs;
-use log::{debug, LevelFilter};
+use log::{debug, warn, LevelFilter};
 use netns::NetworkNamespace;
 use structopt::StructOpt;
 use sync::{sync_menu, synch};
@@ -52,8 +52,15 @@ fn main() -> anyhow::Result<()> {
         args::Command::Exec(cmd) => {
             clean_dead_locks()?;
             if which("pactl").is_ok() {
-                let pa = pulseaudio::get_pulseaudio_server()?;
-                std::env::set_var("PULSE_SERVER", pa);
+                let pa = pulseaudio::get_pulseaudio_server();
+                if let Ok(pa) = pa {
+                    std::env::set_var("PULSE_SERVER", pa);
+                } else {
+                    warn!(
+                        "Could not parse PULSE_SERVER from pactl info output: {:?}",
+                        pa
+                    );
+                }
             } else {
                 debug!("pactl not found, will not set PULSE_SERVER");
             }

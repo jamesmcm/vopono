@@ -10,11 +10,11 @@ pub fn get_pulseaudio_server() -> anyhow::Result<String> {
 
     let caps = re.captures(output);
     if caps.is_none() {
-        return Err(anyhow!("Could not parse pactl output!"));
+        return Err(anyhow!("Could not parse pactl output!:\n{}", output));
     }
     let caps = caps.unwrap().get(1);
     if caps.is_none() {
-        return Err(anyhow!("Could not parse pactl output!"));
+        return Err(anyhow!("Could not parse pactl output!:\n{}", output));
     }
 
     let out = caps.unwrap().as_str().to_string();
