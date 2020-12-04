@@ -256,6 +256,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 proxy.push(basic_tcp_proxy::TcpProxy::new(
                     p,
                     std::net::SocketAddr::new(ns.veth_pair_ips.as_ref().unwrap().namespace_ip, p),
+                    false,
                 ));
             }
         }
