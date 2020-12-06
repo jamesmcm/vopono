@@ -42,7 +42,7 @@ zip = "0.5"
 maplit = "1"
 webbrowser = "0.5"
 basic_tcp_proxy = "0.2"
-ctrlc = "3"
+signal-hook = "0.2"
 
 [package.metadata.rpm]
 package = "vopono"
