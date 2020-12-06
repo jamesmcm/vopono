@@ -248,14 +248,31 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
 }
 
 pub fn elevate_privileges() -> anyhow::Result<()> {
+    use signal_hook::{cleanup, flag, SIGINT};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
     // Check if already running as root
     if nix::unistd::getuid().as_raw() != 0 {
         info!("Calling sudo for elevated privileges, current user will be used as default user");
         let args: Vec<String> = std::env::args().collect();
 
+        let terminated = Arc::new(AtomicBool::new(false));
+        flag::register(SIGINT, Arc::clone(&terminated))?;
+
         debug!("Args: {:?}", &args);
-        Command::new("sudo").arg("-E").args(args).status()?;
-        // Do we want to block here to ensure stdout kept alive? Does it matter?
+        // status blocks until the process has ended
+        let _status = Command::new("sudo").arg("-E").args(args).status()?;
+
+        cleanup::cleanup_signal(SIGINT)?;
+
+        if terminated.load(Ordering::SeqCst) {
+            // we received a sigint,
+            // so we want to pass it on by terminating with a sigint
+            nix::sys::signal::kill(nix::unistd::getpid(), nix::sys::signal::Signal::SIGINT)
+                .expect("failed to send SIGINT");
+        }
+
         std::process::exit(0);
     } else if std::env::var("SUDO_USER").is_err() {
         warn!("Running vopono as root user directly!");

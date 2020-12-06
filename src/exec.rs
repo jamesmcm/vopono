@@ -12,10 +12,15 @@ use super::util::{get_existing_namespaces, get_target_subnet};
 use super::vpn::{verify_auth, Protocol};
 use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
+use signal_hook::{iterator::Signals, SIGINT};
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
 
 pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
+    // this captures all sigint signals
+    // ignore for now, they are automatically passed on to the child
+    let signals = Signals::new(&[SIGINT])?;
+
     let provider: VpnProvider;
     let server_name: String;
     let protocol: Protocol;
@@ -276,37 +281,50 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             "Process {} still running, assumed to be daemon - will leave network namespace alive until ctrl+C received",
             pid
         );
-        stay_alive(pid)?;
+        stay_alive(Some(pid), signals)?;
     } else if command.keep_alive {
         info!("Keep-alive flag active - will leave network namespace alive until ctrl+C received");
-        stay_alive(pid)?;
+        stay_alive(None, signals)?;
     }
 
     Ok(())
 }
 
 // Block waiting for SIGINT
-fn stay_alive(pid: u32) -> anyhow::Result<()> {
-    let recv = ctrl_channel(pid);
-    recv?.recv().unwrap();
-    Ok(())
-}
-
-// Handle waiting for SIGINT
-fn ctrl_channel(pid: u32) -> Result<std::sync::mpsc::Receiver<()>, ctrlc::Error> {
+fn stay_alive(pid: Option<u32>, mut signals: Signals) -> anyhow::Result<()> {
     let (sender, receiver) = std::sync::mpsc::channel();
-    ctrlc::set_handler(move || {
-        let _ = sender.send(());
-        info!(
-            "SIGINT received, killing process {} and terminating...",
-            pid
-        );
-        nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        )
-        .ok();
-    })?;
 
-    Ok(receiver)
+    // discard old signals
+    for _old in signals.pending() {
+        // pass, just empty the iterator
+    }
+
+    let handle = signals.handle();
+
+    let thread = std::thread::spawn(move || {
+        for _sig in signals.forever() {
+            if let Some(pid) = pid {
+                info!(
+                    "SIGINT received, killing process {} and terminating...",
+                    pid
+                );
+                nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(pid as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                )
+                .ok();
+            } else {
+                info!("SIGINT received, terminating...",);
+            }
+            let _ = sender.send(());
+        }
+    });
+
+    // this blocks until sender sends, so until sigint is received
+    receiver.recv().unwrap();
+
+    handle.close();
+    thread.join().unwrap();
+
+    Ok(())
 }
