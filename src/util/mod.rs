@@ -81,14 +81,26 @@ pub fn get_group(username: &str) -> anyhow::Result<String> {
 }
 
 pub fn set_config_permissions() -> anyhow::Result<()> {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+
     let check_dir = vopono_dir()?;
     let username = get_username()?;
     let group = get_group(&username)?;
 
+    let file_permissions = Permissions::from_mode(0o640);
+    let dir_permissions = Permissions::from_mode(0o750);
+
     let group = nix::unistd::Group::from_name(&group)?.map(|x| x.gid);
     let user = nix::unistd::User::from_name(&username)?.map(|x| x.uid);
     for entry in WalkDir::new(check_dir).into_iter().filter_map(|e| e.ok()) {
-        nix::unistd::chown(entry.path(), user, group)?;
+        let path = entry.path();
+        nix::unistd::chown(path, user, group)?;
+        if path.is_file() {
+            std::fs::set_permissions(path, file_permissions.clone())?;
+        } else {
+            std::fs::set_permissions(path, dir_permissions.clone())?;
+        }
     }
     Ok(())
 }
