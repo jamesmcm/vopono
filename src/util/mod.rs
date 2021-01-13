@@ -218,11 +218,10 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
             .filter(|x| x.1.is_some())
             .map(|x| (x.0, running_processes.contains(&x.1.unwrap())))
             .filter(|x| !x.1)
-            .map(|x| {
+            .try_for_each(|x| {
                 debug!("Removing lockfile: {}", x.0.path().display());
                 std::fs::remove_file(x.0.path())
-            })
-            .collect::<Result<(), _>>()?;
+            })?;
 
         // Delete subdirectories if they contain no locks (ignore errors)
         WalkDir::new(&lockfile_path)
@@ -230,8 +229,7 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
             .filter(|x| x.is_ok())
             .map(|x| x.unwrap())
             .filter(|x| x.path().is_dir())
-            .map(|x| std::fs::remove_dir(x.path()))
-            .collect::<Result<(), _>>()
+            .try_for_each(|x| std::fs::remove_dir(x.path()))
             .ok();
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
@@ -245,14 +243,13 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
     existing_namespaces
         .into_iter()
         .filter(|x| !lock_namespaces.contains_key(x))
-        .map(|x| {
+        .try_for_each(|x| {
             debug!("Removing dead namespace: {}", x);
             let path = format!("/etc/netns/{}", x);
             std::fs::remove_dir_all(&path).ok();
 
             sudo_command(&["ip", "netns", "delete", x.as_str()])
-        })
-        .collect::<Result<(), _>>()?;
+        })?;
 
     // TODO - deserialize to struct without Drop instead
     std::mem::forget(lock_namespaces);
@@ -260,7 +257,7 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
 }
 
 pub fn elevate_privileges() -> anyhow::Result<()> {
-    use signal_hook::{cleanup, flag, SIGINT};
+    use signal_hook::{consts::SIGINT, flag};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -276,7 +273,8 @@ pub fn elevate_privileges() -> anyhow::Result<()> {
         // status blocks until the process has ended
         let _status = Command::new("sudo").arg("-E").args(args).status()?;
 
-        cleanup::cleanup_signal(SIGINT)?;
+        // Deprecated - do we need to handle flag here?
+        // cleanup::cleanup_signal(SIGINT)?;
 
         if terminated.load(Ordering::SeqCst) {
             // we received a sigint,
@@ -292,7 +290,7 @@ pub fn elevate_privileges() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn delete_all_files_in_dir(dir: &PathBuf) -> anyhow::Result<()> {
+pub fn delete_all_files_in_dir(dir: &Path) -> anyhow::Result<()> {
     dir.read_dir()?
         .flatten()
         .map(|x| std::fs::remove_file(x.path()))
@@ -300,7 +298,7 @@ pub fn delete_all_files_in_dir(dir: &PathBuf) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn get_configs_from_alias(list_path: &PathBuf, alias: &str) -> Vec<PathBuf> {
+pub fn get_configs_from_alias(list_path: &Path, alias: &str) -> Vec<PathBuf> {
     WalkDir::new(&list_path)
         .into_iter()
         .filter(|x| x.is_ok())
@@ -335,7 +333,7 @@ pub fn get_configs_from_alias(list_path: &PathBuf, alias: &str) -> Vec<PathBuf> 
         .collect::<Vec<PathBuf>>()
 }
 
-pub fn get_config_from_alias(list_path: &PathBuf, alias: &str) -> anyhow::Result<PathBuf> {
+pub fn get_config_from_alias(list_path: &Path, alias: &str) -> anyhow::Result<PathBuf> {
     let paths = get_configs_from_alias(list_path, alias);
     if paths.is_empty() {
         Err(anyhow!("Could not find config file for alias {}", &alias))
@@ -349,7 +347,7 @@ pub fn get_config_from_alias(list_path: &PathBuf, alias: &str) -> anyhow::Result
     }
 }
 
-pub fn get_config_file_protocol(config_file: &PathBuf) -> Protocol {
+pub fn get_config_file_protocol(config_file: &Path) -> Protocol {
     let content = fs::read_to_string(config_file).unwrap();
     if content.contains(&"[Interface]") {
         Protocol::Wireguard

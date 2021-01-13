@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::Write;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -247,7 +247,7 @@ impl NetworkNamespace {
 
     pub fn run_shadowsocks(
         &mut self,
-        config_file: &PathBuf,
+        config_file: &Path,
         ss_host: IpAddr,
         listen_port: u16,
         password: &str,

@@ -45,7 +45,7 @@ impl Mullvad {
     fn request_mullvad_username(&self) -> anyhow::Result<String> {
         let mut username = Input::<String>::new()
             .with_prompt("Mullvad account number")
-            .validate_with(|username: &str| -> Result<(), &str> {
+            .validate_with(|username: &String| -> Result<(), &str> {
                 let mut username = username.to_string();
                 username.retain(|c| !c.is_whitespace() && c.is_digit(10));
                 if username.len() != 16 {

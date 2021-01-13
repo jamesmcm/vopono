@@ -182,13 +182,12 @@ fn prompt_for_wg_key(
             Mullvad::upload_wg_key(&client, auth_token, &keypair)?;
             Ok(keypair)
         } else {
-            let info_clone = user_info.clone();
             let private_key = Input::<String>::new()
                 .with_prompt(format!(
                     "Private key for {}",
-                    user_info.wg_peers[selection].key.public
+                    &user_info.wg_peers[selection].key.public
                 ))
-        .validate_with(move |private_key: &str| -> Result<(), &str> {
+        .validate_with(|private_key: &String| -> Result<(), &str> {
 
             let private_key = private_key.trim();
 
@@ -199,7 +198,7 @@ fn prompt_for_wg_key(
 
             match generate_public_key(private_key) {
                 Ok(public_key) => {
-            if public_key != info_clone.wg_peers[selection].key.public {
+            if public_key != user_info.wg_peers[selection].key.public {
                 return Err("Private key does not match public key");
             }
             Ok(())
@@ -231,22 +230,16 @@ fn prompt_for_wg_key(
 fn request_port() -> anyhow::Result<u16> {
     let port = Input::<u16>::new()
         .with_prompt("Enter port number:")
-        .validate_with(|x: &str| -> Result<(), &str> {
-            let p = x.parse::<u16>();
-            match p {
-                Ok(n) => {
-                    if n == 53
-                        || (n >= 4000 && n <= 33433)
-                        || (n >= 33565 && n <= 51820)
-                        || (n >= 52000 && n <= 60000)
-                    {
-                        Ok(())
-                    } else {
-                        Err("
+        .validate_with(|n: &u16| -> Result<(), &str> {
+            if *n == 53
+                || (*n >= 4000 && *n <= 33433)
+                || (*n >= 33565 && *n <= 51820)
+                || (*n >= 52000 && *n <= 60000)
+            {
+                Ok(())
+            } else {
+                Err("
         Port must be 53, or in range 4000-33433, 33565-51820, 52000-60000")
-                    }
-                }
-                Err(_) => Err("Invalid number"),
             }
         })
         .default(51820)

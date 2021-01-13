@@ -12,7 +12,7 @@ use super::util::{get_existing_namespaces, get_target_subnet};
 use super::vpn::{verify_auth, Protocol};
 use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
-use signal_hook::{iterator::Signals, SIGINT};
+use signal_hook::{consts::SIGINT, iterator::Signals};
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -281,17 +281,17 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             "Process {} still running, assumed to be daemon - will leave network namespace alive until ctrl+C received",
             pid
         );
-        stay_alive(Some(pid), signals)?;
+        stay_alive(Some(pid), signals);
     } else if command.keep_alive {
         info!("Keep-alive flag active - will leave network namespace alive until ctrl+C received");
-        stay_alive(None, signals)?;
+        stay_alive(None, signals);
     }
 
     Ok(())
 }
 
 // Block waiting for SIGINT
-fn stay_alive(pid: Option<u32>, mut signals: Signals) -> anyhow::Result<()> {
+fn stay_alive(pid: Option<u32>, mut signals: Signals) {
     let (sender, receiver) = std::sync::mpsc::channel();
 
     // discard old signals
@@ -325,6 +325,4 @@ fn stay_alive(pid: Option<u32>, mut signals: Signals) -> anyhow::Result<()> {
 
     handle.close();
     thread.join().unwrap();
-
-    Ok(())
 }

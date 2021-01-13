@@ -23,16 +23,17 @@ users = "0.11"
 nix = "0.19"
 serde = {version = "1", features = ["derive", "std"]}
 csv = "1"
-dialoguer = "0.6"
+dialoguer ="0.7"
 regex = "1"
 ron = "0.6"
 walkdir = "2"
+# Must use rand 0.7 for compatibility with x25519-dalek for now
 rand = "0.7"
 toml = "0.5"
 chrono = "0.4"
 compound_duration = "1"
 ipnet = {version = "2", features = ["serde"]}
-reqwest = {default-features = false, version = "0.10", features = ["blocking", "json", "rustls-tls"]}
+reqwest = {default-features = false, version = "0.11", features = ["blocking", "json", "rustls-tls"]}
 sysinfo = "0.15"
 base64 = "0.13"
 x25519-dalek = "1"
@@ -42,7 +43,7 @@ zip = "0.5"
 maplit = "1"
 webbrowser = "0.5"
 basic_tcp_proxy = "0.2"
-signal-hook = "0.2"
+signal-hook = "0.3"
 
 [package.metadata.rpm]
 package = "vopono"
