@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
 use std::fs::read_to_string;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
+use std::path::Path;
 use std::str::FromStr;
 
 #[derive(Serialize, Deserialize)]
@@ -30,7 +30,7 @@ pub struct Shadowsocks {
 impl Shadowsocks {
     pub fn run(
         netns: &NetworkNamespace,
-        config_file: &PathBuf,
+        config_file: &Path,
         _ss_host: IpAddr,
         listen_port: u16,
         password: &str,
@@ -74,7 +74,7 @@ impl Shadowsocks {
     }
 }
 
-pub fn uses_shadowsocks(openvpn_config: &PathBuf) -> anyhow::Result<Option<(IpAddr, u16)>> {
+pub fn uses_shadowsocks(openvpn_config: &Path) -> anyhow::Result<Option<(IpAddr, u16)>> {
     // TODO: We assume all socks-proxy are Shadowsocks
     let config_str = read_to_string(openvpn_config)?;
 
@@ -93,7 +93,7 @@ pub fn uses_shadowsocks(openvpn_config: &PathBuf) -> anyhow::Result<Option<(IpAd
     )))
 }
 
-pub fn get_routes_from_config(path: &PathBuf) -> anyhow::Result<Vec<IpAddr>> {
+pub fn get_routes_from_config(path: &Path) -> anyhow::Result<Vec<IpAddr>> {
     let file_string = std::fs::read_to_string(path)?;
     let mut output_vec = Vec::new();
     // Regex extract

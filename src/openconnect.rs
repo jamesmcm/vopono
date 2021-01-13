@@ -4,7 +4,7 @@ use anyhow::{anyhow, Context};
 use dialoguer::{Input, Password};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize)]
 pub struct OpenConnect {
@@ -64,7 +64,7 @@ impl OpenConnect {
     }
 }
 
-fn get_creds_from_file(auth_file: &PathBuf) -> anyhow::Result<(String, String)> {
+fn get_creds_from_file(auth_file: &Path) -> anyhow::Result<(String, String)> {
     let s = std::fs::read_to_string(auth_file)?;
     let mut iter = s.split('\n');
     let user = iter.next().expect("No username in auth file");

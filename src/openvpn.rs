@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 #[derive(Serialize, Deserialize)]
@@ -525,7 +525,7 @@ pub fn killswitch(
     Ok(())
 }
 
-pub fn get_remotes_from_config(path: &PathBuf) -> anyhow::Result<Vec<Remote>> {
+pub fn get_remotes_from_config(path: &Path) -> anyhow::Result<Vec<Remote>> {
     let file_string = std::fs::read_to_string(path)?;
     let mut output_vec = Vec::new();
     // Regex extract
