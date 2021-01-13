@@ -260,7 +260,7 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
 }
 
 pub fn elevate_privileges() -> anyhow::Result<()> {
-    use signal_hook::{cleanup, flag, SIGINT};
+    use signal_hook::{consts::SIGINT, flag};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -276,7 +276,8 @@ pub fn elevate_privileges() -> anyhow::Result<()> {
         // status blocks until the process has ended
         let _status = Command::new("sudo").arg("-E").args(args).status()?;
 
-        cleanup::cleanup_signal(SIGINT)?;
+        // Deprecated - do we need to handle flag here?
+        // cleanup::cleanup_signal(SIGINT)?;
 
         if terminated.load(Ordering::SeqCst) {
             // we received a sigint,

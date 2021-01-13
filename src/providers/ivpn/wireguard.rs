@@ -129,7 +129,7 @@ impl WireguardProvider for IVPN {
 
         let ip_address = Input::<String>::new()
             .with_prompt(format!("Enter the IP address linked to this public key ({})\nSee https://www.ivpn.net/clientarea/vpn/273887/wireguard/keys ", &keypair.public))
-            .validate_with(move |ipstr: &str| -> Result<(), String> {
+            .validate_with(move |ipstr: &String| -> Result<(), String> {
                 let ip_parse = Ipv4Addr::from_str(ipstr.trim());
                 if let Err(err) = ip_parse {
                     return Err(format!("Input: {} is not valid IPv4 address: {}", ipstr.trim(), err));
@@ -205,7 +205,7 @@ impl WireguardProvider for IVPN {
 fn prompt_for_wg_key() -> anyhow::Result<WgKey> {
     let public_key = Input::<String>::new()
         .with_prompt("Enter Wireguard public key")
-        .validate_with(move |public_key: &str| -> Result<(), &str> {
+        .validate_with(|public_key: &String| -> Result<(), &str> {
             let public_key = public_key.trim();
             if public_key.len() != 44 {
                 return Err("Expected private key length of 44 characters");
@@ -214,10 +214,9 @@ fn prompt_for_wg_key() -> anyhow::Result<WgKey> {
         })
         .interact()?;
 
-    let closure_pubkey = public_key.clone();
     let private_key = Input::<String>::new()
         .with_prompt(format!("Private key for {}", &public_key))
-        .validate_with(move |private_key: &str| -> Result<(), &str> {
+        .validate_with(|private_key: &String| -> Result<(), &str> {
             let private_key = private_key.trim();
 
             if private_key.len() != 44 {
@@ -226,7 +225,7 @@ fn prompt_for_wg_key() -> anyhow::Result<WgKey> {
 
             match generate_public_key(private_key) {
                 Ok(pubkey) => {
-                    if pubkey != closure_pubkey {
+                    if pubkey != public_key {
                         return Err("Private key does not match public key");
                     }
                     Ok(())
@@ -254,20 +253,14 @@ fn request_port() -> anyhow::Result<u16> {
     // https://www.ivpn.net/setup/gnu-linux-wireguard.html
     let port = Input::<u16>::new()
         .with_prompt("Enter port number:")
-        .validate_with(|x: &str| -> Result<(), &str> {
-            let p = x.parse::<u16>();
-            match p {
-                Ok(n) => {
-                    if [2049,2050,53,30587,41893,48574,58237].contains(&n)                    {
-                        Ok(())
-                    } else {
-                        Err("Port must be one of: 2049,2050,53,30587,41893,48574,58237 (see https://www.ivpn.net/setup/gnu-linux-wireguard.html for ports reference)")
-                    }
-                }
-                Err(_) => Err("Invalid number"),
-            }
+        .validate_with(|x: &u16| -> Result<(), &str> {
+          if [2049,2050,53,30587,41893,48574,58237].contains(&x) {
+              Ok(())
+          } else {
+              Err("Port must be one of: 2049,2050,53,30587,41893,48574,58237 (see https://www.ivpn.net/setup/gnu-linux-wireguard.html for ports reference)")
+          }
         })
-        .default(41893)
-        .interact()?;
+      .default(41893)
+      .interact()?;
     Ok(port)
 }

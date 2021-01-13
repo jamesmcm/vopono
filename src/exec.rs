@@ -12,7 +12,7 @@ use super::util::{get_existing_namespaces, get_target_subnet};
 use super::vpn::{verify_auth, Protocol};
 use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
-use signal_hook::{iterator::Signals, SIGINT};
+use signal_hook::{consts::SIGINT, iterator::Signals};
 use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
 
