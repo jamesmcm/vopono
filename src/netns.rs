@@ -1,6 +1,8 @@
 use super::dns_config::DnsConfig;
-use super::iptables::IpTables;
+use super::firewall::Firewall;
+use super::host_masquerade::HostMasquerade;
 use super::network_interface::NetworkInterface;
+use super::openconnect::OpenConnect;
 use super::openvpn::OpenVpn;
 use super::shadowsocks::Shadowsocks;
 use super::util::{config_dir, set_config_permissions, sudo_command};
@@ -9,7 +11,7 @@ use super::vpn::Protocol;
 use super::wireguard::Wireguard;
 use crate::providers::VpnProvider;
 use anyhow::Context;
-use log::{debug, warn};
+use log::{debug, info, warn};
 use nix::unistd;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -23,13 +25,22 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub struct NetworkNamespace {
     pub name: String,
     pub veth_pair: Option<VethPair>,
-    dns_config: Option<DnsConfig>,
+    pub dns_config: Option<DnsConfig>,
     pub openvpn: Option<OpenVpn>,
     pub wireguard: Option<Wireguard>,
-    pub iptables: Option<IpTables>,
+    pub host_masquerade: Option<HostMasquerade>,
     pub shadowsocks: Option<Shadowsocks>,
+    pub veth_pair_ips: Option<VethPairIPs>,
+    pub openconnect: Option<OpenConnect>,
     pub provider: VpnProvider,
     pub protocol: Protocol,
+    pub firewall: Firewall,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct VethPairIPs {
+    pub host_ip: IpAddr,
+    pub namespace_ip: IpAddr,
 }
 
 impl NetworkNamespace {
@@ -46,12 +57,19 @@ impl NetworkNamespace {
         let lockfile = File::open(lockfile.path())?;
         let lock: Lockfile = ron::de::from_reader(lockfile)?;
         let ns = lock.ns;
+        info!("Using existing network namespace: {}", &name);
         Ok(ns)
     }
 
-    pub fn new(name: String, provider: VpnProvider, protocol: Protocol) -> anyhow::Result<Self> {
+    pub fn new(
+        name: String,
+        provider: VpnProvider,
+        protocol: Protocol,
+        firewall: Firewall,
+    ) -> anyhow::Result<Self> {
         sudo_command(&["ip", "netns", "add", name.as_str()])
             .with_context(|| format!("Failed to create network namespace: {}", &name))?;
+        info!("Created new network namespace: {}", &name);
 
         Ok(Self {
             name,
@@ -59,10 +77,13 @@ impl NetworkNamespace {
             dns_config: None,
             openvpn: None,
             wireguard: None,
-            iptables: None,
+            host_masquerade: None,
             shadowsocks: None,
+            veth_pair_ips: None,
+            openconnect: None,
             provider,
             protocol,
+            firewall,
         })
     }
 
@@ -79,8 +100,8 @@ impl NetworkNamespace {
             handle.current_dir(cdir);
         }
         let sudo_string = if user.is_some() {
-            handle.args(&["sudo", "-u", user.as_ref().unwrap()]);
-            Some(format!(" sudo -u {}", user.as_ref().unwrap()))
+            handle.args(&["sudo", "-Eu", user.as_ref().unwrap()]);
+            Some(format!(" sudo -Eu {}", user.as_ref().unwrap()))
         } else {
             None
         };
@@ -120,8 +141,8 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn add_routing(&self, target_subnet: u8) -> anyhow::Result<()> {
-        // TODO: Handle case where IP address taken
+    pub fn add_routing(&mut self, target_subnet: u8) -> anyhow::Result<()> {
+        // TODO: Handle case where IP address taken in better way i.e. don't just change subnet
         let veth_dest = &self
             .veth_pair
             .as_ref()
@@ -137,6 +158,7 @@ impl NetworkNamespace {
         let ip = format!("10.200.{}.1/24", target_subnet);
         let ip_nosub = format!("10.200.{}.1", target_subnet);
         let veth_source_ip = format!("10.200.{}.2/24", target_subnet);
+        let veth_source_ip_nosub = format!("10.200.{}.2", target_subnet);
 
         sudo_command(&["ip", "addr", "add", &ip, "dev", veth_dest]).with_context(|| {
             format!(
@@ -161,6 +183,15 @@ impl NetworkNamespace {
         ])
         .with_context(|| format!("Failed to assign static IP to veth source: {}", veth_source))?;
 
+        info!(
+            "IP address of namespace as seen from host: {}",
+            veth_source_ip_nosub
+        );
+        info!("IP address of host as seen from namespace: {}", ip_nosub);
+        self.veth_pair_ips = Some(VethPairIPs {
+            host_ip: ip_nosub.parse()?,
+            namespace_ip: veth_source_ip_nosub.parse()?,
+        });
         Ok(())
     }
 
@@ -169,12 +200,17 @@ impl NetworkNamespace {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run_openvpn(
         &mut self,
         config_file: PathBuf,
         auth_file: Option<PathBuf>,
         dns: &[IpAddr],
         use_killswitch: bool,
+        open_ports: Option<&Vec<u16>>,
+        forward_ports: Option<&Vec<u16>>,
+        firewall: Firewall,
+        disable_ipv6: bool,
     ) -> anyhow::Result<()> {
         self.openvpn = Some(OpenVpn::run(
             &self,
@@ -182,6 +218,29 @@ impl NetworkNamespace {
             auth_file,
             dns,
             use_killswitch,
+            open_ports,
+            forward_ports,
+            firewall,
+            disable_ipv6,
+        )?);
+        Ok(())
+    }
+
+    pub fn run_openconnect(
+        &mut self,
+        config_file: Option<PathBuf>,
+        open_ports: Option<&Vec<u16>>,
+        forward_ports: Option<&Vec<u16>>,
+        firewall: Firewall,
+        server: &str,
+    ) -> anyhow::Result<()> {
+        self.openconnect = Some(OpenConnect::run(
+            &self,
+            config_file,
+            open_ports,
+            forward_ports,
+            firewall,
+            server,
         )?);
         Ok(())
     }
@@ -209,19 +268,33 @@ impl NetworkNamespace {
         &mut self,
         config_file: PathBuf,
         use_killswitch: bool,
+        open_ports: Option<&Vec<u16>>,
+        forward_ports: Option<&Vec<u16>>,
+        firewall: Firewall,
+        disable_ipv6: bool,
     ) -> anyhow::Result<()> {
-        self.wireguard = Some(Wireguard::run(self, config_file, use_killswitch)?);
+        self.wireguard = Some(Wireguard::run(
+            self,
+            config_file,
+            use_killswitch,
+            open_ports,
+            forward_ports,
+            firewall,
+            disable_ipv6,
+        )?);
         Ok(())
     }
 
-    pub fn add_iptables_rule(
+    pub fn add_host_masquerade(
         &mut self,
         target_subnet: u8,
         interface: NetworkInterface,
+        firewall: Firewall,
     ) -> anyhow::Result<()> {
-        self.iptables = Some(IpTables::add_masquerade_rule(
+        self.host_masquerade = Some(HostMasquerade::add_masquerade_rule(
             format!("10.200.{}.0/24", target_subnet),
             interface,
+            firewall,
         )?);
 
         Ok(())
@@ -298,30 +371,17 @@ impl Drop for NetworkNamespace {
             self.veth_pair = None;
             self.dns_config = None;
             self.wireguard = None;
-            self.iptables = None;
+            self.host_masquerade = None;
             sudo_command(&["ip", "netns", "delete", &self.name])
                 .unwrap_or_else(|_| panic!("Failed to delete network namespace: {}", &self.name));
         } else {
             debug!("Skipping destructors since other vopono instance using this namespace!");
-            let openvpn = self.openvpn.take();
-            let openvpn = Box::new(openvpn);
-            Box::leak(openvpn);
-
-            let veth_pair = self.veth_pair.take();
-            let veth_pair = Box::new(veth_pair);
-            Box::leak(veth_pair);
-
-            let dns_config = self.dns_config.take();
-            let dns_config = Box::new(dns_config);
-            Box::leak(dns_config);
-
-            let wireguard = self.wireguard.take();
-            let wireguard = Box::new(wireguard);
-            Box::leak(wireguard);
-
-            let iptables = self.iptables.take();
-            let iptables = Box::new(iptables);
-            Box::leak(iptables);
+            std::mem::forget(self.openvpn.take());
+            std::mem::forget(self.veth_pair.take());
+            std::mem::forget(self.dns_config.take());
+            std::mem::forget(self.wireguard.take());
+            std::mem::forget(self.host_masquerade.take());
+            std::mem::forget(self.openconnect.take());
         }
     }
 }

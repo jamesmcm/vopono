@@ -1,0 +1,31 @@
+name: PullRequest
+
+on:
+  pull_request:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs: 
+  quickcheck:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.rustversion.outputs.rustversion }}
+    steps:
+    - uses: actions/checkout@v2
+    - run: cargo check
+    - run: cargo pkgid
+    - run: 'echo "$(cargo pkgid | cut -d# -f2)"'
+    - id: rustversion
+      run: 'echo "::set-output name=rustversion::$(cargo pkgid | cut -d# -f2)"'
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - name: Install Clippy
+      run: rustup component add clippy rustfmt
+    - name: Clippy
+      run: cargo clippy -- -D warnings
+    - name: Rustfmt
+      run: cargo fmt --all -- --check

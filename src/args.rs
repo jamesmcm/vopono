@@ -1,3 +1,4 @@
+use super::firewall::Firewall;
 use super::network_interface::NetworkInterface;
 use super::providers::VpnProvider;
 use super::vpn::Protocol;
@@ -90,11 +91,36 @@ pub struct ExecCommand {
     /// Disable killswitch
     #[structopt(long = "no-killswitch")]
     pub no_killswitch: bool,
+
+    /// Keep-alive - do not close network namespace when launched process terminates
+    #[structopt(long = "keep-alive", short = "k")]
+    pub keep_alive: bool,
+
+    /// List of ports to open on network namespace (to allow port forwarding through the tunnel,
+    /// e.g. for BitTorrent, etc.)
+    #[structopt(long = "open-ports", short = "o")]
+    pub open_ports: Option<Vec<u16>>,
+
+    /// List of ports to forward from network namespace to host - useful for running servers and daemons
+    #[structopt(long = "forward", short = "f")]
+    pub forward_ports: Option<Vec<u16>>,
+
+    /// Disable proxying to host machine when forwarding ports
+    #[structopt(long = "no-proxy")]
+    pub no_proxy: bool,
+
+    /// VPN Protocol (if not given will use default)
+    #[structopt(long = "firewall",  possible_values = &Firewall::variants(), case_insensitive = true)]
+    pub firewall: Option<Firewall>,
+
+    /// Block all IPv6 traffic
+    #[structopt(long = "disable-ipv6")]
+    pub disable_ipv6: bool,
 }
 
 #[derive(StructOpt)]
 pub struct ListCommand {
-    /// VPN Provider (if not given will use default)
+    /// VPN Provider
     #[structopt(possible_values = &["namespaces", "applications"])]
     pub list_type: Option<String>,
 }

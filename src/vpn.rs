@@ -66,6 +66,7 @@ arg_enum! {
 pub enum Protocol {
     OpenVpn,
     Wireguard,
+    OpenConnect,
 }
 }
 

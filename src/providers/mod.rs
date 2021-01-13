@@ -1,3 +1,5 @@
+mod azirevpn;
+mod ivpn;
 mod mozilla;
 mod mullvad;
 mod pia;
@@ -30,9 +32,11 @@ arg_enum! {
 pub enum VpnProvider {
     PrivateInternetAccess,
     Mullvad,
-    TigerVpn,
-    ProtonVpn,
-    MozillaVpn,
+    TigerVPN,
+    ProtonVPN,
+    MozillaVPN,
+    AzireVPN,
+    IVPN,
     Custom,
 }
 }
@@ -43,9 +47,11 @@ impl VpnProvider {
         match self {
             Self::PrivateInternetAccess => Box::new(pia::PrivateInternetAccess {}),
             Self::Mullvad => Box::new(mullvad::Mullvad {}),
-            Self::TigerVpn => Box::new(tigervpn::TigerVPN {}),
-            Self::ProtonVpn => Box::new(protonvpn::ProtonVPN {}),
-            Self::MozillaVpn => Box::new(mozilla::MozillaVPN {}),
+            Self::TigerVPN => Box::new(tigervpn::TigerVPN {}),
+            Self::ProtonVPN => Box::new(protonvpn::ProtonVPN {}),
+            Self::MozillaVPN => Box::new(mozilla::MozillaVPN {}),
+            Self::AzireVPN => Box::new(azirevpn::AzireVPN {}),
+            Self::IVPN => Box::new(ivpn::IVPN {}),
             Self::Custom => unimplemented!("Custom provider uses separate logic"),
         }
     }
@@ -54,9 +60,11 @@ impl VpnProvider {
         match self {
             Self::PrivateInternetAccess => Ok(Box::new(pia::PrivateInternetAccess {})),
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
-            Self::TigerVpn => Ok(Box::new(tigervpn::TigerVPN {})),
-            Self::ProtonVpn => Ok(Box::new(protonvpn::ProtonVPN {})),
-            Self::MozillaVpn => Err(anyhow!("MozillaVPN only supports Wireguard!")),
+            Self::TigerVPN => Ok(Box::new(tigervpn::TigerVPN {})),
+            Self::ProtonVPN => Ok(Box::new(protonvpn::ProtonVPN {})),
+            Self::AzireVPN => Ok(Box::new(azirevpn::AzireVPN {})),
+            Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
+            Self::MozillaVPN => Err(anyhow!("MozillaVPN only supports Wireguard!")),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
         }
     }
@@ -64,7 +72,9 @@ impl VpnProvider {
     pub fn get_dyn_wireguard_provider(&self) -> anyhow::Result<Box<dyn WireguardProvider>> {
         match self {
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
-            Self::MozillaVpn => Ok(Box::new(mozilla::MozillaVPN {})),
+            Self::MozillaVPN => Ok(Box::new(mozilla::MozillaVPN {})),
+            Self::AzireVPN => Ok(Box::new(azirevpn::AzireVPN {})),
+            Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
             _ => Err(anyhow!("Wireguard not implemented")),
         }

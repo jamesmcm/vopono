@@ -3,7 +3,7 @@ use super::{ConfigurationChoice, OpenVpnProvider};
 use crate::util::delete_all_files_in_dir;
 use crate::vpn::OpenVpnProtocol;
 use dialoguer::{Input, Password};
-use log::debug;
+use log::{debug, info};
 use reqwest::Url;
 use std::fmt::Display;
 use std::fs::create_dir_all;
@@ -22,11 +22,17 @@ impl ProtonVPN {
         tier: &Tier,
         protocol: &OpenVpnProtocol,
     ) -> anyhow::Result<Url> {
-        Ok(Url::parse(&format!("https://account.protonvpn.com/api/vpn/config?Category={}&Tier={}&Platform=Linux&Protocol={}", category.url_part(), tier.url_part(), protocol))?)
+        let cat = if tier == &Tier::Free {
+            "Server".to_string()
+        } else {
+            category.url_part()
+        };
+        Ok(Url::parse(&format!("https://account.protonvpn.com/api/vpn/config?Category={}&Tier={}&Platform=Linux&Protocol={}", cat, tier.url_part(), protocol))?)
     }
 }
 impl OpenVpnProvider for ProtonVPN {
     fn provider_dns(&self) -> Option<Vec<IpAddr>> {
+        // None will use DNS from OpenVPN headers if present
         None
         // TODO: ProtonVPN DNS servers do not respond
         // let path = self.openvpn_dir().ok()?.join("dns.txt");
@@ -60,7 +66,7 @@ impl OpenVpnProvider for ProtonVPN {
             .with_prompt("OpenVPN Password")
             .with_confirmation("Confirm password", "Passwords did not match")
             .interact()?;
-        Ok((username, password))
+        Ok((username.trim().to_string(), password.trim().to_string()))
     }
 
     fn auth_file_path(&self) -> anyhow::Result<PathBuf> {
@@ -73,7 +79,12 @@ impl OpenVpnProvider for ProtonVPN {
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
         let tier = Tier::choose_one()?;
-        let config_choice = ConfigType::choose_one()?;
+        let config_choice = if tier != Tier::Free {
+            ConfigType::choose_one()?
+        } else {
+            // Dummy as not used for Free
+            ConfigType::Standard
+        };
         let protocol = OpenVpnProtocol::choose_one()?;
         let url = self.build_url(&config_choice, &tier, &protocol)?;
         let zipfile = reqwest::blocking::get(url)?;
@@ -94,16 +105,31 @@ impl OpenVpnProvider for ProtonVPN {
                 .collect::<Vec<&str>>()
                 .join("\n");
 
+            // TODO: sanitized_name is now deprecated but there is not a simple alternative
+            #[allow(deprecated)]
             let filename = if let Some("ovpn") = file
                 .sanitized_name()
                 .extension()
                 .map(|x| x.to_str().expect("Could not convert OsStr"))
             {
-                let code = file.name().split('.').next().unwrap();
+                // Also handle server case from free servers
+                let mut hostname = None;
+                let mut code = file.name().split('.').next().unwrap();
+                if code.contains('-') {
+                    let mut iter_split = code.split('-');
+                    let fcode = iter_split.next().unwrap();
+                    hostname = Some(iter_split.next().unwrap());
+                    code = fcode;
+                }
                 let country = code_map
                     .get(code)
                     .unwrap_or_else(|| panic!("Could not find code in map: {}", code));
-                format!("{}-{}.ovpn", country, code)
+                let host_str = if let Some(host) = hostname {
+                    format!("-{}", host)
+                } else {
+                    String::new()
+                };
+                format!("{}-{}{}.ovpn", country, code, &host_str)
             } else {
                 file.name().to_string()
             };
@@ -128,6 +154,10 @@ impl OpenVpnProvider for ProtonVPN {
         let (user, pass) = self.prompt_for_auth()?;
         let mut outfile = File::create(self.auth_file_path()?)?;
         write!(outfile, "{}\n{}", user, pass)?;
+        info!(
+            "ProtonVPN OpenVPN config written to {}",
+            openvpn_dir.display()
+        );
         Ok(())
     }
 }

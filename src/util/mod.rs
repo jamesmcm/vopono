@@ -1,5 +1,8 @@
 pub mod country_map;
+mod open_ports;
 pub mod wireguard;
+
+use crate::vpn::Protocol;
 
 use super::list::get_lock_namespaces;
 use anyhow::{anyhow, Context};
@@ -7,8 +10,10 @@ use directories_next::BaseDirs;
 use ipnet::Ipv4Net;
 use log::{debug, info, warn};
 use nix::unistd::{Group, User};
+pub use open_ports::open_ports;
 use rand::seq::SliceRandom;
 use regex::Regex;
+use std::fs;
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -76,14 +81,26 @@ pub fn get_group(username: &str) -> anyhow::Result<String> {
 }
 
 pub fn set_config_permissions() -> anyhow::Result<()> {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+
     let check_dir = vopono_dir()?;
     let username = get_username()?;
     let group = get_group(&username)?;
 
+    let file_permissions = Permissions::from_mode(0o640);
+    let dir_permissions = Permissions::from_mode(0o750);
+
     let group = nix::unistd::Group::from_name(&group)?.map(|x| x.gid);
     let user = nix::unistd::User::from_name(&username)?.map(|x| x.uid);
     for entry in WalkDir::new(check_dir).into_iter().filter_map(|e| e.ok()) {
-        nix::unistd::chown(entry.path(), user, group)?;
+        let path = entry.path();
+        nix::unistd::chown(path, user, group)?;
+        if path.is_file() {
+            std::fs::set_permissions(path, file_permissions.clone())?;
+        } else {
+            std::fs::set_permissions(path, dir_permissions.clone())?;
+        }
     }
     Ok(())
 }
@@ -238,20 +255,36 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
         .collect::<Result<(), _>>()?;
 
     // TODO - deserialize to struct without Drop instead
-    let lock_namespaces = Box::new(lock_namespaces);
-    Box::leak(lock_namespaces);
+    std::mem::forget(lock_namespaces);
     Ok(())
 }
 
 pub fn elevate_privileges() -> anyhow::Result<()> {
+    use signal_hook::{cleanup, flag, SIGINT};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
     // Check if already running as root
     if nix::unistd::getuid().as_raw() != 0 {
         info!("Calling sudo for elevated privileges, current user will be used as default user");
         let args: Vec<String> = std::env::args().collect();
 
+        let terminated = Arc::new(AtomicBool::new(false));
+        flag::register(SIGINT, Arc::clone(&terminated))?;
+
         debug!("Args: {:?}", &args);
-        Command::new("sudo").arg("-E").args(args).status()?;
-        // Do we want to block here to ensure stdout kept alive? Does it matter?
+        // status blocks until the process has ended
+        let _status = Command::new("sudo").arg("-E").args(args).status()?;
+
+        cleanup::cleanup_signal(SIGINT)?;
+
+        if terminated.load(Ordering::SeqCst) {
+            // we received a sigint,
+            // so we want to pass it on by terminating with a sigint
+            nix::sys::signal::kill(nix::unistd::getpid(), nix::sys::signal::Signal::SIGINT)
+                .expect("failed to send SIGINT");
+        }
+
         std::process::exit(0);
     } else if std::env::var("SUDO_USER").is_err() {
         warn!("Running vopono as root user directly!");
@@ -313,5 +346,27 @@ pub fn get_config_from_alias(list_path: &PathBuf, alias: &str) -> anyhow::Result
 
         info!("Chosen config: {}", config.display());
         Ok(config.clone())
+    }
+}
+
+pub fn get_config_file_protocol(config_file: &PathBuf) -> Protocol {
+    let content = fs::read_to_string(config_file).unwrap();
+    if content.contains(&"[Interface]") {
+        Protocol::Wireguard
+    } else {
+        // TODO: Don't always assume OpenVPN
+        Protocol::OpenVpn
+    }
+}
+
+use crate::firewall::Firewall;
+use which::which;
+pub fn get_firewall() -> anyhow::Result<Firewall> {
+    if which("nft").is_ok() {
+        Ok(Firewall::NfTables)
+    } else if which("iptables").is_ok() {
+        Ok(Firewall::IpTables)
+    } else {
+        Err(anyhow!("Neither nftables nor iptables is installed!"))
     }
 }
