@@ -46,7 +46,7 @@ jobs:
     - uses: actions/checkout@v2
     - name: BuildRpm
       id: buildrpm
-      uses: ebbflow-io/cargo-rpm-amd64-fedora@1.1
+      uses: ebbflow-io/cargo-rpm-amd64-fedora@master
     - name: Upload RPM Artifact
       uses: actions/upload-artifact@v2
       with:
@@ -60,7 +60,7 @@ jobs:
     - uses: actions/checkout@v2
     - name: BuildRpm
       id: buildrpm
-      uses: ebbflow-io/cargo-rpm-amd64-opensuseleap@1.0
+      uses: ebbflow-io/cargo-rpm-amd64-opensuseleap@master
     - name: Upload RPM Artifact
       uses: actions/upload-artifact@v2
       with:
@@ -88,7 +88,7 @@ jobs:
     - uses: actions/checkout@v2
     - name: BuildDeb
       id: debbuild
-      uses: ebbflow-io/cargo-deb-armv7-debian@1.0
+      uses: ebbflow-io/cargo-deb-armv7-debian@master
     - name: Upload Deb Artifact
       uses: actions/upload-artifact@v2
       with:
@@ -118,7 +118,7 @@ jobs:
     - uses: actions/checkout@v2
     - name: StaticBinaryBuild
       id: armv7staticbuild
-      uses: ebbflow-io/cargo-deb-armv7-debian@1.0
+      uses: ebbflow-io/cargo-deb-armv7-debian@master
       with:
         cmd: cargo build --release --target=armv7-unknown-linux-musleabihf
     - name: Upload Vopono Artifact
