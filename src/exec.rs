@@ -133,7 +133,12 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         ns.add_loopback()?;
         ns.add_veth_pair()?;
         ns.add_routing(target_subnet)?;
-        ns.add_host_masquerade(target_subnet, interface, firewall)?;
+        ns.add_host_masquerade(target_subnet, interface.clone(), firewall)?;
+        ns.add_firewall_exception(
+            interface,
+            NetworkInterface::new(ns.veth_pair.as_ref().unwrap().dest.clone())?,
+            firewall,
+        )?;
         _sysctl = SysCtl::enable_ipv4_forwarding();
         match protocol {
             Protocol::OpenVpn => {
