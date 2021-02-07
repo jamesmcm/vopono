@@ -38,34 +38,6 @@ jobs:
       with:
         name: x86_64-gcc
         path: ./target/release/vopono
-  # fedorarpmbuild:
-  #   needs: [build]
-  #   runs-on: ubuntu-latest
-  #   name: FedoraRpm
-  #   steps:
-  #   - uses: actions/checkout@v2
-  #   - name: BuildRpm
-  #     id: buildrpm
-  #     uses: ebbflow-io/cargo-rpm-amd64-fedora@master
-  #   - name: Upload RPM Artifact
-  #     uses: actions/upload-artifact@v2
-  #     with:
-  #       name: fedorarpm
-  #       path: ./target/release/rpmbuild/RPMS/x86_64/*
-  # opensuseleaprpmbuild:
-  #   needs: [build]
-  #   runs-on: ubuntu-latest
-  #   name: OpensuseLeapRpm
-  #   steps:
-  #   - uses: actions/checkout@v2
-  #   - name: BuildRpm
-  #     id: buildrpm
-  #     uses: ebbflow-io/cargo-rpm-amd64-opensuseleap@master
-  #   - name: Upload RPM Artifact
-  #     uses: actions/upload-artifact@v2
-  #     with:
-  #       name: opensuserpm
-  #       path: ./target/release/rpmbuild/RPMS/x86_64/*
   debbuild:
     needs: [build]
     runs-on: ubuntu-latest
