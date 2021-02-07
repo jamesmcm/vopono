@@ -12,6 +12,7 @@ pub struct HostMasquerade {
 }
 
 impl HostMasquerade {
+    /// Add masquerade rule to route traffic from network namespace to active network interface
     pub fn add_masquerade_rule(
         ip_mask: String,
         interface: NetworkInterface,
