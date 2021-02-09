@@ -9,7 +9,7 @@ use super::util::{config_dir, set_config_permissions, sudo_command};
 use super::veth_pair::VethPair;
 use super::vpn::Protocol;
 use super::wireguard::Wireguard;
-use crate::providers::VpnProvider;
+use crate::{host_masquerade::FirewallException, providers::VpnProvider};
 use anyhow::Context;
 use log::{debug, info, warn};
 use nix::unistd;
@@ -29,6 +29,7 @@ pub struct NetworkNamespace {
     pub openvpn: Option<OpenVpn>,
     pub wireguard: Option<Wireguard>,
     pub host_masquerade: Option<HostMasquerade>,
+    pub firewall_exception: Option<FirewallException>,
     pub shadowsocks: Option<Shadowsocks>,
     pub veth_pair_ips: Option<VethPairIPs>,
     pub openconnect: Option<OpenConnect>,
@@ -78,6 +79,7 @@ impl NetworkNamespace {
             openvpn: None,
             wireguard: None,
             host_masquerade: None,
+            firewall_exception: None,
             shadowsocks: None,
             veth_pair_ips: None,
             openconnect: None,
@@ -300,6 +302,21 @@ impl NetworkNamespace {
         Ok(())
     }
 
+    pub fn add_firewall_exception(
+        &mut self,
+        host_interface: NetworkInterface,
+        ns_interface: NetworkInterface,
+        firewall: Firewall,
+    ) -> anyhow::Result<()> {
+        self.firewall_exception = Some(FirewallException::add_firewall_exception(
+            host_interface,
+            ns_interface,
+            firewall,
+        )?);
+
+        Ok(())
+    }
+
     pub fn check_openvpn_running(&self) -> bool {
         self.openvpn.as_ref().unwrap().check_if_running()
     }
@@ -372,6 +389,7 @@ impl Drop for NetworkNamespace {
             self.dns_config = None;
             self.wireguard = None;
             self.host_masquerade = None;
+            self.firewall_exception = None;
             sudo_command(&["ip", "netns", "delete", &self.name])
                 .unwrap_or_else(|_| panic!("Failed to delete network namespace: {}", &self.name));
         } else {
@@ -380,6 +398,7 @@ impl Drop for NetworkNamespace {
             std::mem::forget(self.veth_pair.take());
             std::mem::forget(self.dns_config.take());
             std::mem::forget(self.wireguard.take());
+            std::mem::forget(self.firewall_exception.take());
             std::mem::forget(self.host_masquerade.take());
             std::mem::forget(self.openconnect.take());
         }

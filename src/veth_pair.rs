@@ -123,7 +123,7 @@ impl Drop for NetworkManagerUnmanaged {
         } else {
             std::fs::remove_file(&nm_path).expect("Failed to delete NetworkManager unmanaged.conf");
         }
-        sudo_command(&["nmcli", "general", "reload"])
+        sudo_command(&["nmcli", "connection", "reload"])
             .expect("Failed to reload NetworkManager configuration");
     }
 }

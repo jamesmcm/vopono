@@ -38,34 +38,6 @@ jobs:
       with:
         name: x86_64-gcc
         path: ./target/release/vopono
-  fedorarpmbuild:
-    needs: [build]
-    runs-on: ubuntu-latest
-    name: FedoraRpm
-    steps:
-    - uses: actions/checkout@v2
-    - name: BuildRpm
-      id: buildrpm
-      uses: ebbflow-io/cargo-rpm-amd64-fedora@master
-    - name: Upload RPM Artifact
-      uses: actions/upload-artifact@v2
-      with:
-        name: fedorarpm
-        path: ./target/release/rpmbuild/RPMS/x86_64/*
-  opensuseleaprpmbuild:
-    needs: [build]
-    runs-on: ubuntu-latest
-    name: OpensuseLeapRpm
-    steps:
-    - uses: actions/checkout@v2
-    - name: BuildRpm
-      id: buildrpm
-      uses: ebbflow-io/cargo-rpm-amd64-opensuseleap@master
-    - name: Upload RPM Artifact
-      uses: actions/upload-artifact@v2
-      with:
-        name: opensuserpm
-        path: ./target/release/rpmbuild/RPMS/x86_64/*
   debbuild:
     needs: [build]
     runs-on: ubuntu-latest
@@ -127,7 +99,7 @@ jobs:
         name: armv7
         path: ./target/armv7-unknown-linux-musleabihf/release/vopono
   update_release_draft:
-    needs: [quickcheck, build, arm7binaries, amd64binaries, raspbianbuild, debbuild, opensuseleaprpmbuild, fedorarpmbuild]
+    needs: [quickcheck, build, arm7binaries, amd64binaries, raspbianbuild, debbuild]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -149,8 +121,6 @@ jobs:
       - run: ls -lha x86_64-gcc
       - run: ls -lha armv7-deb
       - run: ls -lha armv7
-      - run: ls -lha fedorarpm
-      - run: ls -lha opensuserpm
       - name: Upload amd64 deb Release Asset
         uses: actions/upload-release-asset@v1
         env:
@@ -169,24 +139,6 @@ jobs:
           asset_path: ./armv7-deb/vopono_${{needs.quickcheck.outputs.version}}_armhf.deb
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_armhf.deb'
           asset_content_type: application/vnd.debian.binary-package
-      - name: Upload amd64 rpm fedora Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./fedorarpm/vopono-${{needs.quickcheck.outputs.version}}-1.fc32.x86_64.rpm
-          asset_name: 'vopono_${{needs.quickcheck.outputs.version}}-1_amd64_fedora.rpm'
-          asset_content_type: application/octet-stream
-      - name: Upload amd64 rpm opensuse Release Asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./opensuserpm/vopono-${{needs.quickcheck.outputs.version}}-1.x86_64.rpm
-          asset_name: 'vopono_${{needs.quickcheck.outputs.version}}-1_amd64_opensuseleap.rpm'
-          asset_content_type: application/octet-stream
       - name: Upload Armv7 Static Binary
         uses: actions/upload-release-asset@v1
         env:
