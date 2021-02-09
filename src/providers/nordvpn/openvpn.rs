@@ -152,19 +152,11 @@ impl ConfigType {
     }
 
     fn is_onion(&self) -> bool {
-        match self {
-            Self::OnionTcp => true,
-            Self::OnionUdp => true,
-            _ => false,
-        }
+        matches!(self, Self::OnionTcp | Self::OnionUdp)
     }
 
     fn is_double(&self) -> bool {
-        match self {
-            Self::DoubleTcp => true,
-            Self::DoubleUdp => true,
-            _ => false,
-        }
+        matches!(self, Self::DoubleTcp | Self::DoubleUdp)
     }
 }
 
