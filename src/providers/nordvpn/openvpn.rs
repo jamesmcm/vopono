@@ -70,7 +70,15 @@ impl OpenVpnProvider for NordVPN {
                 .extension()
                 .map(|x| x.to_str().expect("Could not convert OsStr"))
             {
-                let fname = file.name();
+                let fname = file
+                    .enclosed_name()
+                    .and_then(|x| x.file_name())
+                    .and_then(|x| x.to_str());
+                if fname.is_none() {
+                    debug!("Could not parse filename: {}", file.name().to_string());
+                    continue;
+                }
+                let fname = fname.unwrap();
                 let server_name = fname.to_lowercase().replace(' ', "_");
                 let server_name = server_name.split('.').next().unwrap();
 
@@ -92,7 +100,7 @@ impl OpenVpnProvider for NordVPN {
                         let country = country_map.get(code.as_str());
                         if country.is_none() {
                             debug!("Could not map country code to name: {}", code.as_str());
-                            file.name().to_string()
+                            fname.to_string()
                         } else {
                             let server_name = server_name.replace("-", "_");
                             format!("{}-{}.ovpn", country.unwrap(), server_name)
@@ -100,16 +108,16 @@ impl OpenVpnProvider for NordVPN {
                     } else {
                         debug!(
                             "Filename did not match established pattern: {}",
-                            file.name().to_string()
+                            fname.to_string()
                         );
-                        file.name().to_string()
+                        fname.to_string()
                     }
                 } else {
                     debug!(
                         "Filename did not match established pattern: {}",
-                        file.name().to_string()
+                        fname.to_string()
                     );
-                    file.name().to_string()
+                    fname.to_string()
                 }
             } else {
                 file.name().to_string()
