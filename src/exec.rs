@@ -224,6 +224,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     command.forward_ports.as_ref(),
                     firewall,
                     command.disable_ipv6,
+                    command.dns.as_ref(),
                 )?;
             }
             Protocol::OpenConnect => {

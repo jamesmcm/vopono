@@ -274,6 +274,7 @@ impl NetworkNamespace {
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
         disable_ipv6: bool,
+        dns: Option<&Vec<IpAddr>>,
     ) -> anyhow::Result<()> {
         self.wireguard = Some(Wireguard::run(
             self,
@@ -283,6 +284,7 @@ impl NetworkNamespace {
             forward_ports,
             firewall,
             disable_ipv6,
+            dns,
         )?);
         Ok(())
     }
