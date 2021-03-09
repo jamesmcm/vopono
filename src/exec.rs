@@ -291,6 +291,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     } else if command.keep_alive {
         info!("Keep-alive flag active - will leave network namespace alive until ctrl+C received");
         stay_alive(None, signals);
+    } else {
+        info!("Shutting down vopono namespace - as there are no processes left running inside");
     }
 
     Ok(())
