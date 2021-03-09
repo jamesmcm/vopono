@@ -266,6 +266,7 @@ impl NetworkNamespace {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run_wireguard(
         &mut self,
         config_file: PathBuf,

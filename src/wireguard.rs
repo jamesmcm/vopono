@@ -20,6 +20,7 @@ pub struct Wireguard {
 }
 
 impl Wireguard {
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         namespace: &mut NetworkNamespace,
         config_file: PathBuf,
