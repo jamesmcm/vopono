@@ -230,7 +230,7 @@ impl Wireguard {
                             namespace.exec(&[
                                 "ip6tables",
                                 "-t",
-                                "nat",
+                                "raw",
                                 "-A",
                                 "PREROUTING",
                                 "!",
@@ -238,12 +238,13 @@ impl Wireguard {
                                 &if_name,
                                 "-d",
                                 &address.to_string(),
+                                "-m",
                                 "addrtype",
                                 "!",
                                 "--src-type",
                                 "LOCAL",
                                 "-j",
-                                "REJECT",
+                                "DROP",
                             ])?;
                         }
 
@@ -251,7 +252,7 @@ impl Wireguard {
                             namespace.exec(&[
                                 "iptables",
                                 "-t",
-                                "nat",
+                                "raw",
                                 "-A",
                                 "PREROUTING",
                                 "!",
@@ -259,12 +260,13 @@ impl Wireguard {
                                 &if_name,
                                 "-d",
                                 &address.to_string(),
+                                "-m",
                                 "addrtype",
                                 "!",
                                 "--src-type",
                                 "LOCAL",
                                 "-j",
-                                "REJECT",
+                                "DROP",
                             ])?;
                         }
                     }
