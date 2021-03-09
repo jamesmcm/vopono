@@ -266,6 +266,7 @@ impl NetworkNamespace {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn run_wireguard(
         &mut self,
         config_file: PathBuf,
@@ -274,6 +275,7 @@ impl NetworkNamespace {
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
         disable_ipv6: bool,
+        dns: Option<&Vec<IpAddr>>,
     ) -> anyhow::Result<()> {
         self.wireguard = Some(Wireguard::run(
             self,
@@ -283,6 +285,7 @@ impl NetworkNamespace {
             forward_ports,
             firewall,
             disable_ipv6,
+            dns,
         )?);
         Ok(())
     }

@@ -20,6 +20,7 @@ pub struct Wireguard {
 }
 
 impl Wireguard {
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         namespace: &mut NetworkNamespace,
         config_file: PathBuf,
@@ -28,6 +29,7 @@ impl Wireguard {
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
         disable_ipv6: bool,
+        dns: Option<&Vec<IpAddr>>,
     ) -> anyhow::Result<Self> {
         if let Err(x) = which::which("wg") {
             error!("wg binary not found. Is wireguard-tools installed and on PATH?");
@@ -115,7 +117,8 @@ impl Wireguard {
         // TODO: Handle custom MTU
         namespace.exec(&["ip", "link", "set", "mtu", "1420", "up", "dev", &if_name])?;
 
-        namespace.dns_config(&config.interface.dns)?;
+        let dns = dns.unwrap_or(&config.interface.dns);
+        namespace.dns_config(&dns)?;
         let fwmark = "51820";
         namespace.exec(&["wg", "set", &if_name, "fwmark", fwmark])?;
 

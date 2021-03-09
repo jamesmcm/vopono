@@ -136,15 +136,15 @@ $ rustc --version
 
 - When launching a new application in an existing vopono namespace, any
   modifications to the firewall rules (i.e. forwarding and opening
-  ports) will not be applied.
-- Connections to the host's PulseAudio and D-bus servers will likely
-  fail since the connection from the network namespace will not appear as a localhost
-  connection. See [issue #38](https://github.com/jamesmcm/vopono/issues/38) for work on solving this.
+  ports) will not be applied (they are only used when creating the
+  namespace).
 - OpenVPN credentials are always stored in plaintext in configuration - may add
   option to not store credentials, but it seems OpenVPN needs them
   provided in plaintext.
 - There is no easy way to delete MozillaVPN devices (Wireguard
   keypairs) - unlike Mullvad this _cannot_ be done on the webpage. I recommend using [MozWire](https://github.com/NilsIrl/MozWire) to manage this.
+- `gnome-terminal` will not run in the network namespace due to the
+  client-server model - see issue [#48](https://github.com/jamesmcm/vopono/issues/48)
 
 ## License
 
