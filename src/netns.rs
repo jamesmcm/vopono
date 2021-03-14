@@ -387,6 +387,7 @@ impl Drop for NetworkNamespace {
                     }
                 }
             }
+            info!("Shutting down vopono namespace - as there are no processes left running inside");
             self.openvpn = None;
             self.veth_pair = None;
             self.dns_config = None;
