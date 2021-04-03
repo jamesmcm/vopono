@@ -1,3 +1,5 @@
+#![allow(clippy::upper_case_acronyms)]
+
 mod application_wrapper;
 mod args;
 mod dns_config;
