@@ -18,6 +18,26 @@ Note that child processes of the application will also be spawned inside
 the network namespace and so use the same VPN connection, so you can run
 entire shell sessions inside vopono.
 
+### Configuration file
+
+You can save default configuration options in the config file
+`~/.config/vopono/config.toml` (or in the respective `$XDG_CONFIG/vopono/`
+directory).
+
+Here is an example:
+
+```toml
+firewall = "NfTables"
+provider = "Mullvad"
+protocol = "Wireguard"
+server = "usa-us22"
+# custom_config = "/home/user/vpn/mycustomconfig.ovpn"
+```
+
+Note that the values are case-sensitive. If you use a custom config file
+then you should not set the provider or server (setting the protocol is
+also optional).
+
 ### Wireguard
 
 Install vopono and use `vopono sync` to
