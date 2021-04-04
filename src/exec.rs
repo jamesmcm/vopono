@@ -7,6 +7,7 @@ use super::providers::VpnProvider;
 use super::shadowsocks::uses_shadowsocks;
 use super::sync::synch;
 use super::sysctl::SysCtl;
+use super::util::vopono_dir;
 use super::util::{get_config_file_protocol, get_config_from_alias};
 use super::util::{get_existing_namespaces, get_target_subnet};
 use super::vpn::{verify_auth, Protocol};
@@ -25,12 +26,43 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let server_name: String;
     let protocol: Protocol;
 
+    // Create empty config file if does not exist
+    let config_path = vopono_dir()?.join("config.toml");
+    {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .read(true)
+            .open(&config_path)?;
+    }
+    let mut vopono_config_settings = config::Config::default();
+    vopono_config_settings.merge(config::File::from(config_path))?;
+
+    // Assign firewall from args or vopono config file
     let firewall: Firewall = command
         .firewall
         .ok_or_else(|| anyhow!(""))
+        .or_else(|_| {
+            vopono_config_settings.get("firewall").map_err(|e| {
+                debug!("vopono config.toml: {:?}", e);
+                anyhow!("Failed to read config file")
+            })
+        })
         .or_else(|_x| crate::util::get_firewall())?;
 
-    if let Some(path) = &command.custom_config {
+    // Assign custom_config from args or vopono config file
+    let custom_config = command.custom_config.clone().or_else(|| {
+        vopono_config_settings
+            .get("custom_config")
+            .map_err(|e| {
+                debug!("vopono config.toml: {:?}", e);
+                anyhow!("Failed to read config file")
+            })
+            .ok()
+    });
+
+    // Assign protocol and server from args or vopono config file or custom config if used
+    if let Some(path) = &custom_config {
         protocol = command
             .protocol
             .unwrap_or_else(|| get_config_file_protocol(path));
@@ -50,17 +82,53 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     } else {
         // Get server and provider
         // TODO: Handle default case and remove expect()
-        provider = command.vpn_provider.expect("Enter a VPN provider");
+        provider = command
+            .vpn_provider
+            .or_else(|| {
+                vopono_config_settings
+                    .get("provider")
+                    .map_err(|e| {
+                        debug!("vopono config.toml: {:?}", e);
+                        anyhow!("Failed to read config file")
+                    })
+                    .ok()
+            })
+            .expect(
+                "Enter a VPN provider as a command-line argument or in the vopono config.toml file",
+            );
         if provider == VpnProvider::Custom {
             bail!("Must provide config file if using custom VPN Provider");
         }
-        server_name = command.server.expect("Enter a VPN server prefix");
+        server_name = command
+            .server
+            .or_else(|| {
+                vopono_config_settings
+                    .get("server")
+                    .map_err(|e| {
+                        debug!("vopono config.toml: {:?}", e);
+                        anyhow!("Failed to read config file")
+                    })
+                    .ok()
+            })
+            .expect(
+                "Enter a VPN server prefix as a command-line argument or in the vopono config.toml file",
+            );
 
         // Check protocol is valid for provider
         protocol = command
             .protocol
+            .or_else(|| {
+                vopono_config_settings
+                    .get("protocol")
+                    .map_err(|e| {
+                        debug!("vopono config.toml: {:?}", e);
+                        anyhow!("Failed to read config file")
+                    })
+                    .ok()
+            })
             .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
     }
+    // TODO: PostUp and PreDown scripts
 
     if provider != VpnProvider::Custom {
         // Check config files exist for provider

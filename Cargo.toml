@@ -1,7 +1,7 @@
 [package]
 name = "vopono"
 description = "Launch applications via VPN tunnels using temporary network namespaces"
-version = "0.6.9"
+version = "0.6.10"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2018"
 license = "GPL-3.0-or-later"
@@ -23,7 +23,7 @@ users = "0.11"
 nix = "0.20"
 serde = {version = "1", features = ["derive", "std"]}
 csv = "1"
-dialoguer ="0.7"
+dialoguer ="0.8"
 regex = "1"
 ron = "0.6"
 walkdir = "2"
@@ -44,6 +44,7 @@ maplit = "1"
 webbrowser = "0.5"
 basic_tcp_proxy = "0.3"
 signal-hook = "0.3"
+config = "0.11"
 
 [package.metadata.rpm]
 package = "vopono"

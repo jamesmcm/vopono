@@ -51,6 +51,18 @@ connections - if your VPN provider allows it). Commands launched with
 the same server prefix and VPN provider will share the same network
 namespace.
 
+Default configuration options can be saved in the `~/.config/vopono/config.toml`
+file, for example:
+
+```toml
+firewall = "NfTables"
+provider = "Mullvad"
+protocol = "Wireguard"
+server = "usa-us22"
+```
+
+Note that the values are case-sensitive.
+
 See the [vopono User Guide](USERGUIDE.md) for much more detailed usage instructions
 (including handling daemons and servers).
 
