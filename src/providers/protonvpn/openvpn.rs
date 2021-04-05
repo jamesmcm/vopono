@@ -20,6 +20,7 @@ impl ProtonVPN {
         &self,
         category: &ConfigType,
         tier: &Tier,
+        feature: &Feature,
         protocol: &OpenVpnProtocol,
     ) -> anyhow::Result<Url> {
         let cat = if tier == &Tier::Free {
@@ -27,7 +28,12 @@ impl ProtonVPN {
         } else {
             category.url_part()
         };
-        Ok(Url::parse(&format!("https://account.protonvpn.com/api/vpn/config?Category={}&Tier={}&Platform=Linux&Protocol={}", cat, tier.url_part(), protocol))?)
+        let fet = if tier == &Tier::Free {
+            "Normal".to_string()
+        } else {
+            feature.url_part()
+        };
+        Ok(Url::parse(&format!("https://account.protonvpn.com/api/vpn/config?Category={}&Tier={}&Feature={}&Platform=Linux&Protocol={}", cat, tier.url_part(), fet, protocol))?)
     }
 }
 impl OpenVpnProvider for ProtonVPN {
@@ -85,8 +91,13 @@ impl OpenVpnProvider for ProtonVPN {
             // Dummy as not used for Free
             ConfigType::Standard
         };
+        let feature_choice = if tier != Tier::Free {
+            Feature::choose_one()?
+        } else {
+            Feature::Normal
+        };
         let protocol = OpenVpnProtocol::choose_one()?;
-        let url = self.build_url(&config_choice, &tier, &protocol)?;
+        let url = self.build_url(&config_choice, &tier, &feature_choice, &protocol)?;
         let zipfile = reqwest::blocking::get(url)?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
         let openvpn_dir = self.openvpn_dir()?;
@@ -210,6 +221,60 @@ impl ConfigurationChoice for Tier {
                 Self::Plus => "Plus Account provides more VPN servers and SecureCore configuration",
                 Self::Basic => "Provides core VPN servers",
                 Self::Free => "Free VPN servers only",
+            }
+            .to_string(),
+        )
+    }
+}
+// {0: "Normal", 1: "Secure-Core", 2: "Tor", 4: "P2P"}
+#[derive(EnumIter, PartialEq)]
+enum Feature {
+    P2P,
+    Tor,
+    Normal,
+}
+
+impl Feature {
+    fn url_part(&self) -> String {
+        match self {
+            Self::P2P => "4".to_string(),
+            Self::Tor => "2".to_string(),
+            Self::Normal => "0".to_string(),
+        }
+    }
+}
+
+impl Display for Feature {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::P2P => "P2P",
+            Self::Tor => "Tor",
+            Self::Normal => "Normal",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+impl Default for Feature {
+    fn default() -> Self {
+        Self::Normal
+    }
+}
+
+impl ConfigurationChoice for Feature {
+    fn prompt() -> String {
+        "Please choose a server feature".to_string()
+    }
+
+    fn variants() -> Vec<Self> {
+        Feature::iter().collect()
+    }
+    fn description(&self) -> Option<String> {
+        Some(
+            match self {
+                Self::P2P => "Connect via torrent optmized network (Plus accounts only)",
+                Self::Tor => "Connect via Tor network (Plus accounts only)",
+                Self::Normal => "Standard (available servers depend on account tier)",
             }
             .to_string(),
         )
