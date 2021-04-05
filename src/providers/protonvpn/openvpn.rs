@@ -249,7 +249,7 @@ impl Display for Feature {
         let s = match self {
             Self::P2P => "P2P",
             Self::Tor => "Tor",
-            Self::Normal => "Normal"
+            Self::Normal => "Normal",
         };
         write!(f, "{}", s)
     }
@@ -272,15 +272,9 @@ impl ConfigurationChoice for Feature {
     fn description(&self) -> Option<String> {
         Some(
             match self {
-                Self::P2P => {
-                    "Connect via torrent optmized network (Plus accounts only)"
-                }
-                Self::Tor => {
-                    "Connect via Tor network (Plus accounts only)"
-                }
-                Self::Normal => {
-                    "Standard (available servers depend on account tier)"
-                }
+                Self::P2P => "Connect via torrent optmized network (Plus accounts only)",
+                Self::Tor => "Connect via Tor network (Plus accounts only)",
+                Self::Normal => "Standard (available servers depend on account tier)",
             }
             .to_string(),
         )
