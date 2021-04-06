@@ -116,6 +116,16 @@ pub struct ExecCommand {
     /// Block all IPv6 traffic
     #[structopt(long = "disable-ipv6")]
     pub disable_ipv6: bool,
+
+    /// Path or alias to executable PostUp script or binary for commands to run on the host after
+    /// bringing up the namespace
+    #[structopt(long = "postup")]
+    pub postup: Option<String>,
+
+    /// Path or alias to executable PreDown script or binary for commands to run on the host after
+    /// before shutting down the namespace
+    #[structopt(long = "predown")]
+    pub predown: Option<String>,
 }
 
 #[derive(StructOpt)]

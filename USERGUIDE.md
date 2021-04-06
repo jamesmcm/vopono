@@ -31,12 +31,24 @@ firewall = "NfTables"
 provider = "Mullvad"
 protocol = "Wireguard"
 server = "usa-us22"
+postup = "/home/archie/postup.sh"
+predown = "/home/archie/predown.sh"
+user = "archie"
 # custom_config = "/home/user/vpn/mycustomconfig.ovpn"
 ```
 
 Note that the values are case-sensitive. If you use a custom config file
 then you should not set the provider or server (setting the protocol is
 also optional).
+
+### Host scripts
+
+Host scripts to run just after a network namespace is created and just before it is destroyed,
+can be provided with the `postup` and `predown` arguments (or in the `config.toml`).
+
+Note these scripts run on the host (outside the network namespace), using the current working directory,
+and with the same user as the final application itself (which can be set
+with the `user` argument or config file entry).
 
 ### Wireguard
 
