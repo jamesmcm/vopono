@@ -26,6 +26,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let server_name: String;
     let protocol: Protocol;
 
+    // TODO: Refactor this part - DRY
     // Create empty config file if does not exist
     let config_path = vopono_dir()?.join("config.toml");
     {
@@ -61,6 +62,42 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             .ok()
     });
 
+    // Assign postup script from args or vopono config file
+    let postup = command.postup.clone().or_else(|| {
+        vopono_config_settings
+            .get("postup")
+            .map_err(|e| {
+                debug!("vopono config.toml: {:?}", e);
+                anyhow!("Failed to read config file")
+            })
+            .ok()
+    });
+
+    // Assign predown script from args or vopono config file
+    let predown = command.predown.clone().or_else(|| {
+        vopono_config_settings
+            .get("predown")
+            .map_err(|e| {
+                debug!("vopono config.toml: {:?}", e);
+                anyhow!("Failed to read config file")
+            })
+            .ok()
+    });
+
+    // User for application command, if None will use root
+    let user = if command.user.is_none() {
+        vopono_config_settings
+            .get("user")
+            .map_err(|e| {
+                debug!("vopono config.toml: {:?}", e);
+                anyhow!("Failed to read config file")
+            })
+            .ok()
+            .or_else(|| std::env::var("SUDO_USER").ok())
+    } else {
+        command.user
+    };
+
     // Assign protocol and server from args or vopono config file or custom config if used
     if let Some(path) = &custom_config {
         protocol = command
@@ -81,7 +118,6 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         );
     } else {
         // Get server and provider
-        // TODO: Handle default case and remove expect()
         provider = command
             .vpn_provider
             .or_else(|| {
@@ -128,7 +164,6 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             })
             .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
     }
-    // TODO: PostUp and PreDown scripts
 
     if provider != VpnProvider::Custom {
         // Check config files exist for provider
@@ -196,6 +231,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             provider.clone(),
             protocol.clone(),
             firewall,
+            predown,
+            user.clone(),
         )?;
         let target_subnet = get_target_subnet()?;
         ns.add_loopback()?;
@@ -309,16 +346,20 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 )?;
             }
         }
+
+        // Run PostUp script (if any)
+        if let Some(pucmd) = postup {
+            if user.is_some() {
+                std::process::Command::new("sudo")
+                    .args(&["-Eu", user.as_ref().unwrap(), &pucmd])
+                    .spawn()?;
+            } else {
+                std::process::Command::new(&pucmd).spawn()?;
+            }
+        }
     }
 
     let ns = ns.write_lockfile(&command.application)?;
-
-    // User for application command, if None will use root
-    let user = if command.user.is_none() {
-        std::env::var("SUDO_USER").ok()
-    } else {
-        command.user
-    };
 
     let application = ApplicationWrapper::new(&ns, &command.application, user)?;
 

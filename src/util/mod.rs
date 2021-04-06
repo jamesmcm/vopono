@@ -328,7 +328,15 @@ pub fn get_configs_from_alias(list_path: &Path, alias: &str) -> Vec<PathBuf> {
                     .to_string(),
             )
         })
-        .filter(|x| x.2.starts_with(alias) || (x.1.starts_with(alias)))
+        .filter(|x| {
+            x.2.starts_with(alias)
+                || (x.1.starts_with(alias))
+                || x.0
+                    .file_name()
+                    .to_str()
+                    .expect("No filename")
+                    .starts_with(alias)
+        })
         .map(|x| PathBuf::from(x.0.path()))
         .collect::<Vec<PathBuf>>()
 }

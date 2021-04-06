@@ -36,6 +36,8 @@ pub struct NetworkNamespace {
     pub provider: VpnProvider,
     pub protocol: Protocol,
     pub firewall: Firewall,
+    pub predown: Option<String>,
+    pub predown_user: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -67,6 +69,8 @@ impl NetworkNamespace {
         provider: VpnProvider,
         protocol: Protocol,
         firewall: Firewall,
+        predown: Option<String>,
+        predown_user: Option<String>,
     ) -> anyhow::Result<Self> {
         sudo_command(&["ip", "netns", "add", name.as_str()])
             .with_context(|| format!("Failed to create network namespace: {}", &name))?;
@@ -86,6 +90,8 @@ impl NetworkNamespace {
             provider,
             protocol,
             firewall,
+            predown,
+            predown_user,
         })
     }
 
@@ -388,6 +394,18 @@ impl Drop for NetworkNamespace {
                 }
             }
             info!("Shutting down vopono namespace - as there are no processes left running inside");
+            // Run PreDown script (if any)
+            if let Some(pdcmd) = self.predown.as_ref() {
+                if self.predown_user.is_some() {
+                    std::process::Command::new("sudo")
+                        .args(&["-Eu", self.predown_user.as_ref().unwrap(), &pdcmd])
+                        .spawn()
+                        .ok();
+                } else {
+                    std::process::Command::new(&pdcmd).spawn().ok();
+                }
+            }
+
             self.openvpn = None;
             self.veth_pair = None;
             self.dns_config = None;
