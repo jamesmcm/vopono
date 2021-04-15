@@ -18,6 +18,9 @@ Note that child processes of the application will also be spawned inside
 the network namespace and so use the same VPN connection, so you can run
 entire shell sessions inside vopono.
 
+Note that the order of command-line arguments matters, as the `--dns`
+argument can take a list of DNS servers for example.
+
 ### Configuration file
 
 You can save default configuration options in the config file
@@ -34,12 +37,17 @@ server = "usa-us22"
 postup = "/home/archie/postup.sh"
 predown = "/home/archie/predown.sh"
 user = "archie"
+dns = "8.8.8.8"
 # custom_config = "/home/user/vpn/mycustomconfig.ovpn"
 ```
 
 Note that the values are case-sensitive. If you use a custom config file
 then you should not set the provider or server (setting the protocol is
 also optional).
+
+The current network namespace name is provided to the PostUp and PreDown
+scripts in the environment variable `$VOPONO_NS`. It is temporarily set
+when running these scripts only.
 
 ### Host scripts
 

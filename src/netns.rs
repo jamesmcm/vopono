@@ -396,6 +396,7 @@ impl Drop for NetworkNamespace {
             info!("Shutting down vopono namespace - as there are no processes left running inside");
             // Run PreDown script (if any)
             if let Some(pdcmd) = self.predown.as_ref() {
+                std::env::set_var("VOPONO_NS", &self.name);
                 if self.predown_user.is_some() {
                     std::process::Command::new("sudo")
                         .args(&["-Eu", self.predown_user.as_ref().unwrap(), &pdcmd])
@@ -404,6 +405,7 @@ impl Drop for NetworkNamespace {
                 } else {
                     std::process::Command::new(&pdcmd).spawn().ok();
                 }
+                std::env::remove_var("VOPONO_NS");
             }
 
             self.openvpn = None;
