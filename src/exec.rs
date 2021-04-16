@@ -98,6 +98,17 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         command.user
     };
 
+    // Assign DNS server from args or vopono config file
+    let base_dns = command.dns.clone().or_else(|| {
+        vopono_config_settings
+            .get("dns")
+            .map_err(|e| {
+                debug!("vopono config.toml: {:?}", e);
+                anyhow!("Failed to read config file")
+            })
+            .ok()
+    });
+
     // Assign protocol and server from args or vopono config file or custom config if used
     if let Some(path) = &custom_config {
         protocol = command
@@ -254,8 +265,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     None
                 };
 
-                let dns = command
-                    .dns
+                let dns = base_dns
                     .clone()
                     .or_else(|| {
                         provider
@@ -266,7 +276,6 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     })
                     .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
-                // TODO: Don't rely on Google DNS here - could copy local one?
                 ns.dns_config(&dns)?;
                 // Check if using Shadowsocks
                 if let Some((ss_host, ss_lport)) =
@@ -313,7 +322,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 }
 
                 // Set DNS with OpenVPN server response if present
-                if command.dns.is_none() {
+                if base_dns.is_none() {
                     if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns {
                         let old_dns = ns.dns_config.take();
                         std::mem::forget(old_dns);
@@ -329,13 +338,11 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     command.forward_ports.as_ref(),
                     firewall,
                     command.disable_ipv6,
-                    command.dns.as_ref(),
+                    base_dns.as_ref(),
                 )?;
             }
             Protocol::OpenConnect => {
-                let dns = command
-                    .dns
-                    .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
+                let dns = base_dns.unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
                 ns.dns_config(&dns)?;
                 ns.run_openconnect(
                     config_file,
@@ -348,7 +355,9 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         }
 
         // Run PostUp script (if any)
+        // Temporarily set env var referring to this network namespace name
         if let Some(pucmd) = postup {
+            std::env::set_var("VOPONO_NS", &ns.name);
             if user.is_some() {
                 std::process::Command::new("sudo")
                     .args(&["-Eu", user.as_ref().unwrap(), &pucmd])
@@ -356,6 +365,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             } else {
                 std::process::Command::new(&pucmd).spawn()?;
             }
+            std::env::remove_var("VOPONO_NS");
         }
     }
 
