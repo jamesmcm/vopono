@@ -27,8 +27,12 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let protocol: Protocol;
 
     // TODO: Refactor this part - DRY
+    // Check if we have config file path passed on command line
     // Create empty config file if does not exist
-    let config_path = vopono_dir()?.join("config.toml");
+    let config_path = command
+        .vopono_config
+        .ok_or_else(|| anyhow!("No config file passed"))
+        .or_else::<anyhow::Error, _>(|_| Ok(vopono_dir()?.join("config.toml")))?;
     {
         std::fs::OpenOptions::new()
             .write(true)
