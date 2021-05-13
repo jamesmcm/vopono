@@ -11,6 +11,7 @@ mod list_configs;
 mod netns;
 mod network_interface;
 mod openconnect;
+mod openfortivpn;
 mod openvpn;
 mod providers;
 mod pulseaudio;

@@ -186,6 +186,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
             Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
             Protocol::OpenConnect => bail!("OpenConnect must use Custom provider"),
+            Protocol::OpenFortiVpn => bail!("OpenFortiVpn must use Custom provider"),
         }?;
         if !cdir.exists() || cdir.read_dir()?.next().is_none() {
             info!(
@@ -221,6 +222,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
             Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
             Protocol::OpenConnect => bail!("OpenConnect must use Custom provider"),
+            Protocol::OpenFortiVpn => bail!("OpenFortiVpn must use Custom provider"),
         }?;
         Some(get_config_from_alias(&cdir, &server_name)?)
     } else {
@@ -354,6 +356,15 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     command.forward_ports.as_ref(),
                     firewall,
                     &server_name,
+                )?;
+            }
+            Protocol::OpenFortiVpn => {
+                // TODO: DNS handled by OpenFortiVpn directly?
+                ns.run_openfortivpn(
+                    config_file.expect("No OpenFortiVPN config file provided"),
+                    command.open_ports.as_ref(),
+                    command.forward_ports.as_ref(),
+                    firewall,
                 )?;
             }
         }
