@@ -49,6 +49,9 @@ pub fn synch(provider: VpnProvider, protocol: Option<Protocol>) -> anyhow::Resul
         Some(Protocol::OpenConnect) => {
             error!("vopono sync not supported for OpenConnect protocol");
         }
+        Some(Protocol::OpenFortiVpn) => {
+            error!("vopono sync not supported for OpenFortiVpn protocol");
+        }
         // TODO: Fix this asking for same credentials twice
         None => {
             if let Ok(p) = provider.get_dyn_wireguard_provider() {

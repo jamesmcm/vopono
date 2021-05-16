@@ -34,16 +34,21 @@ impl OpenFortiVpn {
         // Must run as root - https://github.com/adrienverge/openfortivpn/issues/650
         let command_vec = (&[
             "openfortivpn",
+            "-v",
+            "-v",
             "-c",
             config_file.to_str().expect("Invalid config path"),
         ])
             .to_vec();
 
+        // TODO - better handle blocking for input and waiting until connection established
         handle = netns
             .exec_no_block(&command_vec, None, false, None)
             .context("Failed to launch OpenFortiVPN - is openfortivpn installed?")?;
         let id = handle.id();
 
+        // TODO: Handle default route
+        // sudo ip route | grep "ppp0 proto kernel"
         // Allow input to and output from open ports (for port forwarding in tunnel)
         if let Some(opens) = open_ports {
             super::util::open_ports(&netns, opens.as_slice(), firewall)?;

@@ -44,7 +44,7 @@ pub fn get_active_interfaces() -> anyhow::Result<Vec<String>> {
         .filter(|x| x.contains("state UP"))
         .map(|x| x.split_whitespace().nth(1))
         .filter(|x| x.is_some())
-        .map(|x| x.unwrap())
+        .flatten()
         .map(|x| String::from(&x[..x.len() - 1]))
         .collect::<Vec<String>>();
 

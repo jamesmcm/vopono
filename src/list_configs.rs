@@ -21,6 +21,7 @@ pub fn print_configs(cmd: ServersCommand) -> anyhow::Result<()> {
         Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
         Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
         Protocol::OpenConnect => bail!("Config listing not implemented for OpenConnect"),
+        Protocol::OpenFortiVpn => bail!("Config listing not implemented for OpenFortiVPN"),
     }?;
     if !cdir.exists() || cdir.read_dir()?.next().is_none() {
         bail!(
