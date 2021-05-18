@@ -25,12 +25,20 @@ use walkdir::WalkDir;
 pub fn config_dir() -> anyhow::Result<PathBuf> {
     let mut pathbuf = PathBuf::new();
     let _res: () = if let Some(base_dirs) = BaseDirs::new() {
+        debug!(
+            "Using config dir from XDG dirs: {}",
+            base_dirs.config_dir().to_string_lossy()
+        );
         pathbuf.push(base_dirs.config_dir());
         Ok(())
     } else if let Ok(user) = std::env::var("SUDO_USER") {
         // TODO: DRY
         let confpath = format!("/home/{}/.config", user);
         let path = Path::new(&confpath);
+        debug!(
+            "Using config dir from $SUDO_USER config: {}",
+            path.to_string_lossy()
+        );
         if path.exists() {
             pathbuf.push(path);
             Ok(())
@@ -40,6 +48,10 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
     } else if let Some(user) = get_user_by_uid(get_current_uid()) {
         let confpath = format!("/home/{}/.config", user.name().to_str().unwrap());
         let path = Path::new(&confpath);
+        debug!(
+            "Using config dir from current user config: {}",
+            path.to_string_lossy()
+        );
         if path.exists() {
             pathbuf.push(path);
             Ok(())

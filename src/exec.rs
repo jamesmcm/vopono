@@ -14,8 +14,11 @@ use super::vpn::{verify_auth, Protocol};
 use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
 use signal_hook::{consts::SIGINT, iterator::Signals};
-use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
+use std::{
+    fs::create_dir_all,
+    io::{self, Write},
+};
 
 pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // this captures all sigint signals
@@ -29,6 +32,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // TODO: Refactor this part - DRY
     // Check if we have config file path passed on command line
     // Create empty config file if does not exist
+    create_dir_all(vopono_dir()?)?;
     let config_path = command
         .vopono_config
         .ok_or_else(|| anyhow!("No config file passed"))
@@ -389,6 +393,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let application = ApplicationWrapper::new(&ns, &command.application, user)?;
 
     // Launch TCP proxy server on other threads if forwarding ports
+    // TODO: Fix when running as root
     let mut proxy = Vec::new();
     if let Some(f) = command.forward_ports {
         if !(command.no_proxy || f.is_empty()) {
