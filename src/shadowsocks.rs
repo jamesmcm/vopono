@@ -67,7 +67,7 @@ impl Shadowsocks {
         ];
 
         let handle = netns
-            .exec_no_block(&command_vec, None, true, None)
+            .exec_no_block(&command_vec, None, true, false, None)
             .context("Failed to launch Shadowsocks - is shadowsocks-libev installed?")?;
 
         Ok(Self { pid: handle.id() })

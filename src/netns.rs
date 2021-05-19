@@ -103,6 +103,7 @@ impl NetworkNamespace {
         command: &[&str],
         user: Option<String>,
         silent: bool,
+        capture_output: bool,
         set_dir: Option<PathBuf>,
     ) -> anyhow::Result<std::process::Child> {
         let mut handle = Command::new("ip");
@@ -120,6 +121,10 @@ impl NetworkNamespace {
             handle.stdout(Stdio::null());
             handle.stderr(Stdio::null());
         }
+        if capture_output {
+            handle.stdout(Stdio::piped());
+            handle.stderr(Stdio::piped());
+        }
 
         debug!(
             "ip netns exec {}{} {}",
@@ -132,7 +137,8 @@ impl NetworkNamespace {
     }
 
     pub fn exec(&self, command: &[&str]) -> anyhow::Result<()> {
-        self.exec_no_block(command, None, false, None)?.wait()?;
+        self.exec_no_block(command, None, false, false, None)?
+            .wait()?;
         Ok(())
     }
 

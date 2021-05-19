@@ -71,7 +71,7 @@ impl OpenVpn {
         let working_dir = PathBuf::from(config_file_path.parent().unwrap());
 
         handle = netns
-            .exec_no_block(&command_vec, None, true, Some(working_dir))
+            .exec_no_block(&command_vec, None, true, false, Some(working_dir))
             .context("Failed to launch OpenVPN - is openvpn installed?")?;
         let id = handle.id();
         let mut buffer = String::with_capacity(1024);

@@ -46,7 +46,7 @@ impl OpenConnect {
         let command_vec = (&["openconnect", &user_arg, "--passwd-on-stdin", server]).to_vec();
 
         handle = netns
-            .exec_no_block(&command_vec, None, false, None)
+            .exec_no_block(&command_vec, None, false, false, None)
             .context("Failed to launch OpenConnect - is openconnect installed?")?;
         let id = handle.id();
 

@@ -24,14 +24,7 @@ use walkdir::WalkDir;
 
 pub fn config_dir() -> anyhow::Result<PathBuf> {
     let mut pathbuf = PathBuf::new();
-    let _res: () = if let Some(base_dirs) = BaseDirs::new() {
-        debug!(
-            "Using config dir from XDG dirs: {}",
-            base_dirs.config_dir().to_string_lossy()
-        );
-        pathbuf.push(base_dirs.config_dir());
-        Ok(())
-    } else if let Ok(user) = std::env::var("SUDO_USER") {
+    let _res: () = if let Ok(user) = std::env::var("SUDO_USER") {
         // TODO: DRY
         let confpath = format!("/home/{}/.config", user);
         let path = Path::new(&confpath);
@@ -45,6 +38,13 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
         } else {
             Err(anyhow!("Could not find valid config directory!"))
         }
+    } else if let Some(base_dirs) = BaseDirs::new() {
+        debug!(
+            "Using config dir from XDG dirs: {}",
+            base_dirs.config_dir().to_string_lossy()
+        );
+        pathbuf.push(base_dirs.config_dir());
+        Ok(())
     } else if let Some(user) = get_user_by_uid(get_current_uid()) {
         let confpath = format!("/home/{}/.config", user.name().to_str().unwrap());
         let path = Path::new(&confpath);
