@@ -65,7 +65,7 @@ impl OpenFortiVpn {
             // TODO: remote peer is returned by pppd directly and this is NOT captured in the
             // stdout pipe
             remote_peer = remote_peer.or_else(|| {
-                get_remote_peer(std::str::from_utf8(&errbuffer).expect("Non UTF8 stderr"))
+                get_remote_peer(std::str::from_utf8(&buffer).expect("Non UTF8 stderr"))
             });
             std::thread::sleep(std::time::Duration::new(1, 0));
             stdout.read(&mut buffer)?;
