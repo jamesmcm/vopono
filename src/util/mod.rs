@@ -24,22 +24,34 @@ use walkdir::WalkDir;
 
 pub fn config_dir() -> anyhow::Result<PathBuf> {
     let mut pathbuf = PathBuf::new();
-    let _res: () = if let Some(base_dirs) = BaseDirs::new() {
-        pathbuf.push(base_dirs.config_dir());
-        Ok(())
-    } else if let Ok(user) = std::env::var("SUDO_USER") {
+    let _res: () = if let Ok(user) = std::env::var("SUDO_USER") {
         // TODO: DRY
         let confpath = format!("/home/{}/.config", user);
         let path = Path::new(&confpath);
+        debug!(
+            "Using config dir from $SUDO_USER config: {}",
+            path.to_string_lossy()
+        );
         if path.exists() {
             pathbuf.push(path);
             Ok(())
         } else {
             Err(anyhow!("Could not find valid config directory!"))
         }
+    } else if let Some(base_dirs) = BaseDirs::new() {
+        debug!(
+            "Using config dir from XDG dirs: {}",
+            base_dirs.config_dir().to_string_lossy()
+        );
+        pathbuf.push(base_dirs.config_dir());
+        Ok(())
     } else if let Some(user) = get_user_by_uid(get_current_uid()) {
         let confpath = format!("/home/{}/.config", user.name().to_str().unwrap());
         let path = Path::new(&confpath);
+        debug!(
+            "Using config dir from current user config: {}",
+            path.to_string_lossy()
+        );
         if path.exists() {
             pathbuf.push(path);
             Ok(())
@@ -271,7 +283,11 @@ pub fn elevate_privileges() -> anyhow::Result<()> {
 
         debug!("Args: {:?}", &args);
         // status blocks until the process has ended
-        let _status = Command::new("sudo").arg("-E").args(args).status()?;
+        let _status = Command::new("sudo")
+            .arg("-E")
+            .args(args.clone())
+            .status()
+            .context(format!("Executing sudo -E {:?}", &args))?;
 
         // Deprecated - do we need to handle flag here?
         // cleanup::cleanup_signal(SIGINT)?;
@@ -356,7 +372,9 @@ pub fn get_config_from_alias(list_path: &Path, alias: &str) -> anyhow::Result<Pa
 }
 
 pub fn get_config_file_protocol(config_file: &Path) -> Protocol {
-    let content = fs::read_to_string(config_file).unwrap();
+    let content = fs::read_to_string(config_file)
+        .context(format!("Reading VPN config file: {:?}", config_file))
+        .unwrap();
     if content.contains(&"[Interface]") {
         Protocol::Wireguard
     } else {

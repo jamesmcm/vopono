@@ -11,6 +11,7 @@ mod list_configs;
 mod netns;
 mod network_interface;
 mod openconnect;
+mod openfortivpn;
 mod openvpn;
 mod providers;
 mod pulseaudio;
@@ -75,7 +76,6 @@ fn main() -> anyhow::Result<()> {
             output_list(listcmd)?;
         }
         args::Command::Synch(synchcmd) => {
-            elevate_privileges()?;
             // If provider given then sync that, else prompt with menu
             if synchcmd.vpn_provider.is_none() {
                 sync_menu()?;

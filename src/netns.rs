@@ -3,6 +3,7 @@ use super::firewall::Firewall;
 use super::host_masquerade::HostMasquerade;
 use super::network_interface::NetworkInterface;
 use super::openconnect::OpenConnect;
+use super::openfortivpn::OpenFortiVpn;
 use super::openvpn::OpenVpn;
 use super::shadowsocks::Shadowsocks;
 use super::util::{config_dir, set_config_permissions, sudo_command};
@@ -33,6 +34,7 @@ pub struct NetworkNamespace {
     pub shadowsocks: Option<Shadowsocks>,
     pub veth_pair_ips: Option<VethPairIPs>,
     pub openconnect: Option<OpenConnect>,
+    pub openfortivpn: Option<OpenFortiVpn>,
     pub provider: VpnProvider,
     pub protocol: Protocol,
     pub firewall: Firewall,
@@ -87,6 +89,7 @@ impl NetworkNamespace {
             shadowsocks: None,
             veth_pair_ips: None,
             openconnect: None,
+            openfortivpn: None,
             provider,
             protocol,
             firewall,
@@ -100,6 +103,7 @@ impl NetworkNamespace {
         command: &[&str],
         user: Option<String>,
         silent: bool,
+        capture_output: bool,
         set_dir: Option<PathBuf>,
     ) -> anyhow::Result<std::process::Child> {
         let mut handle = Command::new("ip");
@@ -117,6 +121,10 @@ impl NetworkNamespace {
             handle.stdout(Stdio::null());
             handle.stderr(Stdio::null());
         }
+        if capture_output {
+            handle.stdout(Stdio::piped());
+            handle.stderr(Stdio::piped());
+        }
 
         debug!(
             "ip netns exec {}{} {}",
@@ -129,7 +137,8 @@ impl NetworkNamespace {
     }
 
     pub fn exec(&self, command: &[&str]) -> anyhow::Result<()> {
-        self.exec_no_block(command, None, false, None)?.wait()?;
+        self.exec_no_block(command, None, false, false, None)?
+            .wait()?;
         Ok(())
     }
 
@@ -203,8 +212,8 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn dns_config(&mut self, server: &[IpAddr]) -> anyhow::Result<()> {
-        self.dns_config = Some(DnsConfig::new(self.name.clone(), &server)?);
+    pub fn dns_config(&mut self, server: &[IpAddr], suffixes: &[&str]) -> anyhow::Result<()> {
+        self.dns_config = Some(DnsConfig::new(self.name.clone(), server, suffixes)?);
         Ok(())
     }
 
@@ -249,6 +258,23 @@ impl NetworkNamespace {
             forward_ports,
             firewall,
             server,
+        )?);
+        Ok(())
+    }
+
+    pub fn run_openfortivpn(
+        &mut self,
+        config_file: PathBuf,
+        open_ports: Option<&Vec<u16>>,
+        forward_ports: Option<&Vec<u16>>,
+        firewall: Firewall,
+    ) -> anyhow::Result<()> {
+        self.openfortivpn = Some(OpenFortiVpn::run(
+            self,
+            config_file,
+            open_ports,
+            forward_ports,
+            firewall,
         )?);
         Ok(())
     }

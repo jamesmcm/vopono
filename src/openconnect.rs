@@ -46,7 +46,7 @@ impl OpenConnect {
         let command_vec = (&["openconnect", &user_arg, "--passwd-on-stdin", server]).to_vec();
 
         handle = netns
-            .exec_no_block(&command_vec, None, false, None)
+            .exec_no_block(&command_vec, None, false, false, None)
             .context("Failed to launch OpenConnect - is openconnect installed?")?;
         let id = handle.id();
 
@@ -65,7 +65,10 @@ impl OpenConnect {
 }
 
 fn get_creds_from_file(auth_file: &Path) -> anyhow::Result<(String, String)> {
-    let s = std::fs::read_to_string(auth_file)?;
+    let s = std::fs::read_to_string(auth_file).context(format!(
+        "Reading from OpenConnect authentication file: {:?}",
+        auth_file
+    ))?;
     let mut iter = s.split('\n');
     let user = iter.next().expect("No username in auth file");
     let pass = iter.next().expect("No password in auth file");

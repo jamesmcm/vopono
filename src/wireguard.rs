@@ -39,7 +39,8 @@ impl Wireguard {
             ));
         }
 
-        let config_string = std::fs::read_to_string(&config_file)?;
+        let config_string = std::fs::read_to_string(&config_file)
+            .context(format!("Reading Wireguard config file: {:?}", &config_file))?;
         // Create temp conf file
         {
             let skip_keys = vec![
@@ -54,7 +55,8 @@ impl Wireguard {
                 "SaveConfig",
             ];
 
-            let mut f = std::fs::File::create("/tmp/vopono_nft.conf")?;
+            let mut f = std::fs::File::create("/tmp/vopono_nft.conf")
+                .context("Creating file: /tmp/vopono_nft.conf")?;
             write!(
                 f,
                 "{}",
@@ -85,7 +87,9 @@ impl Wireguard {
         namespace
             .exec(&["wg", "setconf", &if_name, "/tmp/vopono_nft.conf"])
             .context("Failed to run wg setconf - is wireguard-tools installed?")?;
-        std::fs::remove_file("/tmp/vopono_nft.conf")?;
+        std::fs::remove_file("/tmp/vopono_nft.conf")
+            .context("Deleting file: /tmp/vopono_nft.conf")
+            .ok();
         // Extract addresses
         for address in config.interface.address.iter() {
             match address {
@@ -118,7 +122,8 @@ impl Wireguard {
         namespace.exec(&["ip", "link", "set", "mtu", "1420", "up", "dev", &if_name])?;
 
         let dns = dns.unwrap_or(&config.interface.dns);
-        namespace.dns_config(&dns)?;
+        // TODO: DNS suffixes?
+        namespace.dns_config(&dns, &[])?;
         let fwmark = "51820";
         namespace.exec(&["wg", "set", &if_name, "fwmark", fwmark])?;
 
@@ -219,12 +224,15 @@ impl Wireguard {
 
                 let nftcmd = nftcmd.join("\n");
                 {
-                    let mut f = std::fs::File::create("/tmp/vopono_nft.sh")?;
+                    let mut f = std::fs::File::create("/tmp/vopono_nft.sh")
+                        .context("Creating file: /tmp/vopono_nft.sh")?;
                     write!(f, "{}", nftcmd)?;
                 }
 
                 namespace.exec(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
-                std::fs::remove_file("/tmp/vopono_nft.sh")?;
+                std::fs::remove_file("/tmp/vopono_nft.sh")
+                    .context("Deleting file: /tmp/vopono_nft.sh")
+                    .ok();
             }
             Firewall::IpTables => {
                 for address in config.interface.address.iter() {
@@ -341,26 +349,28 @@ pub fn killswitch(
     debug!("Setting Wireguard killswitch....");
     match firewall {
         Firewall::IpTables => {
-            netns.exec(&[
-                "iptables",
-                "-A",
-                "OUTPUT",
-                "!",
-                "-o",
-                ifname,
-                "-m",
-                "mark",
-                "!",
-                "--mark",
-                fwmark,
-                "-m",
-                "addrtype",
-                "!",
-                "--dst-type",
-                "LOCAL",
-                "-j",
-                "REJECT",
-            ])?;
+            netns
+                .exec(&[
+                    "iptables",
+                    "-A",
+                    "OUTPUT",
+                    "!",
+                    "-o",
+                    ifname,
+                    "-m",
+                    "mark",
+                    "!",
+                    "--mark",
+                    fwmark,
+                    "-m",
+                    "addrtype",
+                    "!",
+                    "--dst-type",
+                    "LOCAL",
+                    "-j",
+                    "REJECT",
+                ])
+                .context("Executing ip6tables")?;
 
             netns.exec(&[
                 "ip6tables",
@@ -384,7 +394,9 @@ pub fn killswitch(
             ])?;
         }
         Firewall::NfTables => {
-            netns.exec(&["nft", "add", "table", "inet", &netns.name])?;
+            netns
+                .exec(&["nft", "add", "table", "inet", &netns.name])
+                .context("Executing nft")?;
             netns.exec(&[
                 "nft",
                 "add",

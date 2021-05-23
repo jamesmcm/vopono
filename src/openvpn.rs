@@ -71,7 +71,7 @@ impl OpenVpn {
         let working_dir = PathBuf::from(config_file_path.parent().unwrap());
 
         handle = netns
-            .exec_no_block(&command_vec, None, true, Some(working_dir))
+            .exec_no_block(&command_vec, None, true, false, Some(working_dir))
             .context("Failed to launch OpenVPN - is openvpn installed?")?;
         let id = handle.id();
         let mut buffer = String::with_capacity(1024);
@@ -526,7 +526,8 @@ pub fn killswitch(
 }
 
 pub fn get_remotes_from_config(path: &Path) -> anyhow::Result<Vec<Remote>> {
-    let file_string = std::fs::read_to_string(path)?;
+    let file_string = std::fs::read_to_string(path)
+        .context(format!("Reading OpenVPN config file: {:?}", path))?;
     let mut output_vec = Vec::new();
     // Regex extract
     let re = Regex::new(r"remote ([^\s]+) ([0-9]+)\s?(tcp|udp|tcp-client)?")?;

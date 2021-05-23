@@ -14,8 +14,11 @@ use super::vpn::{verify_auth, Protocol};
 use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
 use signal_hook::{consts::SIGINT, iterator::Signals};
-use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr};
+use std::{
+    fs::create_dir_all,
+    io::{self, Write},
+};
 
 pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // this captures all sigint signals
@@ -27,8 +30,13 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let protocol: Protocol;
 
     // TODO: Refactor this part - DRY
+    // Check if we have config file path passed on command line
     // Create empty config file if does not exist
-    let config_path = vopono_dir()?.join("config.toml");
+    create_dir_all(vopono_dir()?)?;
+    let config_path = command
+        .vopono_config
+        .ok_or_else(|| anyhow!("No config file passed"))
+        .or_else::<anyhow::Error, _>(|_| Ok(vopono_dir()?.join("config.toml")))?;
     {
         std::fs::OpenOptions::new()
             .write(true)
@@ -182,6 +190,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
             Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
             Protocol::OpenConnect => bail!("OpenConnect must use Custom provider"),
+            Protocol::OpenFortiVpn => bail!("OpenFortiVpn must use Custom provider"),
         }?;
         if !cdir.exists() || cdir.read_dir()?.next().is_none() {
             info!(
@@ -217,6 +226,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
             Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
             Protocol::OpenConnect => bail!("OpenConnect must use Custom provider"),
+            Protocol::OpenFortiVpn => bail!("OpenFortiVpn must use Custom provider"),
         }?;
         Some(get_config_from_alias(&cdir, &server_name)?)
     } else {
@@ -276,7 +286,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     })
                     .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
-                ns.dns_config(&dns)?;
+                // TODO: DNS suffixes?
+                ns.dns_config(&dns, &[])?;
                 // Check if using Shadowsocks
                 if let Some((ss_host, ss_lport)) =
                     uses_shadowsocks(config_file.as_ref().expect("No config file provided"))?
@@ -326,7 +337,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns {
                         let old_dns = ns.dns_config.take();
                         std::mem::forget(old_dns);
-                        ns.dns_config(&[newdns])?;
+                        // TODO: DNS suffixes?
+                        ns.dns_config(&[newdns], &[])?;
                     }
                 }
             }
@@ -343,13 +355,23 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             }
             Protocol::OpenConnect => {
                 let dns = base_dns.unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
-                ns.dns_config(&dns)?;
+                // TODO: DNS suffixes?
+                ns.dns_config(&dns, &[])?;
                 ns.run_openconnect(
                     config_file,
                     command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
                     firewall,
                     &server_name,
+                )?;
+            }
+            Protocol::OpenFortiVpn => {
+                // TODO: DNS handled by OpenFortiVpn directly?
+                ns.run_openfortivpn(
+                    config_file.expect("No OpenFortiVPN config file provided"),
+                    command.open_ports.as_ref(),
+                    command.forward_ports.as_ref(),
+                    firewall,
                 )?;
             }
         }
@@ -374,6 +396,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let application = ApplicationWrapper::new(&ns, &command.application, user)?;
 
     // Launch TCP proxy server on other threads if forwarding ports
+    // TODO: Fix when running as root
     let mut proxy = Vec::new();
     if let Some(f) = command.forward_ports {
         if !(command.no_proxy || f.is_empty()) {

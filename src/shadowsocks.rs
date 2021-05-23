@@ -67,7 +67,7 @@ impl Shadowsocks {
         ];
 
         let handle = netns
-            .exec_no_block(&command_vec, None, true, None)
+            .exec_no_block(&command_vec, None, true, false, None)
             .context("Failed to launch Shadowsocks - is shadowsocks-libev installed?")?;
 
         Ok(Self { pid: handle.id() })
@@ -76,7 +76,8 @@ impl Shadowsocks {
 
 pub fn uses_shadowsocks(openvpn_config: &Path) -> anyhow::Result<Option<(IpAddr, u16)>> {
     // TODO: We assume all socks-proxy are Shadowsocks
-    let config_str = read_to_string(openvpn_config)?;
+    let config_str = read_to_string(openvpn_config)
+        .context(format!("Reading OpenVPN config file: {:?}", openvpn_config))?;
 
     let re = Regex::new(r"socks-proxy ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ([0-9]+)")?;
     let cap = re.captures(&config_str);
@@ -94,7 +95,8 @@ pub fn uses_shadowsocks(openvpn_config: &Path) -> anyhow::Result<Option<(IpAddr,
 }
 
 pub fn get_routes_from_config(path: &Path) -> anyhow::Result<Vec<IpAddr>> {
-    let file_string = std::fs::read_to_string(path)?;
+    let file_string = std::fs::read_to_string(path)
+        .context(format!("Reading OpenVPN config file: {:?}", path))?;
     let mut output_vec = Vec::new();
     // Regex extract
     let re = Regex::new(

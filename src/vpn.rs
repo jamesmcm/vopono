@@ -67,6 +67,7 @@ pub enum Protocol {
     OpenVpn,
     Wireguard,
     OpenConnect,
+    OpenFortiVpn,
 }
 }
 

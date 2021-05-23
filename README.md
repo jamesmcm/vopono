@@ -11,6 +11,9 @@ Currently Mullvad, AzireVPN, MozillaVPN, TigerVPN, ProtonVPN, iVPN,
 NordVPN, and PrivateInternetAccess are supported directly, with custom
 configuration files also supported with the `--custom` argument.
 
+For custom connections the OpenConnect and OpenFortiVPN protocols are
+also supported (e.g. for enterprise VPNs). See the [vopono User Guide](USERGUIDE.md) for more details.
+
 ## Screenshot
 
 Screenshot showing an example with firefox, google-chrome-stable and
@@ -39,12 +42,19 @@ Set up VPN provider configuration files:
 $ vopono sync
 ```
 
+Note when creating and uploading new Wireguard keypairs there may be a slight delay
+until they are usable (about 30-60 seconds on Mullvad for example).
+
 Run Firefox through an AzireVPN Wireguard connection to a server in
 Norway:
 
 ```bash
 $ vopono exec --provider azirevpn --server norway firefox
 ```
+
+You should run vopono as your own user (not using sudo) as it will
+handle privilege escalation where necessary. For more details around
+running as a systemd service, etc. see the [User Guide](USERGUIDE.md).
 
 vopono can handle up to 255 separate network namespaces (i.e. different VPN server
 connections - if your VPN provider allows it). Commands launched with
@@ -157,6 +167,10 @@ $ rustc --version
   keypairs) - unlike Mullvad this _cannot_ be done on the webpage. I recommend using [MozWire](https://github.com/NilsIrl/MozWire) to manage this.
 - `gnome-terminal` will not run in the network namespace due to the
   client-server model - see issue [#48](https://github.com/jamesmcm/vopono/issues/48)
+- Port forwarding from inside the network namespace to the host (e.g.
+  for running `transmission-daemon`) does not work correctly when vopono
+  is run as root - see issue [#84](https://github.com/jamesmcm/vopono/issues/84)
+
 
 ## License
 

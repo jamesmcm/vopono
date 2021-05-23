@@ -126,6 +126,11 @@ pub struct ExecCommand {
     /// before shutting down the namespace
     #[structopt(long = "predown")]
     pub predown: Option<String>,
+
+    /// Path to vopono config TOML file (will be created if it does not exist)
+    /// Default: ~/.config/vopono/config.toml
+    #[structopt(long = "vopono-config")]
+    pub vopono_config: Option<PathBuf>,
 }
 
 #[derive(StructOpt)]
