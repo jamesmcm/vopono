@@ -286,7 +286,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     })
                     .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
-                ns.dns_config(&dns)?;
+                // TODO: DNS suffixes?
+                ns.dns_config(&dns, &[])?;
                 // Check if using Shadowsocks
                 if let Some((ss_host, ss_lport)) =
                     uses_shadowsocks(config_file.as_ref().expect("No config file provided"))?
@@ -336,7 +337,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns {
                         let old_dns = ns.dns_config.take();
                         std::mem::forget(old_dns);
-                        ns.dns_config(&[newdns])?;
+                        // TODO: DNS suffixes?
+                        ns.dns_config(&[newdns], &[])?;
                     }
                 }
             }
@@ -353,7 +355,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             }
             Protocol::OpenConnect => {
                 let dns = base_dns.unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
-                ns.dns_config(&dns)?;
+                // TODO: DNS suffixes?
+                ns.dns_config(&dns, &[])?;
                 ns.run_openconnect(
                     config_file,
                     command.open_ports.as_ref(),

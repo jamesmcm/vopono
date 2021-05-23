@@ -10,7 +10,7 @@ pub struct DnsConfig {
 }
 
 impl DnsConfig {
-    pub fn new(ns_name: String, servers: &[IpAddr]) -> anyhow::Result<Self> {
+    pub fn new(ns_name: String, servers: &[IpAddr], suffixes: &[&str]) -> anyhow::Result<Self> {
         std::fs::create_dir_all(format!("/etc/netns/{}", ns_name))
             .with_context(|| format!("Failed to create directory: /etc/netns/{}", ns_name))?;
 
@@ -31,6 +31,16 @@ impl DnsConfig {
                 .collect::<Vec<String>>()
                 .join(", ")
         );
+
+        let suffix = suffixes.join(" ");
+        if !suffix.is_empty() {
+            writeln!(f, "search {}", suffix).with_context(|| {
+                format!(
+                    "Failed to overwrite resolv.conf: /etc/netns/{}/resolv.conf",
+                    ns_name
+                )
+            })?;
+        }
 
         for dns in servers {
             writeln!(f, "nameserver {}", dns).with_context(|| {

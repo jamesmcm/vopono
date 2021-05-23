@@ -283,7 +283,11 @@ pub fn elevate_privileges() -> anyhow::Result<()> {
 
         debug!("Args: {:?}", &args);
         // status blocks until the process has ended
-        let _status = Command::new("sudo").arg("-E").args(args).status()?;
+        let _status = Command::new("sudo")
+            .arg("-E")
+            .args(args.clone())
+            .status()
+            .context(format!("Executing sudo -E {:?}", &args))?;
 
         // Deprecated - do we need to handle flag here?
         // cleanup::cleanup_signal(SIGINT)?;
@@ -368,7 +372,9 @@ pub fn get_config_from_alias(list_path: &Path, alias: &str) -> anyhow::Result<Pa
 }
 
 pub fn get_config_file_protocol(config_file: &Path) -> Protocol {
-    let content = fs::read_to_string(config_file).unwrap();
+    let content = fs::read_to_string(config_file)
+        .context(format!("Reading VPN config file: {:?}", config_file))
+        .unwrap();
     if content.contains(&"[Interface]") {
         Protocol::Wireguard
     } else {

@@ -11,6 +11,9 @@ Currently Mullvad, AzireVPN, MozillaVPN, TigerVPN, ProtonVPN, iVPN,
 NordVPN, and PrivateInternetAccess are supported directly, with custom
 configuration files also supported with the `--custom` argument.
 
+For custom connections the OpenConnect and OpenFortiVPN protocols are
+also supported (e.g. for enterprise VPNs). See the [vopono User Guide](USERGUIDE.md) for more details.
+
 ## Screenshot
 
 Screenshot showing an example with firefox, google-chrome-stable and
@@ -45,6 +48,10 @@ Norway:
 ```bash
 $ vopono exec --provider azirevpn --server norway firefox
 ```
+
+You should run vopono as your own user (not using sudo) as it will
+handle privilege escalation where necessary. For more details around
+running as a systemd service, etc. see the [User Guide](USERGUIDE.md).
 
 vopono can handle up to 255 separate network namespaces (i.e. different VPN server
 connections - if your VPN provider allows it). Commands launched with

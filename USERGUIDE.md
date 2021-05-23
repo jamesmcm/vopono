@@ -180,6 +180,40 @@ directory as the config file itself. So any accompanying files (CA certificates,
 files, etc.) must be in the same directory with the file if using
 relative paths in the config file.
 
+### OpenFortiVPN
+
+OpenFortiVPN is supported as a custom provider, allowing you to connect
+to Fortinet VPN servers.
+
+To use it, first create an [OpenFortiVPN](https://github.com/adrienverge/openfortivpn) config file for your
+connection, such as:
+
+`myvpn.conf`:
+```
+host = vpn.company.net
+port = 443
+username = myuser
+password = mypassword
+set-dns = 0
+pppd-use-peerdns = 0
+pppd-log = /tmp/pppd.log
+```
+
+You must set `set-dns` and `pppd-use-peerdns` to `0` so that
+OpenFortiVPN does not try to change the global DNS settings (vopono will
+set them within the network namespace). You __must__ include the line:
+`pppd-log = /tmp/pppd.log` as vopono uses this to read the pppd output
+directly.
+
+Then run vopono using this as the custom config file and specifying
+`OpenFortiVPN` as the protocol. Note that if you do not specify your
+password in the OpenFortiVPN config file then you must enter it when it
+is waiting to connect (you will not be prompted).
+
+```bash
+vopono -v exec --protocol OpenFortiVPN --custom /home/user/myvpn.conf firefox
+```
+
 ### Firefox
 
 Note if running multiple Firefox sessions, they need to run separate
@@ -223,6 +257,27 @@ When finished with vopono, you must manually kill the
 By default, vopono runs a small TCP proxy to proxy the ports on your
 host machine to the ports on the network namespace - if you do not want
 this to run use the `--no-proxy` flag.
+
+#### systemd service
+
+For the above you may want to run vopono as a systemd service. If your
+user has passwordless sudo access you can use a user service, such as:
+
+`/etc/systemd/user/vopono.service`:
+```
+[Service]
+ExecStart=/usr/bin/vopono -v exec -k -f 9091 --protocol wireguard --provider mullvad --server romania "transmission-daemon -a *.*.*.*"
+```
+
+And then start it with (no sudo):
+```
+systemctl start --user vopono
+```
+
+If you do not have passwordless sudo access (i.e. privilege escalation
+requires entering the password) then you could use a root service and
+set up vopono on the root account. But note [this issue](https://github.com/jamesmcm/vopono/issues/84) currently
+makes this problematic for forwarding ports.
 
 #### Privoxy
 

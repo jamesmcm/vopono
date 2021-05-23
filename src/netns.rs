@@ -212,8 +212,8 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn dns_config(&mut self, server: &[IpAddr]) -> anyhow::Result<()> {
-        self.dns_config = Some(DnsConfig::new(self.name.clone(), &server)?);
+    pub fn dns_config(&mut self, server: &[IpAddr], suffixes: &[&str]) -> anyhow::Result<()> {
+        self.dns_config = Some(DnsConfig::new(self.name.clone(), server, suffixes)?);
         Ok(())
     }
 
@@ -270,7 +270,7 @@ impl NetworkNamespace {
         firewall: Firewall,
     ) -> anyhow::Result<()> {
         self.openfortivpn = Some(OpenFortiVpn::run(
-            &self,
+            self,
             config_file,
             open_ports,
             forward_ports,
