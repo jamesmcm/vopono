@@ -34,7 +34,6 @@ impl OpenFortiVpn {
         let mut handle;
 
         info!("Launching OpenFortiVPN...");
-        // TODO: DNS + default route
         // Must run as root - https://github.com/adrienverge/openfortivpn/issues/650
         let command_vec = (&[
             "openfortivpn",
