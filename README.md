@@ -42,6 +42,9 @@ Set up VPN provider configuration files:
 $ vopono sync
 ```
 
+Note when creating and uploading new Wireguard keypairs there may be a slight delay
+until they are usable (about 30-60 seconds on Mullvad for example).
+
 Run Firefox through an AzireVPN Wireguard connection to a server in
 Norway:
 
@@ -164,6 +167,10 @@ $ rustc --version
   keypairs) - unlike Mullvad this _cannot_ be done on the webpage. I recommend using [MozWire](https://github.com/NilsIrl/MozWire) to manage this.
 - `gnome-terminal` will not run in the network namespace due to the
   client-server model - see issue [#48](https://github.com/jamesmcm/vopono/issues/48)
+- Port forwarding from inside the network namespace to the host (e.g.
+  for running `transmission-daemon`) does not work correctly when vopono
+  is run as root - see issue [#84](https://github.com/jamesmcm/vopono/issues/84)
+
 
 ## License
 
