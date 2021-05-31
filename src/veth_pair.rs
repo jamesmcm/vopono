@@ -36,7 +36,9 @@ impl VethPair {
                 &dest
             );
             let mut nm_config_path = nm_path.clone();
-            nm_config_path.push("conf.d/unmanaged.conf");
+            nm_config_path.push("conf.d");
+            std::fs::create_dir_all(&nm_config_path)?;
+            nm_config_path.push("unmanaged.conf");
 
             let backup_file = if nm_config_path.exists() {
                 // Backup existing unmanaged.conf
@@ -50,8 +52,16 @@ impl VethPair {
 
             {
                 let mut file = if nm_config_path.exists() {
+                    debug!(
+                        "Appending to existing NetworkManager config file: {}",
+                        nm_config_path.as_path().to_string_lossy()
+                    );
                     OpenOptions::new().append(true).open(nm_config_path)?
                 } else {
+                    debug!(
+                        "Creating new NetworkManager config file: {}",
+                        nm_config_path.as_path().to_string_lossy()
+                    );
                     std::fs::File::create(nm_config_path)?
                 };
 
