@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::str::FromStr;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct NetworkInterface {
     pub name: String,
 }

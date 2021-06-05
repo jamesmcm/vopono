@@ -22,7 +22,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::str::FromStr;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Shadowsocks {
     pid: u32,
 }

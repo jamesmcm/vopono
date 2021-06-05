@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::net::IpAddr;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct DnsConfig {
     ns_name: String,
 }

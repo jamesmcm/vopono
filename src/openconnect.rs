@@ -6,7 +6,7 @@ use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct OpenConnect {
     pid: u32,
 }

@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct NetworkNamespace {
     pub name: String,
     pub veth_pair: Option<VethPair>,
@@ -444,6 +444,10 @@ impl Drop for NetworkNamespace {
                 .unwrap_or_else(|_| panic!("Failed to delete network namespace: {}", &self.name));
         } else {
             debug!("Skipping destructors since other vopono instance using this namespace!");
+            debug!(
+                "Existing lockfiles using this namespace: {:?}",
+                lockfile_path.read_dir().unwrap().collect::<Vec<_>>()
+            );
             std::mem::forget(self.openvpn.take());
             std::mem::forget(self.veth_pair.take());
             std::mem::forget(self.dns_config.take());
@@ -455,7 +459,7 @@ impl Drop for NetworkNamespace {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Lockfile {
     pub ns: NetworkNamespace,
     pub start: u64,
