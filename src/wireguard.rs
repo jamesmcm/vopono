@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct Wireguard {
     ns_name: String,
     config_file: PathBuf,

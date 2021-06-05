@@ -8,14 +8,14 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct VethPair {
     pub source: String,
     pub dest: String,
     pub nm_unmanaged: Option<NetworkManagerUnmanaged>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct NetworkManagerUnmanaged {
     pub backup_file: Option<PathBuf>,
 }
@@ -123,17 +123,22 @@ impl Drop for VethPair {
 
 impl Drop for NetworkManagerUnmanaged {
     fn drop(&mut self) {
-        let nm_path = PathBuf::from_str("/etc/NetworkManager/conf.d/unmanaged.conf")
-            .expect("Failed to build path");
-        if self.backup_file.is_some() {
-            std::fs::copy(self.backup_file.as_ref().unwrap(), &nm_path)
-                .expect("Failed to restore backup of NetworkManager unmanaged.conf");
-            std::fs::remove_file(self.backup_file.as_ref().unwrap())
-                .expect("Failed to delete backup of NetworkManager unmanaged.conf");
-        } else {
-            std::fs::remove_file(&nm_path).expect("Failed to delete NetworkManager unmanaged.conf");
+        // Only restore settings if there are no other active namespaces
+        let namespaces = crate::list::get_lock_namespaces();
+        if namespaces.is_ok() && namespaces.unwrap().is_empty() {
+            let nm_path = PathBuf::from_str("/etc/NetworkManager/conf.d/unmanaged.conf")
+                .expect("Failed to build path");
+            if self.backup_file.is_some() {
+                std::fs::copy(self.backup_file.as_ref().unwrap(), &nm_path)
+                    .expect("Failed to restore backup of NetworkManager unmanaged.conf");
+                std::fs::remove_file(self.backup_file.as_ref().unwrap())
+                    .expect("Failed to delete backup of NetworkManager unmanaged.conf");
+            } else {
+                std::fs::remove_file(&nm_path)
+                    .expect("Failed to delete NetworkManager unmanaged.conf");
+            }
+            sudo_command(&["nmcli", "connection", "reload"])
+                .expect("Failed to reload NetworkManager configuration");
         }
-        sudo_command(&["nmcli", "connection", "reload"])
-            .expect("Failed to reload NetworkManager configuration");
     }
 }
