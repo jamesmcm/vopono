@@ -84,39 +84,38 @@ impl Drop for HostMasquerade {
         // Only drop these settings if there are no other active namespaces
         let namespaces = crate::list::get_lock_namespaces();
         debug!("Remaining namespaces: {:?}", namespaces);
-        if namespaces.is_ok() {
-            if namespaces.unwrap().is_empty() {
-                match self.firewall {
-                    Firewall::IpTables => {
-                        sudo_command(&[
-                            "iptables",
-                            "-t",
-                            "nat",
-                            "-D",
-                            "POSTROUTING",
-                            "-s",
-                            &self.ip_mask,
-                            "-o",
-                            &self.interface.name,
-                            "-j",
-                            "MASQUERADE",
-                        ])
-                        .unwrap_or_else(|_| {
+        if namespaces.is_ok() && namespaces.unwrap().is_empty() {
+            match self.firewall {
+                Firewall::IpTables => {
+                    sudo_command(&[
+                        "iptables",
+                        "-t",
+                        "nat",
+                        "-D",
+                        "POSTROUTING",
+                        "-s",
+                        &self.ip_mask,
+                        "-o",
+                        &self.interface.name,
+                        "-j",
+                        "MASQUERADE",
+                    ])
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "Failed to delete iptables masquerade rule, ip_mask: {}, interface: {}",
+                            &self.ip_mask, &self.interface.name
+                        )
+                    });
+                }
+                Firewall::NfTables => {
+                    sudo_command(&["nft", "delete", "table", "inet", "vopono_nat"]).unwrap_or_else(
+                        |_| {
                             panic!(
-                        "Failed to delete iptables masquerade rule, ip_mask: {}, interface: {}",
-                        &self.ip_mask, &self.interface.name
-                    )
-                        });
-                    }
-                    Firewall::NfTables => {
-                        sudo_command(&["nft", "delete", "table", "inet", "vopono_nat"])
-                            .unwrap_or_else(|_| {
-                                panic!(
                             "Failed to delete nftables masquerade rule, ip_mask: {}, interface: {}",
                             &self.ip_mask, &self.interface.name
                         )
-                            });
-                    }
+                        },
+                    );
                 }
             }
         }
@@ -241,11 +240,10 @@ impl Drop for FirewallException {
         // Only drop these settings if there are no other active namespaces
         let namespaces = crate::list::get_lock_namespaces();
         debug!("Remaining namespaces: {:?}", namespaces);
-        if namespaces.is_ok() {
-            if namespaces.unwrap().is_empty() {
-                match self.firewall {
-                    Firewall::IpTables => {
-                        sudo_command(&[
+        if namespaces.is_ok() && namespaces.unwrap().is_empty() {
+            match self.firewall {
+                Firewall::IpTables => {
+                    sudo_command(&[
                     "iptables",
                     "-D",
                     "FORWARD",
@@ -263,7 +261,7 @@ impl Drop for FirewallException {
                     )
                 });
 
-                        sudo_command(&[
+                    sudo_command(&[
                     "iptables",
                     "-D",
                     "FORWARD",
@@ -280,9 +278,9 @@ impl Drop for FirewallException {
                         &self.host_interface.name, &self.ns_interface.name
                     )
                 });
-                    }
-                    Firewall::NfTables => {
-                        sudo_command(&["nft", "delete", "table", "inet", "vopono_bridge"]).unwrap_or_else(
+                }
+                Firewall::NfTables => {
+                    sudo_command(&["nft", "delete", "table", "inet", "vopono_bridge"]).unwrap_or_else(
                     |_| {
                         panic!(
                             "Failed to delete nftables namespace bridge firewall rule, host interface: {}, namespace interface: {}",
@@ -290,7 +288,6 @@ impl Drop for FirewallException {
                         )
                     },
                 );
-                    }
                 }
             }
         }
