@@ -455,6 +455,7 @@ impl Drop for NetworkNamespace {
             std::mem::forget(self.firewall_exception.take());
             std::mem::forget(self.host_masquerade.take());
             std::mem::forget(self.openconnect.take());
+            std::mem::forget(self.openfortivpn.take());
         }
     }
 }
