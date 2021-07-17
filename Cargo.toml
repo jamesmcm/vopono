@@ -20,7 +20,7 @@ pretty_env_logger = "0.4"
 clap = "2"
 which = "4"
 users = "0.11"
-nix = "0.21"
+nix = "0.22"
 serde = {version = "1", features = ["derive", "std"]}
 csv = "1"
 dialoguer ="0.8"
@@ -34,7 +34,7 @@ chrono = "0.4"
 compound_duration = "1"
 ipnet = {version = "2", features = ["serde"]}
 reqwest = {default-features = false, version = "0.11", features = ["blocking", "json", "rustls-tls"]}
-sysinfo = "0.18"
+sysinfo = "0.19"
 base64 = "0.13"
 x25519-dalek = "1"
 strum = "0.21"
