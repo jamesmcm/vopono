@@ -82,7 +82,7 @@ impl OpenVpnProvider for NordVPN {
                 let server_name = fname.to_lowercase().replace(' ', "_");
                 let server_name = server_name.split('.').next().unwrap();
 
-                if let Some(cap) = server_regex.captures(&server_name) {
+                if let Some(cap) = server_regex.captures(server_name) {
                     // check whether the server is a special config type
                     // or not, and discard ones not in line with user's
                     // selection

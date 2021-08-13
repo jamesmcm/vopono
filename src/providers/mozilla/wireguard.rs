@@ -52,7 +52,7 @@ impl MozillaVPN {
             .with_prompt(
                 "The following devices exist on your account, which would you like to use (you will need the private key)",
             )
-            .items(&devices)
+            .items(devices)
             .item("Create a new device (keypair)")
             .default(0)
             .interact()?;

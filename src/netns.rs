@@ -154,7 +154,7 @@ impl NetworkNamespace {
         // TODO: Handle if name taken?
         let source = format!("{}_s", &self.name[7..self.name.len().min(20)]);
         let dest = format!("{}_d", &self.name[7..self.name.len().min(20)]);
-        self.veth_pair = Some(VethPair::new(source, dest, &self)?);
+        self.veth_pair = Some(VethPair::new(source, dest, self)?);
         Ok(())
     }
 
@@ -230,7 +230,7 @@ impl NetworkNamespace {
         disable_ipv6: bool,
     ) -> anyhow::Result<()> {
         self.openvpn = Some(OpenVpn::run(
-            &self,
+            self,
             config_file,
             auth_file,
             dns,
@@ -252,7 +252,7 @@ impl NetworkNamespace {
         server: &str,
     ) -> anyhow::Result<()> {
         self.openconnect = Some(OpenConnect::run(
-            &self,
+            self,
             config_file,
             open_ports,
             forward_ports,
@@ -288,7 +288,7 @@ impl NetworkNamespace {
         encrypt_method: &str,
     ) -> anyhow::Result<()> {
         self.shadowsocks = Some(Shadowsocks::run(
-            &self,
+            self,
             config_file,
             ss_host,
             listen_port,
@@ -425,7 +425,7 @@ impl Drop for NetworkNamespace {
                 std::env::set_var("VOPONO_NS", &self.name);
                 if self.predown_user.is_some() {
                     std::process::Command::new("sudo")
-                        .args(&["-Eu", self.predown_user.as_ref().unwrap(), &pdcmd])
+                        .args(&["-Eu", self.predown_user.as_ref().unwrap(), pdcmd])
                         .spawn()
                         .ok();
                 } else {
