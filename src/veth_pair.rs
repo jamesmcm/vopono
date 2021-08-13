@@ -1,7 +1,7 @@
 use super::util::sudo_command;
 use super::NetworkNamespace;
 use anyhow::Context;
-use log::debug;
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -26,11 +26,29 @@ impl VethPair {
         assert!(source.len() <= 15, "ifname must be <= 15 chars: {}", source);
         assert!(dest.len() <= 15, "ifname must be <= 15 chars: {}", dest);
 
+        // NetworkManager device management
         // If NetworkManager used, add destination veth to unmanaged devices
         // Avoids NM overriding our IP assignment
-        // TODO: Check with systemd?
+        // TODO: Check with systemd instead of nmcli directly?
         let nm_path = PathBuf::from_str("/etc/NetworkManager")?;
-        let nm_unmanaged = if nm_path.exists() && which::which("nmcli").is_ok() {
+        let nm_running = if which::which("nmcli").is_ok() {
+            std::process::Command::new("nmcli")
+                .arg("general")
+                .arg("status")
+                .status()
+                .map(|x| x.success())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if nm_running {
+            debug!("Detected NetworkManager running");
+        } else {
+            debug!("NetworkManager not detected running");
+        }
+
+        let nm_unmanaged = if nm_path.exists() && nm_running {
             debug!(
                 "NetworkManager detected, adding {} to unmanaged devices",
                 &dest
@@ -72,12 +90,45 @@ impl VethPair {
                 )?;
             }
 
-            sudo_command(&["nmcli", "connection", "reload"])
-                .context("Failed to reload NetworkManager configuration")?;
+            if let Err(e) = sudo_command(&["nmcli", "connection", "reload"])
+                .context("Failed to reload NetworkManager configuration")
+            {
+                warn!("Tried but failed to reload NetworkManager configuration - is NetworkManager running? : {}", e);
+            }
             Some(NetworkManagerUnmanaged { backup_file })
         } else {
             None
         };
+
+        // systemd firewalld device management
+        let firewalld_running = std::process::Command::new("systemctl")
+            .arg("is-active")
+            .arg("firewalld")
+            .output()
+            .map(|x| String::from_utf8(x.stdout).ok().unwrap().trim() == "active")
+            .unwrap_or(false);
+
+        if firewalld_running {
+            debug!("Detected firewalld running");
+        } else {
+            debug!("firewalld not detected running");
+        }
+
+        if firewalld_running && which::which("firewall-cmd").is_ok() {
+            debug!(
+                "Detected firewalld running, adding {} veth device to trusted zone",
+                dest
+            );
+            // Permit new interface
+            match std::process::Command::new("firewall-cmd")
+                .arg("--zone=trusted")
+                .arg(format!("--add-interface={}", dest).as_str())
+                .status().map(|x| x.success()) {
+                    Err(e) => warn!("Failed to add veth device {} to firewalld trusted zone, error: {}", dest, e),
+                    Ok(false) => warn!("Possibly failed to add veth device {} to firewalld trusted zone (non-zero exit code)", dest),
+                    _ => {}
+                }
+        }
 
         sudo_command(&[
             "ip",
