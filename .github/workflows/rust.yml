@@ -19,12 +19,20 @@ jobs:
     - run: 'echo "$(cargo pkgid | cut -d# -f2)"'
     - id: rustversion
       run: 'echo "::set-output name=rustversion::$(cargo pkgid | cut -d# -f2)"'
+    - id: cargoversion
+      run: cargo --version
+    - id: rustcversion
+      run: rustc --version
   build:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v2
     - name: Install Clippy
       run: rustup component add clippy rustfmt
+    - id: cargoversion
+      run: cargo --version
+    - id: rustcversion
+      run: rustc --version
     - name: Clippy
       run: cargo clippy -- -D warnings
     - name: Rustfmt
@@ -44,6 +52,10 @@ jobs:
     name: Amd64Deb
     steps:
     - uses: actions/checkout@v2
+    - id: cargoversion
+      run: cargo --version
+    - id: rustcversion
+      run: rustc --version
     - name: BuildDeb
       id: debbuild
       uses: ebbflow-io/cargo-deb-amd64-ubuntu@1.0
@@ -58,6 +70,10 @@ jobs:
     name: Armv7Deb
     steps:
     - uses: actions/checkout@v2
+    - id: cargoversion
+      run: cargo --version
+    - id: rustcversion
+      run: rustc --version
     - name: BuildDeb
       id: debbuild
       uses: ebbflow-io/cargo-deb-armv7-debian@master
@@ -72,6 +88,10 @@ jobs:
     name: Amd64StaticBinaries
     steps:
     - uses: actions/checkout@v2
+    - id: cargoversion
+      run: cargo --version
+    - id: rustcversion
+      run: rustc --version
     - name: StaticBinaryBuild
       id: amd64staticbuild
       uses: ebbflow-io/cargo-deb-amd64-ubuntu@1.0
@@ -88,6 +108,10 @@ jobs:
     name: Armv7StaticBinaries
     steps:
     - uses: actions/checkout@v2
+    - id: cargoversion
+      run: cargo --version
+    - id: rustcversion
+      run: rustc --version
     - name: StaticBinaryBuild
       id: armv7staticbuild
       uses: ebbflow-io/cargo-deb-armv7-debian@master
