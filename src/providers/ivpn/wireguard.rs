@@ -254,7 +254,7 @@ fn request_port() -> anyhow::Result<u16> {
     let port = Input::<u16>::new()
         .with_prompt("Enter port number:")
         .validate_with(|x: &u16| -> Result<(), &str> {
-          if [2049,2050,53,30587,41893,48574,58237].contains(&x) {
+          if [2049,2050,53,30587,41893,48574,58237].contains(x) {
               Ok(())
           } else {
               Err("Port must be one of: 2049,2050,53,30587,41893,48574,58237 (see https://www.ivpn.net/setup/gnu-linux-wireguard.html for ports reference)")

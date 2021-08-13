@@ -179,7 +179,7 @@ fn prompt_for_wg_key(
                 return Err(anyhow!("Cannot add more Wireguard keypairs to this account. Try to delete existing keypairs."));
             }
             let keypair = generate_keypair()?;
-            Mullvad::upload_wg_key(&client, auth_token, &keypair)?;
+            Mullvad::upload_wg_key(client, auth_token, &keypair)?;
             Ok(keypair)
         } else {
             let private_key = Input::<String>::new()

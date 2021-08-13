@@ -134,12 +134,12 @@ impl OpenVpn {
 
         // Allow input to and output from open ports (for port forwarding in tunnel)
         if let Some(opens) = open_ports {
-            super::util::open_ports(&netns, opens.as_slice(), firewall)?;
+            super::util::open_ports(netns, opens.as_slice(), firewall)?;
         }
 
         // Allow input to and output from forwarded ports (will be proxied to host)
         if let Some(forwards) = forward_ports {
-            super::util::open_ports(&netns, forwards.as_slice(), firewall)?;
+            super::util::open_ports(netns, forwards.as_slice(), firewall)?;
         }
 
         if use_killswitch {

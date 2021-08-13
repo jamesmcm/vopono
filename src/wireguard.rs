@@ -123,7 +123,7 @@ impl Wireguard {
 
         let dns = dns.unwrap_or(&config.interface.dns);
         // TODO: DNS suffixes?
-        namespace.dns_config(&dns, &[])?;
+        namespace.dns_config(dns, &[])?;
         let fwmark = "51820";
         namespace.exec(&["wg", "set", &if_name, "fwmark", fwmark])?;
 
@@ -321,12 +321,12 @@ impl Wireguard {
 
         // Allow input to and output from open ports (for port forwarding in tunnel)
         if let Some(opens) = open_ports {
-            super::util::open_ports(&namespace, opens.as_slice(), firewall)?;
+            super::util::open_ports(namespace, opens.as_slice(), firewall)?;
         }
 
         // Allow input to and output from forwarded ports
         if let Some(forwards) = forward_ports {
-            super::util::open_ports(&namespace, forwards.as_slice(), firewall)?;
+            super::util::open_ports(namespace, forwards.as_slice(), firewall)?;
         }
 
         if use_killswitch {
@@ -443,7 +443,7 @@ impl Drop for Wireguard {
             "ip",
             "link",
             "del",
-            &if_name,
+            if_name,
         ]) {
             Ok(_) => {}
             Err(e) => warn!("Failed to delete ip link {}: {:?}", &self.ns_name, e),
