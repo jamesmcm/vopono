@@ -1,5 +1,3 @@
-cargo-features = ["resolver"]
-
 [package]
 name = "vopono"
 description = "Launch applications via VPN tunnels using temporary network namespaces"

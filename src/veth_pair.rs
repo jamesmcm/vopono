@@ -101,12 +101,15 @@ impl VethPair {
         };
 
         // systemd firewalld device management
-        let firewalld_running = std::process::Command::new("systemctl")
-            .arg("is-active")
-            .arg("firewalld")
-            .output()
-            .map(|x| String::from_utf8(x.stdout).ok().unwrap().trim() == "active")
-            .unwrap_or(false);
+        let firewalld_running = if which::which("firewall-cmd").is_ok() {
+            std::process::Command::new("firewall-cmd")
+                .arg("--state")
+                .status()
+                .map(|x| x.success())
+                .unwrap_or(false)
+        } else {
+            false
+        };
 
         if firewalld_running {
             debug!("Detected firewalld running");
@@ -114,7 +117,7 @@ impl VethPair {
             debug!("firewalld not detected running");
         }
 
-        if firewalld_running && which::which("firewall-cmd").is_ok() {
+        if firewalld_running {
             debug!(
                 "Detected firewalld running, adding {} veth device to trusted zone",
                 dest
