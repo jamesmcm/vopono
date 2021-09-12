@@ -74,7 +74,7 @@ impl OpenVpn {
             .exec_no_block(&command_vec, None, true, false, Some(working_dir))
             .context("Failed to launch OpenVPN - is openvpn installed?")?;
         let id = handle.id();
-        let mut buffer = String::with_capacity(1024);
+        let mut buffer = String::with_capacity(16384);
 
         let mut logfile = BufReader::with_capacity(64, File::open(log_file_str)?);
         let mut pos: usize = 0;
@@ -112,7 +112,6 @@ impl OpenVpn {
             }
 
             logfile.seek(SeekFrom::Start(pos as u64)).unwrap();
-            buffer.clear();
         }
 
         if buffer.contains("AUTH_FAILED") {
