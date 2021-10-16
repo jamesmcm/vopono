@@ -121,7 +121,7 @@ The sync process will save your credentials to a file in the
 config directory of the provider, so it can be passed to OpenVPN.
 If it is missing you will be prompted for your credentials.
 
-For PrivateInternetAccess and AzireVPN these should be the same as your account
+For PrivateInternetAccess, HMA (HideMyAss) and AzireVPN these should be the same as your account
 credentials.
 
 For TigerVPN you can view your OpenVPN credentials [online on the "geeks" dashboard](https://www.tigervpn.com/dashboard/geeks).
