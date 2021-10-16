@@ -83,9 +83,9 @@ impl OpenVpnProvider for HMA {
                     .expect("Invalid filename");
                 let mut filename_iter = filename.split('.');
                 let country = filename_iter.next().unwrap();
-                let country = country.replace("'", "").to_lowercase();
+                let country = country.replace("'", "").replace("`", "").to_lowercase();
                 let city = filename_iter.next().unwrap();
-                let city = city.replace("'", "").to_lowercase();
+                let city = city.replace("'", "").replace("`", "").to_lowercase();
                 let filename = format!("{}-{}.ovpn", country, city);
                 let outpath = openvpn_dir.join(filename.to_lowercase().replace(' ', "_"));
                 debug!(
