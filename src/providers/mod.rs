@@ -1,4 +1,5 @@
 mod azirevpn;
+mod hma;
 mod ivpn;
 mod mozilla;
 mod mullvad;
@@ -39,6 +40,7 @@ pub enum VpnProvider {
     AzireVPN,
     IVPN,
     NordVPN,
+    HMA,
     Custom,
 }
 }
@@ -55,6 +57,7 @@ impl VpnProvider {
             Self::AzireVPN => Box::new(azirevpn::AzireVPN {}),
             Self::IVPN => Box::new(ivpn::IVPN {}),
             Self::NordVPN => Box::new(nordvpn::NordVPN {}),
+            Self::HMA => Box::new(hma::HMA {}),
             Self::Custom => unimplemented!("Custom provider uses separate logic"),
         }
     }
@@ -68,6 +71,7 @@ impl VpnProvider {
             Self::AzireVPN => Ok(Box::new(azirevpn::AzireVPN {})),
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::NordVPN => Ok(Box::new(nordvpn::NordVPN {})),
+            Self::HMA => Ok(Box::new(hma::HMA {})),
             Self::MozillaVPN => Err(anyhow!("MozillaVPN only supports Wireguard!")),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
         }
