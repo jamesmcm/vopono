@@ -24,7 +24,20 @@ use walkdir::WalkDir;
 
 pub fn config_dir() -> anyhow::Result<PathBuf> {
     let mut pathbuf = PathBuf::new();
-    let _res: () = if let Ok(user) = std::env::var("SUDO_USER") {
+    let _res: () = if let Ok(home) = std::env::var("HOME") {
+        let confpath = format!("{}/.config", home);
+        let path = Path::new(&confpath);
+        debug!(
+            "Using config dir from $HOME config: {}",
+            path.to_string_lossy()
+        );
+        if path.exists() {
+            pathbuf.push(path);
+            Ok(())
+        } else {
+            Err(anyhow!("Could not find valid config directory!"))
+        }
+    } else if let Ok(user) = std::env::var("SUDO_USER") {
         // TODO: DRY
         let confpath = format!("/home/{}/.config", user);
         let path = Path::new(&confpath);
