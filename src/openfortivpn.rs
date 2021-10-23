@@ -161,7 +161,7 @@ pub fn get_dns(stdout: &str) -> anyhow::Result<(Vec<IpAddr>, Vec<String>)> {
     let re = Regex::new(r"ns \[(?P<ip>[^\]]+)\]").unwrap();
     let mut ips = Vec::new();
     for caps in re.captures_iter(stdout) {
-        for ip_raw in caps["ip"].split(", ").into_iter() {
+        for ip_raw in caps["ip"].split(", ") {
             let ip = IpAddr::from_str(ip_raw)?;
             if !ips.contains(&ip) && ip != IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)) {
                 ips.push(ip);
@@ -172,7 +172,7 @@ pub fn get_dns(stdout: &str) -> anyhow::Result<(Vec<IpAddr>, Vec<String>)> {
     let re = Regex::new(r"ns_suffix \[(?P<suffix>[^\]]+)\]").unwrap();
     let mut suffixes = Vec::new();
     for caps in re.captures_iter(stdout) {
-        for suffix_raw in caps["suffix"].split(';').into_iter() {
+        for suffix_raw in caps["suffix"].split(';') {
             let suffix = suffix_raw.to_string();
             if !suffixes.contains(&suffix) {
                 suffixes.push(suffix);
