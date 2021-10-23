@@ -66,6 +66,26 @@ impl OpenVpn {
             command_vec.push(auth_file.as_ref().unwrap().as_os_str().to_str().unwrap());
         }
 
+        let ipv6_disabled = std::fs::read_to_string("/sys/module/ipv6/parameters/disable")
+            .map(|x| x.trim().to_string())
+            .unwrap_or("0".to_string())
+            == "1";
+        if ipv6_disabled {
+            debug!("Detected IPv6 disabled in /sys/module/ipv6/parameters/disable");
+        } else {
+            debug!("Detected IPv6 enabled in /sys/module/ipv6/parameters/disable");
+        }
+
+        if disable_ipv6 || ipv6_disabled {
+            debug!("IPv6 disabled, will pass pull-filter ignore to OpenVPN");
+            command_vec.push("--pull-filter");
+            command_vec.push("ignore");
+            command_vec.push("ifconfig-ipv6");
+            command_vec.push("--pull-filter");
+            command_vec.push("ignore");
+            command_vec.push("route-ipv6");
+        }
+
         let remotes = get_remotes_from_config(&config_file)?;
         debug!("Found remotes: {:?}", &remotes);
         let working_dir = PathBuf::from(config_file_path.parent().unwrap());
