@@ -68,7 +68,7 @@ impl OpenVpn {
 
         let ipv6_disabled = std::fs::read_to_string("/sys/module/ipv6/parameters/disable")
             .map(|x| x.trim().to_string())
-            .unwrap_or("0".to_string())
+            .unwrap_or_else(|_| "0".to_string())
             == "1";
         if ipv6_disabled {
             debug!("Detected IPv6 disabled in /sys/module/ipv6/parameters/disable");
