@@ -1,7 +1,7 @@
 [package]
 name = "vopono"
 description = "Launch applications via VPN tunnels using temporary network namespaces"
-version = "0.8.7"
+version = "0.8.8"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2018"
 license = "GPL-3.0-or-later"
@@ -25,7 +25,7 @@ serde = {version = "1", features = ["derive", "std"]}
 csv = "1"
 dialoguer ="0.9"
 regex = "1"
-ron = "0.6"
+ron = "0.7"
 walkdir = "2"
 # Must use rand 0.7 for compatibility with x25519-dalek for now
 rand = "0.7"
@@ -34,11 +34,11 @@ chrono = "0.4"
 compound_duration = "1"
 ipnet = {version = "2", features = ["serde"]}
 reqwest = {default-features = false, version = "0.11", features = ["blocking", "json", "rustls-tls"]}
-sysinfo = "0.20"
+sysinfo = "0.21"
 base64 = "0.13"
 x25519-dalek = "1"
-strum = "0.22"
-strum_macros = "0.22"
+strum = "0.23"
+strum_macros = "0.23"
 zip = "0.5"
 maplit = "1"
 webbrowser = "0.5"

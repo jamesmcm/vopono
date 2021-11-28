@@ -76,6 +76,11 @@ impl OpenVpn {
             debug!("Detected IPv6 enabled in /sys/module/ipv6/parameters/disable");
         }
 
+        // Ignore Windows-specific command
+        command_vec.push("--pull-filter");
+        command_vec.push("ignore");
+        command_vec.push("block-outside-dns");
+
         if disable_ipv6 || ipv6_disabled {
             debug!("IPv6 disabled, will pass pull-filter ignore to OpenVPN");
             command_vec.push("--pull-filter");
