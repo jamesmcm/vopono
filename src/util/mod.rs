@@ -23,58 +23,84 @@ use users::{get_current_uid, get_user_by_uid};
 use walkdir::WalkDir;
 
 pub fn config_dir() -> anyhow::Result<PathBuf> {
-    let mut pathbuf = PathBuf::new();
-    let _res: () = if let Ok(home) = std::env::var("HOME") {
-        let confpath = format!("{}/.config", home);
-        let path = Path::new(&confpath);
-        debug!(
-            "Using config dir from $HOME config: {}",
-            path.to_string_lossy()
-        );
-        if path.exists() {
-            pathbuf.push(path);
-            Ok(())
-        } else {
-            Err(anyhow!("Could not find valid config directory!"))
-        }
-    } else if let Ok(user) = std::env::var("SUDO_USER") {
-        // TODO: DRY
-        let confpath = format!("/home/{}/.config", user);
-        let path = Path::new(&confpath);
-        debug!(
-            "Using config dir from $SUDO_USER config: {}",
-            path.to_string_lossy()
-        );
-        if path.exists() {
-            pathbuf.push(path);
-            Ok(())
-        } else {
-            Err(anyhow!("Could not find valid config directory!"))
-        }
-    } else if let Some(base_dirs) = BaseDirs::new() {
-        debug!(
-            "Using config dir from XDG dirs: {}",
-            base_dirs.config_dir().to_string_lossy()
-        );
-        pathbuf.push(base_dirs.config_dir());
-        Ok(())
-    } else if let Some(user) = get_user_by_uid(get_current_uid()) {
-        let confpath = format!("/home/{}/.config", user.name().to_str().unwrap());
-        let path = Path::new(&confpath);
-        debug!(
-            "Using config dir from current user config: {}",
-            path.to_string_lossy()
-        );
-        if path.exists() {
-            pathbuf.push(path);
-            Ok(())
-        } else {
-            Err(anyhow!("Could not find valid config directory!"))
-        }
-    } else {
-        Err(anyhow!("Could not find valid config directory!"))
-    }?;
-    Ok(pathbuf)
+    let path: Option<PathBuf> = None
+        .or_else(|| {
+            if let Ok(home) = std::env::var("HOME") {
+                let confpath = format!("{}/.config", home);
+                let path = Path::new(&confpath);
+                debug!(
+                    "Using config dir from $HOME config: {}",
+                    path.to_string_lossy()
+                );
+                if path.exists() {
+                    // Work-around for case when root $HOME is set but user's is not
+                    // It seems we cannot distinguish these cases
+                    if path.to_string_lossy().contains("/root") {
+                        None
+                    } else {
+                        Some(path.into())
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if let Ok(user) = std::env::var("SUDO_USER") {
+                // TODO: DRY
+                let confpath = format!("/home/{}/.config", user);
+                let path = Path::new(&confpath);
+                debug!(
+                    "Using config dir from $SUDO_USER config: {}",
+                    path.to_string_lossy()
+                );
+                if path.exists() {
+                    Some(path.into())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if let Some(base_dirs) = BaseDirs::new() {
+                debug!(
+                    "Using config dir from XDG dirs: {}",
+                    base_dirs.config_dir().to_string_lossy()
+                );
+                Some(base_dirs.config_dir().into())
+            } else {
+                None
+            }
+        })
+        .or_else(|| {
+            if let Some(user) = get_user_by_uid(get_current_uid()) {
+                // Handles case when run as root directly
+                let confpath = if get_current_uid() == 0 {
+                    "/root/.config".to_string()
+                } else {
+                    format!("/home/{}/.config", user.name().to_str().unwrap())
+                };
+                let path = Path::new(&confpath);
+                debug!(
+                    "Using config dir from current user config: {}",
+                    path.to_string_lossy()
+                );
+                if path.exists() {
+                    Some(path.into())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+
+    path.map(|x| x.into())
+        .ok_or_else(|| anyhow!("Could not find valid config directory!"))
 }
 
 pub fn vopono_dir() -> anyhow::Result<PathBuf> {

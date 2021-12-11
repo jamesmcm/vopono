@@ -123,18 +123,10 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             .protocol
             .unwrap_or_else(|| get_config_file_protocol(path));
         provider = VpnProvider::Custom;
-        // Could hash filename with CRC and use base64 but chars are limited
-        server_name = String::from(
-            &path
-                .as_path()
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
-                .chars()
-                .filter(|&x| x != ' ' && x != '-')
-                .collect::<String>()[0..4],
-        );
+        // Encode filename with base58 so we can fit it within 16 chars for the veth pair name
+        let sname = bs58::encode(&path.to_str().unwrap().to_string()).into_string();
+
+        server_name = sname[0..std::cmp::min(11, sname.len())].to_string();
     } else {
         // Get server and provider
         provider = command
@@ -202,7 +194,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     }
 
     let alias = match provider {
-        VpnProvider::Custom => "custom".to_string(),
+        VpnProvider::Custom => "c".to_string(),
         _ => provider.get_dyn_provider().alias(),
     };
 
