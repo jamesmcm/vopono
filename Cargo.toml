@@ -45,6 +45,7 @@ webbrowser = "0.5"
 basic_tcp_proxy = "0.3"
 signal-hook = "0.3"
 config = "0.11"
+rustc-serialize = "0.3"
 
 [package.metadata.rpm]
 package = "vopono"

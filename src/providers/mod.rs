@@ -1,4 +1,5 @@
 mod azirevpn;
+mod airvpn;
 mod hma;
 mod ivpn;
 mod mozilla;
@@ -38,6 +39,7 @@ pub enum VpnProvider {
     ProtonVPN,
     MozillaVPN,
     AzireVPN,
+    AirVPN,
     IVPN,
     NordVPN,
     HMA,
@@ -55,6 +57,7 @@ impl VpnProvider {
             Self::ProtonVPN => Box::new(protonvpn::ProtonVPN {}),
             Self::MozillaVPN => Box::new(mozilla::MozillaVPN {}),
             Self::AzireVPN => Box::new(azirevpn::AzireVPN {}),
+            Self::AirVPN => Box::new(airvpn::AirVPN {}),
             Self::IVPN => Box::new(ivpn::IVPN {}),
             Self::NordVPN => Box::new(nordvpn::NordVPN {}),
             Self::HMA => Box::new(hma::HMA {}),
@@ -69,6 +72,7 @@ impl VpnProvider {
             Self::TigerVPN => Ok(Box::new(tigervpn::TigerVPN {})),
             Self::ProtonVPN => Ok(Box::new(protonvpn::ProtonVPN {})),
             Self::AzireVPN => Ok(Box::new(azirevpn::AzireVPN {})),
+            Self::AirVPN => Ok(Box::new(airvpn::AirVPN {})),
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::NordVPN => Ok(Box::new(nordvpn::NordVPN {})),
             Self::HMA => Ok(Box::new(hma::HMA {})),
