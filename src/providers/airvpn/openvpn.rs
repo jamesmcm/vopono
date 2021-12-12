@@ -25,7 +25,7 @@ impl OpenVpnProvider for AirVPN {
 
     fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
         //NOTE: not required for AirVPN
-        Ok(("".to_string(), "".to_string()))
+        Ok(("unused".to_string(), "unused".to_string()))
     }
 
     fn auth_file_path(&self) -> anyhow::Result<PathBuf> {
