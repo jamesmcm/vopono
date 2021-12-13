@@ -83,8 +83,12 @@ pub struct VpnServer {
 // TODO: Can we avoid storing plaintext passwords?
 // TODO: Allow not storing credentials
 // OpenVPN only
-pub fn verify_auth(provider: Box<dyn OpenVpnProvider>) -> anyhow::Result<PathBuf> {
+pub fn verify_auth(provider: Box<dyn OpenVpnProvider>) -> anyhow::Result<Option<PathBuf>> {
     let auth_file = provider.auth_file_path()?;
+    if auth_file.is_none() {
+        return Ok(None);
+    }
+    let auth_file = auth_file.unwrap();
     let file = File::open(&auth_file);
     match file {
         Ok(f) => {
@@ -94,7 +98,7 @@ pub fn verify_auth(provider: Box<dyn OpenVpnProvider>) -> anyhow::Result<PathBuf
             // TODO: If thise fail, re-gen auth file
             let _username = iter.next().with_context(|| "No username")??;
             let _password = iter.next().with_context(|| "No password")??;
-            Ok(auth_file)
+            Ok(Some(auth_file))
         }
         Err(_) => {
             debug!(
@@ -104,11 +108,11 @@ pub fn verify_auth(provider: Box<dyn OpenVpnProvider>) -> anyhow::Result<PathBuf
 
             // Write OpenVPN credentials file
             let (user, pass) = provider.prompt_for_auth()?;
-            let mut outfile = File::create(provider.auth_file_path()?)?;
+            let mut outfile = File::create(provider.auth_file_path()?.unwrap())?;
             write!(outfile, "{}\n{}", user, pass)?;
 
             info!("Credentials written to: {}", auth_file.to_string_lossy());
-            Ok(auth_file)
+            Ok(Some(auth_file))
         }
     }
 }

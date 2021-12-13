@@ -7,7 +7,7 @@ use std::fmt::Display;
 use std::fs::create_dir_all;
 use std::fs::File;
 use std::io::{Cursor, Read, Write};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -18,9 +18,7 @@ use rustc_serialize::json::Json;
 
 impl OpenVpnProvider for AirVPN {
     fn provider_dns(&self) -> Option<Vec<IpAddr>> {
-        Some(vec![
-            IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), // TODO AirVPN provider dns
-        ])
+        None
     }
 
     fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
@@ -28,9 +26,9 @@ impl OpenVpnProvider for AirVPN {
         Ok(("unused".to_string(), "unused".to_string()))
     }
 
-    fn auth_file_path(&self) -> anyhow::Result<PathBuf> {
+    fn auth_file_path(&self) -> anyhow::Result<Option<PathBuf>> {
         //NOTE: not required for AirVPN auth is inside ovpn file
-        Ok(self.openvpn_dir()?.join("unused.txt"))
+        Ok(None)
     }
 
     fn create_openvpn_config(&self) -> anyhow::Result<()> {
