@@ -8,7 +8,7 @@ as normal.
 vopono includes built-in killswitches for both Wireguard and OpenVPN.
 
 Currently Mullvad, AzireVPN, MozillaVPN, TigerVPN, ProtonVPN, iVPN,
-NordVPN, HMA (HideMyAss) and PrivateInternetAccess are supported directly, with custom
+NordVPN, AirVPN, HMA (HideMyAss) and PrivateInternetAccess are supported directly, with custom
 configuration files also supported with the `--custom` argument.
 
 For custom connections the OpenConnect and OpenFortiVPN protocols are
@@ -34,6 +34,7 @@ lynx all running through different VPN connections:
 | MozillaVPN            | ❌              | ✅                |
 | NordVPN               | ✅              | ❌                |
 | HMA (HideMyAss)       | ✅              | ❌                |
+| airVPN                | ✅              | ❌                |
 
 ## Usage
 
@@ -171,7 +172,6 @@ $ rustc --version
 - Port forwarding from inside the network namespace to the host (e.g.
   for running `transmission-daemon`) does not work correctly when vopono
   is run as root - see issue [#84](https://github.com/jamesmcm/vopono/issues/84)
-
 
 ## License
 

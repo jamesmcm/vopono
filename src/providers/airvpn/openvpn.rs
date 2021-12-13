@@ -2,6 +2,7 @@ use super::AirVPN;
 use super::{ConfigurationChoice, OpenVpnProvider};
 use crate::util::delete_all_files_in_dir;
 use log::debug;
+use std::env;
 use std::fmt::Display;
 use std::fs::create_dir_all;
 use std::fs::File;
@@ -11,7 +12,6 @@ use std::path::PathBuf;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use zip::ZipArchive;
-use std::env;
 
 extern crate rustc_serialize;
 use rustc_serialize::json::Json;
@@ -34,7 +34,7 @@ impl OpenVpnProvider for AirVPN {
     }
 
     fn create_openvpn_config(&self) -> anyhow::Result<()> {
-        let use_country_code :bool = true;
+        let use_country_code: bool = true;
         let config_choice = ConfigType::choose_one()?;
         let client = reqwest::blocking::Client::new();
 
@@ -45,20 +45,37 @@ impl OpenVpnProvider for AirVPN {
 
         let status_response_json = Json::from_str(&status_response).unwrap();
         let status_response_obj = status_response_json.as_object().unwrap();
-        let all_servers_array = status_response_obj.get("servers").unwrap().as_array().unwrap();
+        let all_servers_array = status_response_obj
+            .get("servers")
+            .unwrap()
+            .as_array()
+            .unwrap();
         let mut request_server_names = "".to_string();
         for item in all_servers_array {
-            let public_name = item.as_object().unwrap().get("public_name").unwrap().as_string().unwrap();
+            let public_name = item
+                .as_object()
+                .unwrap()
+                .get("public_name")
+                .unwrap()
+                .as_string()
+                .unwrap();
             if !request_server_names.is_empty() {
                 // separate server names with '%2C'
                 request_server_names.push_str("%2C");
             }
-            request_server_names.push_str(&public_name);
+            request_server_names.push_str(public_name);
         }
 
-        let generator_url = config_choice.url()?.replace("{servers}", request_server_names.as_str());
-        let zipfile = client.get(generator_url)
-            .header("API-KEY", env::var("AIRVPN_API_KEY").expect("AIRVPN_API_KEY is not defined in your environment variables"))
+        let generator_url = config_choice
+            .url()?
+            .replace("{servers}", request_server_names.as_str());
+        let zipfile = client
+            .get(generator_url)
+            .header(
+                "API-KEY",
+                env::var("AIRVPN_API_KEY")
+                    .expect("AIRVPN_API_KEY is not defined in your environment variables"),
+            )
             .send()?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
         let openvpn_dir = self.openvpn_dir()?;
@@ -108,7 +125,7 @@ impl OpenVpnProvider for AirVPN {
 #[derive(EnumIter, PartialEq)]
 enum ConfigType {
     UDP443,
-    TCP443
+    TCP443,
 }
 
 impl ConfigType {
@@ -147,9 +164,12 @@ impl ConfigurationChoice for ConfigType {
         ConfigType::iter().collect()
     }
     fn description(&self) -> Option<String> {
-        Some( match self {
-            Self::UDP443 => "Protocol: UDP, Port: 443, Entry IP: 1",
-            Self::TCP443 => "Protocol: TCP, Port: 443, Entry IP: 1",
-        }.to_string())
+        Some(
+            match self {
+                Self::UDP443 => "Protocol: UDP, Port: 443, Entry IP: 1",
+                Self::TCP443 => "Protocol: TCP, Port: 443, Entry IP: 1",
+            }
+            .to_string(),
+        )
     }
 }
