@@ -208,7 +208,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             get_active_interfaces()?
                 .into_iter()
                 .next()
-                .ok_or_else(|| anyhow!("No active network interface"))?,
+                .ok_or_else(|| anyhow!("No active network interface - consider overriding network interface selection with -i argument"))?,
         )?),
     }?;
     debug!("Interface: {}", &interface.name);

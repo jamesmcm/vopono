@@ -99,8 +99,7 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
             }
         });
 
-    path.map(|x| x.into())
-        .ok_or_else(|| anyhow!("Could not find valid config directory!"))
+    path.ok_or_else(|| anyhow!("Could not find valid config directory!"))
 }
 
 pub fn vopono_dir() -> anyhow::Result<PathBuf> {
