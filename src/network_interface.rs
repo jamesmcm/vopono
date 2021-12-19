@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Context};
-use log::debug;
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::str::FromStr;
@@ -19,15 +19,22 @@ impl FromStr for NetworkInterface {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> anyhow::Result<Self> {
-        let interfaces = get_active_interfaces()?;
+        let interfaces = get_active_interfaces();
 
-        if interfaces.iter().any(|x| x == s) {
-            Ok(Self {
-                name: String::from(s),
-            })
-        } else {
-            Err(anyhow!("{} is not an active interface!", s))
+        let cond = interfaces.map(|is| is.iter().any(|x| x == s));
+
+        match cond {
+            Ok(true) => {}
+            _ => {
+                warn!(
+                    "{} may not be an active network interface, using anyway since manually set",
+                    s
+                );
+            }
         }
+        Ok(Self {
+            name: String::from(s),
+        })
     }
 }
 
@@ -51,6 +58,6 @@ pub fn get_active_interfaces() -> anyhow::Result<Vec<String>> {
     if !out.is_empty() {
         Ok(out)
     } else {
-        Err(anyhow!("Failed to get active network interface"))
+        Err(anyhow!("Failed to get active network interface - consider using -i argument to override network interface"))
     }
 }
