@@ -1,4 +1,6 @@
 #![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::large_enum_variant)]
+#![allow(dead_code)]
 
 mod application_wrapper;
 mod args;
