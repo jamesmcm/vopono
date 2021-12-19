@@ -34,7 +34,7 @@ chrono = "0.4"
 compound_duration = "1"
 ipnet = {version = "2", features = ["serde"]}
 reqwest = {default-features = false, version = "0.11", features = ["blocking", "json", "rustls-tls"]}
-sysinfo = "0.21"
+sysinfo = "0.22"
 base64 = "0.13"
 x25519-dalek = "1"
 strum = "0.23"
