@@ -149,7 +149,7 @@ impl Display for ConfigType {
 
 impl Default for ConfigType {
     fn default() -> Self {
-        Self::TCP443
+        Self::UDP443
     }
 }
 
