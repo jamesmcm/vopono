@@ -1,6 +1,7 @@
 use super::AirVPN;
 use super::{ConfigurationChoice, OpenVpnProvider};
 use crate::util::delete_all_files_in_dir;
+use anyhow::anyhow;
 use log::debug;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -67,13 +68,17 @@ impl OpenVpnProvider for AirVPN {
         let generator_url = config_choice
             .url()?
             .replace("{servers}", request_server_names.as_str());
+
+        // TODO: Add validator that it is lower case, hexadecimal, 40-character string
+        let api_key = env::var("AIRVPN_API_KEY").or_else(|_|
+                dialoguer::Input::<String>::new()
+                .with_prompt("Enter your AirVPN API key (see https://airvpn.org/apisettings/ )")
+            .interact()        ).map_err(|_| {
+                    anyhow!("Cannot generate AirVPN OpenVPN config files: AIRVPN_API_KEY is not defined in your environment variables. Get your key by activating API access in the Client Area at https://airvpn.org/apisettings/")
+                })?.trim().to_string();
         let zipfile = client
             .get(generator_url)
-            .header(
-                "API-KEY",
-                env::var("AIRVPN_API_KEY")
-                    .expect("AIRVPN_API_KEY is not defined in your environment variables"),
-            )
+            .header("API-KEY", api_key)
             .send()?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
         let openvpn_dir = self.openvpn_dir()?;

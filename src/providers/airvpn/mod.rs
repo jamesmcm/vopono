@@ -7,7 +7,7 @@ pub struct AirVPN {}
 
 impl Provider for AirVPN {
     fn alias(&self) -> String {
-        "AirVPN".to_string()
+        "air".to_string()
     }
 
     fn default_protocol(&self) -> Protocol {
