@@ -132,6 +132,12 @@ For Mullvad your OpenVPN credentials are your account code as your username, and
 For ProtonVPN you can view your OpenVPN credentials [online on your account dashboard](https://account.protonvpn.com/account#openvpn).
 The OpenVPN credentials are **not** the same as your ProtonVPN account credentials.
 
+For AirVPN the OpenVPN connection uses a key embedded in the config
+files, however you will need to provide your AirVPN API key and enable
+API access in [the client area webpage](https://airvpn.org/apisettings/) when running `vopono sync`.
+Note that ports for forwarding must also be added in [the client area webpage](https://airvpn.org/ports/), 
+and it is also possible to configure the VPN tunnel [DNS settings there](https://airvpn.org/dns/).
+
 #### TCP support and custom ports
 
 By default vopono uses the UDP configuration of the VPN providers.
@@ -385,6 +391,9 @@ For iVPN port forwarding also works the same way, however it is **only
 supported for OpenVPN** on iVPN's side. So remember to pass
 `--protocol openvpn -o PORTNUMBER` when trying it! Enable port
 forwarding in the [Port Forwarding page in the iVPN client area](https://www.ivpn.net/clientarea/vpn/273887).
+
+For AirVPN you must enable the port in [the client area webpage](https://airvpn.org/ports/),
+and then use `--protocol openvpn -o PORTNUMBER` as for iVPN.
 
 ## Dependencies
 

@@ -34,7 +34,7 @@ lynx all running through different VPN connections:
 | MozillaVPN            | ❌              | ✅                |
 | NordVPN               | ✅              | ❌                |
 | HMA (HideMyAss)       | ✅              | ❌                |
-| airVPN                | ✅              | ❌                |
+| AirVPN                | ✅              | ❌                |
 
 ## Usage
 
