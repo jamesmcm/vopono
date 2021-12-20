@@ -69,7 +69,7 @@ fn main() -> anyhow::Result<()> {
             } else {
                 debug!("pactl not found, will not set PULSE_SERVER");
             }
-            elevate_privileges()?;
+            elevate_privileges(app.askpass)?;
             clean_dead_namespaces()?;
             exec::exec(cmd)?
         }

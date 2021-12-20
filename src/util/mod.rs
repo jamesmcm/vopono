@@ -309,7 +309,7 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn elevate_privileges() -> anyhow::Result<()> {
+pub fn elevate_privileges(askpass: bool) -> anyhow::Result<()> {
     use signal_hook::{consts::SIGINT, flag};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
@@ -322,13 +322,15 @@ pub fn elevate_privileges() -> anyhow::Result<()> {
         let terminated = Arc::new(AtomicBool::new(false));
         flag::register(SIGINT, Arc::clone(&terminated))?;
 
+        let sudo_flags = if askpass { "-AE" } else { "-E" };
+
         debug!("Args: {:?}", &args);
         // status blocks until the process has ended
         let _status = Command::new("sudo")
-            .arg("-E")
+            .arg(sudo_flags)
             .args(args.clone())
             .status()
-            .context(format!("Executing sudo -E {:?}", &args))?;
+            .context(format!("Executing sudo {} {:?}", sudo_flags, &args))?;
 
         // Deprecated - do we need to handle flag here?
         // cleanup::cleanup_signal(SIGINT)?;

@@ -16,6 +16,10 @@ pub struct App {
     #[structopt(short = "v", long = "verbose")]
     pub verbose: bool,
 
+    /// read sudo password from program specified in SUDO_ASKPASS environment variable
+    #[structopt(short = "A", long = "askpass")]
+    pub askpass: bool,
+
     #[structopt(subcommand)]
     pub cmd: Command,
 }
