@@ -2,6 +2,8 @@ use super::AirVPN;
 use super::{ConfigurationChoice, OpenVpnProvider};
 use crate::util::delete_all_files_in_dir;
 use log::debug;
+use serde_json::Value;
+use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
 use std::fs::create_dir_all;
@@ -12,9 +14,6 @@ use std::path::PathBuf;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use zip::ZipArchive;
-
-extern crate rustc_serialize;
-use rustc_serialize::json::Json;
 
 impl OpenVpnProvider for AirVPN {
     fn provider_dns(&self) -> Option<Vec<IpAddr>> {
@@ -41,13 +40,14 @@ impl OpenVpnProvider for AirVPN {
             .send()?
             .text()?;
 
-        let status_response_json = Json::from_str(&status_response).unwrap();
-        let status_response_obj = status_response_json.as_object().unwrap();
-        let all_servers_array = status_response_obj
+        let deserialized_json: HashMap<String, Value> =
+            serde_json::from_str(&status_response).unwrap();
+        let all_servers_array = deserialized_json
             .get("servers")
             .unwrap()
             .as_array()
             .unwrap();
+
         let mut request_server_names = "".to_string();
         for item in all_servers_array {
             let public_name = item
@@ -55,13 +55,13 @@ impl OpenVpnProvider for AirVPN {
                 .unwrap()
                 .get("public_name")
                 .unwrap()
-                .as_string()
-                .unwrap();
+                .to_string()
+                .replace("\"", "");
             if !request_server_names.is_empty() {
                 // separate server names with '%2C'
                 request_server_names.push_str("%2C");
             }
-            request_server_names.push_str(public_name);
+            request_server_names.push_str(&public_name);
         }
 
         let generator_url = config_choice
