@@ -23,8 +23,8 @@ impl OpenVpnProvider for AzireVPN {
         self.request_userpass()
     }
 
-    fn auth_file_path(&self) -> anyhow::Result<PathBuf> {
-        Ok(self.openvpn_dir()?.join("auth.txt"))
+    fn auth_file_path(&self) -> anyhow::Result<Option<PathBuf>> {
+        Ok(Some(self.openvpn_dir()?.join("auth.txt")))
     }
 
     fn create_openvpn_config(&self) -> anyhow::Result<()> {
@@ -57,12 +57,15 @@ impl OpenVpnProvider for AzireVPN {
 
         // Write OpenVPN credentials file
         let (user, pass) = self.prompt_for_auth()?;
-        let mut outfile = File::create(self.auth_file_path()?)?;
-        write!(outfile, "{}\n{}", user, pass)?;
-        info!(
-            "AzireVPN OpenVPN config written to {}",
-            openvpn_dir.display()
-        );
+        let auth_file = self.auth_file_path()?;
+        if auth_file.is_some() {
+            let mut outfile = File::create(auth_file.unwrap())?;
+            write!(outfile, "{}\n{}", user, pass)?;
+            info!(
+                "AzireVPN OpenVPN config written to {}",
+                openvpn_dir.display()
+            );
+        }
         Ok(())
     }
 }

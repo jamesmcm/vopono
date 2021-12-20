@@ -52,8 +52,8 @@ impl OpenVpnProvider for Mullvad {
         Ok((username, "m".to_string()))
     }
 
-    fn auth_file_path(&self) -> anyhow::Result<PathBuf> {
-        Ok(self.openvpn_dir()?.join("mullvad_userpass.txt"))
+    fn auth_file_path(&self) -> anyhow::Result<Option<PathBuf>> {
+        Ok(Some(self.openvpn_dir()?.join("mullvad_userpass.txt")))
     }
 
     fn create_openvpn_config(&self) -> anyhow::Result<()> {
@@ -179,8 +179,11 @@ impl OpenVpnProvider for Mullvad {
 
         // Write OpenVPN credentials file
         let (user, pass) = self.prompt_for_auth()?;
-        let mut outfile = File::create(self.auth_file_path()?)?;
-        write!(outfile, "{}\n{}", user, pass)?;
+        let auth_file = self.auth_file_path()?;
+        if auth_file.is_some() {
+            let mut outfile = File::create(auth_file.unwrap())?;
+            write!(outfile, "{}\n{}", user, pass)?;
+        }
         Ok(())
     }
 }

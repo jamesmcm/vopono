@@ -262,7 +262,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             Protocol::OpenVpn => {
                 // Handle authentication check
                 let auth_file = if provider != VpnProvider::Custom {
-                    Some(verify_auth(provider.get_dyn_openvpn_provider()?)?)
+                    verify_auth(provider.get_dyn_openvpn_provider()?)?
                 } else {
                     None
                 };
