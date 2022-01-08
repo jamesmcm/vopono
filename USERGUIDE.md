@@ -180,11 +180,15 @@ $ vopono -v exec --custom ~/custom_wireguard.conf --protocol wireguard "firefox"
 ```bash
 $ vopono -v exec --custom ./custom_openvpn.ovpn --protocol openvpn "firefox"
 ```
+> To use a custom provider which requires a username and password, supply an authentication file with the username and password.
+> Reference the authentication file in the ovpn configuration file with `auth-user-pass auth.txt` appended to the top of the file.
 
 Note that in the OpenVPN case the vopono will execute OpenVPN from the same
 directory as the config file itself. So any accompanying files (CA certificates, authentication
 files, etc.) must be in the same directory with the file if using
 relative paths in the config file.
+
+
 
 ### OpenFortiVPN
 
