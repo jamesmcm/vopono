@@ -68,12 +68,21 @@ impl Wireguard {
             )?;
         }
         // TODO: Avoid hacky regex for valid toml
-        let re = Regex::new(r"(?P<key>[^\s]+) = (?P<value>[^\s]+)")?;
+        let re = Regex::new(
+            r"(?m)^[[:blank:]]*(?P<key>[^\s]+)[[:blank:]]*=[[:blank:]]*(?P<value>[^\r\n]+?)[[:blank:]]*\r?$",
+        )?;
         let mut config_string = re
             .replace_all(&config_string, "$key = \"$value\"")
             .to_string();
         config_string.push('\n');
-        let config: WireguardConfig = toml::from_str(&config_string)?;
+        let config: WireguardConfig = toml::from_str(&config_string)
+            .map_err(anyhow::Error::from)
+            .with_context(|| {
+                format!(
+                    "Failed while converting Wireguard config to TOML. Result may be malformed:\n\n{}",
+                    config_string
+                )
+            })?;
         debug!("TOML config: {:?}", config);
         let if_name = namespace.name[7..namespace.name.len().min(20)].to_string();
         assert!(
