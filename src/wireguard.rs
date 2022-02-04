@@ -69,7 +69,7 @@ impl Wireguard {
         }
         // TODO: Avoid hacky regex for valid toml
         let re = Regex::new(
-            r"(?m)^[[:blank:]]*(?P<key>[^\s]+)[[:blank:]]*=[[:blank:]]*(?P<value>[^\r\n]+?)[[:blank:]]*\r?$",
+            r"(?m)^[[:blank:]]*(?P<key>[^\s=#]+)[[:blank:]]*=[[:blank:]]*(?P<value>[^\r\n]+?)[[:blank:]]*\r?$",
         )?;
         let mut config_string = re
             .replace_all(&config_string, "$key = \"$value\"")
