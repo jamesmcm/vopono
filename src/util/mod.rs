@@ -18,7 +18,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
-use sysinfo::{ProcessExt, ProcessRefreshKind, RefreshKind, System, SystemExt};
+use sysinfo::{PidExt, ProcessExt, ProcessRefreshKind, RefreshKind, System, SystemExt};
 use users::{get_current_uid, get_user_by_uid};
 use walkdir::WalkDir;
 
@@ -188,13 +188,13 @@ pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
 pub fn check_process_running(pid: u32) -> bool {
     let s =
         System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
-    s.process(pid as i32).is_some()
+    s.process(sysinfo::Pid::from_u32(pid)).is_some()
 }
 
 pub fn get_all_running_pids() -> Vec<u32> {
     let s =
         System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
-    s.processes().keys().map(|x| *x as u32).collect()
+    s.processes().keys().map(|x| x.as_u32()).collect()
 }
 
 pub fn get_all_running_process_names() -> Vec<String> {
