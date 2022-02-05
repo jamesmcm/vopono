@@ -224,7 +224,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     } else {
         // Config file required for non OpenConnect custom providers
         if protocol != Protocol::OpenConnect {
-            Some(command.custom_config.expect("No custom config provided"))
+            Some(custom_config.expect("No custom config provided"))
         } else {
             None
         }
