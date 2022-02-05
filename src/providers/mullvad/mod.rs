@@ -68,11 +68,11 @@ impl Mullvad {
 
 impl ShadowsocksProvider for Mullvad {
     // Hardcoded password from documentation
+    // https://mullvad.net/en/help/shadowsocks-openvpn-linux/
     fn password(&self) -> String {
-        "23#dfsbbb".to_string()
+        "mullvad".to_string()
     }
-    // TODO: Make this use enum
     fn encrypt_method(&self) -> String {
-        "chacha20".to_string()
+        "aes-256-gcm".to_string()
     }
 }
