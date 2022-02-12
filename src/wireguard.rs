@@ -131,8 +131,8 @@ impl Wireguard {
         namespace.exec(&["ip", "link", "set", "mtu", "1420", "up", "dev", &if_name])?;
 
         let dns: Vec<IpAddr> = dns
-            .map(|x| x.clone())
-            .or(config.interface.dns.clone())
+            .cloned()
+            .or_else(|| config.interface.dns.clone())
             .unwrap_or_else(|| {
                 warn!("Found no DNS settings in Wireguard config, using 8.8.8.8");
                 vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]

@@ -42,7 +42,6 @@ impl OpenVpn {
             ));
         }
 
-        let handle;
         let log_file_str = format!("/etc/netns/{}/openvpn.log", &netns.name);
         {
             File::create(&log_file_str)?;
@@ -95,7 +94,7 @@ impl OpenVpn {
         debug!("Found remotes: {:?}", &remotes);
         let working_dir = PathBuf::from(config_file_path.parent().unwrap());
 
-        handle = netns
+        let handle = netns
             .exec_no_block(&command_vec, None, true, false, Some(working_dir))
             .context("Failed to launch OpenVPN - is openvpn installed?")?;
         let id = handle.id();
@@ -559,7 +558,7 @@ pub fn get_remotes_from_config(path: &Path) -> anyhow::Result<Vec<Remote>> {
 
     let re2 = Regex::new(r"proto ([a-z\-]+)")?;
     let mut caps2 = re2.captures_iter(&file_string);
-    let default_proto = caps2.next().map(|x| x.get(1)).flatten();
+    let default_proto = caps2.next().and_then(|x| x.get(1));
 
     for cap in caps {
         let proto = match (cap.get(3), default_proto) {

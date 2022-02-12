@@ -102,7 +102,7 @@ impl OpenVpnProvider for NordVPN {
                             debug!("Could not map country code to name: {}", code.as_str());
                             fname.to_string()
                         } else {
-                            let server_name = server_name.replace("-", "_");
+                            let server_name = server_name.replace('-', "_");
                             format!("{}-{}.ovpn", country.unwrap(), server_name)
                         }
                     } else {

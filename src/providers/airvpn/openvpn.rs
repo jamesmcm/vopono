@@ -57,7 +57,7 @@ impl OpenVpnProvider for AirVPN {
                 .get("public_name")
                 .unwrap()
                 .to_string()
-                .replace("\"", "");
+                .replace('\"', "");
             if !request_server_names.is_empty() {
                 // separate server names with '%2C'
                 request_server_names.push_str("%2C");

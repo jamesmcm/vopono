@@ -29,8 +29,6 @@ impl OpenConnect {
             ));
         }
 
-        let handle;
-
         let creds = {
             if let Some(config_file) = config_file {
                 let config_file_path = config_file.canonicalize().context("Invalid path given")?;
@@ -45,7 +43,7 @@ impl OpenConnect {
         let user_arg = format!("--user={}", creds.0);
         let command_vec = (&["openconnect", &user_arg, "--passwd-on-stdin", server]).to_vec();
 
-        handle = netns
+        let handle = netns
             .exec_no_block(&command_vec, None, false, false, None)
             .context("Failed to launch OpenConnect - is openconnect installed?")?;
         let id = handle.id();

@@ -31,8 +31,6 @@ impl OpenFortiVpn {
             ));
         }
 
-        let mut handle;
-
         info!("Launching OpenFortiVPN...");
         // Must run as root - https://github.com/adrienverge/openfortivpn/issues/650
         let command_vec = (&[
@@ -48,7 +46,7 @@ impl OpenFortiVpn {
         std::fs::remove_file(&pppd_log).ok();
 
         // TODO - better handle forwarding output when blocking on password entry (no newline!)
-        handle = netns
+        let mut handle = netns
             .exec_no_block(&command_vec, None, false, true, None)
             .context("Failed to launch OpenFortiVPN - is openfortivpn installed?")?;
         let stdout = handle.stdout.take().unwrap();
