@@ -124,7 +124,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             .unwrap_or_else(|| get_config_file_protocol(path));
         provider = VpnProvider::Custom;
         // Encode filename with base58 so we can fit it within 16 chars for the veth pair name
-        let sname = bs58::encode(&path.to_str().unwrap().to_string()).into_string();
+        let sname = bs58::encode(&path.to_str().unwrap()).into_string();
 
         server_name = sname[0..std::cmp::min(11, sname.len())].to_string();
     } else {
@@ -273,8 +273,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                         provider
                             .get_dyn_openvpn_provider()
                             .ok()
-                            .map(|x| x.provider_dns())
-                            .flatten()
+                            .and_then(|x| x.provider_dns())
                     })
                     .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 

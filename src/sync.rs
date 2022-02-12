@@ -2,18 +2,18 @@ use super::providers::VpnProvider;
 use super::util::set_config_permissions;
 use super::vpn::Protocol;
 use anyhow::bail;
+use clap::ArgEnum;
 use dialoguer::MultiSelect;
 use log::{error, info};
-use std::str::FromStr;
 
 pub fn sync_menu() -> anyhow::Result<()> {
-    let variants = VpnProvider::variants()
+    let variants = VpnProvider::value_variants()
         .iter()
-        .filter(|x| **x != "Custom")
+        .filter(|x| **x != VpnProvider::Custom)
         .map(|x| x.to_string())
         .collect::<Vec<String>>();
 
-    let selection = MultiSelect::new()
+    let selection: Vec<usize> = MultiSelect::new()
         .with_prompt("Which VPN providers do you wish to synchronise? Press Space to select and Enter to continue")
         .items(variants.as_slice())
         .interact()?;
@@ -24,8 +24,7 @@ pub fn sync_menu() -> anyhow::Result<()> {
 
     for provider in selection
         .into_iter()
-        .map(|x| VpnProvider::from_str(&variants[x]))
-        .flatten()
+        .flat_map(|x| VpnProvider::from_str(&variants[x], true))
     {
         synch(provider, None)?;
     }

@@ -12,7 +12,7 @@ mod tigervpn;
 use crate::util::vopono_dir;
 use crate::vpn::Protocol;
 use anyhow::anyhow;
-use clap::arg_enum;
+use clap::ArgEnum;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::net::IpAddr;
@@ -29,9 +29,9 @@ use std::string::ToString;
 // Methods should use dialoguer to request authentication, and reqwest for any HTTP requests
 // Should prompt user for any user input - i.e. port + protocol choice
 
-arg_enum! {
 /// enum used to accept VPN Provider as an argument
-#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, ArgEnum)]
+#[clap(rename_all = "verbatim")]
 pub enum VpnProvider {
     PrivateInternetAccess,
     Mullvad,
@@ -45,6 +45,11 @@ pub enum VpnProvider {
     HMA,
     Custom,
 }
+
+impl std::fmt::Display for VpnProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        std::fmt::Display::fmt(self.to_possible_value().unwrap().get_name(), f)
+    }
 }
 
 // Do this since we can't downcast from Provider to other trait objects

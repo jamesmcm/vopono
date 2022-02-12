@@ -32,7 +32,7 @@ pub fn print_configs(cmd: ServersCommand) -> anyhow::Result<()> {
     }
 
     // Use get_configs_from_alias
-    let prefix = cmd.prefix.unwrap_or_else(String::new);
+    let prefix = cmd.prefix.unwrap_or_default();
     println!("provider\tprotocol\tconfig_file");
     if (cmd.protocol.is_none() && provider.get_dyn_openvpn_provider().is_ok())
         || cmd.protocol == Some(Protocol::OpenVpn)

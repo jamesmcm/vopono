@@ -149,7 +149,7 @@ impl WireguardProvider for IVPN {
         let interface = WireguardInterface {
             private_key: keypair.private,
             address: vec![ipnet],
-            dns: vec![IpAddr::from(dns)],
+            dns: Some(vec![IpAddr::from(dns)]),
         };
 
         let port = request_port()?;

@@ -78,6 +78,11 @@ $ vopono exec --provider mullvad --server sweden --protocol wireguard "transmiss
 The server prefix will be searched against available servers (and
 country names) and a random one will be chosen (and reported in the terminal).
 
+Note that vopono expects the `AllowedIPs` setting to allow all traffic,
+since all traffic in the vopono network namespace will be forced through
+this tunnel (traffic via the host is deliberately blocked to enforce the
+killswitch). e.g. it should be `AllowedIPs = 0.0.0.0/0,::/0`
+
 #### Custom Settings
 
 The sync menu will prompt you for any custom settings (i.e. ports used,

@@ -1,7 +1,7 @@
 use super::providers::ConfigurationChoice;
 use crate::providers::OpenVpnProvider;
 use anyhow::{anyhow, Context};
-use clap::arg_enum;
+use clap::ArgEnum;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -61,14 +61,19 @@ impl Display for OpenVpnProtocol {
     }
 }
 
-arg_enum! {
-    #[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, ArgEnum)]
+#[clap(rename_all = "verbatim")]
 pub enum Protocol {
     OpenVpn,
     Wireguard,
     OpenConnect,
     OpenFortiVpn,
 }
+
+impl std::fmt::Display for Protocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        std::fmt::Display::fmt(self.to_possible_value().unwrap().get_name(), f)
+    }
 }
 
 #[derive(Serialize, Deserialize)]

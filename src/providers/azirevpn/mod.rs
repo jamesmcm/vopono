@@ -39,7 +39,7 @@ struct ConnectResponse {
 #[derive(Deserialize, Debug, Clone)]
 struct WgResponse {
     #[serde(alias = "DNS", deserialize_with = "de_vec_ipaddr")]
-    dns: Vec<IpAddr>,
+    dns: Option<Vec<IpAddr>>,
     #[serde(alias = "Address", deserialize_with = "de_vec_ipnet")]
     address: Vec<IpNet>,
     #[serde(alias = "PublicKey")]

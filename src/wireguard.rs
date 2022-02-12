@@ -7,9 +7,9 @@ use log::{debug, error, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::net::IpAddr;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -130,9 +130,15 @@ impl Wireguard {
         // TODO: Handle custom MTU
         namespace.exec(&["ip", "link", "set", "mtu", "1420", "up", "dev", &if_name])?;
 
-        let dns = dns.unwrap_or(&config.interface.dns);
+        let dns: Vec<IpAddr> = dns
+            .cloned()
+            .or_else(|| config.interface.dns.clone())
+            .unwrap_or_else(|| {
+                warn!("Found no DNS settings in Wireguard config, using 8.8.8.8");
+                vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]
+            });
         // TODO: DNS suffixes?
-        namespace.dns_config(dns, &[])?;
+        namespace.dns_config(&dns, &[])?;
         let fwmark = "51820";
         namespace.exec(&["wg", "set", &if_name, "fwmark", fwmark])?;
 
@@ -484,7 +490,7 @@ pub struct WireguardInterface {
     #[serde(rename = "Address", deserialize_with = "de_vec_ipnet")]
     pub address: Vec<IpNet>,
     #[serde(rename = "DNS", deserialize_with = "de_vec_ipaddr")]
-    pub dns: Vec<IpAddr>,
+    pub dns: Option<Vec<IpAddr>>,
 }
 
 #[derive(Deserialize, Debug, Serialize)]
@@ -524,18 +530,25 @@ where
     }
 }
 
-pub fn de_vec_ipaddr<'de, D>(deserializer: D) -> Result<Vec<IpAddr>, D::Error>
+pub fn de_vec_ipaddr<'de, D>(deserializer: D) -> Result<Option<Vec<IpAddr>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let raw = String::deserialize(deserializer)?;
+    let raw = match String::deserialize(deserializer) {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("Missing optional DNS field in Wireguard config - serde");
+            debug!("serde: {:?}", e);
+            return Ok(None);
+        }
+    };
     debug!("Deserializing: {} to Vec<IpAddr>", raw);
     let strings = raw.split(',');
     match strings
         .map(|x| x.trim().parse::<IpAddr>())
         .collect::<Result<Vec<IpAddr>, _>>()
     {
-        Ok(x) => Ok(x),
+        Ok(x) => Ok(Some(x)),
         Err(x) => Err(serde::de::Error::custom(anyhow!(
             "Wireguard IpAddr deserialisation error: {:?}",
             x
