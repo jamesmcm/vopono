@@ -90,7 +90,7 @@ impl WireguardProvider for Mullvad {
                 IpNet::from(wg_peer.ipv4_address),
                 IpNet::from(wg_peer.ipv6_address),
             ],
-            dns: vec![IpAddr::from(dns)],
+            dns: Some(vec![IpAddr::from(dns)]),
         };
 
         let port = request_port()?;

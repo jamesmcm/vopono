@@ -25,11 +25,11 @@ mod veth_pair;
 mod vpn;
 mod wireguard;
 
+use clap::Parser;
 use list::output_list;
 use list_configs::print_configs;
 use log::{debug, warn, LevelFilter};
 use netns::NetworkNamespace;
-use structopt::StructOpt;
 use sync::{sync_menu, synch};
 use util::clean_dead_locks;
 use util::clean_dead_namespaces;
@@ -41,7 +41,7 @@ use which::which;
 
 fn main() -> anyhow::Result<()> {
     // Get struct of args using structopt
-    let app = args::App::from_args();
+    let app = args::App::parse();
 
     // Set up logging
     let mut builder = pretty_env_logger::formatted_timed_builder();

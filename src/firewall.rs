@@ -1,13 +1,12 @@
 use crate::netns::NetworkNamespace;
-use clap::arg_enum;
+use clap::ArgEnum;
 use serde::{Deserialize, Serialize};
 
-arg_enum! {
-    #[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone, Copy, ArgEnum)]
+#[clap(rename_all = "verbatim")]
 pub enum Firewall {
     IpTables,
     NfTables,
-}
 }
 
 pub fn disable_ipv6(netns: &NetworkNamespace, firewall: Firewall) -> anyhow::Result<()> {
