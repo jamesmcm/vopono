@@ -158,7 +158,11 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn add_routing(&mut self, target_subnet: u8, hosts: Option<Vec<IpAddr>>) -> anyhow::Result<()> {
+    pub fn add_routing(
+        &mut self,
+        target_subnet: u8,
+        hosts: Option<Vec<IpAddr>>,
+    ) -> anyhow::Result<()> {
         // TODO: Handle case where IP address taken in better way i.e. don't just change subnet
         let veth_dest = &self
             .veth_pair
@@ -212,7 +216,12 @@ impl NetworkNamespace {
                     "dev",
                     veth_source,
                 ])
-                .with_context(|| format!("Failed to assign hosts route to veth source: {}", veth_source))?;
+                .with_context(|| {
+                    format!(
+                        "Failed to assign hosts route to veth source: {}",
+                        veth_source
+                    )
+                })?;
             }
         }
 
@@ -228,8 +237,18 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn dns_config(&mut self, server: &[IpAddr], suffixes: &[&str], hosts_entries: Option<&Vec<String>>) -> anyhow::Result<()> {
-        self.dns_config = Some(DnsConfig::new(self.name.clone(), server, suffixes, hosts_entries)?);
+    pub fn dns_config(
+        &mut self,
+        server: &[IpAddr],
+        suffixes: &[&str],
+        hosts_entries: Option<&Vec<String>>,
+    ) -> anyhow::Result<()> {
+        self.dns_config = Some(DnsConfig::new(
+            self.name.clone(),
+            server,
+            suffixes,
+            hosts_entries,
+        )?);
         Ok(())
     }
 
