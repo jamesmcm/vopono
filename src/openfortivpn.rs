@@ -21,6 +21,7 @@ impl OpenFortiVpn {
         config_file: PathBuf,
         open_ports: Option<&Vec<u16>>,
         forward_ports: Option<&Vec<u16>>,
+        hosts_entries: Option<&Vec<String>>,
         firewall: Firewall,
     ) -> anyhow::Result<Self> {
         if let Err(x) = which::which("openfortivpn") {
@@ -94,7 +95,7 @@ impl OpenFortiVpn {
         let dns_ip: Vec<IpAddr> = (dns.0).into_iter().map(IpAddr::from).collect();
         // TODO: Avoid this meaningless collect
         let suffixes: Vec<&str> = (dns.1).iter().map(|x| x.as_str()).collect();
-        netns.dns_config(dns_ip.as_slice(), suffixes.as_slice())?;
+        netns.dns_config(dns_ip.as_slice(), suffixes.as_slice(), hosts_entries)?;
         // Allow input to and output from open ports (for port forwarding in tunnel)
         if let Some(opens) = open_ports {
             super::util::open_ports(netns, opens.as_slice(), firewall)?;

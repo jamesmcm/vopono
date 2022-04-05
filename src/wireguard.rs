@@ -30,6 +30,7 @@ impl Wireguard {
         firewall: Firewall,
         disable_ipv6: bool,
         dns: Option<&Vec<IpAddr>>,
+        hosts_entries: Option<&Vec<String>>,
     ) -> anyhow::Result<Self> {
         if let Err(x) = which::which("wg") {
             error!("wg binary not found. Is wireguard-tools installed and on PATH?");
@@ -138,7 +139,7 @@ impl Wireguard {
                 vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]
             });
         // TODO: DNS suffixes?
-        namespace.dns_config(&dns, &[])?;
+        namespace.dns_config(&dns, &[], hosts_entries)?;
         let fwmark = "51820";
         namespace.exec(&["wg", "set", &if_name, "fwmark", fwmark])?;
 

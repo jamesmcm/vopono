@@ -250,7 +250,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         let target_subnet = get_target_subnet()?;
         ns.add_loopback()?;
         ns.add_veth_pair()?;
-        ns.add_routing(target_subnet)?;
+        ns.add_routing(target_subnet, command.open_hosts)?;
         ns.add_host_masquerade(target_subnet, interface.clone(), firewall)?;
         ns.add_firewall_exception(
             interface,
@@ -278,7 +278,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
                 // TODO: DNS suffixes?
-                ns.dns_config(&dns, &[])?;
+                ns.dns_config(&dns, &[], command.hosts_entries.as_ref())?;
                 // Check if using Shadowsocks
                 if let Some((ss_host, ss_lport)) =
                     uses_shadowsocks(config_file.as_ref().expect("No config file provided"))?
@@ -329,7 +329,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                         let old_dns = ns.dns_config.take();
                         std::mem::forget(old_dns);
                         // TODO: DNS suffixes?
-                        ns.dns_config(&[newdns], &[])?;
+                        ns.dns_config(&[newdns], &[], command.hosts_entries.as_ref())?;
                     }
                 }
             }
@@ -342,12 +342,13 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     firewall,
                     command.disable_ipv6,
                     base_dns.as_ref(),
+                    command.hosts_entries.as_ref(),
                 )?;
             }
             Protocol::OpenConnect => {
                 let dns = base_dns.unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
                 // TODO: DNS suffixes?
-                ns.dns_config(&dns, &[])?;
+                ns.dns_config(&dns, &[], command.hosts_entries.as_ref())?;
                 ns.run_openconnect(
                     config_file,
                     command.open_ports.as_ref(),
@@ -362,6 +363,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     config_file.expect("No OpenFortiVPN config file provided"),
                     command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
+                    command.hosts_entries.as_ref(),
                     firewall,
                 )?;
             }
