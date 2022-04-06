@@ -92,6 +92,14 @@ pub struct ExecCommand {
     #[clap(long = "dns", short = 'd')]
     pub dns: Option<Vec<IpAddr>>,
 
+    /// List of /etc/hosts entries for the network namespace (e.g. "10.0.1.10 webdav.server01.lan","10.0.1.10 vaultwarden.server01.lan"). For an local host you should also specifiy the open-hosts command
+    #[clap(long = "hosts", use_value_delimiter = true)]
+    pub hosts_entries: Option<Vec<String>>,
+
+    /// List of host ip's to open on network namespace (comma separated)
+    #[clap(long = "open-hosts", use_value_delimiter = true)]
+    pub open_hosts: Option<Vec<IpAddr>>,
+
     /// Disable killswitch
     #[clap(long = "no-killswitch")]
     pub no_killswitch: bool,

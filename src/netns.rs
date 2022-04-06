@@ -158,7 +158,11 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn add_routing(&mut self, target_subnet: u8) -> anyhow::Result<()> {
+    pub fn add_routing(
+        &mut self,
+        target_subnet: u8,
+        hosts: Option<Vec<IpAddr>>,
+    ) -> anyhow::Result<()> {
         // TODO: Handle case where IP address taken in better way i.e. don't just change subnet
         let veth_dest = &self
             .veth_pair
@@ -200,6 +204,27 @@ impl NetworkNamespace {
         ])
         .with_context(|| format!("Failed to assign static IP to veth source: {}", veth_source))?;
 
+        if let Some(my_hosts) = hosts {
+            for host in my_hosts {
+                self.exec(&[
+                    "ip",
+                    "route",
+                    "add",
+                    &format!("{}", host),
+                    "via",
+                    &ip_nosub,
+                    "dev",
+                    veth_source,
+                ])
+                .with_context(|| {
+                    format!(
+                        "Failed to assign hosts route to veth source: {}",
+                        veth_source
+                    )
+                })?;
+            }
+        }
+
         info!(
             "IP address of namespace as seen from host: {}",
             veth_source_ip_nosub
@@ -212,8 +237,18 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn dns_config(&mut self, server: &[IpAddr], suffixes: &[&str]) -> anyhow::Result<()> {
-        self.dns_config = Some(DnsConfig::new(self.name.clone(), server, suffixes)?);
+    pub fn dns_config(
+        &mut self,
+        server: &[IpAddr],
+        suffixes: &[&str],
+        hosts_entries: Option<&Vec<String>>,
+    ) -> anyhow::Result<()> {
+        self.dns_config = Some(DnsConfig::new(
+            self.name.clone(),
+            server,
+            suffixes,
+            hosts_entries,
+        )?);
         Ok(())
     }
 
@@ -267,6 +302,7 @@ impl NetworkNamespace {
         config_file: PathBuf,
         open_ports: Option<&Vec<u16>>,
         forward_ports: Option<&Vec<u16>>,
+        hosts_entries: Option<&Vec<String>>,
         firewall: Firewall,
     ) -> anyhow::Result<()> {
         self.openfortivpn = Some(OpenFortiVpn::run(
@@ -274,6 +310,7 @@ impl NetworkNamespace {
             config_file,
             open_ports,
             forward_ports,
+            hosts_entries,
             firewall,
         )?);
         Ok(())
@@ -308,6 +345,7 @@ impl NetworkNamespace {
         firewall: Firewall,
         disable_ipv6: bool,
         dns: Option<&Vec<IpAddr>>,
+        hosts_entries: Option<&Vec<String>>,
     ) -> anyhow::Result<()> {
         self.wireguard = Some(Wireguard::run(
             self,
@@ -318,6 +356,7 @@ impl NetworkNamespace {
             firewall,
             disable_ipv6,
             dns,
+            hosts_entries,
         )?);
         Ok(())
     }
