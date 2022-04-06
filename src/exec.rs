@@ -44,8 +44,9 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             .read(true)
             .open(&config_path)?;
     }
-    let mut vopono_config_settings = config::Config::default();
-    vopono_config_settings.merge(config::File::from(config_path))?;
+    let vopono_config_settings_builder =
+        config::Config::builder().add_source(config::File::from(config_path));
+    let vopono_config_settings = vopono_config_settings_builder.build()?;
 
     // Assign firewall from args or vopono config file
     let firewall: Firewall = command
