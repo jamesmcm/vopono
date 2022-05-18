@@ -370,6 +370,13 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             }
         }
 
+        // Temporarily set env var referring to this network namespace IP
+        // for the PostUp script and the application:
+        std::env::set_var(
+            "VOPONO_NS_IP",
+            &ns.veth_pair_ips.as_ref().unwrap().namespace_ip.to_string(),
+        );
+
         // Run PostUp script (if any)
         // Temporarily set env var referring to this network namespace name
         if let Some(pucmd) = postup {
@@ -388,6 +395,8 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     let ns = ns.write_lockfile(&command.application)?;
 
     let application = ApplicationWrapper::new(&ns, &command.application, user)?;
+
+    std::env::remove_var("VOPONO_NS_IP");
 
     // Launch TCP proxy server on other threads if forwarding ports
     // TODO: Fix when running as root
