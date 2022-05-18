@@ -111,7 +111,7 @@ impl OpenVpn {
             let x = logfile.read_line(&mut buffer)?;
 
             if x > 0 {
-                debug!("{}", &buffer[pos..].trim());
+                debug!("{}", &buffer[pos..].trim_end());
             }
 
             pos += x;
