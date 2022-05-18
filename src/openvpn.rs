@@ -109,11 +109,12 @@ impl OpenVpn {
         // Tail OpenVPN log file
         loop {
             let x = logfile.read_line(&mut buffer)?;
-            pos += x;
 
             if x > 0 {
-                debug!("{:?}", buffer);
+                debug!("{}", &buffer[pos..].trim());
             }
+
+            pos += x;
 
             if openvpn_dns.is_none() {
                 if let Some(cap) = dns_regex.captures(&buffer) {
