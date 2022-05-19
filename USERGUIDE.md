@@ -59,7 +59,7 @@ The application to run within the namespace also has access to
 `$VOPONO_HOST_IP`, to get the IP address of the host.
 
 Note: These environment variables are currently only available from within
-the application/script to run, not from the command line. So the following
+the application/script to run, not on the command line. So the following
 doesn't work:
 
 `vopono exec {other Vopono options} 'echo "HOST IP: $VOPONO_HOST_IP"'`
@@ -94,8 +94,14 @@ Note these scripts run on the host (outside the network namespace), using the cu
 and with the same user as the final application itself (which can be set
 with the `user` argument or config file entry).
 
-Shell commands (e.g. `echo POSTUP`) and script arguments (e.g. `script.sh arg1 arg1`),
-are currently not possible (resulting in the script to fail).
+Script arguments (e.g. `script.sh arg1 arg1`), are currently not possible, resulting in an error:
+
+```
+$ vopono exec {other Vopono options} --postup 'echo POSTUP' ls
+[...]
+sudo: echo POSTUP: command not found
+[...]
+```
 
 ### Wireguard
 
