@@ -49,6 +49,13 @@ The current network namespace name is provided to the PostUp and PreDown
 scripts in the environment variable `$VOPONO_NS`. It is temporarily set
 when running these scripts only.
 
+Similarly, the network namespace IP address is provided via `$VOPONO_NS_IP`,
+and is available to the PostUp and PreDown scripts, and the application to
+run itself. `$VOPONO_NS_IP` is useful if you'd like to configure a server
+running within the network namespace to listen on its local IP address only
+(see below, for more information on that).
+
+
 ### Host scripts
 
 Host scripts to run just after a network namespace is created and just before it is destroyed,
@@ -266,12 +273,19 @@ Note in the case of `transmission-daemon` the `-a *.*.*.*` argument is
 required to allow external connections to the daemon's web portal (your
 host machine will now count as external to the network namespace).
 
+Instead of listening on `*.*.*.*` you also can listen on `$VOPONO_NS_IP`,
+to listen on an IP address that is only reachable from the same machine,
+the network namespace runs on.
+
 When finished with vopono, you must manually kill the
 `transmission-daemon` since the PID changes (i.e. use `killall`).
 
 By default, vopono runs a small TCP proxy to proxy the ports on your
 host machine to the ports on the network namespace - if you do not want
 this to run use the `--no-proxy` flag.
+
+In this case, you can read the IP of the network namespace from the
+terminal, or use `$VOPONO_NS_IP` to get it (e.g. to use it in a script).
 
 #### systemd service
 

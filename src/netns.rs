@@ -462,6 +462,15 @@ impl Drop for NetworkNamespace {
             // Run PreDown script (if any)
             if let Some(pdcmd) = self.predown.as_ref() {
                 std::env::set_var("VOPONO_NS", &self.name);
+                std::env::set_var(
+                    "VOPONO_NS_IP",
+                    &self
+                        .veth_pair_ips
+                        .as_ref()
+                        .unwrap()
+                        .namespace_ip
+                        .to_string(),
+                );
                 if self.predown_user.is_some() {
                     std::process::Command::new("sudo")
                         .args(&["-Eu", self.predown_user.as_ref().unwrap(), pdcmd])
@@ -471,6 +480,7 @@ impl Drop for NetworkNamespace {
                     std::process::Command::new(&pdcmd).spawn().ok();
                 }
                 std::env::remove_var("VOPONO_NS");
+                std::env::remove_var("VOPONO_NS_IP");
             }
 
             self.openvpn = None;
