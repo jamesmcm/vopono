@@ -55,6 +55,35 @@ run itself. `$VOPONO_NS_IP` is useful if you'd like to configure a server
 running within the network namespace to listen on its local IP address only
 (see below, for more information on that).
 
+The application to run within the namespace also has access to
+`$VOPONO_HOST_IP`, to get the IP address of the host.
+
+Note: These environment variables are currently only available from within
+the application/script to run, not on the command line. So the following
+doesn't work:
+
+`vopono exec {other Vopono options} 'echo "HOST IP: $VOPONO_HOST_IP"'`
+
+Output: `HOST IP: $VOPONO_HOST_IP` (the environ variable wasn't expanded).
+
+A work around is to create a executable script, that executes the 
+application you'd like to run:
+
+```bash
+#!/bin/bash
+
+echo "=> NETWORK NAMESPACE IP: $VOPONO_NS_IP"
+echo "=> HOST IP: $VOPONO_HOST_IP"
+```
+
+Execution: `vopono exec {other Vopono options} '/path/to/the/above/script.sh'`
+
+Output:
+
+```
+=> NETWORK NAMESPACE IP: 10.200.1.2
+=> HOST IP: 10.200.1.1
+```
 
 ### Host scripts
 
@@ -64,6 +93,15 @@ can be provided with the `postup` and `predown` arguments (or in the `config.tom
 Note these scripts run on the host (outside the network namespace), using the current working directory,
 and with the same user as the final application itself (which can be set
 with the `user` argument or config file entry).
+
+Script arguments (e.g. `script.sh arg1 arg1`), are currently not possible, resulting in an error:
+
+```
+$ vopono exec {other Vopono options} --postup 'echo POSTUP' ls
+[...]
+sudo: echo POSTUP: command not found
+[...]
+```
 
 ### Wireguard
 
