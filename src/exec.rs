@@ -392,11 +392,15 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         }
     }
 
+    // Set env var referring to the host IP for the application:
+    std::env::set_var(
+        "VOPONO_HOST_IP",
+        &ns.veth_pair_ips.as_ref().unwrap().host_ip.to_string(),
+    );
+
     let ns = ns.write_lockfile(&command.application)?;
 
     let application = ApplicationWrapper::new(&ns, &command.application, user)?;
-
-    std::env::remove_var("VOPONO_NS_IP");
 
     // Launch TCP proxy server on other threads if forwarding ports
     // TODO: Fix when running as root
@@ -437,6 +441,9 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         info!("Keep-alive flag active - will leave network namespace alive until ctrl+C received");
         stay_alive(None, signals);
     }
+
+    std::env::remove_var("VOPONO_NS_IP");
+    std::env::remove_var("VOPONO_HOST_IP");
 
     Ok(())
 }
