@@ -300,6 +300,8 @@ Note for same daemons you may need to use the `-k` keep-alive option in
 case the process ID changes (you will then need to manually kill the
 daemon after finishing).
 
+#### transmission-daemon
+
 For example, to launch `transmission-daemon` that is externally
 accessible at `127.0.0.1:9091` (with outward connections via AzireVPN with Wireguard and a VPN server in Norway):
 
@@ -317,6 +319,19 @@ the network namespace runs on.
 
 When finished with vopono, you must manually kill the
 `transmission-daemon` since the PID changes (i.e. use `killall`).
+
+#### Jackett
+
+The same approach also works for [Jackett](https://github.com/Jackett/Jackett), e.g. with the setup from
+the [AUR PKGBUILD](https://aur.archlinux.org/packages/jackett-bin) (a separate `jackett` user and hosting on port `9117`):
+
+```bash
+$ vopono -v exec -u jackett "/usr/lib/jackett/jackett --NoRestart --NoUpdates --DataFolder /var/lib/jackett" -f 9117
+```
+
+You can then access the web UI on the host machine at `http://127.0.0.1:9117/UI/Dashboard`, but all of Jackett's connections will go via the VPN.
+
+#### Proxy to host
 
 By default, vopono runs a small TCP proxy to proxy the ports on your
 host machine to the ports on the network namespace - if you do not want

@@ -15,6 +15,7 @@ use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use std::net::{IpAddr, Ipv4Addr};
+use std::str::FromStr;
 use std::{
     fs::create_dir_all,
     io::{self, Write},
@@ -203,14 +204,41 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
 
     let mut ns;
     let _sysctl;
-    let interface: NetworkInterface = match command.interface {
+
+    // Assign network interface from args or vopono config file
+    let interface = command.interface.clone().or_else(|| {
+        vopono_config_settings
+            .get_string("interface")
+            .map_err(|e| {
+                debug!("vopono config.toml: {:?}", e);
+                anyhow!("Failed to read config file")
+            })
+            .map(|x| {
+                NetworkInterface::from_str(&x)
+                    .map_err(|e| {
+                        debug!("vopono config.toml: {:?}", e);
+                        anyhow!("Failed to parse network interface in config file")
+                    })
+                    .ok()
+            })
+            .ok()
+            .flatten()
+    });
+    let interface: NetworkInterface = match interface {
         Some(x) => anyhow::Result::<NetworkInterface>::Ok(x),
-        None => Ok(NetworkInterface::new(
-            get_active_interfaces()?
+        None => {
+            let active_interfaces = get_active_interfaces()?;
+            if active_interfaces.len() > 1 {
+                warn!("Multiple network interfaces are active: {:#?}, consider specifying the interface with the -i argument. Using {}", &active_interfaces, &active_interfaces[0]);
+            }
+            Ok(
+            NetworkInterface::new(
+            active_interfaces
                 .into_iter()
                 .next()
                 .ok_or_else(|| anyhow!("No active network interface - consider overriding network interface selection with -i argument"))?,
-        )?),
+        )?)
+        }
     }?;
     debug!("Interface: {}", &interface.name);
 
