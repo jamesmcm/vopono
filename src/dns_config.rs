@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::io::BufRead;
 use std::io::Write;
 use std::net::IpAddr;
+use std::os::unix::fs::PermissionsExt;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DnsConfig {
@@ -18,16 +19,17 @@ impl DnsConfig {
         suffixes: &[&str],
         hosts_entries: Option<&Vec<String>>,
     ) -> anyhow::Result<Self> {
-        std::fs::create_dir_all(format!("/etc/netns/{}", ns_name))
-            .with_context(|| format!("Failed to create directory: /etc/netns/{}", ns_name))?;
+        let dir_path = format!("/etc/netns/{}", ns_name);
+        std::fs::create_dir_all(&dir_path)
+            .with_context(|| format!("Failed to create directory: {}", &dir_path))?;
+        std::fs::set_permissions(&dir_path, PermissionsExt::from_mode(0o644))
+            .with_context(|| format!("Failed to set directory permissions for {}", dir_path))?;
 
-        let mut resolv = std::fs::File::create(format!("/etc/netns/{}/resolv.conf", ns_name))
-            .with_context(|| {
-                format!(
-                    "Failed to open resolv.conf: /etc/netns/{}/resolv.conf",
-                    ns_name
-                )
-            })?;
+        let resolv_conf_path = format!("/etc/netns/{}/resolv.conf", ns_name);
+        let mut resolv = std::fs::File::create(&resolv_conf_path)
+            .with_context(|| format!("Failed to open resolv.conf: {}", &resolv_conf_path))?;
+        std::fs::set_permissions(&resolv_conf_path, PermissionsExt::from_mode(0o644))
+            .with_context(|| format!("Failed to set file permissions for {}", resolv_conf_path))?;
 
         debug!(
             "Setting namespace {} DNS server to {}",
@@ -59,8 +61,11 @@ impl DnsConfig {
         }
 
         if let Some(my_hosts_entries) = hosts_entries {
-            let mut hosts = std::fs::File::create(format!("/etc/netns/{}/hosts", ns_name))
-                .with_context(|| format!("Failed to open hosts: /etc/netns/{}/hosts", ns_name))?;
+            let hosts_path = format!("/etc/netns/{}/hosts", ns_name);
+            let mut hosts = std::fs::File::create(&hosts_path)
+                .with_context(|| format!("Failed to open hosts: {}", &hosts_path))?;
+            std::fs::set_permissions(&hosts_path, PermissionsExt::from_mode(0o644))
+                .with_context(|| format!("Failed to set file permissions for {}", &hosts_path))?;
 
             for hosts_enty in my_hosts_entries {
                 writeln!(hosts, "{}", hosts_enty).with_context(|| {
@@ -73,14 +78,13 @@ impl DnsConfig {
             let nsswitch_src = std::fs::File::open("/etc/nsswitch.conf")
                 .with_context(|| "Failed to open nsswitch.conf: /etc/nsswitch.conf")?;
 
-            let mut nsswitch =
-                std::fs::File::create(format!("/etc/netns/{}/nsswitch.conf", ns_name))
-                    .with_context(|| {
-                        format!(
-                            "Failed to open nsswitch.conf: /etc/netns/{}/nsswitch.conf",
-                            ns_name
-                        )
-                    })?;
+            let nsswitch_path = format!("/etc/netns/{}/nsswitch.conf", ns_name);
+            let mut nsswitch = std::fs::File::create(&nsswitch_path)
+                .with_context(|| format!("Failed to open nsswitch.conf: {}", nsswitch_path))?;
+            std::fs::set_permissions(&nsswitch_path, PermissionsExt::from_mode(0o644))
+                .with_context(|| {
+                    format!("Failed to set file permissions for {}", &nsswitch_path)
+                })?;
 
             for line in std::io::BufReader::new(nsswitch_src).lines() {
                 writeln!(
