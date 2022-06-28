@@ -125,6 +125,7 @@ impl NetworkNamespace {
             handle.stdout(Stdio::piped());
             handle.stderr(Stdio::piped());
         }
+        handle.stdin(Stdio::piped());
 
         debug!(
             "ip netns exec {}{} {}",
@@ -280,7 +281,7 @@ impl NetworkNamespace {
 
     pub fn run_openconnect(
         &mut self,
-        config_file: Option<PathBuf>,
+        config_file: PathBuf,
         open_ports: Option<&Vec<u16>>,
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,

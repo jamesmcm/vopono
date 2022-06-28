@@ -125,10 +125,30 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             .protocol
             .unwrap_or_else(|| get_config_file_protocol(path));
         provider = VpnProvider::Custom;
-        // Encode filename with base58 so we can fit it within 16 chars for the veth pair name
-        let sname = bs58::encode(&path.to_str().unwrap()).into_string();
 
-        server_name = sname[0..std::cmp::min(11, sname.len())].to_string();
+        if protocol != Protocol::OpenConnect {
+            // Encode filename with base58 so we can fit it within 16 chars for the veth pair name
+            let sname = bs58::encode(&path.to_str().unwrap()).into_string();
+
+            server_name = sname[0..std::cmp::min(11, sname.len())].to_string();
+        } else {
+            // For OpenConnect the server-name can be provided via the usual config or
+            // command-line-options. Since it also can be provided via the custom-config we will
+            // set an empty-string if it isn't provided.
+            server_name = command
+                .server
+                .or_else(|| {
+                    vopono_config_settings
+                        .get("server")
+                        .map_err(|e| {
+                            debug!("vopono config.toml: {:?}", e);
+                            anyhow!("Failed to read config file")
+                        })
+                        .ok()
+                })
+                .or_else(|| Some(String::new()))
+                .unwrap();
+        }
     } else {
         // Get server and provider
         provider = command
@@ -251,12 +271,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         }?;
         Some(get_config_from_alias(&cdir, &server_name)?)
     } else {
-        // Config file required for non OpenConnect custom providers
-        if protocol != Protocol::OpenConnect {
-            Some(custom_config.expect("No custom config provided"))
-        } else {
-            None
-        }
+        Some(custom_config.expect("No custom config provided"))
     };
 
     // Better to check for lockfile exists?
@@ -379,7 +394,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 // TODO: DNS suffixes?
                 ns.dns_config(&dns, &[], command.hosts_entries.as_ref())?;
                 ns.run_openconnect(
-                    config_file,
+                    config_file.expect("No OpenConnect config file provided"),
                     command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
                     firewall,
