@@ -1,9 +1,10 @@
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use anyhow::{anyhow, Context};
-use dialoguer::{Input, Password};
+use dialoguer::Password;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -15,7 +16,7 @@ impl OpenConnect {
     #[allow(clippy::too_many_arguments)]
     pub fn run(
         netns: &NetworkNamespace,
-        config_file: Option<PathBuf>,
+        config_file: PathBuf,
         open_ports: Option<&Vec<u16>>,
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
@@ -29,23 +30,34 @@ impl OpenConnect {
             ));
         }
 
-        let creds = {
-            if let Some(config_file) = config_file {
-                let config_file_path = config_file.canonicalize().context("Invalid path given")?;
-                get_creds_from_file(&config_file_path)
-            } else {
-                request_creds()
-            }
-        }?;
+        let pass = request_creds();
+
+        let password = pass.expect("Provide password via Stdin!");
 
         info!("Launching OpenConnect...");
-        // TODO: Auth
-        let user_arg = format!("--user={}", creds.0);
-        let command_vec = (&["openconnect", &user_arg, "--passwd-on-stdin", server]).to_vec();
+        let mut command_vec = (&[
+            "openconnect",
+            "--config",
+            config_file.to_str().expect("Invalid config path"),
+            "--passwd-on-stdin",
+        ])
+            .to_vec();
+
+        if !server.is_empty() {
+            command_vec.push(server.as_ref());
+        }
 
         let handle = netns
             .exec_no_block(&command_vec, None, false, false, None)
             .context("Failed to launch OpenConnect - is openconnect installed?")?;
+
+        handle
+            .stdin
+            .as_ref()
+            .unwrap()
+            .write_all(password.as_bytes())
+            .expect("Failed to write to stdin");
+
         let id = handle.id();
 
         // Allow input to and output from open ports (for port forwarding in tunnel)
@@ -73,16 +85,12 @@ fn get_creds_from_file(auth_file: &Path) -> anyhow::Result<(String, String)> {
     Ok((user.to_string(), pass.to_string()))
 }
 
-fn request_creds() -> anyhow::Result<(String, String)> {
-    let username = Input::<String>::new()
-        .with_prompt("OpenConnect username")
-        .interact()?;
-    let username = username.trim();
+fn request_creds() -> anyhow::Result<String> {
     let password = Password::new()
         .with_prompt("OpenConnect password")
         .interact()?;
     let password = password.trim();
-    Ok((username.to_string(), password.to_string()))
+    Ok(password.to_string())
 }
 
 impl Drop for OpenConnect {
