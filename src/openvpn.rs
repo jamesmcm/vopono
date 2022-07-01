@@ -236,7 +236,7 @@ pub fn killswitch(
                     match &remote.host {
                         // TODO: Fix this to specify destination address - but need hostname
                         // resolution working
-                        Host::IPv4(_ip) => {
+                        Host::IPv4(ip) => {
                             if ipcmd == "iptables" {
                                 netns.exec(&[
                                     ipcmd,
@@ -246,8 +246,8 @@ pub fn killswitch(
                                     &remote.protocol.to_string(),
                                     "-m",
                                     &remote.protocol.to_string(),
-                                    // "-d",
-                                    // &ip.to_string(),
+                                    "-d",
+                                    &ip.to_string(),
                                     "--dport",
                                     port_str.as_str(),
                                     "-j",
@@ -255,7 +255,7 @@ pub fn killswitch(
                                 ])?;
                             }
                         }
-                        Host::IPv6(_ip) => {
+                        Host::IPv6(ip) => {
                             if ipcmd == "ip6tables" {
                                 netns.exec(&[
                                     ipcmd,
@@ -265,8 +265,8 @@ pub fn killswitch(
                                     &remote.protocol.to_string(),
                                     "-m",
                                     &remote.protocol.to_string(),
-                                    // "-d",
-                                    // &ip.to_string(),
+                                    "-d",
+                                    &ip.to_string(),
                                     "--dport",
                                     port_str.as_str(),
                                     "-j",
@@ -394,7 +394,7 @@ pub fn killswitch(
                 match &remote.host {
                     // TODO: Fix this to specify destination address - but need hostname
                     // resolution working
-                    Host::IPv4(_ip) => {
+                    Host::IPv4(ip) => {
                         netns.exec(&[
                             "nft",
                             "add",
@@ -402,9 +402,9 @@ pub fn killswitch(
                             "inet",
                             &netns.name,
                             "output",
-                            // "ip",
-                            // "daddr",
-                            // &ip.to_string(),
+                            "ip",
+                            "daddr",
+                            &ip.to_string(),
                             &remote.protocol.to_string(),
                             "dport",
                             port_str.as_str(),
@@ -412,7 +412,7 @@ pub fn killswitch(
                             "accept",
                         ])?;
                     }
-                    Host::IPv6(_ip) => {
+                    Host::IPv6(ip) => {
                         netns.exec(&[
                             "nft",
                             "add",
@@ -420,9 +420,9 @@ pub fn killswitch(
                             "inet",
                             &netns.name,
                             "output",
-                            // "ip6",
-                            // "daddr",
-                            // &ip.to_string(),
+                            "ip6",
+                            "daddr",
+                            &ip.to_string(),
                             &remote.protocol.to_string(),
                             "dport",
                             port_str.as_str(),
