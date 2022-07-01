@@ -195,7 +195,7 @@ impl Drop for OpenVpn {
 
 pub fn killswitch(
     netns: &NetworkNamespace,
-    dns: &[IpAddr],
+    _dns: &[IpAddr],
     remotes: &[Remote],
     firewall: Firewall,
     disable_ipv6: bool,
@@ -229,37 +229,6 @@ pub fn killswitch(
                 netns.exec(&[ipcmd, "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"])?;
                 netns.exec(&[ipcmd, "-A", "INPUT", "-i", "tun+", "-j", "ACCEPT"])?;
                 netns.exec(&[ipcmd, "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"])?;
-                for dnsa in dns.iter() {
-                    match dnsa {
-                        // TODO: Tidy this up
-                        IpAddr::V4(addr) => {
-                            if ipcmd == "iptables" {
-                                netns.exec(&[
-                                    ipcmd,
-                                    "-A",
-                                    "OUTPUT",
-                                    "-d",
-                                    &addr.to_string(),
-                                    "-j",
-                                    "ACCEPT",
-                                ])?;
-                            }
-                        }
-                        IpAddr::V6(addr) => {
-                            if ipcmd == "ip6tables" && !disable_ipv6 {
-                                netns.exec(&[
-                                    ipcmd,
-                                    "-A",
-                                    "OUTPUT",
-                                    "-d",
-                                    &addr.to_string(),
-                                    "-j",
-                                    "ACCEPT",
-                                ])?;
-                            }
-                        }
-                    }
-                }
 
                 // TODO: Tidy this up - remote can be IPv4 or IPv6 address or hostname
                 for remote in remotes {
@@ -419,40 +388,6 @@ pub fn killswitch(
                 "counter",
                 "accept",
             ])?;
-            for dnsa in dns.iter() {
-                match dnsa {
-                    IpAddr::V4(addr) => {
-                        netns.exec(&[
-                            "nft",
-                            "add",
-                            "rule",
-                            "inet",
-                            &netns.name,
-                            "output",
-                            "ip",
-                            "daddr",
-                            &addr.to_string(),
-                            "counter",
-                            "accept",
-                        ])?;
-                    }
-                    IpAddr::V6(addr) => {
-                        netns.exec(&[
-                            "nft",
-                            "add",
-                            "rule",
-                            "inet",
-                            &netns.name,
-                            "output",
-                            "ip6",
-                            "daddr",
-                            &addr.to_string(),
-                            "counter",
-                            "accept",
-                        ])?;
-                    }
-                };
-            }
 
             for remote in remotes {
                 let port_str = format!("{}", remote.port);
