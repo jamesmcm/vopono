@@ -1,16 +1,5 @@
-use super::application_wrapper::ApplicationWrapper;
 use super::args::ExecCommand;
-use super::firewall::Firewall;
-use super::netns::NetworkNamespace;
-use super::network_interface::{get_active_interfaces, NetworkInterface};
-use super::providers::VpnProvider;
-use super::shadowsocks::uses_shadowsocks;
 use super::sync::synch;
-use super::sysctl::SysCtl;
-use super::util::vopono_dir;
-use super::util::{get_config_file_protocol, get_config_from_alias};
-use super::util::{get_existing_namespaces, get_target_subnet};
-use super::vpn::{verify_auth, Protocol};
 use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
 use signal_hook::{consts::SIGINT, iterator::Signals};
@@ -20,6 +9,17 @@ use std::{
     fs::create_dir_all,
     io::{self, Write},
 };
+use vopono_core::config::providers::VpnProvider;
+use vopono_core::config::vpn::{verify_auth, Protocol};
+use vopono_core::network::application_wrapper::ApplicationWrapper;
+use vopono_core::network::firewall::Firewall;
+use vopono_core::network::netns::NetworkNamespace;
+use vopono_core::network::network_interface::{get_active_interfaces, NetworkInterface};
+use vopono_core::network::shadowsocks::uses_shadowsocks;
+use vopono_core::network::sysctl::SysCtl;
+use vopono_core::util::vopono_dir;
+use vopono_core::util::{get_config_file_protocol, get_config_from_alias};
+use vopono_core::util::{get_existing_namespaces, get_target_subnet};
 
 pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // this captures all sigint signals
@@ -59,7 +59,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 anyhow!("Failed to read config file")
             })
         })
-        .or_else(|_x| crate::util::get_firewall())?;
+        .or_else(|_x| vopono_core::util::get_firewall())?;
 
     // Assign custom_config from args or vopono config file
     let custom_config = command.custom_config.clone().or_else(|| {
@@ -474,7 +474,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     io::stdout().write_all(output.stdout.as_slice())?;
 
     // Allow daemons to leave namespace open
-    if crate::util::check_process_running(pid) {
+    if vopono_core::util::check_process_running(pid) {
         info!(
             "Process {} still running, assumed to be daemon - will leave network namespace alive until ctrl+C received",
             pid

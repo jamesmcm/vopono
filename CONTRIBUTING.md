@@ -4,7 +4,7 @@
 
 Clone the repo and build with `cargo build`.
 
-Note the minimum supported Rust version is 1.43.
+Note the minimum supported Rust version is 1.56.
 
 ### Clippy
 
@@ -19,7 +19,7 @@ $ cargo clippy --all-features --all-targets
 ## Adding a new VPN provider
 
 Adding support for a new VPN provider is as simple as adding the
-relevant files to `src/providers/` defining Structs which implement the
+relevant files to `vopono_core/config/src/providers/` defining Structs which implement the
 base `Provider` trait and at least one of the `OpenVpnProvider` or
 `WireguardProvider` traits.
 
@@ -37,7 +37,7 @@ provide an enum of choices to the user (i.e. selecting between different
 configurations- TCP vs. UDP, etc.).
 
 The new provider must also be added to the `VpnProvider` enum in
-`src/providers/mod.rs` to be able to convert from the StructOpt provider
+`vopono_core/src/config/providers/mod.rs` to be able to convert from the StructOpt provider
 argument to the structs implementing the traits above.
 
 Note that for OpenVPN it is also necessary to create any additional

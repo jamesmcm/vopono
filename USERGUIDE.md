@@ -289,7 +289,12 @@ Network settings > Settings, then deselect `Enable DNS over HTTPS`.
 You may also wish to disable WebRTC - see
 [Mullvad's guide](https://mullvad.net/en/help/webrtc/) for more details.
 
-Similar issues apply to Chromium and Google Chrome.
+Similar issues apply to Chromium and Google Chrome, where you must provide a 
+different `user-data-dir` in order to force it to use a separate process:
+
+```bash
+$ chromium --user-data-dir=/tmp/profile-2
+```
 
 ### Daemons and servers
 

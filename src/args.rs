@@ -1,10 +1,10 @@
-use super::firewall::Firewall;
-use super::network_interface::NetworkInterface;
-use super::providers::VpnProvider;
-use super::vpn::Protocol;
 use clap::Parser;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use vopono_core::config::providers::VpnProvider;
+use vopono_core::config::vpn::Protocol;
+use vopono_core::network::firewall::Firewall;
+use vopono_core::network::network_interface::NetworkInterface;
 
 #[derive(Parser)]
 #[clap(
