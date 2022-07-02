@@ -1,10 +1,10 @@
-use super::providers::VpnProvider;
-use super::util::set_config_permissions;
-use super::vpn::Protocol;
 use anyhow::bail;
 use clap::ArgEnum;
 use dialoguer::MultiSelect;
 use log::{error, info};
+use vopono_core::config::providers::VpnProvider;
+use vopono_core::config::vpn::Protocol;
+use vopono_core::util::set_config_permissions;
 
 pub fn sync_menu() -> anyhow::Result<()> {
     let variants = VpnProvider::value_variants()

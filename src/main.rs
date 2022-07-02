@@ -2,42 +2,21 @@
 #![allow(clippy::large_enum_variant)]
 #![allow(dead_code)]
 
-mod application_wrapper;
 mod args;
-mod dns_config;
 mod exec;
-mod firewall;
-mod host_masquerade;
 mod list;
 mod list_configs;
-mod netns;
-mod network_interface;
-mod openconnect;
-mod openfortivpn;
-mod openvpn;
-mod providers;
-mod pulseaudio;
-mod shadowsocks;
 mod sync;
-mod sysctl;
-mod util;
-mod veth_pair;
-mod vpn;
-mod wireguard;
 
 use clap::Parser;
 use list::output_list;
 use list_configs::print_configs;
 use log::{debug, warn, LevelFilter};
-use netns::NetworkNamespace;
 use sync::{sync_menu, synch};
-use util::clean_dead_locks;
-use util::clean_dead_namespaces;
-use util::elevate_privileges;
+use vopono_core::util::clean_dead_locks;
+use vopono_core::util::clean_dead_namespaces;
+use vopono_core::util::elevate_privileges;
 use which::which;
-
-// TODO:
-// - Allow for not saving OpenVPN creds to config
 
 fn main() -> anyhow::Result<()> {
     // Get struct of args using structopt
@@ -57,7 +36,7 @@ fn main() -> anyhow::Result<()> {
         args::Command::Exec(cmd) => {
             clean_dead_locks()?;
             if which("pactl").is_ok() {
-                let pa = pulseaudio::get_pulseaudio_server();
+                let pa = vopono_core::util::pulseaudio::get_pulseaudio_server();
                 if let Ok(pa) = pa {
                     std::env::set_var("PULSE_SERVER", pa);
                 } else {

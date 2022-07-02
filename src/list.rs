@@ -1,12 +1,6 @@
 use super::args::ListCommand;
-use super::netns::Lockfile;
-use super::util::config_dir;
 use chrono::prelude::*;
-use std::collections::HashMap;
-use std::fs::File;
-use walkdir::WalkDir;
-
-// TODO: Implement read-only namespace struct without Drop?
+use vopono_core::util::get_lock_namespaces;
 
 pub fn output_list(listcmd: ListCommand) -> anyhow::Result<()> {
     match listcmd.list_type.as_deref() {
@@ -47,7 +41,6 @@ pub fn print_applications() -> anyhow::Result<()> {
     Ok(())
 }
 
-// TODO: DRY
 pub fn print_namespaces() -> anyhow::Result<()> {
     let namespaces = get_lock_namespaces()?;
 
@@ -83,26 +76,4 @@ pub fn print_namespaces() -> anyhow::Result<()> {
     // Avoid triggering Drop for these namespaces
     std::mem::forget(namespaces);
     Ok(())
-}
-
-pub fn get_lock_namespaces() -> anyhow::Result<HashMap<String, Vec<Lockfile>>> {
-    let mut dir = config_dir()?;
-    dir.push("vopono");
-    dir.push("locks");
-
-    let mut namespaces: HashMap<String, Vec<Lockfile>> = HashMap::new();
-    WalkDir::new(dir)
-        .into_iter()
-        .filter(|x| x.is_ok() && x.as_ref().unwrap().path().is_file())
-        .map(|x| x.unwrap())
-        .try_for_each(|x| -> anyhow::Result<()> {
-            let lockfile = File::open(x.path())?;
-            let lock: Lockfile = ron::de::from_reader(lockfile)?;
-            namespaces
-                .entry(lock.ns.name.clone())
-                .or_insert_with(Vec::new)
-                .push(lock);
-            Ok(())
-        })?;
-    Ok(namespaces)
 }

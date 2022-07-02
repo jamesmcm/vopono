@@ -1,8 +1,8 @@
 use super::args::ServersCommand;
-use crate::providers::VpnProvider;
-use crate::util::get_configs_from_alias;
-use crate::vpn::Protocol;
 use anyhow::bail;
+use vopono_core::config::providers::VpnProvider;
+use vopono_core::config::vpn::Protocol;
+use vopono_core::util::get_configs_from_alias;
 
 pub fn print_configs(cmd: ServersCommand) -> anyhow::Result<()> {
     let provider = cmd.vpn_provider;

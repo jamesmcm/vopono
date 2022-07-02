@@ -1,0 +1,45 @@
+[package]
+name = "vopono_core"
+description = "Library code for running VPN connections in network namespaces"
+version = "0.1.0"
+edition = "2021"
+authors = ["James McMurray <jamesmcm03@gmail.com>"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/jamesmcm/vopono"
+homepage = "https://github.com/jamesmcm/vopono"
+readme = "README.md"
+keywords = ["vopono", "vpn", "wireguard", "openvpn", "netns"]
+
+[dependencies]
+anyhow = "1"
+directories-next = "2"
+log = "0.4"
+which = "4"
+users = "0.11"
+nix = "0.24"
+serde = { version = "1", features = ["derive", "std"] }
+csv = "1"
+dialoguer = "0.10"                                      # TODO: Remove me
+clap = { version = "3", features = ["derive"] }         # TODO: Remove me
+regex = "1"
+ron = "0.7"
+walkdir = "2"
+# Must use rand 0.7 for compatibility with x25519-dalek for now
+rand = "0.7"
+toml = "0.5"
+ipnet = { version = "2", features = ["serde"] }
+reqwest = { default-features = false, version = "0.11", features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] } # TODO: Can we remove Tokio dependency?
+sysinfo = "0.24"
+base64 = "0.13"
+x25519-dalek = "1"
+strum = "0.24"
+strum_macros = "0.24"
+zip = "0.6"
+maplit = "1"
+webbrowser = "0.7"
+serde_json = "1"
+signal-hook = "0.3"
