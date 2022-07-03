@@ -219,7 +219,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./armv5-deb/vopono_${{needs.quickcheck.outputs.version}}_arm.deb
+          asset_path: ./armv5-deb/vopono_${{needs.quickcheck.outputs.version}}_armel.deb
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_armel.deb'
           asset_content_type: application/vnd.debian.binary-package
       - name: Upload amd64 rpm fedora Release Asset
