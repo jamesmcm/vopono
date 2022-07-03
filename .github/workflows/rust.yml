@@ -98,6 +98,20 @@ jobs:
       with:
         name: armv7-deb
         path: ./target/armv7-unknown-linux-musleabihf/debian/*
+  armv5deb:
+    needs: [build]
+    runs-on: ubuntu-latest
+    name: Armv5Deb
+    steps:
+    - uses: actions/checkout@v2
+    - name: BuildDeb
+      id: debbuild
+      uses: jamesmcm/cargo-deb-armv5-debian@master
+    - name: Upload Deb Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: armv5-deb
+        path: ./target/armv5te-unknown-linux-musleabi/debian/*
   amd64binaries:
     needs: [build, quickcheck]
     runs-on: ubuntu-latest
@@ -155,7 +169,7 @@ jobs:
         name: armv5
         path: ./target/armv5te-unknown-linux-musleabi/release/vopono
   update_release_draft:
-    needs: [quickcheck, build, arm7binaries, arm5binaries, amd64binaries, raspbianbuild, debbuild, opensuseleaprpmbuild, fedorarpmbuild]
+    needs: [quickcheck, build, arm7binaries, arm5binaries, amd64binaries, raspbianbuild, armv5deb, debbuild, opensuseleaprpmbuild, fedorarpmbuild]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
