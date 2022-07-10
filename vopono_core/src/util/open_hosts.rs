@@ -1,6 +1,6 @@
-use std::net::IpAddr;
 use crate::network::firewall::Firewall;
 use crate::network::netns::NetworkNamespace;
+use std::net::IpAddr;
 
 pub fn open_hosts(
     netns: &NetworkNamespace,
