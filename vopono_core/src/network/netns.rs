@@ -163,7 +163,7 @@ impl NetworkNamespace {
     pub fn add_routing(
         &mut self,
         target_subnet: u8,
-        hosts: Option<Vec<IpAddr>>,
+        hosts: Option<&Vec<IpAddr>>,
     ) -> anyhow::Result<()> {
         // TODO: Handle case where IP address taken in better way i.e. don't just change subnet
         let veth_dest = &self

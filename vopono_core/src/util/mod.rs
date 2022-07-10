@@ -1,5 +1,6 @@
 pub mod country_map;
 pub mod open_ports;
+pub mod open_hosts;
 pub mod pulseaudio;
 pub mod wireguard;
 
@@ -12,6 +13,7 @@ use ipnet::Ipv4Net;
 use log::{debug, info, warn};
 use nix::unistd::{Group, User};
 pub use open_ports::open_ports;
+pub use open_hosts::open_hosts;
 use rand::seq::SliceRandom;
 use regex::Regex;
 use std::collections::HashMap;
