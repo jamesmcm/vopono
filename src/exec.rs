@@ -294,7 +294,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         let target_subnet = get_target_subnet()?;
         ns.add_loopback()?;
         ns.add_veth_pair()?;
-        ns.add_routing(target_subnet, command.open_hosts)?;
+        ns.add_routing(target_subnet, command.open_hosts.as_ref())?;
         ns.add_host_masquerade(target_subnet, interface.clone(), firewall)?;
         ns.add_firewall_exception(
             interface,
@@ -411,6 +411,10 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     firewall,
                 )?;
             }
+        }
+
+        if let Some(ref hosts) = command.open_hosts {
+            vopono_core::util::open_hosts(&ns, hosts.to_vec(), firewall)?;
         }
 
         // Temporarily set env var referring to this network namespace IP
