@@ -1,5 +1,6 @@
 use super::AirVPN;
 use super::{ConfigurationChoice, OpenVpnProvider};
+use crate::config::providers::UiClient;
 use crate::util::delete_all_files_in_dir;
 use anyhow::anyhow;
 use log::debug;
@@ -31,9 +32,9 @@ impl OpenVpnProvider for AirVPN {
         Ok(None)
     }
 
-    fn create_openvpn_config(&self) -> anyhow::Result<()> {
+    fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
         let use_country_code: bool = true;
-        let config_choice = ConfigType::choose_one()?;
+        let config_choice = uiclient.get_configuration_choice::<ConfigType>()?;
         let client = reqwest::blocking::Client::new();
 
         let status_response = client

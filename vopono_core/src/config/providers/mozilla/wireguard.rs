@@ -10,7 +10,7 @@ use dialoguer::Input;
 use ipnet::IpNet;
 use log::{debug, info};
 use regex::Regex;
-use reqwest::blocking::Client;
+use reqwest::blocking::Client; // TODO: Can we use a smaller dependency?
 use serde::{Deserialize, Serialize};
 use std::fs::create_dir_all;
 use std::io::Write;

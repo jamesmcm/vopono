@@ -12,6 +12,7 @@ mod tigervpn;
 use crate::config::vpn::Protocol;
 use crate::util::vopono_dir;
 use anyhow::anyhow;
+use base64::Config;
 use clap::ArgEnum;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -158,29 +159,68 @@ pub trait ConfigurationChoice: Display + Sized + Default + PartialEq {
 
     /// Descriptions are a user-friendly descriptions for each enum variant
     fn description(&self) -> Option<String>;
-
-    /// Launches a dialoguer single select menu for the enum
-    fn choose_one() -> anyhow::Result<Self> {
-        let mut variants = Self::variants();
-        let display_names = variants.iter().map(|x| x.to_string());
-        let descriptions = variants.iter().map(|x| x.description());
-        let index = dialoguer::Select::new()
-            .with_prompt(Self::prompt())
-            .items(
-                display_names
-                    .zip(descriptions)
-                    .map(|x| {
-                        if x.1.is_some() {
-                            format!("{}: {}", x.0, x.1.unwrap())
-                        } else {
-                            x.0
-                        }
-                    })
-                    .collect::<Vec<String>>()
-                    .as_slice(),
-            )
-            .default(variants.iter().position(|x| *x == Self::default()).unwrap())
-            .interact()?;
-        Ok(variants.remove(index))
-    }
 }
+// TODO: FromStr, ToString
+
+pub struct BoolChoice {
+    prompt: String,
+    default: bool,
+}
+
+/// Only supports strings - for numeric types, validate as string and then parse
+pub struct Input {
+    prompt: String,
+    validator: Option<Box<dyn Fn(&str) -> core::result::Result<(), &str>>>,
+    // _return: PhantomData<T>,
+}
+
+pub struct Password {
+    prompt: String,
+    confirm: bool,
+}
+
+/// Trait to be implemented by a struct wrapping the user-facing client code
+/// e.g. separate implementations for CLI, TUI, GUI, etc.
+/// For GUI and TUI may want to override `process_choices()` to get the responses in a batch
+pub trait UiClient {
+    fn get_configuration_choice<T: ConfigurationChoice>(&self) -> anyhow::Result<T>;
+    fn get_bool_choice(&self, bool_choice: &BoolChoice) -> anyhow::Result<bool>;
+    fn get_input(&self, input: &Input) -> anyhow::Result<String>;
+    fn get_password(&self, password: &Password) -> anyhow::Result<String>;
+
+    // TODO: Cannot return dyn ConfigurationChoice
+    // Used to process choices in batches - any choices that can be batched together (i.e. independent of eachother) should do so
+    // This will make creating a GUI easier so it is not one page per choice - CLI-style
+    // fn process_choices(&self, choices: &[WrappedChoice]) -> anyhow::Result<Vec<WrappedResponse>> {
+    //     Ok(choices
+    //         .into_iter()
+    //         .map(|c| match c {
+    //             WrappedChoice::BoolChoice(bchoice) => {
+    //                 WrappedResponse::Bool(self.get_bool_choice(bchoice)?)
+    //             }
+    //             WrappedChoice::Input(inp) => WrappedResponse::Input(self.get_input(inp)?),
+    //             WrappedChoice::Password(pass) => {
+    //                 WrappedResponse::Password(self.get_password(pass)?)
+    //             }
+    //             WrappedChoice::ConfigurationChoice(cc) => {
+    //                 WrappedResponse::ConfigurationChoice(self.get_configuration_choice(cc)?)
+    //             }
+    //         })
+    //         .collect())
+    // }
+}
+
+// TODO: Cannot return dyn ConfigurationChoice
+// pub enum WrappedChoice {
+//     BoolChoice(BoolChoice),
+//     ConfigurationChoice(impl ConfigurationChoice),
+//     Input(Input),
+//     Password(Password),
+// }
+//
+// pub enum WrappedResponse {
+//     Bool(bool),
+//     ConfigurationChoice(Box<impl ConfigurationChoice>),
+//     Input(String),
+//     Password(String),
+// }
