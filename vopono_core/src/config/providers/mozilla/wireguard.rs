@@ -2,11 +2,13 @@ use super::validate_hostname;
 use super::MozillaVPN;
 use super::{Error, User};
 use super::{Login, WireguardProvider};
+use crate::config::providers::Input;
+use crate::config::providers::InputNumericu16;
+use crate::config::providers::UiClient;
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::{generate_keypair, generate_public_key, WgKey};
 use anyhow::anyhow;
-use dialoguer::Input;
 use ipnet::IpNet;
 use log::{debug, info};
 use regex::Regex;
@@ -45,10 +47,11 @@ impl MozillaVPN {
         &self,
         client: &Client,
         login: &Login,
+        uiclient: &dyn UiClient,
     ) -> anyhow::Result<(NewDevice, WgKey)> {
         let devices = &login.user.devices;
         if !devices.is_empty() {
-        let selection = dialoguer::Select::new()
+        let selection = Select::new()
             .with_prompt(
                 "The following devices exist on your account, which would you like to use (you will need the private key)",
             )
@@ -58,16 +61,16 @@ impl MozillaVPN {
             .interact()?;
 
         if selection >= devices.len() {
-            let (device, keypair) = generate_device()?;
+            let (device, keypair) = generate_device(uiclient)?;
             self.upload_new_device(&device, client, login)?;
             Ok((device, keypair))
         } else {
-            let private_key = Input::<String>::new()
-                .with_prompt(format!(
+            let private_key = uiclient.get_input(&Input {
+               prompt:format!(
                     "Private key for {}",
                     &devices[selection].pubkey
-                ))
-        .validate_with(|private_key: &String| -> Result<(), &str> {
+                ),
+        validator: Some(Box::new( |private_key: &str| -> Result<(), &'static str> {
             let private_key = private_key.trim();
             if private_key.len() != 44 {
                 return Err("Expected private key length of 44 characters"
@@ -82,20 +85,19 @@ impl MozillaVPN {
             Ok(())
                 }
                 Err(_) => Err("Failed to generate public key")
-        }})
-                .interact()?;
+        }}))})?;
             // TODO: Fix clones here
             let device = devices[selection].clone();
             Ok((NewDevice { name: device.name.clone(), pubkey: device.pubkey.clone()},
             WgKey {public: device.pubkey, private: private_key  } ))
         }
-    } else if dialoguer::Confirm::new()
+    } else if :Confirm::new()
             .with_prompt(
                 "No devices currently exist on your Mozilla account, would you like to generate a new device?"
             )
             .default(true)
             .interact()? {
-                let (device, keypair) = generate_device()?;
+                let (device, keypair) = generate_device(uiclient)?;
                 self.upload_new_device(&device, client, login)?;
                 Ok((device, keypair))
         } else {
@@ -105,8 +107,8 @@ impl MozillaVPN {
 }
 
 impl WireguardProvider for MozillaVPN {
-    fn create_wireguard_config(&self) -> anyhow::Result<()> {
-        let wireguard_dir = self.wireguard_dir()?;
+    fn create_wireguard_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
+        let wireguard_dir = self.wireguard_dir(uiclient)?;
         create_dir_all(&wireguard_dir)?;
         delete_all_files_in_dir(&wireguard_dir)?;
 
@@ -124,7 +126,7 @@ impl WireguardProvider for MozillaVPN {
         let login = self.get_login(&client)?;
         debug!("Received user info: {:?}", &login);
 
-        let (_device, keypair) = self.prompt_for_wg_key(&client, &login)?;
+        let (_device, keypair) = self.prompt_for_wg_key(&client, &login, uiclient)?;
 
         debug!("Chosen keypair: {:?}", keypair);
 
@@ -152,7 +154,7 @@ impl WireguardProvider for MozillaVPN {
             dns: Some(vec![IpAddr::from(dns)]),
         };
 
-        let port = request_port()?;
+        let port = request_port(uiclient)?;
 
         // Note we tunnel both IPv4 and IPv6
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?, IpNet::from_str("::0/0")?];
@@ -200,20 +202,18 @@ impl WireguardProvider for MozillaVPN {
     }
 }
 
-fn generate_device() -> anyhow::Result<(NewDevice, WgKey)> {
+fn generate_device(uiclient: &dyn UiClient) -> anyhow::Result<(NewDevice, WgKey)> {
     let keypair = generate_keypair()?;
-    let name = Input::<String>::new()
-        .with_prompt("Please enter name for new device")
-        .validate_with(|x: &String| {
+    let name = uiclient.get_input(&Input {
+        prompt: "Please enter name for new device".to_string(),
+        validator: Some(Box::new(|x: &str| {
             if validate_hostname(x) {
                 Ok(())
             } else {
-                Err(anyhow!(
-                    "Device name must can only contain letters, numbers and dashes"
-                ))
+                Err("Device name must can only contain letters, numbers and dashes")
             }
-        })
-        .interact()?;
+        })),
+    })?;
 
     Ok((
         NewDevice {
@@ -224,10 +224,10 @@ fn generate_device() -> anyhow::Result<(NewDevice, WgKey)> {
     ))
 }
 
-fn request_port() -> anyhow::Result<u16> {
-    let port = Input::<u16>::new()
-        .with_prompt("Enter port number:")
-        .validate_with(|n: &u16| -> Result<(), &str> {
+fn request_port(uiclient: &dyn UiClient) -> anyhow::Result<u16> {
+    let port = uiclient.get_input_numeric_u16(&InputNumericu16 {
+        prompt: "Enter port number".to_string(),
+        validator: Some(Box::new(|n: &u16| -> Result<(), &str> {
             if *n == 53
                 || (*n >= 4000 && *n <= 33433)
                 || (*n >= 33565 && *n <= 51820)
@@ -238,9 +238,9 @@ fn request_port() -> anyhow::Result<u16> {
                 Err("
         Port must be 53, or in range 4000-33433, 33565-51820, 52000-60000")
             }
-        })
-        .default(51820)
-        .interact()?;
+        })),
+        default: Some(51820),
+    })?;
     Ok(port)
 }
 

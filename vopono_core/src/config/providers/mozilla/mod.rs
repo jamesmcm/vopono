@@ -65,6 +65,7 @@ impl MozillaVPN {
         "https://vpn.mozilla.org/api/v1"
     }
 
+    // TODO: Make this work with GUI - i.e. if terminal is not accessible
     /// Login with OAuth login (adapted from MozWire crate: https://github.com/NilsIrl/MozWire/blob/trunk/src/main.rs )
     fn get_login(&self, client: &Client) -> anyhow::Result<Login> {
         let login = client

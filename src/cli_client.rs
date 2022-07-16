@@ -43,7 +43,20 @@ impl UiClient for CliClient {
         dialoguer::Input::<String>::new()
             .with_prompt(&inp.prompt)
             .validate_with(inp.validator)
+            .interact()
     }
+
+    fn get_input_numeric_u16(inp: &InputNumericu16) -> anyhow::Result<u16> {
+        let mut d = dialoguer::Input::<u16>::new()
+            .with_prompt(&inp.prompt)
+            .validate_with(inp.validator);
+
+        if inp.default.is_some() {
+            d = d.default(inp.default);
+        }
+        d.interact()
+    }
+
     fn get_password(pw: &Password) -> anyhow::Result<String> {
         let req = dialoguer::Password::new().with_prompt(pw.prompt);
         let req = if pw.confirm {
@@ -51,6 +64,6 @@ impl UiClient for CliClient {
         } else {
             req
         };
-        req.interact()?;
+        req.interact()
     }
 }

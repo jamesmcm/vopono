@@ -22,7 +22,7 @@ impl OpenVpnProvider for AirVPN {
         None
     }
 
-    fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
+    fn prompt_for_auth(&self, _uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
         //NOTE: not required for AirVPN
         Ok(("unused".to_string(), "unused".to_string()))
     }
@@ -34,7 +34,7 @@ impl OpenVpnProvider for AirVPN {
 
     fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
         let use_country_code: bool = true;
-        let config_choice = uiclient.get_configuration_choice::<ConfigType>()?;
+        let config_choice = uiclient.get_configuration_choice(&ConfigType::default())?;
         let client = reqwest::blocking::Client::new();
 
         let status_response = client
@@ -66,15 +66,16 @@ impl OpenVpnProvider for AirVPN {
             request_server_names.push_str(&public_name);
         }
 
-        let generator_url = config_choice
+        let generator_url = ConfigType::iter()
+            .nth(config_choice)
+            .expect("Bad ConfigType index")
             .url()?
             .replace("{servers}", request_server_names.as_str());
 
         // TODO: Add validator that it is lower case, hexadecimal, 40-character string
         let api_key = env::var("AIRVPN_API_KEY").or_else(|_|
-                dialoguer::Input::<String>::new()
-                .with_prompt("Enter your AirVPN API key (see https://airvpn.org/apisettings/ )")
-            .interact()        ).map_err(|_| {
+                uiclient.get_input(&crate::config::providers::Input{prompt: "Enter your AirVPN API key (see https://airvpn.org/apisettings/ )".to_string(), validator: None})
+                  ).map_err(|_| {
                     anyhow!("Cannot generate AirVPN OpenVPN config files: AIRVPN_API_KEY is not defined in your environment variables. Get your key by activating API access in the Client Area at https://airvpn.org/apisettings/")
                 })?.trim().to_string();
         let zipfile = client
@@ -160,13 +161,14 @@ impl Default for ConfigType {
 }
 
 impl ConfigurationChoice for ConfigType {
-    fn prompt() -> String {
+    fn prompt(&self) -> String {
         "Please choose the set of OpenVPN configuration files you wish to install".to_string()
     }
 
-    fn variants() -> Vec<Self> {
-        ConfigType::iter().collect()
+    fn all_names(&self) -> Vec<String> {
+        Self::iter().map(|x| format!("{}", x)).collect()
     }
+
     fn description(&self) -> Option<String> {
         Some(
             match self {

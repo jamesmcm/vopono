@@ -1,7 +1,6 @@
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use anyhow::{anyhow, Context};
-use dialoguer::Password;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::io::Write;

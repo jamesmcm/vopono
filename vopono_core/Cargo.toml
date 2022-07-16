@@ -19,7 +19,6 @@ users = "0.11"
 nix = "0.24"
 serde = { version = "1", features = ["derive", "std"] }
 csv = "1"
-dialoguer = "0.10"                                      # TODO: Remove me
 clap = { version = "3", features = ["derive"] }         # TODO: Remove me
 regex = "1"
 ron = "0.7"

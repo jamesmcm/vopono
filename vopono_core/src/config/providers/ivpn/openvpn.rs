@@ -1,8 +1,9 @@
+use super::OpenVpnProvider;
 use super::IVPN;
-use super::{ConfigurationChoice, OpenVpnProvider};
+use crate::config::providers::Input;
+use crate::config::providers::UiClient;
 use crate::config::vpn::OpenVpnProtocol;
 use crate::util::delete_all_files_in_dir;
-use dialoguer::Input;
 use log::{debug, info};
 use reqwest::Url;
 use std::fs::create_dir_all;
@@ -33,12 +34,8 @@ impl OpenVpnProvider for IVPN {
         None
     }
 
-    fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
-        let username = Input::<String>::new()
-            .with_prompt(
-                "IVPN account ID (starts with \"ivpn\" see: https://www.ivpn.net/clientarea/vpn/273887 )",
-            )
-            .interact()?;
+    fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
+        let username = uiclient.get_input(&Input {prompt:"IVPN account ID (starts with \"ivpn\" see: https://www.ivpn.net/clientarea/vpn/273887 )".to_string(), validator: None})?;
 
         Ok((username, "password".to_string()))
     }
@@ -47,13 +44,13 @@ impl OpenVpnProvider for IVPN {
         Ok(Some(self.openvpn_dir()?.join("auth.txt")))
     }
 
-    fn create_openvpn_config(&self) -> anyhow::Result<()> {
+    fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
         let openvpn_dir = self.openvpn_dir()?;
         let country_map = crate::util::country_map::country_to_code_map();
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
-        let protocol = OpenVpnProtocol::choose_one()?;
-        let url = self.build_url(&protocol)?;
+        let protocol = uiclient.get_configuration_choice(&OpenVpnProtocol::default())?;
+        let url = self.build_url(&OpenVpnProtocol::index_to_variant(protocol))?;
         let zipfile = reqwest::blocking::get(url)?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
         let openvpn_dir = self.openvpn_dir()?;
@@ -121,7 +118,7 @@ impl OpenVpnProvider for IVPN {
         }
 
         // Write OpenVPN credentials file
-        let (user, pass) = self.prompt_for_auth()?;
+        let (user, pass) = self.prompt_for_auth(uiclient)?;
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;

@@ -1,10 +1,10 @@
 use super::ConfigurationChoice;
 use super::WireguardProvider;
 use super::IVPN;
+use crate::config::providers::UiClient;
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::{generate_keypair, generate_public_key, WgKey};
-use dialoguer::Input;
 use ipnet::{IpNet, Ipv4Net};
 use log::info;
 use regex::Regex;
@@ -23,6 +23,12 @@ enum WgKeyChoice {
     ExistingKey,
 }
 
+impl WgKeyChoice {
+    fn index_to_variant(index: usize) -> Self {
+        Self::iter().nth(index).expect("Invalid index")
+    }
+}
+
 impl Display for WgKeyChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
@@ -39,13 +45,13 @@ impl Default for WgKeyChoice {
 }
 
 impl ConfigurationChoice for WgKeyChoice {
-    fn prompt() -> String {
+    fn prompt(&self) -> String {
         "Do you want to generate a new Wireguard keypair or use an existing one?".to_string()
     }
-
-    fn variants() -> Vec<Self> {
-        WgKeyChoice::iter().collect()
+    fn all_names(&self) -> Vec<String> {
+        Self::iter().map(|x| format!("{}", x)).collect()
     }
+
     fn description(&self) -> Option<String> {
         None
     }
@@ -60,6 +66,12 @@ enum DNSChoice {
     Standard,
     AntiTracker,
     AntiTrackerHardcore,
+}
+
+impl DNSChoice {
+    fn index_to_variant(index: usize) -> Self {
+        Self::iter().nth(index).expect("Invalid index")
+    }
 }
 
 impl Display for DNSChoice {
@@ -81,13 +93,13 @@ impl Default for DNSChoice {
 }
 
 impl ConfigurationChoice for DNSChoice {
-    fn prompt() -> String {
+    fn prompt(&self) -> String {
         "Choose DNS server configuration".to_string()
     }
-
-    fn variants() -> Vec<Self> {
-        DNSChoice::iter().collect()
+    fn all_names(&self) -> Vec<String> {
+        Self::iter().map(|x| format!("{}", x)).collect()
     }
+
     fn description(&self) -> Option<String> {
         None
     }
@@ -104,8 +116,8 @@ impl DNSChoice {
 }
 
 impl WireguardProvider for IVPN {
-    fn create_wireguard_config(&self) -> anyhow::Result<()> {
-        let wireguard_dir = self.wireguard_dir()?;
+    fn create_wireguard_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
+        let wireguard_dir = self.wireguard_dir(uiclient)?;
         create_dir_all(&wireguard_dir)?;
         delete_all_files_in_dir(&wireguard_dir)?;
 
@@ -117,7 +129,9 @@ impl WireguardProvider for IVPN {
             relays.push(relay);
         }
 
-        let wg_key_choice = WgKeyChoice::choose_one()?;
+        let wg_key_choice = WgKeyChoice::index_to_variant(
+            uiclient.get_configuration_choice(&WgKeyChoice::default())?,
+        );
         let keypair: WgKey = if wg_key_choice == WgKeyChoice::ExistingKey {
             prompt_for_wg_key()?
         } else {
@@ -144,7 +158,8 @@ impl WireguardProvider for IVPN {
 
         let ip_address = Ipv4Addr::from_str(ip_address.trim())?;
         let ipnet = IpNet::from(Ipv4Net::new(ip_address, 32)?);
-        let dns_choice = DNSChoice::choose_one()?;
+        let dns_choice =
+            DNSChoice::index_to_variant(uiclient.get_configuration_choice(&DNSChoice::default())?);
         let dns = dns_choice.to_ipv4();
         let interface = WireguardInterface {
             private_key: keypair.private,
