@@ -2,7 +2,6 @@ use super::providers::ConfigurationChoice;
 use super::providers::OpenVpnProvider;
 use super::providers::UiClient;
 use anyhow::{anyhow, Context};
-use clap::ArgEnum;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -11,6 +10,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 use strum::IntoEnumIterator;
+use strum_macros::Display;
 use strum_macros::EnumIter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize, EnumIter)]
@@ -69,19 +69,12 @@ impl Display for OpenVpnProtocol {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, ArgEnum)]
-#[clap(rename_all = "verbatim")]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Display)]
 pub enum Protocol {
     OpenVpn,
     Wireguard,
     OpenConnect,
     OpenFortiVpn,
-}
-
-impl std::fmt::Display for Protocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        std::fmt::Display::fmt(self.to_possible_value().unwrap().get_name(), f)
-    }
 }
 
 #[derive(Serialize, Deserialize)]

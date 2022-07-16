@@ -12,10 +12,10 @@ mod tigervpn;
 use crate::config::vpn::Protocol;
 use crate::util::vopono_dir;
 use anyhow::anyhow;
-use clap::ArgEnum;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
+use strum_macros::Display;
 
 // Command-line arguments use VpnProvider enum
 // We pattern match on that to build an instance of the actual provider struct
@@ -27,8 +27,7 @@ use std::path::PathBuf;
 // Should prompt user for any user input - i.e. port + protocol choice
 
 /// enum used to accept VPN Provider as an argument
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, ArgEnum)]
-#[clap(rename_all = "verbatim")]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Display)]
 pub enum VpnProvider {
     PrivateInternetAccess,
     Mullvad,
@@ -41,12 +40,6 @@ pub enum VpnProvider {
     NordVPN,
     HMA,
     Custom,
-}
-
-impl std::fmt::Display for VpnProvider {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        std::fmt::Display::fmt(self.to_possible_value().unwrap().get_name(), f)
-    }
 }
 
 // Do this since we can't downcast from Provider to other trait objects
@@ -166,12 +159,14 @@ pub struct BoolChoice {
     pub default: bool,
 }
 
+#[allow(clippy::type_complexity)]
 /// Only supports strings
 pub struct Input {
     pub prompt: String,
     pub validator: Option<Box<dyn Fn(&String) -> core::result::Result<(), String>>>,
 }
 
+#[allow(clippy::type_complexity)]
 /// Only supports u16 input - so UI Client can allow numbers only
 pub struct InputNumericu16 {
     pub prompt: String,
@@ -197,40 +192,4 @@ pub trait UiClient {
     fn get_input(&self, input: Input) -> anyhow::Result<String>;
     fn get_input_numeric_u16(&self, input: InputNumericu16) -> anyhow::Result<u16>;
     fn get_password(&self, password: Password) -> anyhow::Result<String>;
-
-    // TODO: Cannot return dyn ConfigurationChoice
-    // Used to process choices in batches - any choices that can be batched together (i.e. independent of eachother) should do so
-    // This will make creating a GUI easier so it is not one page per choice - CLI-style
-    // fn process_choices(&self, choices: &[WrappedChoice]) -> anyhow::Result<Vec<WrappedResponse>> {
-    //     Ok(choices
-    //         .into_iter()
-    //         .map(|c| match c {
-    //             WrappedChoice::BoolChoice(bchoice) => {
-    //                 WrappedResponse::Bool(self.get_bool_choice(bchoice)?)
-    //             }
-    //             WrappedChoice::Input(inp) => WrappedResponse::Input(self.get_input(inp)?),
-    //             WrappedChoice::Password(pass) => {
-    //                 WrappedResponse::Password(self.get_password(pass)?)
-    //             }
-    //             WrappedChoice::ConfigurationChoice(cc) => {
-    //                 WrappedResponse::ConfigurationChoice(self.get_configuration_choice(cc)?)
-    //             }
-    //         })
-    //         .collect())
-    // }
 }
-
-// TODO: Cannot return dyn ConfigurationChoice
-// pub enum WrappedChoice {
-//     BoolChoice(BoolChoice),
-//     ConfigurationChoice(impl ConfigurationChoice),
-//     Input(Input),
-//     Password(Password),
-// }
-//
-// pub enum WrappedResponse {
-//     Bool(bool),
-//     ConfigurationChoice(Box<impl ConfigurationChoice>),
-//     Input(String),
-//     Password(String),
-// }
