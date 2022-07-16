@@ -74,7 +74,7 @@ impl OpenVpnProvider for AirVPN {
 
         // TODO: Add validator that it is lower case, hexadecimal, 40-character string
         let api_key = env::var("AIRVPN_API_KEY").or_else(|_|
-                uiclient.get_input(&crate::config::providers::Input{prompt: "Enter your AirVPN API key (see https://airvpn.org/apisettings/ )".to_string(), validator: None})
+                uiclient.get_input(crate::config::providers::Input{prompt: "Enter your AirVPN API key (see https://airvpn.org/apisettings/ )".to_string(), validator: None})
                   ).map_err(|_| {
                     anyhow!("Cannot generate AirVPN OpenVPN config files: AIRVPN_API_KEY is not defined in your environment variables. Get your key by activating API access in the Client Area at https://airvpn.org/apisettings/")
                 })?.trim().to_string();
@@ -167,6 +167,9 @@ impl ConfigurationChoice for ConfigType {
 
     fn all_names(&self) -> Vec<String> {
         Self::iter().map(|x| format!("{}", x)).collect()
+    }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        Some(Self::iter().map(|x| x.description().unwrap()).collect())
     }
 
     fn description(&self) -> Option<String> {

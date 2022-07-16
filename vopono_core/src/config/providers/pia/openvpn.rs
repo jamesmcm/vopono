@@ -23,11 +23,11 @@ impl OpenVpnProvider for PrivateInternetAccess {
     }
 
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
-        let username = uiclient.get_input(&Input {
+        let username = uiclient.get_input(Input {
             prompt: "PrivateInternetAccess username".to_string(),
             validator: None,
         })?;
-        let password = uiclient.get_password(&Password {
+        let password = uiclient.get_password(Password {
             prompt: "Password".to_string(),
             confirm: true,
         })?;
@@ -162,6 +162,9 @@ impl ConfigurationChoice for ConfigType {
         Self::iter().map(|x| format!("{}", x)).collect()
     }
 
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        Some(Self::iter().map(|x| x.description().unwrap()).collect())
+    }
     fn description(&self) -> Option<String> {
         Some( match self {
             Self::DefaultConf => "These files connect over UDP port 1198 with AES-128-CBC+SHA1, using the server name to connect.",

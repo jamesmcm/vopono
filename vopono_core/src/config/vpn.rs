@@ -38,6 +38,9 @@ impl ConfigurationChoice for OpenVpnProtocol {
     fn all_names(&self) -> Vec<String> {
         Self::iter().map(|x| format!("{}", x)).collect()
     }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        None
+    }
     fn description(&self) -> Option<String> {
         None
     }

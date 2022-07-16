@@ -1,6 +1,8 @@
 use super::ConfigurationChoice;
 use super::WireguardProvider;
 use super::IVPN;
+use crate::config::providers::Input;
+use crate::config::providers::InputNumericu16;
 use crate::config::providers::UiClient;
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
@@ -52,6 +54,9 @@ impl ConfigurationChoice for WgKeyChoice {
         Self::iter().map(|x| format!("{}", x)).collect()
     }
 
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        None
+    }
     fn description(&self) -> Option<String> {
         None
     }
@@ -99,6 +104,9 @@ impl ConfigurationChoice for DNSChoice {
     fn all_names(&self) -> Vec<String> {
         Self::iter().map(|x| format!("{}", x)).collect()
     }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        None
+    }
 
     fn description(&self) -> Option<String> {
         None
@@ -117,7 +125,7 @@ impl DNSChoice {
 
 impl WireguardProvider for IVPN {
     fn create_wireguard_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
-        let wireguard_dir = self.wireguard_dir(uiclient)?;
+        let wireguard_dir = self.wireguard_dir()?;
         create_dir_all(&wireguard_dir)?;
         delete_all_files_in_dir(&wireguard_dir)?;
 
@@ -133,7 +141,7 @@ impl WireguardProvider for IVPN {
             uiclient.get_configuration_choice(&WgKeyChoice::default())?,
         );
         let keypair: WgKey = if wg_key_choice == WgKeyChoice::ExistingKey {
-            prompt_for_wg_key()?
+            prompt_for_wg_key(uiclient)?
         } else {
             let keypair = generate_keypair()?;
             info!("Generated Wireguard keypair (save this): {:?}", &keypair);
@@ -141,9 +149,11 @@ impl WireguardProvider for IVPN {
             keypair
         };
 
-        let ip_address = Input::<String>::new()
-            .with_prompt(format!("Enter the IP address linked to this public key ({})\nSee https://www.ivpn.net/clientarea/vpn/273887/wireguard/keys ", &keypair.public))
-            .validate_with(move |ipstr: &String| -> Result<(), String> {
+        let ip_address = uiclient.get_input(Input {
+            
+            prompt: format!("Enter the IP address linked to this public key ({})\nSee https://www.ivpn.net/clientarea/vpn/273887/wireguard/keys ", &keypair.public),
+            validator: Some(Box::new(
+            move |ipstr: &String| -> Result<(), String> {
                 let ip_parse = Ipv4Addr::from_str(ipstr.trim());
                 if let Err(err) = ip_parse {
                     return Err(format!("Input: {} is not valid IPv4 address: {}", ipstr.trim(), err));
@@ -154,7 +164,7 @@ impl WireguardProvider for IVPN {
                     }
                 }
                 Ok(())
-            }).interact()?;
+            }))})?;
 
         let ip_address = Ipv4Addr::from_str(ip_address.trim())?;
         let ipnet = IpNet::from(Ipv4Net::new(ip_address, 32)?);
@@ -167,7 +177,7 @@ impl WireguardProvider for IVPN {
             dns: Some(vec![IpAddr::from(dns)]),
         };
 
-        let port = request_port()?;
+        let port = request_port(uiclient)?;
 
         // IPv6 not supported for Wireguard on iVPN
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?];
@@ -217,38 +227,37 @@ impl WireguardProvider for IVPN {
     }
 }
 
-fn prompt_for_wg_key() -> anyhow::Result<WgKey> {
-    let public_key = Input::<String>::new()
-        .with_prompt("Enter Wireguard public key")
-        .validate_with(|public_key: &String| -> Result<(), &str> {
+fn prompt_for_wg_key(uiclient: &dyn UiClient) -> anyhow::Result<WgKey> {
+    let public_key = uiclient.get_input(Input {
+        prompt: "Enter Wireguard public key".to_string(),
+        validator: Some(Box::new( |public_key: &String| -> Result<(), String> {
             let public_key = public_key.trim();
             if public_key.len() != 44 {
-                return Err("Expected private key length of 44 characters");
+                return Err("Expected private key length of 44 characters".to_string());
             }
             Ok(())
-        })
-        .interact()?;
+        }))})?;
 
-    let private_key = Input::<String>::new()
-        .with_prompt(format!("Private key for {}", &public_key))
-        .validate_with(|private_key: &String| -> Result<(), &str> {
+        let pubkey_clone = public_key.clone();
+    let private_key = uiclient.get_input(Input{
+        prompt: format!("Private key for {}", &public_key),
+        validator: Some(Box::new(move |private_key: &String| -> Result<(), String> {
             let private_key = private_key.trim();
 
             if private_key.len() != 44 {
-                return Err("Expected private key length of 44 characters");
+                return Err("Expected private key length of 44 characters".to_string());
             }
 
             match generate_public_key(private_key) {
                 Ok(pubkey) => {
-                    if pubkey != public_key {
-                        return Err("Private key does not match public key");
+                    if pubkey != pubkey_clone {
+                        return Err("Private key does not match public key".to_string());
                     }
                     Ok(())
                 }
-                Err(_) => Err("Failed to generate public key"),
+                Err(_) => Err("Failed to generate public key".to_string()),
             }
-        })
-        .interact()?;
+        }))})?;
 
     Ok(WgKey {
         public: public_key,
@@ -265,18 +274,17 @@ struct WireguardRelay {
     pubkey: String,
 }
 
-fn request_port() -> anyhow::Result<u16> {
+fn request_port(uiclient: &dyn UiClient) -> anyhow::Result<u16> {
     // https://www.ivpn.net/setup/gnu-linux-wireguard.html
-    let port = Input::<u16>::new()
-        .with_prompt("Enter port number:")
-        .validate_with(|x: &u16| -> Result<(), &str> {
+    let port = uiclient.get_input_numeric_u16(InputNumericu16 {
+        prompt: "Enter port number:".to_string(),
+        validator: Some(Box::new(|x: &u16| -> Result<(), String> {
           if [2049,2050,53,30587,41893,48574,58237].contains(x) {
               Ok(())
           } else {
-              Err("Port must be one of: 2049,2050,53,30587,41893,48574,58237 (see https://www.ivpn.net/setup/gnu-linux-wireguard.html for ports reference)")
+              Err("Port must be one of: 2049,2050,53,30587,41893,48574,58237 (see https://www.ivpn.net/setup/gnu-linux-wireguard.html for ports reference)".to_string())
           }
-        })
-      .default(41893)
-      .interact()?;
+        })),
+      default: Some(41893)})?;
     Ok(port)
 }

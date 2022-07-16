@@ -50,12 +50,12 @@ struct WgResponse {
 
 impl AzireVPN {
     fn request_userpass(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
-        let username = uiclient.get_input(&Input {
+        let username = uiclient.get_input(Input {
             prompt: "AzireVPN username".to_string(),
             validator: None,
         })?;
         let username = username.trim();
-        let password = uiclient.get_password(&Password {
+        let password = uiclient.get_password(Password {
             prompt: "AzireVPN password".to_string(),
             confirm: true,
         })?;

@@ -24,12 +24,12 @@ impl OpenVpnProvider for NordVPN {
     }
 
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
-        let username = uiclient.get_input(&Input {
+        let username = uiclient.get_input(Input {
             prompt: "NordVPN username".to_string(),
             validator: None,
         })?;
 
-        let password = uiclient.get_password(&Password {
+        let password = uiclient.get_password(Password {
             prompt: "Password".to_string(),
             confirm: true,
         })?;
@@ -204,6 +204,9 @@ impl ConfigurationChoice for ConfigType {
 
     fn all_names(&self) -> Vec<String> {
         Self::iter().map(|x| format!("{}", x)).collect()
+    }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        Some(Self::iter().map(|x| x.description().unwrap()).collect())
     }
     fn description(&self) -> Option<String> {
         Some( match self {

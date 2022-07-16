@@ -1,7 +1,10 @@
 use super::validate_hostname;
+use super::Device;
 use super::MozillaVPN;
 use super::{Error, User};
 use super::{Login, WireguardProvider};
+use crate::config::providers::BoolChoice;
+use crate::config::providers::ConfigurationChoice;
 use crate::config::providers::Input;
 use crate::config::providers::InputNumericu16;
 use crate::config::providers::UiClient;
@@ -18,6 +21,29 @@ use std::fs::create_dir_all;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
+
+struct Devices {
+    devices: Vec<Device>,
+}
+
+impl ConfigurationChoice for Devices {
+    fn prompt(&self) -> String {
+        "The following devices exist on your account, which would you like to use (you will need the private key)".to_string()
+    }
+
+    fn all_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.devices.iter().map(|x| x.name.clone()).collect();
+        v.push("Create a new device (keypair)".to_string());
+        v
+    }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        None
+    }
+
+    fn description(&self) -> Option<String> {
+        None
+    }
+}
 
 impl MozillaVPN {
     fn upload_new_device(
@@ -51,52 +77,45 @@ impl MozillaVPN {
     ) -> anyhow::Result<(NewDevice, WgKey)> {
         let devices = &login.user.devices;
         if !devices.is_empty() {
-        let selection = Select::new()
-            .with_prompt(
-                "The following devices exist on your account, which would you like to use (you will need the private key)",
-            )
-            .items(devices)
-            .item("Create a new device (keypair)")
-            .default(0)
-            .interact()?;
+        let selection = uiclient.get_configuration_choice(&Devices{devices: devices.clone()})?;
 
         if selection >= devices.len() {
             let (device, keypair) = generate_device(uiclient)?;
             self.upload_new_device(&device, client, login)?;
             Ok((device, keypair))
         } else {
-            let private_key = uiclient.get_input(&Input {
+            let pubkey_clone = devices[selection].pubkey.clone();
+            let private_key = uiclient.get_input(Input {
                prompt:format!(
                     "Private key for {}",
                     &devices[selection].pubkey
                 ),
-        validator: Some(Box::new( |private_key: &str| -> Result<(), &'static str> {
+        validator: Some(Box::new( move |private_key: &String| -> Result<(), String> {
             let private_key = private_key.trim();
             if private_key.len() != 44 {
-                return Err("Expected private key length of 44 characters"
+                return Err("Expected private key length of 44 characters".to_string()
                 );
             }
 
             match generate_public_key(private_key) {
                 Ok(public_key) => {
-            if public_key.as_str() != devices[selection].pubkey {
-                return Err("Private key does not match public key");
+            if public_key.as_str() != pubkey_clone {
+                return Err("Private key does not match public key".to_string());
             }
             Ok(())
                 }
-                Err(_) => Err("Failed to generate public key")
+                Err(_) => Err("Failed to generate public key".to_string())
         }}))})?;
             // TODO: Fix clones here
             let device = devices[selection].clone();
             Ok((NewDevice { name: device.name.clone(), pubkey: device.pubkey.clone()},
             WgKey {public: device.pubkey, private: private_key  } ))
         }
-    } else if :Confirm::new()
-            .with_prompt(
-                "No devices currently exist on your Mozilla account, would you like to generate a new device?"
-            )
-            .default(true)
-            .interact()? {
+    } else if uiclient.get_bool_choice(BoolChoice {
+                prompt: "No devices currently exist on your Mozilla account, would you like to generate a new device?".to_string(),
+                default: true,
+    })?
+             {
                 let (device, keypair) = generate_device(uiclient)?;
                 self.upload_new_device(&device, client, login)?;
                 Ok((device, keypair))
@@ -108,7 +127,7 @@ impl MozillaVPN {
 
 impl WireguardProvider for MozillaVPN {
     fn create_wireguard_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
-        let wireguard_dir = self.wireguard_dir(uiclient)?;
+        let wireguard_dir = self.wireguard_dir()?;
         create_dir_all(&wireguard_dir)?;
         delete_all_files_in_dir(&wireguard_dir)?;
 
@@ -204,13 +223,13 @@ impl WireguardProvider for MozillaVPN {
 
 fn generate_device(uiclient: &dyn UiClient) -> anyhow::Result<(NewDevice, WgKey)> {
     let keypair = generate_keypair()?;
-    let name = uiclient.get_input(&Input {
+    let name = uiclient.get_input(Input {
         prompt: "Please enter name for new device".to_string(),
-        validator: Some(Box::new(|x: &str| {
+        validator: Some(Box::new(|x: &String| {
             if validate_hostname(x) {
                 Ok(())
             } else {
-                Err("Device name must can only contain letters, numbers and dashes")
+                Err("Device name must can only contain letters, numbers and dashes".to_string())
             }
         })),
     })?;
@@ -225,9 +244,9 @@ fn generate_device(uiclient: &dyn UiClient) -> anyhow::Result<(NewDevice, WgKey)
 }
 
 fn request_port(uiclient: &dyn UiClient) -> anyhow::Result<u16> {
-    let port = uiclient.get_input_numeric_u16(&InputNumericu16 {
+    let port = uiclient.get_input_numeric_u16(InputNumericu16 {
         prompt: "Enter port number".to_string(),
-        validator: Some(Box::new(|n: &u16| -> Result<(), &str> {
+        validator: Some(Box::new(|n: &u16| -> Result<(), String> {
             if *n == 53
                 || (*n >= 4000 && *n <= 33433)
                 || (*n >= 33565 && *n <= 51820)
@@ -236,7 +255,8 @@ fn request_port(uiclient: &dyn UiClient) -> anyhow::Result<u16> {
                 Ok(())
             } else {
                 Err("
-        Port must be 53, or in range 4000-33433, 33565-51820, 52000-60000")
+        Port must be 53, or in range 4000-33433, 33565-51820, 52000-60000"
+                    .to_string())
             }
         })),
         default: Some(51820),

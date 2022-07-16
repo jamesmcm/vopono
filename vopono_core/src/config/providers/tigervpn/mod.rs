@@ -75,13 +75,13 @@ impl OpenVpnProvider for TigerVPN {
     }
 
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
-        let username = uiclient.get_input(&Input {
+        let username = uiclient.get_input(Input {
             prompt: "TigerVPN OpenVPN username (see https://www.tigervpn.com/dashboard/geeks )"
                 .to_string(),
             validator: None,
         })?;
 
-        let password = uiclient.get_password(&Password {
+        let password = uiclient.get_password(Password {
             prompt: "Password".to_string(),
             confirm: true,
         })?;

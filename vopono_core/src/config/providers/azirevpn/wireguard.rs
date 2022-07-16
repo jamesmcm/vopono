@@ -15,7 +15,7 @@ use std::str::FromStr;
 
 impl WireguardProvider for AzireVPN {
     fn create_wireguard_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
-        let wireguard_dir = self.wireguard_dir(uiclient)?;
+        let wireguard_dir = self.wireguard_dir()?;
         create_dir_all(&wireguard_dir)?;
         delete_all_files_in_dir(&wireguard_dir)?;
 

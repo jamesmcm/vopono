@@ -44,13 +44,13 @@ impl Provider for Mullvad {
 
 impl Mullvad {
     fn request_mullvad_username(&self, uiclient: &dyn UiClient) -> anyhow::Result<String> {
-        let mut username = uiclient.get_input(&Input {
+        let mut username = uiclient.get_input(Input {
             prompt: "Mullvad account number".to_string(),
-            validator: Some(Box::new(|username: &str| -> Result<(), &str> {
+            validator: Some(Box::new(|username: &String| -> Result<(), String> {
                 let mut username = username.to_string();
                 username.retain(|c| !c.is_whitespace() && c.is_ascii_digit());
                 if username.len() != 16 {
-                    return Err("Mullvad account number should be 16 digits!");
+                    return Err("Mullvad account number should be 16 digits!".to_string());
                 }
                 Ok(())
             })),

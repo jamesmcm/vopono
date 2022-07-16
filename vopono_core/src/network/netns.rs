@@ -8,7 +8,7 @@ use super::openvpn::OpenVpn;
 use super::shadowsocks::Shadowsocks;
 use super::veth_pair::VethPair;
 use super::wireguard::Wireguard;
-use crate::config::providers::VpnProvider;
+use crate::config::providers::{UiClient, VpnProvider};
 use crate::config::vpn::Protocol;
 use crate::network::host_masquerade::FirewallException;
 use crate::util::{config_dir, set_config_permissions, sudo_command};
@@ -287,6 +287,7 @@ impl NetworkNamespace {
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
         server: &str,
+        uiclient: &dyn UiClient,
     ) -> anyhow::Result<()> {
         self.openconnect = Some(OpenConnect::run(
             self,
@@ -295,6 +296,7 @@ impl NetworkNamespace {
             forward_ports,
             firewall,
             server,
+            uiclient,
         )?);
         Ok(())
     }

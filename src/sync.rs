@@ -2,11 +2,11 @@ use anyhow::bail;
 use clap::ArgEnum;
 use dialoguer::MultiSelect;
 use log::{error, info};
-use vopono_core::config::providers::VpnProvider;
+use vopono_core::config::providers::{UiClient, VpnProvider};
 use vopono_core::config::vpn::Protocol;
 use vopono_core::util::set_config_permissions;
 
-pub fn sync_menu() -> anyhow::Result<()> {
+pub fn sync_menu(uiclient: &dyn UiClient) -> anyhow::Result<()> {
     let variants = VpnProvider::value_variants()
         .iter()
         .filter(|x| **x != VpnProvider::Custom)
@@ -26,24 +26,28 @@ pub fn sync_menu() -> anyhow::Result<()> {
         .into_iter()
         .flat_map(|x| VpnProvider::from_str(&variants[x], true))
     {
-        synch(provider, None)?;
+        synch(provider, None, uiclient)?;
     }
 
     Ok(())
 }
 
-pub fn synch(provider: VpnProvider, protocol: Option<Protocol>) -> anyhow::Result<()> {
+pub fn synch(
+    provider: VpnProvider,
+    protocol: Option<Protocol>,
+    uiclient: &dyn UiClient,
+) -> anyhow::Result<()> {
     match protocol {
         Some(Protocol::OpenVpn) => {
             info!("Starting OpenVPN configuration...");
             let provider = provider.get_dyn_openvpn_provider()?;
-            provider.create_openvpn_config()?;
+            provider.create_openvpn_config(uiclient)?;
             // downcast?
         }
         Some(Protocol::Wireguard) => {
             info!("Starting Wireguard configuration...");
             let provider = provider.get_dyn_wireguard_provider()?;
-            provider.create_wireguard_config()?;
+            provider.create_wireguard_config(uiclient)?;
         }
         Some(Protocol::OpenConnect) => {
             error!("vopono sync not supported for OpenConnect protocol");
@@ -55,11 +59,11 @@ pub fn synch(provider: VpnProvider, protocol: Option<Protocol>) -> anyhow::Resul
         None => {
             if let Ok(p) = provider.get_dyn_wireguard_provider() {
                 info!("Starting Wireguard configuration...");
-                p.create_wireguard_config()?;
+                p.create_wireguard_config(uiclient)?;
             }
             if let Ok(p) = provider.get_dyn_openvpn_provider() {
                 info!("Starting OpenVPN configuration...");
-                p.create_openvpn_config()?;
+                p.create_openvpn_config(uiclient)?;
             }
         }
     }

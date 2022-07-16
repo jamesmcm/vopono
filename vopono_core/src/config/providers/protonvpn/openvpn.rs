@@ -62,14 +62,14 @@ impl OpenVpnProvider for ProtonVPN {
     }
 
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
-        let username = uiclient.get_input(&Input {
+        let username = uiclient.get_input(Input {
             prompt:
                 "ProtonVPN OpenVPN username (see: https://account.protonvpn.com/account#openvpn )"
                     .to_string(),
             validator: None,
         })?;
 
-        let password = uiclient.get_password(&Password {
+        let password = uiclient.get_password(Password {
             prompt: "OpenVPN Password".to_string(),
             confirm: true,
         })?;
@@ -224,6 +224,10 @@ impl ConfigurationChoice for Tier {
     fn all_names(&self) -> Vec<String> {
         Self::iter().map(|x| format!("{}", x)).collect()
     }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        Some(Self::iter().map(|x| x.description().unwrap()).collect())
+    }
+
     fn description(&self) -> Option<String> {
         Some(
             match self {
@@ -281,6 +285,9 @@ impl ConfigurationChoice for Feature {
     fn all_names(&self) -> Vec<String> {
         Self::iter().map(|x| format!("{}", x)).collect()
     }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        Some(Self::iter().map(|x| x.description().unwrap()).collect())
+    }
     fn description(&self) -> Option<String> {
         Some(
             match self {
@@ -334,6 +341,9 @@ impl ConfigurationChoice for ConfigType {
 
     fn all_names(&self) -> Vec<String> {
         Self::iter().map(|x| format!("{}", x)).collect()
+    }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        Some(Self::iter().map(|x| x.description().unwrap()).collect())
     }
     fn description(&self) -> Option<String> {
         Some(

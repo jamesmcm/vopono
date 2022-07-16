@@ -24,7 +24,6 @@ use std::path::PathBuf;
 
 // Methods below take full responsiblity for generating config files
 // Should be output to ~/.config/vopono/{provider}/{protocol}/{country}-{host_alias}.{conf,ovpn}
-// Methods should use dialoguer to request authentication, and reqwest for any HTTP requests
 // Should prompt user for any user input - i.e. port + protocol choice
 
 /// enum used to accept VPN Provider as an argument
@@ -120,7 +119,7 @@ pub trait WireguardProvider: Provider {
     /// This method must create the Wireguard wg-quick config files
     fn create_wireguard_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()>;
 
-    fn wireguard_dir(&self, uiclient: &dyn UiClient) -> anyhow::Result<PathBuf> {
+    fn wireguard_dir(&self) -> anyhow::Result<PathBuf> {
         Ok(self.provider_dir()?.join("wireguard"))
     }
 }
@@ -154,32 +153,35 @@ pub trait ConfigurationChoice {
     /// Descriptions are a user-friendly descriptions for each enum variant
     fn description(&self) -> Option<String>;
 
+    /// Descriptions are a user-friendly descriptions for each enum variant
+    fn all_descriptions(&self) -> Option<Vec<String>>;
+
     /// Get all enum variant names (this order will be used for other methods)
     fn all_names(&self) -> Vec<String>;
 }
 // TODO: FromStr, ToString
 
 pub struct BoolChoice {
-    prompt: String,
-    default: bool,
+    pub prompt: String,
+    pub default: bool,
 }
 
 /// Only supports strings
 pub struct Input {
-    prompt: String,
-    validator: Option<Box<dyn Fn(&str) -> core::result::Result<(), &str>>>,
+    pub prompt: String,
+    pub validator: Option<Box<dyn Fn(&String) -> core::result::Result<(), String>>>,
 }
 
 /// Only supports u16 input - so UI Client can allow numbers only
 pub struct InputNumericu16 {
-    prompt: String,
-    validator: Option<Box<dyn Fn(&u16) -> core::result::Result<(), &str>>>,
-    default: Option<u16>,
+    pub prompt: String,
+    pub validator: Option<Box<dyn Fn(&u16) -> core::result::Result<(), String>>>,
+    pub default: Option<u16>,
 }
 
 pub struct Password {
-    prompt: String,
-    confirm: bool,
+    pub prompt: String,
+    pub confirm: bool,
 }
 
 /// Trait to be implemented by a struct wrapping the user-facing client code
@@ -191,10 +193,10 @@ pub trait UiClient {
         &self,
         conf_choice: &dyn ConfigurationChoice,
     ) -> anyhow::Result<usize>;
-    fn get_bool_choice(&self, bool_choice: &BoolChoice) -> anyhow::Result<bool>;
-    fn get_input(&self, input: &Input) -> anyhow::Result<String>;
-    fn get_input_numeric_u16(&self, input: &InputNumericu16) -> anyhow::Result<u16>;
-    fn get_password(&self, password: &Password) -> anyhow::Result<String>;
+    fn get_bool_choice(&self, bool_choice: BoolChoice) -> anyhow::Result<bool>;
+    fn get_input(&self, input: Input) -> anyhow::Result<String>;
+    fn get_input_numeric_u16(&self, input: InputNumericu16) -> anyhow::Result<u16>;
+    fn get_password(&self, password: Password) -> anyhow::Result<String>;
 
     // TODO: Cannot return dyn ConfigurationChoice
     // Used to process choices in batches - any choices that can be batched together (i.e. independent of eachother) should do so

@@ -35,7 +35,7 @@ impl OpenVpnProvider for IVPN {
     }
 
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
-        let username = uiclient.get_input(&Input {prompt:"IVPN account ID (starts with \"ivpn\" see: https://www.ivpn.net/clientarea/vpn/273887 )".to_string(), validator: None})?;
+        let username = uiclient.get_input(Input {prompt:"IVPN account ID (starts with \"ivpn\" see: https://www.ivpn.net/clientarea/vpn/273887 )".to_string(), validator: None})?;
 
         Ok((username, "password".to_string()))
     }
