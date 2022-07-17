@@ -150,7 +150,6 @@ impl WireguardProvider for IVPN {
         };
 
         let ip_address = uiclient.get_input(Input {
-            
             prompt: format!("Enter the IP address linked to this public key ({})\nSee https://www.ivpn.net/clientarea/vpn/273887/wireguard/keys ", &keypair.public),
             validator: Some(Box::new(
             move |ipstr: &String| -> Result<(), String> {
@@ -230,34 +229,38 @@ impl WireguardProvider for IVPN {
 fn prompt_for_wg_key(uiclient: &dyn UiClient) -> anyhow::Result<WgKey> {
     let public_key = uiclient.get_input(Input {
         prompt: "Enter Wireguard public key".to_string(),
-        validator: Some(Box::new( |public_key: &String| -> Result<(), String> {
+        validator: Some(Box::new(|public_key: &String| -> Result<(), String> {
             let public_key = public_key.trim();
             if public_key.len() != 44 {
                 return Err("Expected private key length of 44 characters".to_string());
             }
             Ok(())
-        }))})?;
+        })),
+    })?;
 
-        let pubkey_clone = public_key.clone();
-    let private_key = uiclient.get_input(Input{
+    let pubkey_clone = public_key.clone();
+    let private_key = uiclient.get_input(Input {
         prompt: format!("Private key for {}", &public_key),
-        validator: Some(Box::new(move |private_key: &String| -> Result<(), String> {
-            let private_key = private_key.trim();
+        validator: Some(Box::new(
+            move |private_key: &String| -> Result<(), String> {
+                let private_key = private_key.trim();
 
-            if private_key.len() != 44 {
-                return Err("Expected private key length of 44 characters".to_string());
-            }
-
-            match generate_public_key(private_key) {
-                Ok(pubkey) => {
-                    if pubkey != pubkey_clone {
-                        return Err("Private key does not match public key".to_string());
-                    }
-                    Ok(())
+                if private_key.len() != 44 {
+                    return Err("Expected private key length of 44 characters".to_string());
                 }
-                Err(_) => Err("Failed to generate public key".to_string()),
-            }
-        }))})?;
+
+                match generate_public_key(private_key) {
+                    Ok(pubkey) => {
+                        if pubkey != pubkey_clone {
+                            return Err("Private key does not match public key".to_string());
+                        }
+                        Ok(())
+                    }
+                    Err(_) => Err("Failed to generate public key".to_string()),
+                }
+            },
+        )),
+    })?;
 
     Ok(WgKey {
         public: public_key,

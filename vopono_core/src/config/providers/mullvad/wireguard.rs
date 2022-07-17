@@ -1,6 +1,6 @@
 use super::Mullvad;
 use super::{AuthToken, UserInfo, UserResponse, WireguardProvider};
-use crate::config::providers::{UiClient, Input, InputNumericu16, ConfigurationChoice, BoolChoice};
+use crate::config::providers::{BoolChoice, ConfigurationChoice, Input, InputNumericu16, UiClient};
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::{generate_keypair, generate_public_key, WgKey, WgPeer};
@@ -158,15 +158,13 @@ struct WireguardRelay {
     socks_name: String,
 }
 
-
-
 struct Devices {
     devices: Vec<WgPeer>,
 }
 
 impl ConfigurationChoice for Devices {
     fn prompt(&self) -> String {
-                "The following Wireguard keys exist on your account, which would you like to use (you will need the private key)".to_string()
+        "The following Wireguard keys exist on your account, which would you like to use (you will need the private key)".to_string()
     }
 
     fn all_names(&self) -> Vec<String> {
@@ -187,7 +185,7 @@ fn prompt_for_wg_key(
     user_info: UserInfo,
     client: &Client,
     auth_token: &str,
- uiclient: &dyn UiClient
+    uiclient: &dyn UiClient,
 ) -> anyhow::Result<WgKey> {
     if !user_info.wg_peers.is_empty() {
         let existing = Devices { devices: user_info.wg_peers.clone()};
@@ -205,7 +203,7 @@ fn prompt_for_wg_key(
             Ok(keypair)
         } else {
             let pubkey_clone =  user_info.wg_peers[selection].key.public.clone();
-            let private_key = uiclient.get_input(Input{ 
+            let private_key = uiclient.get_input(Input{
                     prompt: format!("Private key for {}",
                     &user_info.wg_peers[selection].key.public
                 ),
@@ -260,7 +258,8 @@ fn request_port(uiclient: &dyn UiClient) -> anyhow::Result<u16> {
                 Ok(())
             } else {
                 Err("
-        Port must be 53, or in range 4000-33433, 33565-51820, 52000-60000".to_string())
+        Port must be 53, or in range 4000-33433, 33565-51820, 52000-60000"
+                    .to_string())
             }
         })),
         default: Some(51820),
