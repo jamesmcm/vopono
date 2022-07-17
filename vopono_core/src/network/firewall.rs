@@ -1,8 +1,8 @@
 use super::netns::NetworkNamespace;
 use serde::{Deserialize, Serialize};
-use strum_macros::Display;
+use strum_macros::{Display, EnumIter};
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy, Display)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy, Display, EnumIter)]
 pub enum Firewall {
     IpTables,
     NfTables,

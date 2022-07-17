@@ -52,6 +52,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     // Assign firewall from args or vopono config file
     let firewall: Firewall = command
         .firewall
+        .map(|x| x.to_variant())
         .ok_or_else(|| anyhow!(""))
         .or_else(|_| {
             vopono_config_settings.get("firewall").map_err(|e| {
@@ -123,6 +124,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     if let Some(path) = &custom_config {
         protocol = command
             .protocol
+            .map(|x| x.to_variant())
             .unwrap_or_else(|| get_config_file_protocol(path));
         provider = VpnProvider::Custom;
 
@@ -153,6 +155,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         // Get server and provider
         provider = command
             .vpn_provider
+            .map(|x| x.to_variant())
             .or_else(|| {
                 vopono_config_settings
                     .get("provider")
@@ -186,6 +189,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         // Check protocol is valid for provider
         protocol = command
             .protocol
+            .map(|x| x.to_variant())
             .or_else(|| {
                 vopono_config_settings
                     .get("protocol")

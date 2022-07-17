@@ -1,7 +1,7 @@
 [package]
 name = "vopono"
 description = "Launch applications via VPN tunnels using temporary network namespaces"
-version = "0.10.0"
+version = "0.10.1"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2021"
 license = "GPL-3.0-or-later"
@@ -29,6 +29,8 @@ bs58 = "0.4"
 nix = "0.24"
 config = "0.13"
 basic_tcp_proxy = "0.3"
+strum = "0.24"
+strum_macros = "0.24"
 
 [package.metadata.rpm]
 package = "vopono"

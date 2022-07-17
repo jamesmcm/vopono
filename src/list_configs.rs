@@ -5,7 +5,7 @@ use vopono_core::config::vpn::Protocol;
 use vopono_core::util::get_configs_from_alias;
 
 pub fn print_configs(cmd: ServersCommand) -> anyhow::Result<()> {
-    let provider = cmd.vpn_provider;
+    let provider = cmd.vpn_provider.to_variant();
     if provider == VpnProvider::Custom {
         bail!("Config listing not implemented for Custom provider files");
     }
@@ -14,6 +14,7 @@ pub fn print_configs(cmd: ServersCommand) -> anyhow::Result<()> {
     let protocol = cmd
         .protocol
         .clone()
+        .map(|x| x.to_variant())
         .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
 
     // Check config files exist for provider
@@ -35,7 +36,7 @@ pub fn print_configs(cmd: ServersCommand) -> anyhow::Result<()> {
     let prefix = cmd.prefix.unwrap_or_default();
     println!("provider\tprotocol\tconfig_file");
     if (cmd.protocol.is_none() && provider.get_dyn_openvpn_provider().is_ok())
-        || cmd.protocol == Some(Protocol::OpenVpn)
+        || cmd.protocol.clone().map(|x| x.to_variant()) == Some(Protocol::OpenVpn)
     {
         let openvpn_configs = get_configs_from_alias(
             &provider.get_dyn_openvpn_provider()?.openvpn_dir()?,
@@ -52,7 +53,7 @@ pub fn print_configs(cmd: ServersCommand) -> anyhow::Result<()> {
     };
 
     if (cmd.protocol.is_none() && provider.get_dyn_wireguard_provider().is_ok())
-        || cmd.protocol == Some(Protocol::Wireguard)
+        || cmd.protocol.map(|x| x.to_variant()) == Some(Protocol::Wireguard)
     {
         let wg_configs = get_configs_from_alias(
             &provider.get_dyn_wireguard_provider()?.wireguard_dir()?,

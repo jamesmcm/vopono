@@ -64,7 +64,11 @@ fn main() -> anyhow::Result<()> {
             if synchcmd.vpn_provider.is_none() {
                 sync_menu(&uiclient)?;
             } else {
-                synch(synchcmd.vpn_provider.unwrap(), synchcmd.protocol, &uiclient)?;
+                synch(
+                    synchcmd.vpn_provider.unwrap().to_variant(),
+                    synchcmd.protocol.map(|x| x.to_variant()),
+                    &uiclient,
+                )?;
             }
         }
         args::Command::Servers(serverscmd) => {

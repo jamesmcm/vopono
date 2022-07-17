@@ -69,7 +69,7 @@ impl Display for OpenVpnProtocol {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Display)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Display, EnumIter)]
 pub enum Protocol {
     OpenVpn,
     Wireguard,

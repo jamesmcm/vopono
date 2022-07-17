@@ -6,11 +6,13 @@ use vopono_core::config::providers::{UiClient, VpnProvider};
 use vopono_core::config::vpn::Protocol;
 use vopono_core::util::set_config_permissions;
 
+use crate::args::WrappedArg;
+
 pub fn sync_menu(uiclient: &dyn UiClient) -> anyhow::Result<()> {
-    let variants = VpnProvider::value_variants()
+    let variants = WrappedArg::<VpnProvider>::value_variants()
         .iter()
-        .filter(|x| **x != VpnProvider::Custom)
-        .map(|x| x.to_string())
+        .filter(|x| x.to_variant() != VpnProvider::Custom)
+        .map(|x| x.to_variant().to_string())
         .collect::<Vec<String>>();
 
     let selection: Vec<usize> = MultiSelect::new()
@@ -24,9 +26,9 @@ pub fn sync_menu(uiclient: &dyn UiClient) -> anyhow::Result<()> {
 
     for provider in selection
         .into_iter()
-        .flat_map(|x| VpnProvider::from_str(&variants[x], true))
+        .flat_map(|x| WrappedArg::<VpnProvider>::from_str(&variants[x], true))
     {
-        synch(provider, None, uiclient)?;
+        synch(provider.to_variant(), None, uiclient)?;
     }
 
     Ok(())

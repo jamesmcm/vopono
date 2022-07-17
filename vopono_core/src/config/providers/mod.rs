@@ -15,7 +15,7 @@ use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::path::PathBuf;
-use strum_macros::Display;
+use strum_macros::{Display, EnumIter};
 
 // Command-line arguments use VpnProvider enum
 // We pattern match on that to build an instance of the actual provider struct
@@ -27,7 +27,7 @@ use strum_macros::Display;
 // Should prompt user for any user input - i.e. port + protocol choice
 
 /// enum used to accept VPN Provider as an argument
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Display)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Display, EnumIter)]
 pub enum VpnProvider {
     PrivateInternetAccess,
     Mullvad,
