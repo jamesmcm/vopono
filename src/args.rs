@@ -22,12 +22,14 @@ impl<T: IntoEnumIterator + Clone + Display> WrappedArg<T> {
 
 impl<T: IntoEnumIterator + Clone + Display> ArgEnum for WrappedArg<T> {
     fn from_str(input: &str, ignore_case: bool) -> core::result::Result<Self, String> {
-        let mut use_input = input.trim().to_string();
-        if ignore_case {
-            use_input = use_input.to_ascii_lowercase();
-        }
+        let use_input = input.trim().to_string();
 
-        let found = T::iter().find(|x| x.to_string() == use_input);
+        let found = if ignore_case {
+            T::iter().find(|x| x.to_string().to_ascii_lowercase() == use_input.to_ascii_lowercase())
+        } else {
+            T::iter().find(|x| x.to_string() == use_input)
+        };
+
         if let Some(f) = found {
             Ok(WrappedArg { variant: f })
         } else {
