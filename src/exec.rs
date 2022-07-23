@@ -9,7 +9,7 @@ use std::{
     fs::create_dir_all,
     io::{self, Write},
 };
-use vopono_core::config::providers::VpnProvider;
+use vopono_core::config::providers::{UiClient, VpnProvider};
 use vopono_core::config::vpn::{verify_auth, Protocol};
 use vopono_core::network::application_wrapper::ApplicationWrapper;
 use vopono_core::network::firewall::Firewall;
@@ -21,7 +21,7 @@ use vopono_core::util::vopono_dir;
 use vopono_core::util::{get_config_file_protocol, get_config_from_alias};
 use vopono_core::util::{get_existing_namespaces, get_target_subnet};
 
-pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
+pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()> {
     // this captures all sigint signals
     // ignore for now, they are automatically passed on to the child
     let signals = Signals::new(&[SIGINT])?;
@@ -52,6 +52,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     // Assign firewall from args or vopono config file
     let firewall: Firewall = command
         .firewall
+        .map(|x| x.to_variant())
         .ok_or_else(|| anyhow!(""))
         .or_else(|_| {
             vopono_config_settings.get("firewall").map_err(|e| {
@@ -123,6 +124,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
     if let Some(path) = &custom_config {
         protocol = command
             .protocol
+            .map(|x| x.to_variant())
             .unwrap_or_else(|| get_config_file_protocol(path));
         provider = VpnProvider::Custom;
 
@@ -153,6 +155,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         // Get server and provider
         provider = command
             .vpn_provider
+            .map(|x| x.to_variant())
             .or_else(|| {
                 vopono_config_settings
                     .get("provider")
@@ -186,6 +189,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
         // Check protocol is valid for provider
         protocol = command
             .protocol
+            .map(|x| x.to_variant())
             .or_else(|| {
                 vopono_config_settings
                     .get("protocol")
@@ -211,7 +215,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                 "Config files for {} {} do not exist, running vopono sync",
                 provider, protocol
             );
-            synch(provider.clone(), Some(protocol.clone()))?;
+            synch(provider.clone(), Some(protocol.clone()), uiclient)?;
         }
     }
 
@@ -306,7 +310,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
             Protocol::OpenVpn => {
                 // Handle authentication check
                 let auth_file = if provider != VpnProvider::Custom {
-                    verify_auth(provider.get_dyn_openvpn_provider()?)?
+                    verify_auth(provider.get_dyn_openvpn_provider()?, uiclient)?
                 } else {
                     None
                 };
@@ -399,6 +403,7 @@ pub fn exec(command: ExecCommand) -> anyhow::Result<()> {
                     command.forward_ports.as_ref(),
                     firewall,
                     &server_name,
+                    uiclient,
                 )?;
             }
             Protocol::OpenFortiVpn => {

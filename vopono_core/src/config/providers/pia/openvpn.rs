@@ -1,7 +1,7 @@
 use super::PrivateInternetAccess;
 use super::{ConfigurationChoice, OpenVpnProvider};
+use crate::config::providers::{Input, Password, UiClient};
 use crate::util::delete_all_files_in_dir;
-use dialoguer::{Input, Password};
 use log::debug;
 use reqwest::Url;
 use std::fmt::Display;
@@ -22,15 +22,16 @@ impl OpenVpnProvider for PrivateInternetAccess {
         ])
     }
 
-    fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
-        let username = Input::<String>::new()
-            .with_prompt("PrivateInternetAccess username")
-            .interact()?;
+    fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
+        let username = uiclient.get_input(Input {
+            prompt: "PrivateInternetAccess username".to_string(),
+            validator: None,
+        })?;
+        let password = uiclient.get_password(Password {
+            prompt: "Password".to_string(),
+            confirm: true,
+        })?;
 
-        let password = Password::new()
-            .with_prompt("Password")
-            .with_confirmation("Confirm password", "Passwords did not match")
-            .interact()?;
         Ok((username, password))
     }
 
@@ -38,8 +39,10 @@ impl OpenVpnProvider for PrivateInternetAccess {
         Ok(Some(self.openvpn_dir()?.join("auth.txt")))
     }
 
-    fn create_openvpn_config(&self) -> anyhow::Result<()> {
-        let config_choice = ConfigType::choose_one()?;
+    fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
+        let config_choice = ConfigType::index_to_variant(
+            uiclient.get_configuration_choice(&ConfigType::default())?,
+        );
         let zipfile = reqwest::blocking::get(config_choice.url()?)?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
         let openvpn_dir = self.openvpn_dir()?;
@@ -88,7 +91,7 @@ impl OpenVpnProvider for PrivateInternetAccess {
         }
 
         // Write OpenVPN credentials file
-        let (user, pass) = self.prompt_for_auth()?;
+        let (user, pass) = self.prompt_for_auth(uiclient)?;
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;
@@ -125,6 +128,9 @@ impl ConfigType {
 
         Ok(s.parse()?)
     }
+    fn index_to_variant(index: usize) -> Self {
+        Self::iter().nth(index).expect("Invalid index")
+    }
 }
 
 impl Display for ConfigType {
@@ -149,12 +155,15 @@ impl Default for ConfigType {
 }
 
 impl ConfigurationChoice for ConfigType {
-    fn prompt() -> String {
+    fn prompt(&self) -> String {
         "Please choose the set of OpenVPN configuration files you wish to install".to_string()
     }
+    fn all_names(&self) -> Vec<String> {
+        Self::iter().map(|x| format!("{}", x)).collect()
+    }
 
-    fn variants() -> Vec<Self> {
-        ConfigType::iter().collect()
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        Some(Self::iter().map(|x| x.description().unwrap()).collect())
     }
     fn description(&self) -> Option<String> {
         Some( match self {

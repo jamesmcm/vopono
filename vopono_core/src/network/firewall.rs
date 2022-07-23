@@ -1,9 +1,8 @@
 use super::netns::NetworkNamespace;
-use clap::ArgEnum;
 use serde::{Deserialize, Serialize};
+use strum_macros::{Display, EnumIter};
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy, ArgEnum)]
-#[clap(rename_all = "verbatim")]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Copy, Display, EnumIter)]
 pub enum Firewall {
     IpTables,
     NfTables,

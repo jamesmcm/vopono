@@ -1,10 +1,9 @@
 mod openvpn;
 mod wireguard;
 
-use super::{ConfigurationChoice, OpenVpnProvider, Provider, WireguardProvider};
+use super::{Input, OpenVpnProvider, Password, Provider, UiClient, WireguardProvider};
 use crate::config::vpn::Protocol;
 use crate::network::wireguard::{de_socketaddr, de_vec_ipaddr, de_vec_ipnet};
-use dialoguer::{Input, Password};
 use ipnet::IpNet;
 use serde::Deserialize;
 use std::net::IpAddr;
@@ -50,14 +49,16 @@ struct WgResponse {
 }
 
 impl AzireVPN {
-    fn request_userpass(&self) -> anyhow::Result<(String, String)> {
-        let username = Input::<String>::new()
-            .with_prompt("AzireVPN username")
-            .interact()?;
+    fn request_userpass(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
+        let username = uiclient.get_input(Input {
+            prompt: "AzireVPN username".to_string(),
+            validator: None,
+        })?;
         let username = username.trim();
-        let password = Password::new()
-            .with_prompt("AzireVPN password")
-            .interact()?;
+        let password = uiclient.get_password(Password {
+            prompt: "AzireVPN password".to_string(),
+            confirm: true,
+        })?;
         let password = password.trim();
         Ok((username.to_string(), password.to_string()))
     }

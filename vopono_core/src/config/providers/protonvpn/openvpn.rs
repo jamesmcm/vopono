@@ -1,8 +1,8 @@
 use super::ProtonVPN;
 use super::{ConfigurationChoice, OpenVpnProvider};
+use crate::config::providers::{Input, Password, UiClient};
 use crate::config::vpn::OpenVpnProtocol;
 use crate::util::delete_all_files_in_dir;
-use dialoguer::{Input, Password};
 use log::{debug, info};
 use reqwest::Url;
 use std::fmt::Display;
@@ -61,17 +61,18 @@ impl OpenVpnProvider for ProtonVPN {
         // Some(vec![IpAddr::V4(ip)])
     }
 
-    fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
-        let username = Input::<String>::new()
-            .with_prompt(
-                "ProtonVPN OpenVPN username (see: https://account.protonvpn.com/account#openvpn )",
-            )
-            .interact()?;
+    fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
+        let username = uiclient.get_input(Input {
+            prompt:
+                "ProtonVPN OpenVPN username (see: https://account.protonvpn.com/account#openvpn )"
+                    .to_string(),
+            validator: None,
+        })?;
 
-        let password = Password::new()
-            .with_prompt("OpenVPN Password")
-            .with_confirmation("Confirm password", "Passwords did not match")
-            .interact()?;
+        let password = uiclient.get_password(Password {
+            prompt: "OpenVPN Password".to_string(),
+            confirm: true,
+        })?;
         Ok((username.trim().to_string(), password.trim().to_string()))
     }
 
@@ -79,24 +80,26 @@ impl OpenVpnProvider for ProtonVPN {
         Ok(Some(self.openvpn_dir()?.join("auth.txt")))
     }
 
-    fn create_openvpn_config(&self) -> anyhow::Result<()> {
+    fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
         let openvpn_dir = self.openvpn_dir()?;
         let code_map = crate::util::country_map::code_to_country_map();
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
-        let tier = Tier::choose_one()?;
+        let tier = Tier::index_to_variant(uiclient.get_configuration_choice(&Tier::default())?);
         let config_choice = if tier != Tier::Free {
-            ConfigType::choose_one()?
+            ConfigType::index_to_variant(uiclient.get_configuration_choice(&ConfigType::default())?)
         } else {
             // Dummy as not used for Free
             ConfigType::Standard
         };
         let feature_choice = if tier != Tier::Free {
-            Feature::choose_one()?
+            Feature::index_to_variant(uiclient.get_configuration_choice(&Feature::default())?)
         } else {
             Feature::Normal
         };
-        let protocol = OpenVpnProtocol::choose_one()?;
+        let protocol = OpenVpnProtocol::index_to_variant(
+            uiclient.get_configuration_choice(&OpenVpnProtocol::default())?,
+        );
         let url = self.build_url(&config_choice, &tier, &feature_choice, &protocol)?;
         let zipfile = reqwest::blocking::get(url)?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
@@ -162,7 +165,7 @@ impl OpenVpnProvider for ProtonVPN {
         // write!(dns_file, "{}", dns_string)?;
 
         // Write OpenVPN credentials file
-        let (user, pass) = self.prompt_for_auth()?;
+        let (user, pass) = self.prompt_for_auth(uiclient)?;
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;
@@ -191,6 +194,9 @@ impl Tier {
             Self::Free => "0".to_string(),
         }
     }
+    fn index_to_variant(index: usize) -> Self {
+        Self::iter().nth(index).expect("Invalid index")
+    }
 }
 
 impl Display for Tier {
@@ -211,13 +217,17 @@ impl Default for Tier {
 }
 
 impl ConfigurationChoice for Tier {
-    fn prompt() -> String {
+    fn prompt(&self) -> String {
         "Choose your ProtonVPN account tier".to_string()
     }
 
-    fn variants() -> Vec<Self> {
-        Tier::iter().collect()
+    fn all_names(&self) -> Vec<String> {
+        Self::iter().map(|x| format!("{}", x)).collect()
     }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        Some(Self::iter().map(|x| x.description().unwrap()).collect())
+    }
+
     fn description(&self) -> Option<String> {
         Some(
             match self {
@@ -245,6 +255,9 @@ impl Feature {
             Self::Normal => "0".to_string(),
         }
     }
+    fn index_to_variant(index: usize) -> Self {
+        Self::iter().nth(index).expect("Invalid index")
+    }
 }
 
 impl Display for Feature {
@@ -265,12 +278,15 @@ impl Default for Feature {
 }
 
 impl ConfigurationChoice for Feature {
-    fn prompt() -> String {
+    fn prompt(&self) -> String {
         "Please choose a server feature".to_string()
     }
 
-    fn variants() -> Vec<Self> {
-        Feature::iter().collect()
+    fn all_names(&self) -> Vec<String> {
+        Self::iter().map(|x| format!("{}", x)).collect()
+    }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        Some(Self::iter().map(|x| x.description().unwrap()).collect())
     }
     fn description(&self) -> Option<String> {
         Some(
@@ -297,6 +313,9 @@ impl ConfigType {
             Self::Standard => "Country".to_string(),
         }
     }
+    fn index_to_variant(index: usize) -> Self {
+        Self::iter().nth(index).expect("Invalid index")
+    }
 }
 
 impl Display for ConfigType {
@@ -316,12 +335,15 @@ impl Default for ConfigType {
 }
 
 impl ConfigurationChoice for ConfigType {
-    fn prompt() -> String {
+    fn prompt(&self) -> String {
         "Please choose the set of OpenVPN configuration files you wish to install".to_string()
     }
 
-    fn variants() -> Vec<Self> {
-        ConfigType::iter().collect()
+    fn all_names(&self) -> Vec<String> {
+        Self::iter().map(|x| format!("{}", x)).collect()
+    }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        Some(Self::iter().map(|x| x.description().unwrap()).collect())
     }
     fn description(&self) -> Option<String> {
         Some(

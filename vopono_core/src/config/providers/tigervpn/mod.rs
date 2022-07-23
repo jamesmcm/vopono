@@ -1,9 +1,9 @@
-use super::{ConfigurationChoice, OpenVpnProvider, Provider};
+use super::{Input, Password, UiClient};
+use super::{OpenVpnProvider, Provider};
 use crate::config::vpn::OpenVpnProtocol;
 use crate::config::vpn::Protocol;
 use crate::util::delete_all_files_in_dir;
 use anyhow::Context;
-use dialoguer::{Input, Password};
 use serde::Deserialize;
 use std::fs::create_dir_all;
 use std::fs::File;
@@ -74,17 +74,17 @@ impl OpenVpnProvider for TigerVPN {
         None
     }
 
-    fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
-        let username = Input::<String>::new()
-            .with_prompt(
-                "TigerVPN OpenVPN username (see https://www.tigervpn.com/dashboard/geeks )",
-            )
-            .interact()?;
+    fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
+        let username = uiclient.get_input(Input {
+            prompt: "TigerVPN OpenVPN username (see https://www.tigervpn.com/dashboard/geeks )"
+                .to_string(),
+            validator: None,
+        })?;
 
-        let password = Password::new()
-            .with_prompt("Password")
-            .with_confirmation("Confirm password", "Passwords did not match")
-            .interact()?;
+        let password = uiclient.get_password(Password {
+            prompt: "Password".to_string(),
+            confirm: true,
+        })?;
         Ok((username, password))
     }
 
@@ -92,11 +92,13 @@ impl OpenVpnProvider for TigerVPN {
         Ok(Some(self.openvpn_dir()?.join("auth.txt")))
     }
 
-    fn create_openvpn_config(&self) -> anyhow::Result<()> {
+    fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
         let openvpn_dir = self.openvpn_dir()?;
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
-        let protocol = OpenVpnProtocol::choose_one()?;
+        let protocol = OpenVpnProtocol::index_to_variant(
+            uiclient.get_configuration_choice(&OpenVpnProtocol::default())?,
+        );
         let settings = Self::get_default_openvpn_settings();
 
         let (port, proto_str) = match protocol {
@@ -124,7 +126,7 @@ impl OpenVpnProvider for TigerVPN {
         }
 
         // Write OpenVPN credentials file
-        let (user, pass) = self.prompt_for_auth()?;
+        let (user, pass) = self.prompt_for_auth(uiclient)?;
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;

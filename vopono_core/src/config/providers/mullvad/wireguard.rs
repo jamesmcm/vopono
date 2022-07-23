@@ -1,10 +1,10 @@
 use super::Mullvad;
 use super::{AuthToken, UserInfo, UserResponse, WireguardProvider};
+use crate::config::providers::{BoolChoice, ConfigurationChoice, Input, InputNumericu16, UiClient};
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
-use crate::util::wireguard::{generate_keypair, generate_public_key, WgKey};
+use crate::util::wireguard::{generate_keypair, generate_public_key, WgKey, WgPeer};
 use anyhow::{anyhow, Context};
-use dialoguer::Input;
 use ipnet::IpNet;
 use log::{debug, info};
 use regex::Regex;
@@ -36,7 +36,7 @@ impl Mullvad {
 }
 
 impl WireguardProvider for Mullvad {
-    fn create_wireguard_config(&self) -> anyhow::Result<()> {
+    fn create_wireguard_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
         let wireguard_dir = self.wireguard_dir()?;
         create_dir_all(&wireguard_dir)?;
         delete_all_files_in_dir(&wireguard_dir)?;
@@ -47,7 +47,7 @@ impl WireguardProvider for Mullvad {
             .send()?
             .json()?;
 
-        let username = self.request_mullvad_username()?;
+        let username = self.request_mullvad_username(uiclient)?;
         let auth: AuthToken = client
             .get(&format!(
                 "https://api.mullvad.net/www/accounts/{}/",
@@ -65,7 +65,7 @@ impl WireguardProvider for Mullvad {
         let user_info = user_info.account;
         debug!("Received user info: {:?}", user_info);
 
-        let keypair: WgKey = prompt_for_wg_key(user_info, &client, &auth.auth_token)?;
+        let keypair: WgKey = prompt_for_wg_key(user_info, &client, &auth.auth_token, uiclient)?;
 
         debug!("Chosen keypair: {:?}", keypair);
         // Get user info again in case we uploaded new key
@@ -93,7 +93,7 @@ impl WireguardProvider for Mullvad {
             dns: Some(vec![IpAddr::from(dns)]),
         };
 
-        let port = request_port()?;
+        let port = request_port(uiclient)?;
 
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?, IpNet::from_str("::0/0")?];
 
@@ -158,20 +158,39 @@ struct WireguardRelay {
     socks_name: String,
 }
 
+struct Devices {
+    devices: Vec<WgPeer>,
+}
+
+impl ConfigurationChoice for Devices {
+    fn prompt(&self) -> String {
+        "The following Wireguard keys exist on your account, which would you like to use (you will need the private key)".to_string()
+    }
+
+    fn all_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.devices.iter().map(|x| x.to_string()).collect();
+        v.push("Generate a new keypair".to_string());
+        v
+    }
+
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        None
+    }
+    fn description(&self) -> Option<String> {
+        None
+    }
+}
+
 fn prompt_for_wg_key(
     user_info: UserInfo,
     client: &Client,
     auth_token: &str,
+    uiclient: &dyn UiClient,
 ) -> anyhow::Result<WgKey> {
     if !user_info.wg_peers.is_empty() {
-        let selection = dialoguer::Select::new()
-            .with_prompt(
-                "The following Wireguard keys exist on your account, which would you like to use (you will need the private key)",
-            )
-            .items(&user_info.wg_peers)
-            .item("Generate a new key pair")
-            .default(0)
-            .interact()?;
+        let existing = Devices { devices: user_info.wg_peers.clone()};
+
+        let selection = uiclient.get_configuration_choice(&existing)?;
 
         if selection >= user_info.wg_peers.len() {
             if user_info.wg_peers.len() >= user_info.max_wg_peers as usize
@@ -183,30 +202,29 @@ fn prompt_for_wg_key(
             Mullvad::upload_wg_key(client, auth_token, &keypair)?;
             Ok(keypair)
         } else {
-            let private_key = Input::<String>::new()
-                .with_prompt(format!(
-                    "Private key for {}",
+            let pubkey_clone =  user_info.wg_peers[selection].key.public.clone();
+            let private_key = uiclient.get_input(Input{
+                    prompt: format!("Private key for {}",
                     &user_info.wg_peers[selection].key.public
-                ))
-        .validate_with(|private_key: &String| -> Result<(), &str> {
+                ),
+        validator: Some(Box::new(move |private_key: &String| -> Result<(), String> {
 
             let private_key = private_key.trim();
 
             if private_key.len() != 44 {
-                return Err("Expected private key length of 44 characters"
+                return Err("Expected private key length of 44 characters".to_string()
                 );
             }
 
             match generate_public_key(private_key) {
                 Ok(public_key) => {
-            if public_key != user_info.wg_peers[selection].key.public {
-                return Err("Private key does not match public key");
+            if public_key != pubkey_clone {
+                return Err("Private key does not match public key".to_string());
             }
             Ok(())
                 }
-                Err(_) => Err("Failed to generate public key")
-        }})
-                .interact()?;
+                Err(_) => Err("Failed to generate public key".to_string())
+        }}))})?;
 
 
             Ok(WgKey {
@@ -214,12 +232,12 @@ fn prompt_for_wg_key(
                 private: private_key,
             })
         }
-    } else if dialoguer::Confirm::new()
-            .with_prompt(
-                "No Wireguard keys currently exist on your Mullvad account, would you like to generate a new keypair?"
-            )
-            .default(true)
-            .interact()? {
+    } else if uiclient.get_bool_choice(BoolChoice{
+            prompt:
+                "No Wireguard keys currently exist on your Mullvad account, would you like to generate a new keypair?".to_string(),
+            default: true,
+    })?
+             {
                 let keypair = generate_keypair()?;
                 Mullvad::upload_wg_key(client, auth_token, &keypair)?;
                 Ok(keypair)
@@ -228,10 +246,10 @@ fn prompt_for_wg_key(
     }
 }
 
-fn request_port() -> anyhow::Result<u16> {
-    let port = Input::<u16>::new()
-        .with_prompt("Enter port number:")
-        .validate_with(|n: &u16| -> Result<(), &str> {
+fn request_port(uiclient: &dyn UiClient) -> anyhow::Result<u16> {
+    let port = uiclient.get_input_numeric_u16(InputNumericu16 {
+        prompt: "Enter port number".to_string(),
+        validator: Some(Box::new(|n: &u16| -> Result<(), String> {
             if *n == 53
                 || (*n >= 4000 && *n <= 33433)
                 || (*n >= 33565 && *n <= 51820)
@@ -240,10 +258,11 @@ fn request_port() -> anyhow::Result<u16> {
                 Ok(())
             } else {
                 Err("
-        Port must be 53, or in range 4000-33433, 33565-51820, 52000-60000")
+        Port must be 53, or in range 4000-33433, 33565-51820, 52000-60000"
+                    .to_string())
             }
-        })
-        .default(51820)
-        .interact()?;
+        })),
+        default: Some(51820),
+    })?;
     Ok(port)
 }

@@ -1,7 +1,7 @@
 [package]
 name = "vopono_core"
 description = "Library code for running VPN connections in network namespaces"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 license = "GPL-3.0-or-later"
@@ -19,8 +19,6 @@ users = "0.11"
 nix = "0.24"
 serde = { version = "1", features = ["derive", "std"] }
 csv = "1"
-dialoguer = "0.10"                                      # TODO: Remove me
-clap = { version = "3", features = ["derive"] }         # TODO: Remove me
 regex = "1"
 ron = "0.7"
 walkdir = "2"

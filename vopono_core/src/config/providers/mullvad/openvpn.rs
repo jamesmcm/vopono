@@ -1,5 +1,6 @@
 use super::Mullvad;
 use super::{ConfigurationChoice, OpenVpnProvider};
+use crate::config::providers::{BoolChoice, UiClient};
 use crate::config::vpn::OpenVpnProtocol;
 use crate::util::delete_all_files_in_dir;
 use anyhow::Context;
@@ -47,8 +48,8 @@ impl OpenVpnProvider for Mullvad {
         Some(vec![IpAddr::V4(Ipv4Addr::new(193, 138, 218, 74))])
     }
 
-    fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
-        let username = self.request_mullvad_username()?;
+    fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
+        let username = self.request_mullvad_username(uiclient)?;
         Ok((username, "m".to_string()))
     }
 
@@ -56,7 +57,7 @@ impl OpenVpnProvider for Mullvad {
         Ok(Some(self.openvpn_dir()?.join("mullvad_userpass.txt")))
     }
 
-    fn create_openvpn_config(&self) -> anyhow::Result<()> {
+    fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
         let openvpn_dir = self.openvpn_dir()?;
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
@@ -67,22 +68,20 @@ impl OpenVpnProvider for Mullvad {
             .send()?
             .json()?;
 
-        let mut config_choice = ConfigType::choose_one()?;
+        let mut config_choice = ConfigType::index_to_variant(
+            uiclient.get_configuration_choice(&ConfigType::default())?,
+        );
         let port = config_choice.generate_port();
 
-        let use_ips = dialoguer::Confirm::new()
-            .with_prompt(
-                "Use IP addresses instead of hostnames? (may be resistant to DNS blocking, but need to be synced more frequently)"
-            )
-            .default(false)
-            .interact()?;
+        let use_ips = uiclient.get_bool_choice(BoolChoice{
+                prompt: "Use IP addresses instead of hostnames? (may be resistant to DNS blocking, but need to be synced more frequently)".to_string(),
+                default: false,
+        })?;
 
-        let use_bridges = dialoguer::Confirm::new()
-            .with_prompt(
-                "Connect via a bridge? (route over two separate servers, requires connecting on TCP port 443)"
-            )
-            .default(false)
-            .interact()?;
+        let use_bridges = uiclient.get_bool_choice(BoolChoice{
+            prompt:
+                "Connect via a bridge? (route over two separate servers, requires connecting on TCP port 443)".to_string(),
+            default: false})?;
 
         let mut settings = self.get_default_openvpn_settings();
 
@@ -178,7 +177,7 @@ impl OpenVpnProvider for Mullvad {
         }
 
         // Write OpenVPN credentials file
-        let (user, pass) = self.prompt_for_auth()?;
+        let (user, pass) = self.prompt_for_auth(uiclient)?;
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;
@@ -204,6 +203,9 @@ impl ConfigType {
             Self::Tcp80 => OpenVpnProtocol::TCP,
             Self::Tcp443 => OpenVpnProtocol::TCP,
         }
+    }
+    fn index_to_variant(index: usize) -> Self {
+        Self::iter().nth(index).expect("Invalid index")
     }
 
     fn generate_port(&self) -> u16 {
@@ -237,12 +239,15 @@ impl Default for ConfigType {
 }
 
 impl ConfigurationChoice for ConfigType {
-    fn prompt() -> String {
+    fn prompt(&self) -> String {
         "Please choose your OpenVPN connection protocol and port".to_string()
     }
 
-    fn variants() -> Vec<Self> {
-        ConfigType::iter().collect()
+    fn all_names(&self) -> Vec<String> {
+        Self::iter().map(|x| format!("{}", x)).collect()
+    }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        None
     }
 
     fn description(&self) -> Option<String> {

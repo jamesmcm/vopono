@@ -1,7 +1,7 @@
 use super::providers::ConfigurationChoice;
 use super::providers::OpenVpnProvider;
+use super::providers::UiClient;
 use anyhow::{anyhow, Context};
-use clap::ArgEnum;
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
@@ -10,6 +10,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 use strum::IntoEnumIterator;
+use strum_macros::Display;
 use strum_macros::EnumIter;
 
 #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize, EnumIter)]
@@ -18,6 +19,11 @@ pub enum OpenVpnProtocol {
     TCP,
 }
 
+impl OpenVpnProtocol {
+    pub fn index_to_variant(index: usize) -> Self {
+        Self::iter().nth(index).expect("Invalid index")
+    }
+}
 impl Default for OpenVpnProtocol {
     fn default() -> Self {
         Self::UDP
@@ -25,14 +31,16 @@ impl Default for OpenVpnProtocol {
 }
 
 impl ConfigurationChoice for OpenVpnProtocol {
-    fn prompt() -> String {
+    fn prompt(&self) -> String {
         "Which OpenVPN connection protocol do you wish to use".to_string()
     }
 
-    fn variants() -> Vec<Self> {
-        OpenVpnProtocol::iter().collect()
+    fn all_names(&self) -> Vec<String> {
+        Self::iter().map(|x| format!("{}", x)).collect()
     }
-
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        None
+    }
     fn description(&self) -> Option<String> {
         None
     }
@@ -61,19 +69,12 @@ impl Display for OpenVpnProtocol {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, ArgEnum)]
-#[clap(rename_all = "verbatim")]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Display, EnumIter)]
 pub enum Protocol {
     OpenVpn,
     Wireguard,
     OpenConnect,
     OpenFortiVpn,
-}
-
-impl std::fmt::Display for Protocol {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        std::fmt::Display::fmt(self.to_possible_value().unwrap().get_name(), f)
-    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -88,7 +89,10 @@ pub struct VpnServer {
 // TODO: Can we avoid storing plaintext passwords?
 // TODO: Allow not storing credentials
 // OpenVPN only
-pub fn verify_auth(provider: Box<dyn OpenVpnProvider>) -> anyhow::Result<Option<PathBuf>> {
+pub fn verify_auth(
+    provider: Box<dyn OpenVpnProvider>,
+    uiclient: &dyn UiClient,
+) -> anyhow::Result<Option<PathBuf>> {
     let auth_file = provider.auth_file_path()?;
     if auth_file.is_none() {
         return Ok(None);
@@ -112,7 +116,7 @@ pub fn verify_auth(provider: Box<dyn OpenVpnProvider>) -> anyhow::Result<Option<
             );
 
             // Write OpenVPN credentials file
-            let (user, pass) = provider.prompt_for_auth()?;
+            let (user, pass) = provider.prompt_for_auth(uiclient)?;
             let mut outfile = File::create(provider.auth_file_path()?.unwrap())?;
             write!(outfile, "{}\n{}", user, pass)?;
 

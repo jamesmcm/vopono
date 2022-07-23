@@ -1,7 +1,8 @@
+use crate::config::providers::{Password, UiClient};
+
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use anyhow::{anyhow, Context};
-use dialoguer::Password;
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -21,6 +22,7 @@ impl OpenConnect {
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
         server: &str,
+        uiclient: &dyn UiClient,
     ) -> anyhow::Result<Self> {
         if let Err(x) = which::which("openconnect") {
             error!("OpenConnect not found. Is OpenConnect installed and on PATH?");
@@ -30,7 +32,7 @@ impl OpenConnect {
             ));
         }
 
-        let pass = request_creds();
+        let pass = request_creds(uiclient);
 
         let password = pass.expect("Provide password via Stdin!");
 
@@ -74,10 +76,11 @@ impl OpenConnect {
     }
 }
 
-fn request_creds() -> anyhow::Result<String> {
-    let password = Password::new()
-        .with_prompt("OpenConnect password")
-        .interact()?;
+fn request_creds(uiclient: &dyn UiClient) -> anyhow::Result<String> {
+    let password = uiclient.get_password(Password {
+        prompt: "OpenConnect password".to_string(),
+        confirm: true,
+    })?;
     let password = password.trim();
     Ok(password.to_string())
 }

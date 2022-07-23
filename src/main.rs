@@ -3,12 +3,14 @@
 #![allow(dead_code)]
 
 mod args;
+mod cli_client;
 mod exec;
 mod list;
 mod list_configs;
 mod sync;
 
 use clap::Parser;
+use cli_client::CliClient;
 use list::output_list;
 use list_configs::print_configs;
 use log::{debug, warn, LevelFilter};
@@ -32,6 +34,7 @@ fn main() -> anyhow::Result<()> {
     builder.filter_level(log_level);
     builder.init();
 
+    let uiclient = CliClient {};
     match app.cmd {
         args::Command::Exec(cmd) => {
             clean_dead_locks()?;
@@ -50,7 +53,7 @@ fn main() -> anyhow::Result<()> {
             }
             elevate_privileges(app.askpass)?;
             clean_dead_namespaces()?;
-            exec::exec(cmd)?
+            exec::exec(cmd, &uiclient)?
         }
         args::Command::List(listcmd) => {
             clean_dead_locks()?;
@@ -59,9 +62,13 @@ fn main() -> anyhow::Result<()> {
         args::Command::Synch(synchcmd) => {
             // If provider given then sync that, else prompt with menu
             if synchcmd.vpn_provider.is_none() {
-                sync_menu()?;
+                sync_menu(&uiclient)?;
             } else {
-                synch(synchcmd.vpn_provider.unwrap(), synchcmd.protocol)?;
+                synch(
+                    synchcmd.vpn_provider.unwrap().to_variant(),
+                    synchcmd.protocol.map(|x| x.to_variant()),
+                    &uiclient,
+                )?;
             }
         }
         args::Command::Servers(serverscmd) => {

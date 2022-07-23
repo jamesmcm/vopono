@@ -1,5 +1,6 @@
 use super::AzireVPN;
 use super::{ConnectResponse, WgResponse, WireguardProvider};
+use crate::config::providers::UiClient;
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::country_map::code_to_country_map;
 use crate::util::delete_all_files_in_dir;
@@ -13,7 +14,7 @@ use std::io::Write;
 use std::str::FromStr;
 
 impl WireguardProvider for AzireVPN {
-    fn create_wireguard_config(&self) -> anyhow::Result<()> {
+    fn create_wireguard_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
         let wireguard_dir = self.wireguard_dir()?;
         create_dir_all(&wireguard_dir)?;
         delete_all_files_in_dir(&wireguard_dir)?;
@@ -23,7 +24,7 @@ impl WireguardProvider for AzireVPN {
         // TODO: Hardcoded list, can this be retrieved from the API?
         let aliases = self.server_aliases();
         let country_map = code_to_country_map();
-        let (username, password) = self.request_userpass()?;
+        let (username, password) = self.request_userpass(uiclient)?;
         let keypair: WgKey = generate_keypair()?;
         debug!("Chosen keypair: {:?}", keypair);
 

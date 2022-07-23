@@ -1,7 +1,7 @@
 use super::HMA;
 use super::{ConfigurationChoice, OpenVpnProvider};
+use crate::config::providers::{Input, Password, UiClient};
 use crate::util::delete_all_files_in_dir;
-use dialoguer::{Input, Password};
 use log::{debug, info};
 use std::fmt::Display;
 use std::fs::create_dir_all;
@@ -21,15 +21,15 @@ impl OpenVpnProvider for HMA {
         None
     }
 
-    fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
-        let username = Input::<String>::new()
-            .with_prompt("HMA username ")
-            .interact()?;
-
-        let password = Password::new()
-            .with_prompt("HMA Password")
-            .with_confirmation("Confirm password", "Passwords did not match")
-            .interact()?;
+    fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
+        let username = uiclient.get_input(Input {
+            prompt: "HMA username".to_string(),
+            validator: None,
+        })?;
+        let password = uiclient.get_password(Password {
+            prompt: "HMA password".to_string(),
+            confirm: true,
+        })?;
         Ok((username.trim().to_string(), password.trim().to_string()))
     }
 
@@ -37,12 +37,12 @@ impl OpenVpnProvider for HMA {
         Ok(Some(self.openvpn_dir()?.join("auth.txt")))
     }
 
-    fn create_openvpn_config(&self) -> anyhow::Result<()> {
+    fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
         let openvpn_dir = self.openvpn_dir()?;
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
         debug!("Requesting ConfigType");
-        let config_choice = ConfigType::choose_one()?;
+        let config_choice = uiclient.get_configuration_choice(&ConfigType::default())?;
         let url = "https://vpn.hidemyass.com/vpn-config/vpn-configs.zip";
         let zipfile = reqwest::blocking::get(url)?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
@@ -72,7 +72,7 @@ impl OpenVpnProvider for HMA {
                     .parent()
                     .and_then(|x| x.file_name().map(|x| x.to_str()))
                     .flatten()
-                    == Some(&config_choice.dir_name())
+                    == Some(&ConfigType::index_to_variant(config_choice).dir_name())
                 && !path.starts_with("OpenVPN-2.4")
             {
                 let filename = path
@@ -97,7 +97,7 @@ impl OpenVpnProvider for HMA {
         }
 
         // Write OpenVPN credentials file
-        let (user, pass) = self.prompt_for_auth()?;
+        let (user, pass) = self.prompt_for_auth(uiclient)?;
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;
@@ -121,6 +121,9 @@ impl ConfigType {
             Self::Tcp => "TCP".to_string(),
         }
     }
+    fn index_to_variant(index: usize) -> Self {
+        Self::iter().nth(index).expect("Invalid index")
+    }
 }
 
 impl Display for ConfigType {
@@ -136,13 +139,16 @@ impl Default for ConfigType {
 }
 
 impl ConfigurationChoice for ConfigType {
-    fn prompt() -> String {
+    fn prompt(&self) -> String {
         "Please choose the set of OpenVPN configuration files you wish to install".to_string()
     }
-
-    fn variants() -> Vec<Self> {
-        ConfigType::iter().collect()
+    fn all_names(&self) -> Vec<String> {
+        Self::iter().map(|x| format!("{}", x)).collect()
     }
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        Some(Self::iter().map(|x| x.description().unwrap()).collect())
+    }
+
     fn description(&self) -> Option<String> {
         Some(
             match self {

@@ -1,10 +1,59 @@
+use clap::ArgEnum;
 use clap::Parser;
+use std::fmt::Display;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use strum::IntoEnumIterator;
 use vopono_core::config::providers::VpnProvider;
 use vopono_core::config::vpn::Protocol;
 use vopono_core::network::firewall::Firewall;
 use vopono_core::network::network_interface::NetworkInterface;
+
+#[derive(Clone)]
+pub struct WrappedArg<T: IntoEnumIterator + Clone + Display> {
+    variant: T,
+}
+
+impl<T: IntoEnumIterator + Clone + Display> WrappedArg<T> {
+    pub fn to_variant(&self) -> T {
+        self.variant.clone()
+    }
+}
+
+impl<T: IntoEnumIterator + Clone + Display> ArgEnum for WrappedArg<T> {
+    fn from_str(input: &str, ignore_case: bool) -> core::result::Result<Self, String> {
+        let use_input = input.trim().to_string();
+
+        let found = if ignore_case {
+            T::iter().find(|x| x.to_string().to_ascii_lowercase() == use_input.to_ascii_lowercase())
+        } else {
+            T::iter().find(|x| x.to_string() == use_input)
+        };
+
+        if let Some(f) = found {
+            Ok(WrappedArg { variant: f })
+        } else {
+            // TODO - better error messages
+            Err(format!("Invalid argument: {}", input))
+        }
+    }
+
+    fn to_possible_value<'a>(&self) -> Option<clap::PossibleValue<'a>> {
+        // TODO: Leak necessary?
+        Some(clap::PossibleValue::new(Box::leak(
+            self.variant.to_string().into_boxed_str(),
+        )))
+    }
+
+    fn value_variants<'a>() -> &'a [Self] {
+        // TODO: Leak necessary?
+        Box::leak(Box::new(
+            T::iter()
+                .map(|x| WrappedArg { variant: x })
+                .collect::<Vec<Self>>(),
+        ))
+    }
+}
 
 #[derive(Parser)]
 #[clap(
@@ -54,22 +103,22 @@ pub enum Command {
 pub struct SynchCommand {
     /// VPN Provider - will launch interactive menu if not provided
     #[clap(arg_enum, ignore_case = true)]
-    pub vpn_provider: Option<VpnProvider>,
+    pub vpn_provider: Option<WrappedArg<VpnProvider>>,
 
     /// VPN Protocol (if not given will try to sync both)
     #[clap(arg_enum, long = "protocol", short = 'c', ignore_case = true)]
-    pub protocol: Option<Protocol>,
+    pub protocol: Option<WrappedArg<Protocol>>,
 }
 
 #[derive(Parser)]
 pub struct ExecCommand {
     /// VPN Provider (must be given unless using custom config)
     #[clap(arg_enum, long = "provider", short = 'p', ignore_case = true)]
-    pub vpn_provider: Option<VpnProvider>,
+    pub vpn_provider: Option<WrappedArg<VpnProvider>>,
 
     /// VPN Protocol (if not given will use default)
     #[clap(arg_enum, long = "protocol", short = 'c', ignore_case = true)]
-    pub protocol: Option<Protocol>,
+    pub protocol: Option<WrappedArg<Protocol>>,
 
     /// Network Interface (if not given, will use first active network interface)
     #[clap(long = "interface", short = 'i', ignore_case = true)]
@@ -125,7 +174,7 @@ pub struct ExecCommand {
 
     /// VPN Protocol (if not given will use default)
     #[clap(arg_enum, long = "firewall", ignore_case = true)]
-    pub firewall: Option<Firewall>,
+    pub firewall: Option<WrappedArg<Firewall>>,
 
     /// Block all IPv6 traffic
     #[clap(long = "disable-ipv6")]
@@ -158,11 +207,11 @@ pub struct ListCommand {
 pub struct ServersCommand {
     /// VPN Provider
     #[clap(arg_enum, ignore_case = true)]
-    pub vpn_provider: VpnProvider,
+    pub vpn_provider: WrappedArg<VpnProvider>,
 
     /// VPN Protocol (if not given will list all)
     #[clap(arg_enum, long = "protocol", short = 'c', ignore_case = true)]
-    pub protocol: Option<Protocol>,
+    pub protocol: Option<WrappedArg<Protocol>>,
 
     /// VPN Server prefix
     #[clap(long = "prefix", short = 's')]

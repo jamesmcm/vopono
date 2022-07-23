@@ -1,5 +1,6 @@
 use super::AzireVPN;
-use super::{ConfigurationChoice, OpenVpnProvider};
+use super::OpenVpnProvider;
+use crate::config::providers::UiClient;
 use crate::config::vpn::OpenVpnProtocol;
 use crate::util::delete_all_files_in_dir;
 use log::{debug, info};
@@ -19,16 +20,16 @@ impl OpenVpnProvider for AzireVPN {
         ])
     }
 
-    fn prompt_for_auth(&self) -> anyhow::Result<(String, String)> {
-        self.request_userpass()
+    fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
+        self.request_userpass(uiclient)
     }
 
     fn auth_file_path(&self) -> anyhow::Result<Option<PathBuf>> {
         Ok(Some(self.openvpn_dir()?.join("auth.txt")))
     }
 
-    fn create_openvpn_config(&self) -> anyhow::Result<()> {
-        let protocol = OpenVpnProtocol::choose_one()?;
+    fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
+        let protocol = uiclient.get_configuration_choice(&OpenVpnProtocol::default())?;
         // TODO: Allow port selection, TLS version selection
         let openvpn_dir = self.openvpn_dir()?;
         let country_map = crate::util::country_map::code_to_country_map();
@@ -56,7 +57,7 @@ impl OpenVpnProvider for AzireVPN {
         }
 
         // Write OpenVPN credentials file
-        let (user, pass) = self.prompt_for_auth()?;
+        let (user, pass) = self.prompt_for_auth(uiclient)?;
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;

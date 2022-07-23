@@ -2,12 +2,12 @@ mod openvpn;
 mod wireguard;
 
 use super::{
-    ConfigurationChoice, OpenVpnProvider, Provider, ShadowsocksProvider, WireguardProvider,
+    ConfigurationChoice, Input, OpenVpnProvider, Provider, ShadowsocksProvider, UiClient,
+    WireguardProvider,
 };
 use crate::config::vpn::Protocol;
 use crate::util::wireguard::WgPeer;
 use anyhow::anyhow;
-use dialoguer::Input;
 use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
@@ -43,18 +43,18 @@ impl Provider for Mullvad {
 }
 
 impl Mullvad {
-    fn request_mullvad_username(&self) -> anyhow::Result<String> {
-        let mut username = Input::<String>::new()
-            .with_prompt("Mullvad account number")
-            .validate_with(|username: &String| -> Result<(), &str> {
+    fn request_mullvad_username(&self, uiclient: &dyn UiClient) -> anyhow::Result<String> {
+        let mut username = uiclient.get_input(Input {
+            prompt: "Mullvad account number".to_string(),
+            validator: Some(Box::new(|username: &String| -> Result<(), String> {
                 let mut username = username.to_string();
                 username.retain(|c| !c.is_whitespace() && c.is_ascii_digit());
                 if username.len() != 16 {
-                    return Err("Mullvad account number should be 16 digits!");
+                    return Err("Mullvad account number should be 16 digits!".to_string());
                 }
                 Ok(())
-            })
-            .interact()?;
+            })),
+        })?;
 
         username.retain(|c| !c.is_whitespace() && c.is_ascii_digit());
         if username.len() != 16 {
