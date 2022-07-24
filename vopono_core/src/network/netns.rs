@@ -157,7 +157,8 @@ impl NetworkNamespace {
 
     pub fn add_veth_pair(&mut self) -> anyhow::Result<()> {
         // TODO: Handle if name taken?
-        let basename = &self.name[(self.name.len() - 13).max(0)..self.name.len()];
+        // Use bs58 here?
+        let basename = &self.name[((self.name.len() as i32) - 13).max(0) as usize..self.name.len()];
         let source = format!("{}_s", basename);
         let dest = format!("{}_d", basename);
         self.veth_pair = Some(VethPair::new(source, dest, self)?);

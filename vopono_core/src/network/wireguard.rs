@@ -17,6 +17,7 @@ pub struct Wireguard {
     ns_name: String,
     config_file: PathBuf,
     firewall: Firewall,
+    if_name: String,
 }
 
 impl Wireguard {
@@ -85,7 +86,10 @@ impl Wireguard {
                 )
             })?;
         debug!("TOML config: {:?}", config);
-        let if_name = namespace.name[7..namespace.name.len().min(20)].to_string();
+        // TODO: Use bs58 here?
+        let if_name = namespace.name
+            [((namespace.name.len() as i32) - 13).max(0) as usize..namespace.name.len()]
+            .to_string();
         assert!(
             if_name.len() <= 15,
             "ifname must be <= 15 chars: {}",
@@ -352,6 +356,7 @@ impl Wireguard {
             config_file,
             ns_name: namespace.name.clone(),
             firewall,
+            if_name,
         })
     }
 }
@@ -450,7 +455,6 @@ pub fn killswitch(
 
 impl Drop for Wireguard {
     fn drop(&mut self) {
-        let if_name = &self.ns_name[7..self.ns_name.len().min(20)];
         match sudo_command(&[
             "ip",
             "netns",
@@ -459,10 +463,13 @@ impl Drop for Wireguard {
             "ip",
             "link",
             "del",
-            if_name,
+            &self.if_name,
         ]) {
             Ok(_) => {}
-            Err(e) => warn!("Failed to delete ip link {}: {:?}", &self.ns_name, e),
+            Err(e) => warn!(
+                "Failed to delete ip link {}, {}: {:?}",
+                &self.ns_name, &self.if_name, e
+            ),
         };
 
         if let Firewall::NfTables = self.firewall {
