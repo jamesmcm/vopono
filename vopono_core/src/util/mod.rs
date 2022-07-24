@@ -191,6 +191,21 @@ pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
     Ok(output)
 }
 
+pub fn get_pids_in_namespace(ns_name: &str) -> anyhow::Result<Vec<i32>> {
+    let output = Command::new("ip")
+        .args(&["netns", "pids", ns_name])
+        .output()?
+        .stdout;
+    let output = std::str::from_utf8(&output)?
+        .split('\n')
+        .filter_map(|x| x.split_whitespace().next())
+        .filter_map(|x| x.parse::<i32>().ok())
+        .collect();
+    debug!("PIDs active in {}: {:?}", &ns_name, output);
+
+    Ok(output)
+}
+
 pub fn check_process_running(pid: u32) -> bool {
     let s =
         System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
@@ -261,8 +276,7 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
         std::fs::create_dir_all(&lockfile_path)?;
         WalkDir::new(&lockfile_path)
             .into_iter()
-            .filter(|x| x.is_ok())
-            .map(|x| x.unwrap())
+            .filter_map(|x| x.ok())
             .filter(|x| x.path().is_file())
             .map(|x| {
                 (
@@ -285,8 +299,7 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
         // Delete subdirectories if they contain no locks (ignore errors)
         WalkDir::new(&lockfile_path)
             .into_iter()
-            .filter(|x| x.is_ok())
-            .map(|x| x.unwrap())
+            .filter_map(|x| x.ok())
             .filter(|x| x.path().is_dir())
             .try_for_each(|x| std::fs::remove_dir(x.path()))
             .ok();
@@ -301,7 +314,9 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
 
     existing_namespaces
         .into_iter()
-        .filter(|x| !lock_namespaces.contains_key(x))
+        .filter(|x| {
+            !lock_namespaces.contains_key(x) && get_pids_in_namespace(x).unwrap().is_empty()
+        })
         .try_for_each(|x| {
             debug!("Removing dead namespace: {}", x);
             let path = format!("/etc/netns/{}", x);
@@ -366,8 +381,7 @@ pub fn delete_all_files_in_dir(dir: &Path) -> anyhow::Result<()> {
 pub fn get_configs_from_alias(list_path: &Path, alias: &str) -> Vec<PathBuf> {
     WalkDir::new(&list_path)
         .into_iter()
-        .filter(|x| x.is_ok())
-        .map(|x| x.unwrap())
+        .filter_map(|x| x.ok())
         .filter(|x| {
             x.path().is_file()
                 && x.path().extension().is_some()

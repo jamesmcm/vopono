@@ -105,6 +105,7 @@ impl NetworkNamespace {
         user: Option<String>,
         silent: bool,
         capture_output: bool,
+        capture_input: bool,
         set_dir: Option<PathBuf>,
     ) -> anyhow::Result<std::process::Child> {
         let mut handle = Command::new("ip");
@@ -126,7 +127,9 @@ impl NetworkNamespace {
             handle.stdout(Stdio::piped());
             handle.stderr(Stdio::piped());
         }
-        handle.stdin(Stdio::piped());
+        if capture_input {
+            handle.stdin(Stdio::piped());
+        }
 
         debug!(
             "ip netns exec {}{} {}",
@@ -139,7 +142,7 @@ impl NetworkNamespace {
     }
 
     pub fn exec(&self, command: &[&str]) -> anyhow::Result<()> {
-        self.exec_no_block(command, None, false, false, None)?
+        self.exec_no_block(command, None, false, false, false, None)?
             .wait()?;
         Ok(())
     }
@@ -165,6 +168,7 @@ impl NetworkNamespace {
         &mut self,
         target_subnet: u8,
         hosts: Option<&Vec<IpAddr>>,
+        allow_host_access: bool,
     ) -> anyhow::Result<()> {
         // TODO: Handle case where IP address taken in better way i.e. don't just change subnet
         let veth_dest = &self
@@ -213,7 +217,7 @@ impl NetworkNamespace {
                     "ip",
                     "route",
                     "add",
-                    &format!("{}", host),
+                    &host.to_string(),
                     "via",
                     &ip_nosub,
                     "dev",
@@ -221,11 +225,30 @@ impl NetworkNamespace {
                 ])
                 .with_context(|| {
                     format!(
-                        "Failed to assign hosts route to veth source: {}",
-                        veth_source
+                        "Failed to assign hosts route {} to veth source: {}",
+                        host, veth_source
                     )
                 })?;
             }
+        }
+
+        if allow_host_access {
+            self.exec(&[
+                "ip",
+                "route",
+                "add",
+                &ip_nosub,
+                "via",
+                &ip_nosub,
+                "dev",
+                veth_source,
+            ])
+            .with_context(|| {
+                format!(
+                    "Failed to assign hosts route for local host {} to veth source: {}",
+                    ip_nosub, veth_source
+                )
+            })?;
         }
 
         info!(
@@ -446,6 +469,7 @@ impl Drop for NetworkNamespace {
         lockfile_path.push(format!("vopono/locks/{}", self.name));
 
         // Drop if lock directory doesn't exist, or it exists but is empty
+        // TODO: How can we make this check that no _other_ PIDs exist (aside from ones we have spawned)
         if !lockfile_path.exists()
             || (lockfile_path.read_dir().is_ok()
                 && lockfile_path.read_dir().unwrap().next().is_none())

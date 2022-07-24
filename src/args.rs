@@ -194,6 +194,15 @@ pub struct ExecCommand {
     /// Default: ~/.config/vopono/config.toml
     #[clap(long = "vopono-config")]
     pub vopono_config: Option<PathBuf>,
+
+    /// Custom name for the generated network namespace
+    /// Will use this network namespace directly if it exists
+    #[clap(long = "custom-netns-name")]
+    pub custom_netns_name: Option<String>,
+    /// Allow access to host from network namespace
+    /// Useful for accessing services on the host locally
+    #[clap(long = "allow-host-access")]
+    pub allow_host_access: bool,
 }
 
 #[derive(Parser)]

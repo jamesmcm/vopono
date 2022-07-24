@@ -1,7 +1,7 @@
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use crate::config::vpn::OpenVpnProtocol;
-use crate::util::check_process_running;
+use crate::util::{check_process_running, vopono_dir};
 use anyhow::{anyhow, Context};
 use log::{debug, error, info};
 use regex::Regex;
@@ -16,6 +16,7 @@ use std::str::FromStr;
 pub struct OpenVpn {
     pid: u32,
     pub openvpn_dns: Option<IpAddr>,
+    pub logfile: PathBuf,
 }
 
 impl OpenVpn {
@@ -42,7 +43,9 @@ impl OpenVpn {
             ));
         }
 
-        let log_file_str = format!("/etc/netns/{}/openvpn.log", &netns.name);
+        std::fs::create_dir_all(vopono_dir()?.join("logs"))?;
+        let log_file_path = vopono_dir()?.join(format!("logs/{}_openvpn.log", &netns.name));
+        let log_file_str: String = log_file_path.as_os_str().to_string_lossy().to_string();
         {
             File::create(&log_file_str)?;
         }
@@ -95,7 +98,7 @@ impl OpenVpn {
         let working_dir = PathBuf::from(config_file_path.parent().unwrap());
 
         let handle = netns
-            .exec_no_block(&command_vec, None, true, false, Some(working_dir))
+            .exec_no_block(&command_vec, None, true, false, false, Some(working_dir))
             .context("Failed to launch OpenVPN - is openvpn installed?")?;
         let id = handle.id();
         let mut buffer = String::with_capacity(16384);
@@ -173,6 +176,7 @@ impl OpenVpn {
         Ok(Self {
             pid: id,
             openvpn_dns,
+            logfile: log_file_path,
         })
     }
 
@@ -189,6 +193,18 @@ impl Drop for OpenVpn {
         ) {
             Ok(_) => debug!("Killed OpenVPN (pid: {})", self.pid),
             Err(e) => error!("Failed to kill OpenVPN (pid: {}): {:?}", self.pid, e),
+        }
+
+        match std::fs::remove_file(&self.logfile) {
+            Ok(_) => debug!(
+                "Deleted OpenVPN logfile: {}",
+                self.logfile.as_os_str().to_string_lossy()
+            ),
+            Err(e) => error!(
+                "Failed to delete OpenVPN logfile: {}: {:?}",
+                self.logfile.as_os_str().to_string_lossy(),
+                e
+            ),
         }
     }
 }
