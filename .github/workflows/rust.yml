@@ -112,6 +112,20 @@ jobs:
       with:
         name: armv5-deb
         path: ./target/armv5te-unknown-linux-musleabi/debian/*
+  aarch64deb:
+    needs: [build]
+    runs-on: ubuntu-latest
+    name: Aarch64Deb
+    steps:
+    - uses: actions/checkout@v2
+    - name: BuildDeb
+      id: debbuild
+      uses: jamesmcm/cargo-deb-aarch64-debian@master
+    - name: Upload Deb Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: aarch64-deb
+        path: ./target/aarch64-unknown-linux-musl/debian/*
   amd64binaries:
     needs: [build, quickcheck]
     runs-on: ubuntu-latest
@@ -168,8 +182,28 @@ jobs:
       with:
         name: armv5
         path: ./target/armv5te-unknown-linux-musleabi/release/vopono
+  aarch64binaries:
+    needs: [build, quickcheck]
+    runs-on: ubuntu-latest
+    name: Aarch64StaticBinaries
+    steps:
+    - uses: actions/checkout@v2
+    - id: cargoversion
+      run: cargo --version
+    - id: rustcversion
+      run: rustc --version
+    - name: StaticBinaryBuild
+      id: aarch64staticbuild
+      uses: jamesmcm/cargo-deb-aarch64-debian@master
+      with:
+        cmd: cargo build --release --target=aarch64-unknown-linux-musl
+    - name: Upload Vopono Artifact
+      uses: actions/upload-artifact@v2
+      with:
+        name: aarch64
+        path: ./target/aarch64-unknown-linux-musl/release/vopono
   update_release_draft:
-    needs: [quickcheck, build, arm7binaries, arm5binaries, amd64binaries, raspbianbuild, armv5deb, debbuild, opensuseleaprpmbuild, fedorarpmbuild]
+    needs: [quickcheck, build, arm7binaries, arm5binaries, aarch64binaries, amd64binaries, raspbianbuild, armv5deb, aarch64deb, debbuild, opensuseleaprpmbuild, fedorarpmbuild]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v2
@@ -193,6 +227,8 @@ jobs:
       - run: ls -lha armv7
       - run: ls -lha armv5-deb
       - run: ls -lha armv5
+      - run: ls -lha aarch64-deb
+      - run: ls -lha aarch64
       - run: ls -lha fedorarpm
       - run: ls -lha opensuserpm
       - name: Upload amd64 deb Release Asset
@@ -221,6 +257,15 @@ jobs:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: ./armv5-deb/vopono_${{needs.quickcheck.outputs.version}}_armel.deb
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_armel.deb'
+          asset_content_type: application/vnd.debian.binary-package
+      - name: Upload aarch64 deb Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./aarch64-deb/vopono_${{needs.quickcheck.outputs.version}}_aarch64.deb
+          asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_aarch64.deb'
           asset_content_type: application/vnd.debian.binary-package
       - name: Upload amd64 rpm fedora Release Asset
         uses: actions/upload-release-asset@v1
@@ -257,6 +302,15 @@ jobs:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: ./armv5/vopono
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_linux_armv5'
+          asset_content_type: application/octet-stream
+      - name: Upload Aarch64 Static Binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./aarch64/vopono
+          asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_linux_aarch64'
           asset_content_type: application/octet-stream
       - name: Upload Amd64 Static Binary
         uses: actions/upload-release-asset@v1

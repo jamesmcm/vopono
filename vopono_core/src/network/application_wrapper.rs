@@ -34,7 +34,7 @@ impl ApplicationWrapper {
         }
 
         // TODO: Could allow user to set custom working directory here
-        let handle = netns.exec_no_block(app_vec.as_slice(), user, false, false, None)?;
+        let handle = netns.exec_no_block(app_vec.as_slice(), user, false, false, false, None)?;
         Ok(Self { handle })
     }
 

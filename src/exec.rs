@@ -30,7 +30,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     let server_name: String;
     let protocol: Protocol;
 
-    // TODO: Refactor this part - DRY
+    // TODO: Refactor this part - DRY - macro_rules ?
     // Check if we have config file path passed on command line
     // Create empty config file if does not exist
     create_dir_all(vopono_dir()?)?;
@@ -72,6 +72,36 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             })
             .ok()
     });
+
+    // Assign custom_config from args or vopono config file
+    let custom_netns_name = command.custom_netns_name.clone().or_else(|| {
+        vopono_config_settings
+            .get("custom_netns_name")
+            .map_err(|e| {
+                debug!("vopono config.toml: {:?}", e);
+                anyhow!("Failed to read config file")
+            })
+            .ok()
+    });
+
+    // Assign open_hosts from args or vopono config file
+    let mut open_hosts = command.open_hosts.clone().or_else(|| {
+        vopono_config_settings
+            .get("open_hosts")
+            .map_err(|e| {
+                debug!("vopono config.toml: {:?}", e);
+                anyhow!("Failed to read config file")
+            })
+            .ok()
+    });
+    let allow_host_access = command.allow_host_access
+        || vopono_config_settings
+            .get("allow_host_access")
+            .map_err(|e| {
+                debug!("vopono config.toml: {:?}", e);
+                anyhow!("Failed to read config file")
+            })
+            .unwrap_or(false);
 
     // Assign postup script from args or vopono config file
     let postup = command.postup.clone().or_else(|| {
@@ -224,7 +254,11 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         _ => provider.get_dyn_provider().alias(),
     };
 
-    let ns_name = format!("vopono_{}_{}", alias, server_name);
+    let ns_name = if let Some(c_ns_name) = custom_netns_name {
+        c_ns_name
+    } else {
+        format!("vopono_{}_{}", alias, server_name)
+    };
 
     let mut ns;
     let _sysctl;
@@ -298,7 +332,22 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         let target_subnet = get_target_subnet()?;
         ns.add_loopback()?;
         ns.add_veth_pair()?;
-        ns.add_routing(target_subnet, command.open_hosts.as_ref())?;
+        ns.add_routing(target_subnet, open_hosts.as_ref(), allow_host_access)?;
+
+        // Add local host to open hosts if allow_host_access enabled
+        if allow_host_access {
+            let host_ip = ns.veth_pair_ips.as_ref().unwrap().host_ip;
+            warn!(
+                "Allowing host access from network namespace, host IP address is: {}",
+                host_ip
+            );
+            if let Some(oh) = open_hosts.iter_mut().next() {
+                oh.push(host_ip);
+            } else {
+                open_hosts = Some(vec![host_ip]);
+            }
+        }
+
         ns.add_host_masquerade(target_subnet, interface.clone(), firewall)?;
         ns.add_firewall_exception(
             interface,
@@ -418,7 +467,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             }
         }
 
-        if let Some(ref hosts) = command.open_hosts {
+        if let Some(ref hosts) = open_hosts {
             vopono_core::util::open_hosts(&ns, hosts.to_vec(), firewall)?;
         }
 
