@@ -101,8 +101,8 @@ impl PrivateInternetAccess {
             .json()?;
 
         match token {
-            PiaToken::Ok { token } => return Ok(token),
-            PiaToken::Err { message } => return Err(anyhow!("{}", message)),
+            PiaToken::Ok { token } => Ok(token),
+            PiaToken::Err { message } => Err(anyhow!("{}", message)),
         }
     }
 
@@ -120,7 +120,7 @@ impl PrivateInternetAccess {
         let key_client = ClientBuilder::new()
             .tls_built_in_root_certs(false)
             .add_root_certificate(cert)
-            .resolve(cn, (ip.clone(), PrivateInternetAccess::PORT).into())
+            .resolve(cn, (*ip, PrivateInternetAccess::PORT).into())
             .build()?;
 
         let url = format!("https://{}:{}/addKey", cn, PrivateInternetAccess::PORT);
@@ -129,8 +129,8 @@ impl PrivateInternetAccess {
 
         let server_info: WireguardServerInfoRequest = key_client.get(url).send()?.json()?;
         match server_info {
-            WireguardServerInfoRequest::Ok(server_info) => return Ok(server_info),
-            WireguardServerInfoRequest::Err { message } => return Err(anyhow!("{}", message)),
+            WireguardServerInfoRequest::Ok(server_info) => Ok(server_info),
+            WireguardServerInfoRequest::Err { message } => Err(anyhow!("{}", message)),
         }
     }
 
@@ -194,10 +194,7 @@ impl WireguardProvider for PrivateInternetAccess {
                 let wireguard_peer = WireguardPeer {
                     public_key: "".into(), // Empty, will be filled in on connect later
                     allowed_ips: allowed_ips.clone(),
-                    endpoint: SocketAddr::new(
-                        IpAddr::from(wg_server.ip),
-                        PrivateInternetAccess::PORT,
-                    ),
+                    endpoint: SocketAddr::new(wg_server.ip, PrivateInternetAccess::PORT),
                     keepalive: Some(25.to_string()),
                 };
 
@@ -243,7 +240,7 @@ impl WireguardProvider for PrivateInternetAccess {
 
         let server_info = PrivateInternetAccess::add_key(ip, cn, &token, &pia_config.pubkey)?;
 
-        wg_config.interface.address = vec![IpNet::new(server_info.peer_ip.into(), 32)?];
+        wg_config.interface.address = vec![IpNet::new(server_info.peer_ip, 32)?];
         wg_config.interface.dns = Some(
             server_info
                 .dns_servers

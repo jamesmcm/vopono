@@ -544,7 +544,7 @@ impl FromStr for WireguardConfig {
             r"(?m)^[[:blank:]]*(?P<key>[^\s=#]+)[[:blank:]]*=[[:blank:]]*(?P<value>[^\r\n#]+?)[[:blank:]]*(?:#[^\r\n]*)?\r?$",
         )?;
         let mut config_string = re
-            .replace_all(&config_string, "$key = \"$value\"")
+            .replace_all(config_string, "$key = \"$value\"")
             .to_string();
         config_string.push('\n');
         toml::from_str(&config_string)
