@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Wireguard {
@@ -509,6 +510,8 @@ pub struct WireguardPeer {
     pub allowed_ips: Vec<IpNet>,
     #[serde(rename = "Endpoint")]
     pub endpoint: SocketAddr,
+    #[serde(rename = "PersistentKeepalive")]
+    pub keepalive: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Serialize)]
@@ -517,6 +520,42 @@ pub struct WireguardConfig {
     pub interface: WireguardInterface,
     #[serde(rename = "Peer")]
     pub peer: WireguardPeer,
+}
+
+impl TryInto<String> for WireguardConfig {
+    type Error = anyhow::Error;
+
+    fn try_into(self) -> Result<String, Self::Error> {
+        // TODO: avoid hacky regex for TOML -> wireguard config conversion
+        let re = Regex::new(r"=\s\[(?P<value>[^\]]+)\]")?;
+        let mut toml = toml::to_string(&self)?;
+        toml.retain(|c| c != '"');
+        let toml = toml.replace(", ", ",");
+        Ok(re.replace_all(&toml, "= $value").to_string())
+    }
+}
+
+impl FromStr for WireguardConfig {
+    type Err = anyhow::Error;
+
+    fn from_str(config_string: &str) -> Result<Self, Self::Err> {
+        // TODO: Avoid hacky regex for valid toml
+        let re = Regex::new(
+            r"(?m)^[[:blank:]]*(?P<key>[^\s=#]+)[[:blank:]]*=[[:blank:]]*(?P<value>[^\r\n#]+?)[[:blank:]]*(?:#[^\r\n]*)?\r?$",
+        )?;
+        let mut config_string = re
+            .replace_all(&config_string, "$key = \"$value\"")
+            .to_string();
+        config_string.push('\n');
+        toml::from_str(&config_string)
+            .map_err(anyhow::Error::from)
+            .with_context(|| {
+                format!(
+                    "Failed while converting Wireguard config to TOML. Result may be malformed:\n\n{}",
+                    config_string
+                )
+            })
+    }
 }
 
 pub fn de_vec_ipnet<'de, D>(deserializer: D) -> Result<Vec<IpNet>, D::Error>

@@ -65,6 +65,7 @@ impl WireguardProvider for AzireVPN {
                 public_key: wg_peer.public_key.clone(),
                 allowed_ips: allowed_ips.clone(),
                 endpoint: wg_peer.endpoint,
+                keepalive: None,
             };
 
             let wireguard_conf = WireguardConfig {
