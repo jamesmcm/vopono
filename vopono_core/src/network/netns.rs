@@ -41,6 +41,7 @@ pub struct NetworkNamespace {
     pub firewall: Firewall,
     pub predown: Option<String>,
     pub predown_user: Option<String>,
+    pub predown_group: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -74,6 +75,7 @@ impl NetworkNamespace {
         firewall: Firewall,
         predown: Option<String>,
         predown_user: Option<String>,
+        predown_group: Option<String>,
     ) -> anyhow::Result<Self> {
         sudo_command(&["ip", "netns", "add", name.as_str()])
             .with_context(|| format!("Failed to create network namespace: {}", &name))?;
@@ -96,13 +98,16 @@ impl NetworkNamespace {
             firewall,
             predown,
             predown_user,
+            predown_group,
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn exec_no_block(
         &self,
         command: &[&str],
         user: Option<String>,
+        group: Option<String>,
         silent: bool,
         capture_output: bool,
         capture_input: bool,
@@ -113,12 +118,26 @@ impl NetworkNamespace {
         if let Some(cdir) = set_dir {
             handle.current_dir(cdir);
         }
-        let sudo_string = if user.is_some() {
-            handle.args(&["sudo", "-Eu", user.as_ref().unwrap()]);
-            Some(format!(" sudo -Eu {}", user.as_ref().unwrap()))
+
+        let mut sudo_args = Vec::new();
+        if let Some(ref user) = user {
+            sudo_args.push("--user");
+            sudo_args.push(user);
+        }
+        if let Some(ref group) = group {
+            sudo_args.push("--group");
+            sudo_args.push(group);
+        }
+
+        let sudo_string = if !sudo_args.is_empty() {
+            let mut args = vec!["sudo", "--preserve-env"];
+            args.append(&mut sudo_args);
+            handle.args(args.clone());
+            Some(format!(" {}", args.join(" ")))
         } else {
             None
         };
+
         if silent {
             handle.stdout(Stdio::null());
             handle.stderr(Stdio::null());
@@ -142,7 +161,7 @@ impl NetworkNamespace {
     }
 
     pub fn exec(&self, command: &[&str]) -> anyhow::Result<()> {
-        self.exec_no_block(command, None, false, false, false, None)?
+        self.exec_no_block(command, None, None, false, false, false, None)?
             .wait()?;
         Ok(())
     }
@@ -505,14 +524,27 @@ impl Drop for NetworkNamespace {
                         .namespace_ip
                         .to_string(),
                 );
-                if self.predown_user.is_some() {
-                    std::process::Command::new("sudo")
-                        .args(&["-Eu", self.predown_user.as_ref().unwrap(), pdcmd])
-                        .spawn()
-                        .ok();
+
+                let mut sudo_args = Vec::new();
+                if let Some(ref predown_user) = self.predown_user {
+                    sudo_args.push("--user");
+                    sudo_args.push(predown_user);
+                }
+                if let Some(ref predown_group) = self.predown_group {
+                    sudo_args.push("--group");
+                    sudo_args.push(predown_group);
+                }
+
+                if !sudo_args.is_empty() {
+                    let mut args = vec!["--preserve-env"];
+                    args.append(&mut sudo_args);
+                    args.push(pdcmd);
+
+                    std::process::Command::new("sudo").args(args).spawn().ok();
                 } else {
                     std::process::Command::new(&pdcmd).spawn().ok();
                 }
+
                 std::env::remove_var("VOPONO_NS");
                 std::env::remove_var("VOPONO_NS_IP");
             }

@@ -48,7 +48,7 @@ impl OpenFortiVpn {
 
         // TODO - better handle forwarding output when blocking on password entry (no newline!)
         let mut handle = netns
-            .exec_no_block(&command_vec, None, false, true, false, None)
+            .exec_no_block(&command_vec, None, None, false, true, false, None)
             .context("Failed to launch OpenFortiVPN - is openfortivpn installed?")?;
         let stdout = handle.stdout.take().unwrap();
         let id = handle.id();

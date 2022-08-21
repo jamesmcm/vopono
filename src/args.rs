@@ -135,6 +135,14 @@ pub struct ExecCommand {
     #[clap(long = "user", short = 'u')]
     pub user: Option<String>,
 
+    /// Group with which to run the application
+    #[clap(long = "group", short = 'g')]
+    pub group: Option<String>,
+
+    /// Working directory in which to run the application (default is current working directory)
+    #[clap(long = "working-directory", short = 'w')]
+    pub working_directory: Option<String>,
+
     /// Custom VPN Provider - OpenVPN or Wireguard config file (will override other settings)
     #[clap(parse(from_os_str), long = "custom")]
     pub custom_config: Option<PathBuf>,
