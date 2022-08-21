@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use super::netns::NetworkNamespace;
 use crate::util::get_all_running_process_names;
 use log::warn;
@@ -11,6 +13,8 @@ impl ApplicationWrapper {
         netns: &NetworkNamespace,
         application: &str,
         user: Option<String>,
+        group: Option<String>,
+        working_directory: Option<PathBuf>,
     ) -> anyhow::Result<Self> {
         let running_processes = get_all_running_process_names();
         let app_vec = application.split_whitespace().collect::<Vec<_>>();
@@ -33,8 +37,15 @@ impl ApplicationWrapper {
             }
         }
 
-        // TODO: Could allow user to set custom working directory here
-        let handle = netns.exec_no_block(app_vec.as_slice(), user, false, false, false, None)?;
+        let handle = netns.exec_no_block(
+            app_vec.as_slice(),
+            user,
+            group,
+            false,
+            false,
+            false,
+            working_directory,
+        )?;
         Ok(Self { handle })
     }
 

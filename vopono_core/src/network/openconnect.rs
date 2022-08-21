@@ -50,7 +50,7 @@ impl OpenConnect {
         }
 
         let handle = netns
-            .exec_no_block(&command_vec, None, false, false, true, None)
+            .exec_no_block(&command_vec, None, None, false, false, true, None)
             .context("Failed to launch OpenConnect - is openconnect installed?")?;
 
         handle

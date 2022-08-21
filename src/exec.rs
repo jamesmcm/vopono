@@ -4,6 +4,7 @@ use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::{
     fs::create_dir_all,
@@ -137,6 +138,32 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             .or_else(|| std::env::var("SUDO_USER").ok())
     } else {
         command.user
+    };
+
+    // Group for application command
+    let group = if command.group.is_none() {
+        vopono_config_settings
+            .get("group")
+            .map_err(|e| {
+                debug!("vopono config.toml: {:?}", e);
+                anyhow!("Failed to read config file")
+            })
+            .ok()
+    } else {
+        command.group
+    };
+
+    // Working directory for application command
+    let working_directory = if command.working_directory.is_none() {
+        vopono_config_settings
+            .get("working-directory")
+            .map_err(|e| {
+                debug!("vopono config.toml: {:?}", e);
+                anyhow!("Failed to read config file")
+            })
+            .ok()
+    } else {
+        command.working_directory
     };
 
     // Assign DNS server from args or vopono config file
@@ -328,6 +355,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             firewall,
             predown,
             user.clone(),
+            group.clone(),
         )?;
         let target_subnet = get_target_subnet()?;
         ns.add_loopback()?;
@@ -482,13 +510,27 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         // Temporarily set env var referring to this network namespace name
         if let Some(pucmd) = postup {
             std::env::set_var("VOPONO_NS", &ns.name);
-            if user.is_some() {
-                std::process::Command::new("sudo")
-                    .args(&["-Eu", user.as_ref().unwrap(), &pucmd])
-                    .spawn()?;
+
+            let mut sudo_args = Vec::new();
+            if let Some(ref user) = user {
+                sudo_args.push("--user");
+                sudo_args.push(user);
+            }
+            if let Some(ref group) = group {
+                sudo_args.push("--group");
+                sudo_args.push(group);
+            }
+
+            if !sudo_args.is_empty() {
+                let mut args = vec!["--preserve-env"];
+                args.append(&mut sudo_args);
+                args.push(&pucmd);
+
+                std::process::Command::new("sudo").args(args).spawn()?;
             } else {
                 std::process::Command::new(&pucmd).spawn()?;
-            }
+            };
+
             std::env::remove_var("VOPONO_NS");
         }
     }
@@ -501,7 +543,13 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
 
     let ns = ns.write_lockfile(&command.application)?;
 
-    let application = ApplicationWrapper::new(&ns, &command.application, user)?;
+    let application = ApplicationWrapper::new(
+        &ns,
+        &command.application,
+        user,
+        group,
+        working_directory.map(PathBuf::from),
+    )?;
 
     // Launch TCP proxy server on other threads if forwarding ports
     // TODO: Fix when running as root
