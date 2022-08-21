@@ -28,7 +28,7 @@ lynx all running through different VPN connections:
 | Mullvad               | ✅              | ✅                |
 | AzireVPN              | ✅              | ✅                |
 | iVPN                  | ✅              | ✅                |
-| PrivateInternetAccess | ✅              | ❌                |
+| PrivateInternetAccess | ✅              | ✅                |
 | TigerVPN              | ✅              | ❌                |
 | ProtonVPN             | ✅              | ❌                |
 | MozillaVPN            | ❌              | ✅                |

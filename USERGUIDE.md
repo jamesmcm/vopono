@@ -445,6 +445,14 @@ via AzireVPN though (Wireguard works correctly).
 
 ### VPN Provider limitations
 
+#### PrivateInternetAccess
+
+Wireguard support for PrivateInternetAccess (PIA) requires the use of a
+user token to get the latest servers at time of use. See [issue 9](https://github.com/jamesmcm/vopono/issues/9) for details,
+and PIA's [official script for Wireguard access](https://github.com/pia-foss/manual-connections/blob/master/connect_to_wireguard_with_token.sh).
+
+So if you encounter connection issues, first try re-running `vopono sync`.
+
 #### MozillaVPN
 
 There is no easy way to delete MozillaVPN devices (Wireguard keypairs),
