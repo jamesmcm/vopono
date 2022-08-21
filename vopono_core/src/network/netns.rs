@@ -376,9 +376,9 @@ impl NetworkNamespace {
         dns: Option<&Vec<IpAddr>>,
         hosts_entries: Option<&Vec<String>>,
     ) -> anyhow::Result<()> {
-        self.provider
-            .get_dyn_wireguard_provider()?
-            .wireguard_preup(config_file.as_path())?;
+        if let Ok(wgprov) = self.provider.get_dyn_wireguard_provider() {
+            wgprov.wireguard_preup(config_file.as_path())?;
+        }
 
         self.wireguard = Some(Wireguard::run(
             self,
