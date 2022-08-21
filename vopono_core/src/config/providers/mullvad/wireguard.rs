@@ -45,7 +45,7 @@ impl WireguardProvider for Mullvad {
         let relays: Vec<WireguardRelay> = client
             .get("https://api.mullvad.net/www/relays/wireguard/")
             .send()?
-            .json()?;
+            .json().with_context(|| "Failed to parse Mullvad relays response - try again after a few minutes or report an issue if it is persistent")?;
 
         let username = self.request_mullvad_username(uiclient)?;
         let auth: AuthToken = client

@@ -1,7 +1,7 @@
 [package]
 name = "vopono"
 description = "Launch applications via VPN tunnels using temporary network namespaces"
-version = "0.10.1"
+version = "0.10.2"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2021"
 license = "GPL-3.0-or-later"
@@ -26,7 +26,7 @@ signal-hook = "0.3"
 walkdir = "2"
 chrono = "0.4"
 bs58 = "0.4"
-nix = "0.24"
+nix = "0.25"
 config = "0.13"
 basic_tcp_proxy = "0.3"
 strum = "0.24"
