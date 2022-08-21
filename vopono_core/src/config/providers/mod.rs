@@ -13,8 +13,8 @@ use crate::config::vpn::Protocol;
 use crate::util::vopono_dir;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
 use std::path::PathBuf;
+use std::{net::IpAddr, path::Path};
 use strum_macros::{Display, EnumIter};
 
 // Command-line arguments use VpnProvider enum
@@ -78,6 +78,7 @@ impl VpnProvider {
 
     pub fn get_dyn_wireguard_provider(&self) -> anyhow::Result<Box<dyn WireguardProvider>> {
         match self {
+            Self::PrivateInternetAccess => Ok(Box::new(pia::PrivateInternetAccess {})),
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
             Self::MozillaVPN => Ok(Box::new(mozilla::MozillaVPN {})),
             Self::AzireVPN => Ok(Box::new(azirevpn::AzireVPN {})),
@@ -114,6 +115,10 @@ pub trait WireguardProvider: Provider {
 
     fn wireguard_dir(&self) -> anyhow::Result<PathBuf> {
         Ok(self.provider_dir()?.join("wireguard"))
+    }
+
+    fn wireguard_preup(&self, _config_file: &Path) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 

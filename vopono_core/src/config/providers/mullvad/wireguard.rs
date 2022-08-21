@@ -104,6 +104,7 @@ impl WireguardProvider for Mullvad {
                 public_key: relay.pubkey.clone(),
                 allowed_ips: allowed_ips.clone(),
                 endpoint: SocketAddr::new(IpAddr::from(relay.ipv4_addr_in), port),
+                keepalive: None,
             };
 
             let wireguard_conf = WireguardConfig {

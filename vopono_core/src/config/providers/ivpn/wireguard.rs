@@ -189,6 +189,7 @@ impl WireguardProvider for IVPN {
                 public_key: relay.pubkey.clone(),
                 allowed_ips: allowed_ips.clone(),
                 endpoint: SocketAddr::new(relay.ip, port),
+                keepalive: None,
             };
 
             let wireguard_conf = WireguardConfig {

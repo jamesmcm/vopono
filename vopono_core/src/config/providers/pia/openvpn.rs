@@ -1,6 +1,6 @@
 use super::PrivateInternetAccess;
 use super::{ConfigurationChoice, OpenVpnProvider};
-use crate::config::providers::{Input, Password, UiClient};
+use crate::config::providers::UiClient;
 use crate::util::delete_all_files_in_dir;
 use log::debug;
 use reqwest::Url;
@@ -23,16 +23,7 @@ impl OpenVpnProvider for PrivateInternetAccess {
     }
 
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
-        let username = uiclient.get_input(Input {
-            prompt: "PrivateInternetAccess username".to_string(),
-            validator: None,
-        })?;
-        let password = uiclient.get_password(Password {
-            prompt: "Password".to_string(),
-            confirm: true,
-        })?;
-
-        Ok((username, password))
+        self.prompt_for_auth(uiclient)
     }
 
     fn auth_file_path(&self) -> anyhow::Result<Option<PathBuf>> {
@@ -93,8 +84,8 @@ impl OpenVpnProvider for PrivateInternetAccess {
         // Write OpenVPN credentials file
         let (user, pass) = self.prompt_for_auth(uiclient)?;
         let auth_file = self.auth_file_path()?;
-        if auth_file.is_some() {
-            let mut outfile = File::create(auth_file.unwrap())?;
+        if let Some(auth_file) = auth_file {
+            let mut outfile = File::create(auth_file)?;
             write!(outfile, "{}\n{}", user, pass)?;
         }
         Ok(())
