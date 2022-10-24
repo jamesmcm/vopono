@@ -508,7 +508,7 @@ pub struct WireguardPeer {
     pub public_key: String,
     #[serde(rename = "AllowedIPs", deserialize_with = "de_vec_ipnet")]
     pub allowed_ips: Vec<IpNet>,
-    #[serde(rename = "Endpoint")]
+    #[serde(rename = "Endpoint", deserialize_with = "de_socketaddr")]
     pub endpoint: SocketAddr,
     #[serde(rename = "PersistentKeepalive")]
     pub keepalive: Option<String>,
