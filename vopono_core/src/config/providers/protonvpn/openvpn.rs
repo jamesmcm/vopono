@@ -182,7 +182,6 @@ impl OpenVpnProvider for ProtonVPN {
 #[derive(EnumIter, PartialEq)]
 enum Tier {
     Plus,
-    Basic,
     Free,
 }
 
@@ -190,7 +189,6 @@ impl Tier {
     fn url_part(&self) -> String {
         match self {
             Self::Plus => "2".to_string(),
-            Self::Basic => "1".to_string(),
             Self::Free => "0".to_string(),
         }
     }
@@ -203,7 +201,6 @@ impl Display for Tier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::Plus => "Plus",
-            Self::Basic => "Basic",
             Self::Free => "Free",
         };
         write!(f, "{}", s)
@@ -212,7 +209,7 @@ impl Display for Tier {
 
 impl Default for Tier {
     fn default() -> Self {
-        Self::Basic
+        Self::Free
     }
 }
 
@@ -232,7 +229,6 @@ impl ConfigurationChoice for Tier {
         Some(
             match self {
                 Self::Plus => "Plus Account provides more VPN servers and SecureCore configuration",
-                Self::Basic => "Provides core VPN servers",
                 Self::Free => "Free VPN servers only",
             }
             .to_string(),
