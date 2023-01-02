@@ -1,5 +1,5 @@
 use anyhow::bail;
-use clap::ArgEnum;
+use clap::ValueEnum;
 use dialoguer::MultiSelect;
 use log::{error, info};
 use vopono_core::config::providers::{UiClient, VpnProvider};

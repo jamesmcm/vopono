@@ -137,7 +137,7 @@ impl OpenVpnProvider for NordVPN {
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;
-            write!(outfile, "{}\n{}", user, pass)?;
+            write!(outfile, "{user}\n{pass}")?;
         }
         Ok(())
     }
@@ -187,7 +187,7 @@ impl Display for ConfigType {
             Self::DoubleTcp => "Double TCP",
             Self::DoubleUdp => "Double UDP",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -203,7 +203,7 @@ impl ConfigurationChoice for ConfigType {
     }
 
     fn all_names(&self) -> Vec<String> {
-        Self::iter().map(|x| format!("{}", x)).collect()
+        Self::iter().map(|x| format!("{x}")).collect()
     }
     fn all_descriptions(&self) -> Option<Vec<String>> {
         Some(Self::iter().map(|x| x.description().unwrap()).collect())

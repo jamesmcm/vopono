@@ -23,8 +23,8 @@ pub struct NetworkManagerUnmanaged {
 // ifname must be less <= 15 chars
 impl VethPair {
     pub fn new(source: String, dest: String, netns: &NetworkNamespace) -> anyhow::Result<Self> {
-        assert!(source.len() <= 15, "ifname must be <= 15 chars: {}", source);
-        assert!(dest.len() <= 15, "ifname must be <= 15 chars: {}", dest);
+        assert!(source.len() <= 15, "ifname must be <= 15 chars: {source}");
+        assert!(dest.len() <= 15, "ifname must be <= 15 chars: {dest}");
 
         // NetworkManager device management
         // If NetworkManager used, add destination veth to unmanaged devices
@@ -85,8 +85,7 @@ impl VethPair {
 
                 write!(
                     file,
-                    "[keyfile]\nunmanaged-devices=interface-name:{}\n",
-                    dest
+                    "[keyfile]\nunmanaged-devices=interface-name:{dest}\n"
                 )?;
             }
 
@@ -125,7 +124,7 @@ impl VethPair {
             // Permit new interface
             match std::process::Command::new("firewall-cmd")
                 .arg("--zone=trusted")
-                .arg(format!("--add-interface={}", dest).as_str())
+                .arg(format!("--add-interface={dest}").as_str())
                 .status().map(|x| x.success()) {
                     Err(e) => warn!("Failed to add veth device {} to firewalld trusted zone, error: {}", dest, e),
                     Ok(false) => warn!("Possibly failed to add veth device {} to firewalld trusted zone (non-zero exit code)", dest),

@@ -173,7 +173,7 @@ impl OpenVpnProvider for Mullvad {
             let file = File::create(openvpn_dir.join("mullvad_ca.crt"))
                 .context("Could not create mullvad CA file")?;
             let mut write_buf = std::io::BufWriter::new(file);
-            write!(write_buf, "{}", ca)?;
+            write!(write_buf, "{ca}")?;
         }
 
         // Write OpenVPN credentials file
@@ -181,7 +181,7 @@ impl OpenVpnProvider for Mullvad {
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;
-            write!(outfile, "{}\n{}", user, pass)?;
+            write!(outfile, "{user}\n{pass}")?;
         }
         Ok(())
     }
@@ -228,7 +228,7 @@ impl Display for ConfigType {
             Self::Tcp80 => "TCP (Port 80)",
             Self::Tcp443 => "TCP (Port 443)",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -244,7 +244,7 @@ impl ConfigurationChoice for ConfigType {
     }
 
     fn all_names(&self) -> Vec<String> {
-        Self::iter().map(|x| format!("{}", x)).collect()
+        Self::iter().map(|x| format!("{x}")).collect()
     }
     fn all_descriptions(&self) -> Option<Vec<String>> {
         None

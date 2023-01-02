@@ -82,8 +82,7 @@ impl Wireguard {
             .map_err(anyhow::Error::from)
             .with_context(|| {
                 format!(
-                    "Failed while converting Wireguard config to TOML. Result may be malformed:\n\n{}",
-                    config_string
+                    "Failed while converting Wireguard config to TOML. Result may be malformed:\n\n{config_string}"
                 )
             })?;
         debug!("TOML config: {:?}", config);
@@ -93,8 +92,7 @@ impl Wireguard {
             .to_string();
         assert!(
             if_name.len() <= 15,
-            "ifname must be <= 15 chars: {}",
-            if_name
+            "ifname must be <= 15 chars: {if_name}"
         );
 
         namespace.exec(&["ip", "link", "add", &if_name, "type", "wireguard"])?;
@@ -247,7 +245,7 @@ impl Wireguard {
                 {
                     let mut f = std::fs::File::create("/tmp/vopono_nft.sh")
                         .context("Creating file: /tmp/vopono_nft.sh")?;
-                    write!(f, "{}", nftcmd)?;
+                    write!(f, "{nftcmd}")?;
                 }
 
                 namespace.exec(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
@@ -551,8 +549,7 @@ impl FromStr for WireguardConfig {
             .map_err(anyhow::Error::from)
             .with_context(|| {
                 format!(
-                    "Failed while converting Wireguard config to TOML. Result may be malformed:\n\n{}",
-                    config_string
+                    "Failed while converting Wireguard config to TOML. Result may be malformed:\n\n{config_string}"
                 )
             })
     }

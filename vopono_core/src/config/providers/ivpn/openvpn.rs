@@ -21,8 +21,7 @@ impl IVPN {
             OpenVpnProtocol::UDP => "",
         };
         Ok(Url::parse(&format!(
-            "https://www.ivpn.net/releases/config/ivpn-openvpn-config{}.zip",
-            tcp_str
+            "https://www.ivpn.net/releases/config/ivpn-openvpn-config{tcp_str}.zip"
         ))?)
     }
 }
@@ -97,7 +96,7 @@ impl OpenVpnProvider for IVPN {
 
                 let city = match citer.next() {
                     None => String::new(),
-                    Some(x) => format!("-{}", x),
+                    Some(x) => format!("-{x}"),
                 };
 
                 let code = country_map.get(country);
@@ -114,7 +113,7 @@ impl OpenVpnProvider for IVPN {
             debug!("Reading file: {}, {}", file.name(), fname);
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
-            write!(outfile, "{}", file_contents)?;
+            write!(outfile, "{file_contents}")?;
         }
 
         // Write OpenVPN credentials file
@@ -122,7 +121,7 @@ impl OpenVpnProvider for IVPN {
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;
-            write!(outfile, "{}\n{}", user, pass)?;
+            write!(outfile, "{user}\n{pass}")?;
             info!("IVPN OpenVPN config written to {}", openvpn_dir.display());
         }
         Ok(())

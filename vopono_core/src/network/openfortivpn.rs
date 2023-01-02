@@ -143,7 +143,7 @@ impl Drop for OpenFortiVpn {
 
 pub fn get_remote_peer(pppd_log: &Path) -> anyhow::Result<Ipv4Addr> {
     let stdout = std::fs::read_to_string(pppd_log)
-        .context(format!("Opening pppd log file: {:?}", pppd_log))?;
+        .context(format!("Opening pppd log file: {pppd_log:?}"))?;
     let re = Regex::new(r"remote IP address (?P<ip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})").unwrap();
     let mut ips = Vec::new();
     for caps in re.captures_iter(&stdout) {

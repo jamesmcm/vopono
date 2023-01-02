@@ -27,10 +27,10 @@ impl Display for WgPeer {
 
 pub fn generate_keypair() -> anyhow::Result<WgKey> {
     // Generate new keypair
-    let private = StaticSecret::new(&mut OsRng);
+    let private = StaticSecret::new(OsRng);
     let public = PublicKey::from(&private);
     let public_key = base64::encode(public.as_bytes());
-    let private_key = base64::encode(&private.to_bytes());
+    let private_key = base64::encode(private.to_bytes());
 
     let keypair = WgKey {
         public: public_key,

@@ -4,7 +4,7 @@ use regex::Regex;
 use std::process::Command;
 
 pub fn get_pulseaudio_server() -> anyhow::Result<String> {
-    let output = Command::new("pactl").args(&["info"]).output()?.stdout;
+    let output = Command::new("pactl").args(["info"]).output()?.stdout;
     let re = Regex::new(r"Server String: ([^\n]+)").unwrap();
     let output = std::str::from_utf8(&output)?;
 

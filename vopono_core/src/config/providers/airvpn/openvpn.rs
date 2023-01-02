@@ -109,7 +109,7 @@ impl OpenVpnProvider for AirVPN {
                 debug!("server_name: {}", server_name.to_string());
                 let country = country_map.get(country_code.as_str());
                 if country.is_none() || use_country_code {
-                    format!("{}-{}.ovpn", country_code, server_name)
+                    format!("{country_code}-{server_name}.ovpn")
                 } else {
                     format!("{}-{}.ovpn", country.unwrap(), server_name)
                 }
@@ -150,7 +150,7 @@ impl Display for ConfigType {
             Self::UDP443 => "UDP",
             Self::TCP443 => "TCP",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -166,7 +166,7 @@ impl ConfigurationChoice for ConfigType {
     }
 
     fn all_names(&self) -> Vec<String> {
-        Self::iter().map(|x| format!("{}", x)).collect()
+        Self::iter().map(|x| format!("{x}")).collect()
     }
     fn all_descriptions(&self) -> Option<Vec<String>> {
         Some(Self::iter().map(|x| x.description().unwrap()).collect())

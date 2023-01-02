@@ -86,7 +86,7 @@ impl OpenVpnProvider for PrivateInternetAccess {
         let auth_file = self.auth_file_path()?;
         if let Some(auth_file) = auth_file {
             let mut outfile = File::create(auth_file)?;
-            write!(outfile, "{}\n{}", user, pass)?;
+            write!(outfile, "{user}\n{pass}")?;
         }
         Ok(())
     }
@@ -135,7 +135,7 @@ impl Display for ConfigType {
             Self::LegacyIp => "Legacy IP",
             Self::LegacyTcpIp => "Legacy TCP IP",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -150,7 +150,7 @@ impl ConfigurationChoice for ConfigType {
         "Please choose the set of OpenVPN configuration files you wish to install".to_string()
     }
     fn all_names(&self) -> Vec<String> {
-        Self::iter().map(|x| format!("{}", x)).collect()
+        Self::iter().map(|x| format!("{x}")).collect()
     }
 
     fn all_descriptions(&self) -> Option<Vec<String>> {

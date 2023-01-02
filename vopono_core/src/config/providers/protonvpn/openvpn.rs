@@ -137,9 +137,9 @@ impl OpenVpnProvider for ProtonVPN {
                 }
                 let country = code_map
                     .get(code)
-                    .unwrap_or_else(|| panic!("Could not find code in map: {}", code));
+                    .unwrap_or_else(|| panic!("Could not find code in map: {code}"));
                 let host_str = if let Some(host) = hostname {
-                    format!("-{}", host)
+                    format!("-{host}")
                 } else {
                     String::new()
                 };
@@ -151,7 +151,7 @@ impl OpenVpnProvider for ProtonVPN {
             debug!("Reading file: {}", file.name());
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
-            write!(outfile, "{}", file_contents)?;
+            write!(outfile, "{file_contents}")?;
         }
 
         // TODO: ProtonVPN DNS servers do not connect
@@ -169,7 +169,7 @@ impl OpenVpnProvider for ProtonVPN {
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;
-            write!(outfile, "{}\n{}", user, pass)?;
+            write!(outfile, "{user}\n{pass}")?;
             info!(
                 "ProtonVPN OpenVPN config written to {}",
                 openvpn_dir.display()
@@ -203,7 +203,7 @@ impl Display for Tier {
             Self::Plus => "Plus",
             Self::Free => "Free",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -219,7 +219,7 @@ impl ConfigurationChoice for Tier {
     }
 
     fn all_names(&self) -> Vec<String> {
-        Self::iter().map(|x| format!("{}", x)).collect()
+        Self::iter().map(|x| format!("{x}")).collect()
     }
     fn all_descriptions(&self) -> Option<Vec<String>> {
         Some(Self::iter().map(|x| x.description().unwrap()).collect())
@@ -263,7 +263,7 @@ impl Display for Feature {
             Self::Tor => "Tor",
             Self::Normal => "Normal",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -279,7 +279,7 @@ impl ConfigurationChoice for Feature {
     }
 
     fn all_names(&self) -> Vec<String> {
-        Self::iter().map(|x| format!("{}", x)).collect()
+        Self::iter().map(|x| format!("{x}")).collect()
     }
     fn all_descriptions(&self) -> Option<Vec<String>> {
         Some(Self::iter().map(|x| x.description().unwrap()).collect())
@@ -320,7 +320,7 @@ impl Display for ConfigType {
             Self::SecureCore => "SecureCore",
             Self::Standard => "Standard",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 
@@ -336,7 +336,7 @@ impl ConfigurationChoice for ConfigType {
     }
 
     fn all_names(&self) -> Vec<String> {
-        Self::iter().map(|x| format!("{}", x)).collect()
+        Self::iter().map(|x| format!("{x}")).collect()
     }
     fn all_descriptions(&self) -> Option<Vec<String>> {
         Some(Self::iter().map(|x| x.description().unwrap()).collect())

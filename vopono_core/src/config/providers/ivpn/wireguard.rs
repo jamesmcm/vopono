@@ -37,7 +37,7 @@ impl Display for WgKeyChoice {
             Self::NewKey => "Generate new Wireguard keypair",
             Self::ExistingKey => "Enter existing Wireguard keypair (keys page: https://www.ivpn.net/clientarea/vpn/273887/wireguard/keys )",
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 impl Default for WgKeyChoice {
@@ -51,7 +51,7 @@ impl ConfigurationChoice for WgKeyChoice {
         "Do you want to generate a new Wireguard keypair or use an existing one?".to_string()
     }
     fn all_names(&self) -> Vec<String> {
-        Self::iter().map(|x| format!("{}", x)).collect()
+        Self::iter().map(|x| format!("{x}")).collect()
     }
 
     fn all_descriptions(&self) -> Option<Vec<String>> {
@@ -88,7 +88,7 @@ impl Display for DNSChoice {
                 "AntiTracker Hardcore Mode DNS (block above plus social media trackers)"
             }
         };
-        write!(f, "{}", s)
+        write!(f, "{s}")
     }
 }
 impl Default for DNSChoice {
@@ -102,7 +102,7 @@ impl ConfigurationChoice for DNSChoice {
         "Choose DNS server configuration".to_string()
     }
     fn all_names(&self) -> Vec<String> {
-        Self::iter().map(|x| format!("{}", x)).collect()
+        Self::iter().map(|x| format!("{x}")).collect()
     }
     fn all_descriptions(&self) -> Option<Vec<String>> {
         None
@@ -202,10 +202,10 @@ impl WireguardProvider for IVPN {
             let city = strsplit.next().unwrap();
             let country_name = code_map
                 .get(country_code)
-                .unwrap_or_else(|| panic!("Could not find code in map: {}", country_code));
+                .unwrap_or_else(|| panic!("Could not find code in map: {country_code}"));
 
             let path =
-                wireguard_dir.join(format!("{}-{}-{}.conf", country_name, country_code, city));
+                wireguard_dir.join(format!("{country_name}-{country_code}-{city}.conf"));
 
             let mut toml = toml::to_string(&wireguard_conf)?;
             toml.retain(|c| c != '"');
@@ -214,7 +214,7 @@ impl WireguardProvider for IVPN {
             // Create file, write TOML
             {
                 let mut f = std::fs::File::create(path)?;
-                write!(f, "{}", toml)?;
+                write!(f, "{toml}")?;
             }
         }
 

@@ -1,4 +1,5 @@
 use super::args::ListCommand;
+use anyhow::anyhow;
 use chrono::prelude::*;
 use vopono_core::util::get_lock_namespaces;
 
@@ -22,7 +23,8 @@ pub fn print_applications() -> anyhow::Result<()> {
         let now = Utc::now();
         for ns in keys {
             for lock in namespaces.get(ns).unwrap() {
-                let naive = NaiveDateTime::from_timestamp(lock.start as i64, 0);
+                let naive = NaiveDateTime::from_timestamp_opt(lock.start as i64, 0)
+                    .ok_or(anyhow!("Timestamp parsing failed"))?;
                 let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
                 let diff = now - datetime;
                 println!(
@@ -60,7 +62,8 @@ pub fn print_namespaces() -> anyhow::Result<()> {
                 .map(|x| x.start)
                 .min()
                 .unwrap();
-            let naive = NaiveDateTime::from_timestamp(min_time as i64, 0);
+            let naive = NaiveDateTime::from_timestamp_opt(min_time as i64, 0)
+                .ok_or(anyhow!("Timestamp parsing failed"))?;
             let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
             let diff = now - datetime;
             println!(

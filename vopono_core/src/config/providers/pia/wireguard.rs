@@ -204,7 +204,7 @@ impl WireguardProvider for PrivateInternetAccess {
                 };
 
                 // Create file, write TOML
-                let path = wireguard_dir.join(format!("{}.conf", id));
+                let path = wireguard_dir.join(format!("{id}.conf"));
                 let wireguard_conf: String = wireguard_conf.try_into()?;
                 let mut f = File::create(path)?;
                 f.write_all(wireguard_conf.as_bytes())?;
@@ -231,12 +231,12 @@ impl WireguardProvider for PrivateInternetAccess {
 
         let token = PrivateInternetAccess::get_pia_token(&pia_config.user, &pia_config.pass)?;
 
-        let mut wg_config: WireguardConfig = std::fs::read_to_string(&wg_config_file)?.parse()?;
+        let mut wg_config: WireguardConfig = std::fs::read_to_string(wg_config_file)?.parse()?;
         let ip = &wg_config.peer.endpoint.ip();
         let cn = pia_config
             .cn_lookup
             .get(ip)
-            .with_context(|| format!("Could not find matching common name for IP {}", ip))?;
+            .with_context(|| format!("Could not find matching common name for IP {ip}"))?;
 
         let server_info = PrivateInternetAccess::add_key(ip, cn, &token, &pia_config.pubkey)?;
 

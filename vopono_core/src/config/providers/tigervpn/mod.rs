@@ -122,7 +122,7 @@ impl OpenVpnProvider for TigerVPN {
             let file = File::create(openvpn_dir.join("ca.crt"))
                 .context("Could not create mullvad CA file")?;
             let mut write_buf = std::io::BufWriter::new(file);
-            write!(write_buf, "{}", ca)?;
+            write!(write_buf, "{ca}")?;
         }
 
         // Write OpenVPN credentials file
@@ -130,7 +130,7 @@ impl OpenVpnProvider for TigerVPN {
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;
-            write!(outfile, "{}\n{}", user, pass)?;
+            write!(outfile, "{user}\n{pass}")?;
         }
         Ok(())
     }

@@ -82,17 +82,17 @@ impl OpenVpnProvider for HMA {
                     .expect("Invalid filename");
                 let mut filename_iter = filename.split('.');
                 let country = filename_iter.next().unwrap();
-                let country = country.replace('\'', "").replace('`', "").to_lowercase();
+                let country = country.replace(['\'', '`'], "").to_lowercase();
                 let city = filename_iter.next().unwrap();
-                let city = city.replace('\'', "").replace('`', "").to_lowercase();
-                let filename = format!("{}-{}.ovpn", country, city);
+                let city = city.replace(['\'', '`'], "").to_lowercase();
+                let filename = format!("{country}-{city}.ovpn");
                 let outpath = openvpn_dir.join(filename.to_lowercase().replace(' ', "_"));
                 debug!(
                     "Writing file: {}",
                     outpath.to_str().unwrap_or("Invalid path")
                 );
                 let mut outfile = File::create(outpath)?;
-                write!(outfile, "{}", file_contents)?;
+                write!(outfile, "{file_contents}")?;
             };
         }
 
@@ -101,7 +101,7 @@ impl OpenVpnProvider for HMA {
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;
-            write!(outfile, "{}\n{}", user, pass)?;
+            write!(outfile, "{user}\n{pass}")?;
             info!("HMA OpenVPN config written to {}", openvpn_dir.display());
         }
         Ok(())
@@ -143,7 +143,7 @@ impl ConfigurationChoice for ConfigType {
         "Please choose the set of OpenVPN configuration files you wish to install".to_string()
     }
     fn all_names(&self) -> Vec<String> {
-        Self::iter().map(|x| format!("{}", x)).collect()
+        Self::iter().map(|x| format!("{x}")).collect()
     }
     fn all_descriptions(&self) -> Option<Vec<String>> {
         Some(Self::iter().map(|x| x.description().unwrap()).collect())

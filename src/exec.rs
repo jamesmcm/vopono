@@ -25,7 +25,7 @@ use vopono_core::util::{get_existing_namespaces, get_target_subnet};
 pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()> {
     // this captures all sigint signals
     // ignore for now, they are automatically passed on to the child
-    let signals = Signals::new(&[SIGINT])?;
+    let signals = Signals::new([SIGINT])?;
 
     let provider: VpnProvider;
     let server_name: String;
@@ -284,7 +284,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     let ns_name = if let Some(c_ns_name) = custom_netns_name {
         c_ns_name
     } else {
-        format!("vopono_{}_{}", alias, server_name)
+        format!("vopono_{alias}_{server_name}")
     };
 
     let mut ns;

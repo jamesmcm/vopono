@@ -36,7 +36,7 @@ impl OpenVpnProvider for AzireVPN {
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
         for alias in self.server_aliases() {
-            let url = format!("https://www.azirevpn.com/cfg/openvpn/generate?country={}&os=linux-cli&nat=1&port=random&protocol={}&tls=gcm&keys=0", alias, protocol);
+            let url = format!("https://www.azirevpn.com/cfg/openvpn/generate?country={alias}&os=linux-cli&nat=1&port=random&protocol={protocol}&tls=gcm&keys=0");
             let file = reqwest::blocking::get(&url)?.bytes()?;
 
             let file_contents = std::str::from_utf8(&file)?;
@@ -49,11 +49,11 @@ impl OpenVpnProvider for AzireVPN {
             let country = country_map
                 .get(&alias[0..2])
                 .expect("Could not map country to name");
-            let filename = format!("{}-{}.ovpn", country, alias);
+            let filename = format!("{country}-{alias}.ovpn");
             debug!("Writing file: {}", filename);
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
-            write!(outfile, "{}", file_contents)?;
+            write!(outfile, "{file_contents}")?;
         }
 
         // Write OpenVPN credentials file
@@ -61,7 +61,7 @@ impl OpenVpnProvider for AzireVPN {
         let auth_file = self.auth_file_path()?;
         if auth_file.is_some() {
             let mut outfile = File::create(auth_file.unwrap())?;
-            write!(outfile, "{}\n{}", user, pass)?;
+            write!(outfile, "{user}\n{pass}")?;
             info!(
                 "AzireVPN OpenVPN config written to {}",
                 openvpn_dir.display()

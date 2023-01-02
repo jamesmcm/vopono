@@ -53,7 +53,7 @@ pub struct VethPairIPs {
 impl NetworkNamespace {
     pub fn from_existing(name: String) -> anyhow::Result<Self> {
         let mut lockfile_path = config_dir()?;
-        lockfile_path.push(format!("vopono/locks/{}", name));
+        lockfile_path.push(format!("vopono/locks/{name}"));
 
         std::fs::create_dir_all(&lockfile_path)?;
         debug!("Trying to read lockfile: {}", lockfile_path.display());
@@ -114,7 +114,7 @@ impl NetworkNamespace {
         set_dir: Option<PathBuf>,
     ) -> anyhow::Result<std::process::Child> {
         let mut handle = Command::new("ip");
-        handle.args(&["netns", "exec", &self.name]);
+        handle.args(["netns", "exec", &self.name]);
         if let Some(cdir) = set_dir {
             handle.current_dir(cdir);
         }
@@ -178,8 +178,8 @@ impl NetworkNamespace {
         // TODO: Handle if name taken?
         // Use bs58 here?
         let basename = &self.name[((self.name.len() as i32) - 13).max(0) as usize..self.name.len()];
-        let source = format!("{}_s", basename);
-        let dest = format!("{}_d", basename);
+        let source = format!("{basename}_s");
+        let dest = format!("{basename}_d");
         self.veth_pair = Some(VethPair::new(source, dest, self)?);
         Ok(())
     }
@@ -203,21 +203,20 @@ impl NetworkNamespace {
             .expect("Source veth undefined")
             .source;
 
-        let ip = format!("10.200.{}.1/24", target_subnet);
-        let ip_nosub = format!("10.200.{}.1", target_subnet);
-        let veth_source_ip = format!("10.200.{}.2/24", target_subnet);
-        let veth_source_ip_nosub = format!("10.200.{}.2", target_subnet);
+        let ip = format!("10.200.{target_subnet}.1/24");
+        let ip_nosub = format!("10.200.{target_subnet}.1");
+        let veth_source_ip = format!("10.200.{target_subnet}.2/24");
+        let veth_source_ip_nosub = format!("10.200.{target_subnet}.2");
 
         sudo_command(&["ip", "addr", "add", &ip, "dev", veth_dest]).with_context(|| {
             format!(
-                "Failed to assign static IP to veth destination: {}",
-                veth_dest
+                "Failed to assign static IP to veth destination: {veth_dest}"
             )
         })?;
 
         self.exec(&["ip", "addr", "add", &veth_source_ip, "dev", veth_source])
             .with_context(|| {
-                format!("Failed to assign static IP to veth source: {}", veth_source)
+                format!("Failed to assign static IP to veth source: {veth_source}")
             })?;
         self.exec(&[
             "ip",
@@ -229,7 +228,7 @@ impl NetworkNamespace {
             "dev",
             veth_source,
         ])
-        .with_context(|| format!("Failed to assign static IP to veth source: {}", veth_source))?;
+        .with_context(|| format!("Failed to assign static IP to veth source: {veth_source}"))?;
 
         if let Some(my_hosts) = hosts {
             for host in my_hosts {
@@ -245,8 +244,7 @@ impl NetworkNamespace {
                 ])
                 .with_context(|| {
                     format!(
-                        "Failed to assign hosts route {} to veth source: {}",
-                        host, veth_source
+                        "Failed to assign hosts route {host} to veth source: {veth_source}"
                     )
                 })?;
             }
@@ -265,8 +263,7 @@ impl NetworkNamespace {
             ])
             .with_context(|| {
                 format!(
-                    "Failed to assign hosts route for local host {} to veth source: {}",
-                    ip_nosub, veth_source
+                    "Failed to assign hosts route for local host {ip_nosub} to veth source: {veth_source}"
                 )
             })?;
         }
@@ -420,7 +417,7 @@ impl NetworkNamespace {
         firewall: Firewall,
     ) -> anyhow::Result<()> {
         self.host_masquerade = Some(HostMasquerade::add_masquerade_rule(
-            format!("10.200.{}.0/24", target_subnet),
+            format!("10.200.{target_subnet}.0/24"),
             interface,
             firewall,
         )?);
@@ -463,7 +460,7 @@ impl NetworkNamespace {
         };
         let lock_string = ron::ser::to_string(&lock)?;
         let mut f = File::create(&lockfile_path)?;
-        write!(f, "{}", lock_string)?;
+        write!(f, "{lock_string}")?;
         debug!("Lockfile written: {}", lockfile_path.display());
 
         set_config_permissions()?;
@@ -517,7 +514,7 @@ impl Drop for NetworkNamespace {
                 std::env::set_var("VOPONO_NS", &self.name);
                 std::env::set_var(
                     "VOPONO_NS_IP",
-                    &self
+                    self
                         .veth_pair_ips
                         .as_ref()
                         .unwrap()
@@ -542,7 +539,7 @@ impl Drop for NetworkNamespace {
 
                     std::process::Command::new("sudo").args(args).spawn().ok();
                 } else {
-                    std::process::Command::new(&pdcmd).spawn().ok();
+                    std::process::Command::new(pdcmd).spawn().ok();
                 }
 
                 std::env::remove_var("VOPONO_NS");

@@ -36,7 +36,7 @@ impl ConfigurationChoice for OpenVpnProtocol {
     }
 
     fn all_names(&self) -> Vec<String> {
-        Self::iter().map(|x| format!("{}", x)).collect()
+        Self::iter().map(|x| format!("{x}")).collect()
     }
     fn all_descriptions(&self) -> Option<Vec<String>> {
         None
@@ -65,7 +65,7 @@ impl Display for OpenVpnProtocol {
             Self::UDP => "udp",
             Self::TCP => "tcp",
         };
-        write!(f, "{}", out)
+        write!(f, "{out}")
     }
 }
 
@@ -118,7 +118,7 @@ pub fn verify_auth(
             // Write OpenVPN credentials file
             let (user, pass) = provider.prompt_for_auth(uiclient)?;
             let mut outfile = File::create(provider.auth_file_path()?.unwrap())?;
-            write!(outfile, "{}\n{}", user, pass)?;
+            write!(outfile, "{user}\n{pass}")?;
 
             info!("Credentials written to: {}", auth_file.to_string_lossy());
             Ok(Some(auth_file))

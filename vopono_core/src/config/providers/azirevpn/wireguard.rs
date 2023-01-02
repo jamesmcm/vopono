@@ -32,8 +32,7 @@ impl WireguardProvider for AzireVPN {
         for alias in aliases {
             let response = client
                 .post(reqwest::Url::parse(&format!(
-                    "https://api.azirevpn.com/v1/wireguard/connect/{}",
-                    alias
+                    "https://api.azirevpn.com/v1/wireguard/connect/{alias}"
                 ))?)
                 .form(&[
                     ("username", &username),
@@ -77,7 +76,7 @@ impl WireguardProvider for AzireVPN {
                 .get(&alias[0..2])
                 .expect("Could not map country code");
 
-            let path = wireguard_dir.join(format!("{}-{}.conf", country, alias));
+            let path = wireguard_dir.join(format!("{country}-{alias}.conf"));
 
             let mut toml = toml::to_string(&wireguard_conf)?;
             toml.retain(|c| c != '"');
@@ -86,7 +85,7 @@ impl WireguardProvider for AzireVPN {
             // Create file, write TOML
             {
                 let mut f = std::fs::File::create(path)?;
-                write!(f, "{}", toml)?;
+                write!(f, "{toml}")?;
             }
         }
 

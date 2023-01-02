@@ -1,5 +1,5 @@
-use clap::ArgEnum;
 use clap::Parser;
+use clap::ValueEnum;
 use std::fmt::Display;
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ impl<T: IntoEnumIterator + Clone + Display> WrappedArg<T> {
     }
 }
 
-impl<T: IntoEnumIterator + Clone + Display> ArgEnum for WrappedArg<T> {
+impl<T: IntoEnumIterator + Clone + Display> ValueEnum for WrappedArg<T> {
     fn from_str(input: &str, ignore_case: bool) -> core::result::Result<Self, String> {
         let use_input = input.trim().to_string();
 
@@ -34,15 +34,15 @@ impl<T: IntoEnumIterator + Clone + Display> ArgEnum for WrappedArg<T> {
             Ok(WrappedArg { variant: f })
         } else {
             // TODO - better error messages
-            Err(format!("Invalid argument: {}", input))
+            Err(format!("Invalid argument: {input}"))
         }
     }
 
-    fn to_possible_value<'a>(&self) -> Option<clap::PossibleValue<'a>> {
+    fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
         // TODO: Leak necessary?
-        Some(clap::PossibleValue::new(Box::leak(
-            self.variant.to_string().into_boxed_str(),
-        )))
+        let name: &'static str = Box::leak(self.variant.to_string().into_boxed_str());
+
+        Some(clap::builder::PossibleValue::new(name))
     }
 
     fn value_variants<'a>() -> &'a [Self] {
@@ -102,22 +102,22 @@ pub enum Command {
 #[derive(Parser)]
 pub struct SynchCommand {
     /// VPN Provider - will launch interactive menu if not provided
-    #[clap(arg_enum, ignore_case = true)]
+    #[clap(value_enum, ignore_case = true)]
     pub vpn_provider: Option<WrappedArg<VpnProvider>>,
 
     /// VPN Protocol (if not given will try to sync both)
-    #[clap(arg_enum, long = "protocol", short = 'c', ignore_case = true)]
+    #[clap(value_enum, long = "protocol", short = 'c', ignore_case = true)]
     pub protocol: Option<WrappedArg<Protocol>>,
 }
 
 #[derive(Parser)]
 pub struct ExecCommand {
     /// VPN Provider (must be given unless using custom config)
-    #[clap(arg_enum, long = "provider", short = 'p', ignore_case = true)]
+    #[clap(value_enum, long = "provider", short = 'p', ignore_case = true)]
     pub vpn_provider: Option<WrappedArg<VpnProvider>>,
 
     /// VPN Protocol (if not given will use default)
-    #[clap(arg_enum, long = "protocol", short = 'c', ignore_case = true)]
+    #[clap(value_enum, long = "protocol", short = 'c', ignore_case = true)]
     pub protocol: Option<WrappedArg<Protocol>>,
 
     /// Network Interface (if not given, will use first active network interface)
@@ -144,7 +144,8 @@ pub struct ExecCommand {
     pub working_directory: Option<String>,
 
     /// Custom VPN Provider - OpenVPN or Wireguard config file (will override other settings)
-    #[clap(parse(from_os_str), long = "custom")]
+    // TODO: Check From OsStr part works
+    #[clap(long = "custom")]
     pub custom_config: Option<PathBuf>,
 
     /// DNS Server (will override provider's DNS server)
@@ -181,7 +182,7 @@ pub struct ExecCommand {
     pub no_proxy: bool,
 
     /// VPN Protocol (if not given will use default)
-    #[clap(arg_enum, long = "firewall", ignore_case = true)]
+    #[clap(value_enum, long = "firewall", ignore_case = true)]
     pub firewall: Option<WrappedArg<Firewall>>,
 
     /// Block all IPv6 traffic
@@ -216,18 +217,18 @@ pub struct ExecCommand {
 #[derive(Parser)]
 pub struct ListCommand {
     /// VPN Provider
-    #[clap(possible_values = &["namespaces", "applications"])]
+    #[clap(value_parser(clap::builder::PossibleValuesParser::from(&["namespaces", "applications"])))]
     pub list_type: Option<String>,
 }
 
 #[derive(Parser)]
 pub struct ServersCommand {
     /// VPN Provider
-    #[clap(arg_enum, ignore_case = true)]
+    #[clap(value_enum, ignore_case = true)]
     pub vpn_provider: WrappedArg<VpnProvider>,
 
     /// VPN Protocol (if not given will list all)
-    #[clap(arg_enum, long = "protocol", short = 'c', ignore_case = true)]
+    #[clap(value_enum, long = "protocol", short = 'c', ignore_case = true)]
     pub protocol: Option<WrappedArg<Protocol>>,
 
     /// VPN Server prefix

@@ -32,7 +32,7 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
     let path: Option<PathBuf> = None
         .or_else(|| {
             if let Ok(home) = std::env::var("HOME") {
-                let confpath = format!("{}/.config", home);
+                let confpath = format!("{home}/.config");
                 let path = Path::new(&confpath);
                 debug!(
                     "Using config dir from $HOME config: {}",
@@ -56,7 +56,7 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
         .or_else(|| {
             if let Ok(user) = std::env::var("SUDO_USER") {
                 // TODO: DRY
-                let confpath = format!("/home/{}/.config", user);
+                let confpath = format!("/home/{user}/.config");
                 let path = Path::new(&confpath);
                 debug!(
                     "Using config dir from $SUDO_USER config: {}",
@@ -163,7 +163,7 @@ pub fn set_config_permissions() -> anyhow::Result<()> {
 
 pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<Ipv4Net>> {
     let output = Command::new("ip")
-        .args(&["addr", "show", "type", "veth"])
+        .args(["addr", "show", "type", "veth"])
         .output()?
         .stdout;
     let output = std::str::from_utf8(&output)?;
@@ -179,7 +179,7 @@ pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<Ipv4Net>> {
 }
 
 pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
-    let output = Command::new("ip").args(&["netns", "list"]).output()?.stdout;
+    let output = Command::new("ip").args(["netns", "list"]).output()?.stdout;
     let output = std::str::from_utf8(&output)?
         .split('\n')
         .map(|x| x.split_whitespace().next())
@@ -193,7 +193,7 @@ pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
 
 pub fn get_pids_in_namespace(ns_name: &str) -> anyhow::Result<Vec<i32>> {
     let output = Command::new("ip")
-        .args(&["netns", "pids", ns_name])
+        .args(["netns", "pids", ns_name])
         .output()?
         .stdout;
     let output = std::str::from_utf8(&output)?
@@ -319,8 +319,8 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
         })
         .try_for_each(|x| {
             debug!("Removing dead namespace: {}", x);
-            let path = format!("/etc/netns/{}", x);
-            std::fs::remove_dir_all(&path).ok();
+            let path = format!("/etc/netns/{x}");
+            std::fs::remove_dir_all(path).ok();
 
             sudo_command(&["ip", "netns", "delete", x.as_str()])
         })?;
@@ -379,7 +379,7 @@ pub fn delete_all_files_in_dir(dir: &Path) -> anyhow::Result<()> {
 }
 
 pub fn get_configs_from_alias(list_path: &Path, alias: &str) -> Vec<PathBuf> {
-    WalkDir::new(&list_path)
+    WalkDir::new(list_path)
         .into_iter()
         .filter_map(|x| x.ok())
         .filter(|x| {
@@ -436,9 +436,9 @@ pub fn get_config_from_alias(list_path: &Path, alias: &str) -> anyhow::Result<Pa
 
 pub fn get_config_file_protocol(config_file: &Path) -> Protocol {
     let content = fs::read_to_string(config_file)
-        .context(format!("Reading VPN config file: {:?}", config_file))
+        .context(format!("Reading VPN config file: {config_file:?}"))
         .unwrap();
-    if content.contains(&"[Interface]") {
+    if content.contains("[Interface]") {
         Protocol::Wireguard
     } else {
         // TODO: Don't always assume OpenVPN

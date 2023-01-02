@@ -53,7 +53,7 @@ impl MozillaVPN {
         login: &Login,
     ) -> anyhow::Result<()> {
         let response = client
-            .post(&format!("{}/vpn/device", self.base_url()))
+            .post(format!("{}/vpn/device", self.base_url()))
             .bearer_auth(&login.token)
             .json(&device)
             .send()
@@ -200,7 +200,7 @@ impl WireguardProvider for MozillaVPN {
                 .unwrap_or_else(|| panic!("Failed to split hostname: {}", relay.hostname));
 
             let country = relay.country_name.to_lowercase().replace(' ', "_");
-            let path = wireguard_dir.join(format!("{}-{}.conf", country, host));
+            let path = wireguard_dir.join(format!("{country}-{host}.conf"));
 
             let mut toml = toml::to_string(&wireguard_conf)?;
             toml.retain(|c| c != '"');
@@ -209,7 +209,7 @@ impl WireguardProvider for MozillaVPN {
             // Create file, write TOML
             {
                 let mut f = std::fs::File::create(path)?;
-                write!(f, "{}", toml)?;
+                write!(f, "{toml}")?;
             }
         }
 
