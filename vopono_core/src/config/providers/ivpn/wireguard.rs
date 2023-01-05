@@ -204,8 +204,7 @@ impl WireguardProvider for IVPN {
                 .get(country_code)
                 .unwrap_or_else(|| panic!("Could not find code in map: {country_code}"));
 
-            let path =
-                wireguard_dir.join(format!("{country_name}-{country_code}-{city}.conf"));
+            let path = wireguard_dir.join(format!("{country_name}-{country_code}-{city}.conf"));
 
             let mut toml = toml::to_string(&wireguard_conf)?;
             toml.retain(|c| c != '"');

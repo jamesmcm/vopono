@@ -509,8 +509,8 @@ pub fn killswitch(
 }
 
 pub fn get_remotes_from_config(path: &Path) -> anyhow::Result<Vec<Remote>> {
-    let file_string = std::fs::read_to_string(path)
-        .context(format!("Reading OpenVPN config file: {path:?}"))?;
+    let file_string =
+        std::fs::read_to_string(path).context(format!("Reading OpenVPN config file: {path:?}"))?;
     let mut output_vec = Vec::new();
     // Regex extract
     let re = Regex::new(r"remote ([^\s]+) ([0-9]+)\s?(tcp|udp|tcp-client)?")?;

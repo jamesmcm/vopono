@@ -209,15 +209,11 @@ impl NetworkNamespace {
         let veth_source_ip_nosub = format!("10.200.{target_subnet}.2");
 
         sudo_command(&["ip", "addr", "add", &ip, "dev", veth_dest]).with_context(|| {
-            format!(
-                "Failed to assign static IP to veth destination: {veth_dest}"
-            )
+            format!("Failed to assign static IP to veth destination: {veth_dest}")
         })?;
 
         self.exec(&["ip", "addr", "add", &veth_source_ip, "dev", veth_source])
-            .with_context(|| {
-                format!("Failed to assign static IP to veth source: {veth_source}")
-            })?;
+            .with_context(|| format!("Failed to assign static IP to veth source: {veth_source}"))?;
         self.exec(&[
             "ip",
             "route",
@@ -243,9 +239,7 @@ impl NetworkNamespace {
                     veth_source,
                 ])
                 .with_context(|| {
-                    format!(
-                        "Failed to assign hosts route {host} to veth source: {veth_source}"
-                    )
+                    format!("Failed to assign hosts route {host} to veth source: {veth_source}")
                 })?;
             }
         }
@@ -514,8 +508,7 @@ impl Drop for NetworkNamespace {
                 std::env::set_var("VOPONO_NS", &self.name);
                 std::env::set_var(
                     "VOPONO_NS_IP",
-                    self
-                        .veth_pair_ips
+                    self.veth_pair_ips
                         .as_ref()
                         .unwrap()
                         .namespace_ip

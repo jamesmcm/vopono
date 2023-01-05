@@ -95,8 +95,8 @@ pub fn uses_shadowsocks(openvpn_config: &Path) -> anyhow::Result<Option<(IpAddr,
 }
 
 pub fn get_routes_from_config(path: &Path) -> anyhow::Result<Vec<IpAddr>> {
-    let file_string = std::fs::read_to_string(path)
-        .context(format!("Reading OpenVPN config file: {path:?}"))?;
+    let file_string =
+        std::fs::read_to_string(path).context(format!("Reading OpenVPN config file: {path:?}"))?;
     let mut output_vec = Vec::new();
     // Regex extract
     let re = Regex::new(

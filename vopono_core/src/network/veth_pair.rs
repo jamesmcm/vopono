@@ -83,10 +83,7 @@ impl VethPair {
                     std::fs::File::create(nm_config_path)?
                 };
 
-                write!(
-                    file,
-                    "[keyfile]\nunmanaged-devices=interface-name:{dest}\n"
-                )?;
+                write!(file, "[keyfile]\nunmanaged-devices=interface-name:{dest}\n")?;
             }
 
             if let Err(e) = sudo_command(&["nmcli", "connection", "reload"])

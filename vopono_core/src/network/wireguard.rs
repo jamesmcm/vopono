@@ -90,10 +90,7 @@ impl Wireguard {
         let if_name = namespace.name
             [((namespace.name.len() as i32) - 13).max(0) as usize..namespace.name.len()]
             .to_string();
-        assert!(
-            if_name.len() <= 15,
-            "ifname must be <= 15 chars: {if_name}"
-        );
+        assert!(if_name.len() <= 15, "ifname must be <= 15 chars: {if_name}");
 
         namespace.exec(&["ip", "link", "add", &if_name, "type", "wireguard"])?;
 

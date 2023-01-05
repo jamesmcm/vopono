@@ -49,9 +49,7 @@ impl WireguardProvider for Mullvad {
 
         let username = self.request_mullvad_username(uiclient)?;
         let auth: AuthToken = client
-            .get(&format!(
-                "https://api.mullvad.net/www/accounts/{username}/"
-            ))
+            .get(&format!("https://api.mullvad.net/www/accounts/{username}/"))
             .send()?
             .json()?;
 

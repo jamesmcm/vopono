@@ -44,17 +44,13 @@ impl DnsConfig {
         let suffix = suffixes.join(" ");
         if !suffix.is_empty() {
             writeln!(resolv, "search {suffix}").with_context(|| {
-                format!(
-                    "Failed to overwrite resolv.conf: /etc/netns/{ns_name}/resolv.conf"
-                )
+                format!("Failed to overwrite resolv.conf: /etc/netns/{ns_name}/resolv.conf")
             })?;
         }
 
         for dns in servers {
             writeln!(resolv, "nameserver {dns}").with_context(|| {
-                format!(
-                    "Failed to overwrite resolv.conf: /etc/netns/{ns_name}/resolv.conf"
-                )
+                format!("Failed to overwrite resolv.conf: /etc/netns/{ns_name}/resolv.conf")
             })?;
         }
 
@@ -95,9 +91,7 @@ impl DnsConfig {
                         })
                 )
                 .with_context(|| {
-                    format!(
-                        "Failed to overwrite nsswitch.conf: /etc/netns/{ns_name}/nsswitch.conf"
-                    )
+                    format!("Failed to overwrite nsswitch.conf: /etc/netns/{ns_name}/nsswitch.conf")
                 })?;
             }
         }
