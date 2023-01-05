@@ -24,7 +24,7 @@ pub fn print_applications() -> anyhow::Result<()> {
         for ns in keys {
             for lock in namespaces.get(ns).unwrap() {
                 let naive = NaiveDateTime::from_timestamp_opt(lock.start as i64, 0)
-                    .ok_or(anyhow!("Timestamp parsing failed"))?;
+                    .ok_or_else(|| anyhow!("Timestamp parsing failed"))?;
                 let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
                 let diff = now - datetime;
                 println!(
@@ -63,7 +63,7 @@ pub fn print_namespaces() -> anyhow::Result<()> {
                 .min()
                 .unwrap();
             let naive = NaiveDateTime::from_timestamp_opt(min_time as i64, 0)
-                .ok_or(anyhow!("Timestamp parsing failed"))?;
+                .ok_or_else(|| anyhow!("Timestamp parsing failed"))?;
             let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
             let diff = now - datetime;
             println!(
