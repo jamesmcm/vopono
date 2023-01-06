@@ -1,7 +1,7 @@
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use crate::config::vpn::OpenVpnProtocol;
-use crate::util::{check_process_running, vopono_dir};
+use crate::util::{check_process_running, set_config_permissions, vopono_dir};
 use anyhow::{anyhow, Context};
 use log::{debug, error, info};
 use regex::Regex;
@@ -51,7 +51,7 @@ impl OpenVpn {
         }
 
         let config_file_path = config_file.canonicalize().context("Invalid path given")?;
-
+        set_config_permissions()?;
         info!("Launching OpenVPN...");
         let mut command_vec = ([
             "openvpn",
@@ -78,6 +78,9 @@ impl OpenVpn {
             debug!("Detected IPv6 enabled in /sys/module/ipv6/parameters/disable");
         }
 
+        // Only try once for DNS resolution / remote host connection
+        command_vec.push("--connect-retry-max");
+        command_vec.push("1");
         // Ignore Windows-specific command
         command_vec.push("--pull-filter");
         command_vec.push("ignore");

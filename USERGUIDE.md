@@ -188,6 +188,16 @@ API access in [the client area webpage](https://airvpn.org/apisettings/) when ru
 Note that ports for forwarding must also be added in [the client area webpage](https://airvpn.org/ports/), 
 and it is also possible to configure the VPN tunnel [DNS settings there](https://airvpn.org/dns/).
 
+#### Connection / hostname resolution issues
+
+If you face issues with OpenVPN resolving the remote host, try generating the VPN provider config files with IP addresses instead.
+
+e.g. the error may appear as follows:
+
+```
+2023-01-06 13:19:18 RESOLVE: Cannot resolve host address: ro-buh-ovpn-002.mullvad.net:1197 (Name or service not known)
+```
+
 #### TCP support and custom ports
 
 By default vopono uses the UDP configuration of the VPN providers.
@@ -525,3 +535,9 @@ sudo ip netns exec ping 8.8.8.8
 ```
 
 See issues #40, #24, #2, and #1 for previous troubleshooting of issues.
+
+### DNS / name resolution issues
+
+When encountering issues in name resolution (e.g. with OpenVPN resolving remote host names), please
+first try generating the VPN provider config files with IP addresses instead to see whether the issue
+is connection/firewall related or solely a DNS / hostname resolution issue.

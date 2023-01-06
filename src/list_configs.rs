@@ -38,10 +38,12 @@ pub fn print_configs(cmd: ServersCommand) -> anyhow::Result<()> {
     if (cmd.protocol.is_none() && provider.get_dyn_openvpn_provider().is_ok())
         || cmd.protocol.clone().map(|x| x.to_variant()) == Some(Protocol::OpenVpn)
     {
-        let openvpn_configs = get_configs_from_alias(
+        let mut openvpn_configs = get_configs_from_alias(
             &provider.get_dyn_openvpn_provider()?.openvpn_dir()?,
             &prefix,
         );
+
+        openvpn_configs.sort_by_key(|c| c.file_name().unwrap().to_str().unwrap().to_owned());
 
         for config in openvpn_configs {
             println!(
@@ -55,10 +57,12 @@ pub fn print_configs(cmd: ServersCommand) -> anyhow::Result<()> {
     if (cmd.protocol.is_none() && provider.get_dyn_wireguard_provider().is_ok())
         || cmd.protocol.map(|x| x.to_variant()) == Some(Protocol::Wireguard)
     {
-        let wg_configs = get_configs_from_alias(
+        let mut wg_configs = get_configs_from_alias(
             &provider.get_dyn_wireguard_provider()?.wireguard_dir()?,
             &prefix,
         );
+
+        wg_configs.sort_by_key(|c| c.file_name().unwrap().to_str().unwrap().to_owned());
 
         for config in wg_configs {
             println!(

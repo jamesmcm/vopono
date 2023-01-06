@@ -109,11 +109,20 @@ impl WireguardProvider for Mullvad {
                 peer: wireguard_peer,
             };
 
-            let host = relay
-                .hostname
-                .split('-')
-                .next()
-                .unwrap_or_else(|| panic!("Failed to split hostname: {}", relay.hostname));
+            let host = if relay.hostname.chars().filter(|c| *c == '-').count() > 1 {
+                // New naming convention -  at-vie-wg-001
+                let substrings: Vec<&str> = relay.hostname.split('-').collect();
+
+                substrings[0].to_owned() + substrings[1] + substrings[3]
+            } else {
+                // Old naming convention - au10-wireguard
+                relay
+                    .hostname
+                    .split('-')
+                    .next()
+                    .unwrap_or_else(|| panic!("Failed to split hostname: {}", relay.hostname))
+                    .to_owned()
+            };
 
             let country = relay.country_name.to_lowercase().replace(' ', "_");
             let path = wireguard_dir.join(format!("{country}-{host}.conf"));
