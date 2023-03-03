@@ -1,7 +1,7 @@
 [package]
 name = "vopono_core"
 description = "Library code for running VPN connections in network namespaces"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 license = "GPL-3.0-or-later"
@@ -24,15 +24,15 @@ ron = "0.8"
 walkdir = "2"
 # Must use rand 0.7 for compatibility with x25519-dalek for now
 rand = "0.7"
-toml = "0.5"
+toml = "0.7"
 ipnet = { version = "2", features = ["serde"] }
 reqwest = { default-features = false, version = "0.11", features = [
     "blocking",
     "json",
     "rustls-tls",
 ] } # TODO: Can we remove Tokio dependency?
-sysinfo = "0.27"
-base64 = "0.20"
+sysinfo = "0.28"
+base64 = "0.21"
 x25519-dalek = "1"
 strum = "0.24"
 strum_macros = "0.24"
