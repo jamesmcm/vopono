@@ -1,7 +1,14 @@
+use base64::{
+    engine::{general_purpose, GeneralPurpose},
+    Engine as _,
+};
+
 use rand::rngs::OsRng;
 use serde::Deserialize;
 use std::fmt::Display;
 use x25519_dalek::{PublicKey, StaticSecret};
+
+const B64_ENGINE: GeneralPurpose = general_purpose::STANDARD;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct WgKey {
@@ -29,8 +36,8 @@ pub fn generate_keypair() -> anyhow::Result<WgKey> {
     // Generate new keypair
     let private = StaticSecret::new(OsRng);
     let public = PublicKey::from(&private);
-    let public_key = base64::encode(public.as_bytes());
-    let private_key = base64::encode(private.to_bytes());
+    let public_key = B64_ENGINE.encode(public.as_bytes());
+    let private_key = B64_ENGINE.encode(private.to_bytes());
 
     let keypair = WgKey {
         public: public_key,
@@ -40,12 +47,12 @@ pub fn generate_keypair() -> anyhow::Result<WgKey> {
 }
 
 pub fn generate_public_key(private_key: &str) -> anyhow::Result<String> {
-    let private_bytes = base64::decode(private_key)?;
+    let private_bytes = B64_ENGINE.decode(private_key)?;
     let mut byte_array = [0; 32];
     byte_array.copy_from_slice(&private_bytes);
 
     let private = StaticSecret::from(byte_array);
     let public = PublicKey::from(&private);
-    let public_key = base64::encode(public.as_bytes());
+    let public_key = B64_ENGINE.encode(public.as_bytes());
     Ok(public_key)
 }
