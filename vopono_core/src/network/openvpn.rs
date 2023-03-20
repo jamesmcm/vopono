@@ -516,10 +516,10 @@ pub fn get_remotes_from_config(path: &Path) -> anyhow::Result<Vec<Remote>> {
         std::fs::read_to_string(path).context(format!("Reading OpenVPN config file: {path:?}"))?;
     let mut output_vec = Vec::new();
     // Regex extract
-    let re = Regex::new(r"remote ([^\s]+) ([0-9]+)\s?(tcp|udp|tcp-client)?")?;
+    let re = Regex::new(r"(?m)^\s*remote ([^\s]+) ([0-9]+)\s?(tcp|udp|tcp-client)?")?;
     let caps = re.captures_iter(&file_string);
 
-    let re2 = Regex::new(r"proto ([a-z\-]+)")?;
+    let re2 = Regex::new(r"(?m)^\s*proto ([a-z\-]+)")?;
     let mut caps2 = re2.captures_iter(&file_string);
     let default_proto = caps2.next().and_then(|x| x.get(1));
 
