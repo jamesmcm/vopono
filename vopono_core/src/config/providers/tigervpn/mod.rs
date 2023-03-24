@@ -64,6 +64,10 @@ impl Provider for TigerVPN {
         "tig".to_string()
     }
 
+    fn alias_2char(&self) -> String {
+        "ti".to_string()
+    }
+
     fn default_protocol(&self) -> Protocol {
         Protocol::OpenVpn
     }

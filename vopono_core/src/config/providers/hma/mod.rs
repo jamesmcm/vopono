@@ -11,6 +11,10 @@ impl Provider for HMA {
         "hma".to_string()
     }
 
+    fn alias_2char(&self) -> String {
+        "hm".to_string()
+    }
+
     fn default_protocol(&self) -> Protocol {
         Protocol::OpenVpn
     }

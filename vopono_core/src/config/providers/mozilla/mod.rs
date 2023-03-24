@@ -55,6 +55,11 @@ impl Provider for MozillaVPN {
     fn alias(&self) -> String {
         "mozilla".to_string()
     }
+
+    fn alias_2char(&self) -> String {
+        "mz".to_string()
+    }
+
     fn default_protocol(&self) -> Protocol {
         Protocol::Wireguard
     }

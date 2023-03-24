@@ -10,6 +10,10 @@ impl Provider for AirVPN {
         "air".to_string()
     }
 
+    fn alias_2char(&self) -> String {
+        "ar".to_string()
+    }
+
     fn default_protocol(&self) -> Protocol {
         Protocol::OpenVpn
     }
