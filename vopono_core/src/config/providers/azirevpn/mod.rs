@@ -24,6 +24,10 @@ impl Provider for AzireVPN {
     fn alias(&self) -> String {
         "azire".to_string()
     }
+    fn alias_2char(&self) -> String {
+        "az".to_string()
+    }
+
     fn default_protocol(&self) -> Protocol {
         Protocol::Wireguard
     }

@@ -101,6 +101,8 @@ impl VpnProvider {
 pub trait Provider {
     fn alias(&self) -> String;
 
+    fn alias_2char(&self) -> String;
+
     fn default_protocol(&self) -> Protocol;
 
     fn provider_dir(&self) -> anyhow::Result<PathBuf> {

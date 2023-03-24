@@ -12,6 +12,10 @@ impl Provider for IVPN {
         "ivpn".to_string()
     }
 
+    fn alias_2char(&self) -> String {
+        "iv".to_string()
+    }
+
     fn default_protocol(&self) -> Protocol {
         Protocol::Wireguard
     }

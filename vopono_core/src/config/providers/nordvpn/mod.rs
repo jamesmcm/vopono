@@ -10,6 +10,10 @@ impl Provider for NordVPN {
         "nordvpn".to_string()
     }
 
+    fn alias_2char(&self) -> String {
+        "nd".to_string()
+    }
+
     fn default_protocol(&self) -> Protocol {
         Protocol::OpenVpn
     }

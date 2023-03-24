@@ -37,6 +37,11 @@ impl Provider for Mullvad {
     fn alias(&self) -> String {
         "mv".to_string()
     }
+
+    fn alias_2char(&self) -> String {
+        "mv".to_string()
+    }
+
     fn default_protocol(&self) -> Protocol {
         Protocol::Wireguard
     }

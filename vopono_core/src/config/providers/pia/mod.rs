@@ -13,6 +13,10 @@ impl Provider for PrivateInternetAccess {
         "pia".to_string()
     }
 
+    fn alias_2char(&self) -> String {
+        "pi".to_string()
+    }
+
     fn default_protocol(&self) -> Protocol {
         Protocol::OpenVpn
     }
