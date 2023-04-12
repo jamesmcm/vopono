@@ -46,16 +46,18 @@ impl Wireguard {
             .context(format!("Reading Wireguard config file: {:?}", &config_file))?;
         // Create temp conf file
         {
-            let skip_keys = vec![
-                "Address",
-                "DNS",
-                "MTU",
-                "Table",
-                "PreUp",
-                "PreDown",
-                "PostUp",
-                "PostDown",
-                "SaveConfig",
+            // TODO: Maybe properly parse ini format
+
+            // Valid keys for wireguard config (see wg(8):CONFIGURATION FILE FORMAT)
+            let allow_keys = vec![
+                "PrivateKey",
+                "ListenPort",
+                "FwMark",
+                "PublicKey",
+                "PresharedKey",
+                "AllowedIPs",
+                "Endpoint",
+                "PersistentKeepalive",
             ];
 
             let mut f = std::fs::File::create("/tmp/vopono_nft.conf")
@@ -65,7 +67,11 @@ impl Wireguard {
                 "{}",
                 config_string
                     .split('\n')
-                    .filter(|x| !skip_keys.contains(&x.split_whitespace().next().unwrap_or("")))
+                    .filter(|x| x
+                        .split_once('=')
+                        .map(|(key, _)| allow_keys.contains(&key.trim()))
+                        // If line doesn't include an =, don't filter it out
+                        .unwrap_or(true))
                     .collect::<Vec<&str>>()
                     .join("\n")
             )?;
