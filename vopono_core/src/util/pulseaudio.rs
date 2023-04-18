@@ -4,8 +4,11 @@ use regex::Regex;
 use std::process::Command;
 
 pub fn get_pulseaudio_server() -> anyhow::Result<String> {
-    let output = Command::new("pactl").args(["info"]).output()?.stdout;
-    let re = Regex::new(r"Server String: ([^\n]+)").unwrap();
+    let output = Command::new("pactl")
+        .args(["-f", "json", "info"])
+        .output()?
+        .stdout;
+    let re = Regex::new("\"server_string\":\"([^\"]+)\"").unwrap();
     let output = std::str::from_utf8(&output)?;
 
     let caps = re.captures(output);
