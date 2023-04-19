@@ -287,7 +287,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         let short_name = if server_name.len() > 7 {
             bs58::encode(&server_name).into_string()[0..7].to_string()
         } else {
-            server_name.clone()
+            server_name.replace('-', "")
         };
         format!("vo_{alias}_{short_name}")
     };
