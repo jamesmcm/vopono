@@ -1,6 +1,5 @@
-use super::providers::ConfigurationChoice;
 use super::providers::OpenVpnProvider;
-use super::providers::UiClient;
+use super::providers::{ConfigurationChoice, UiClient};
 use anyhow::{anyhow, Context};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};

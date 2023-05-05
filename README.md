@@ -28,13 +28,20 @@ lynx all running through different VPN connections:
 | Mullvad               | ✅              | ✅                |
 | AzireVPN              | ✅              | ✅                |
 | iVPN                  | ✅              | ✅                |
-| PrivateInternetAccess | ✅              | ✅                |
+| PrivateInternetAccess | ✅              | ✅\*\*            |
 | TigerVPN              | ✅              | ❌                |
-| ProtonVPN             | ✅              | ❌                |
+| ProtonVPN             | ✅              | ❓\*              |
 | MozillaVPN            | ❌              | ✅                |
 | NordVPN               | ✅              | ❌                |
 | HMA (HideMyAss)       | ✅              | ❌                |
 | AirVPN                | ✅              | ❌                |
+
+\* For ProtonVPN you can generate and download specific Wireguard config
+files, and use them as a custom provider config. See the [User Guide](USERGUIDE.md)
+for details - note that port forwarding is not supported for ProtonVPN
+(but is for Mullvad).
+
+\*\* Port forwarding is not currently supported for PrivateInternetAccess.
 
 ## Usage
 
