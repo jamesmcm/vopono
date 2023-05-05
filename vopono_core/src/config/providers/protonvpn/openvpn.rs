@@ -3,7 +3,10 @@ use super::{ConfigurationChoice, OpenVpnProvider};
 use crate::config::providers::{Input, Password, UiClient};
 use crate::config::vpn::OpenVpnProtocol;
 use crate::util::delete_all_files_in_dir;
+use anyhow::anyhow;
 use log::{debug, info};
+use regex::Regex;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, COOKIE};
 use reqwest::Url;
 use std::fmt::Display;
 use std::fs::create_dir_all;
@@ -20,7 +23,6 @@ impl ProtonVPN {
         &self,
         category: &ConfigType,
         tier: &Tier,
-        feature: &Feature,
         protocol: &OpenVpnProtocol,
     ) -> anyhow::Result<Url> {
         let cat = if tier == &Tier::Free {
@@ -28,12 +30,7 @@ impl ProtonVPN {
         } else {
             category.url_part()
         };
-        let fet = if tier == &Tier::Free {
-            "Normal".to_string()
-        } else {
-            feature.url_part()
-        };
-        Ok(Url::parse(&format!("https://account.protonvpn.com/api/vpn/config?Category={}&Tier={}&Feature={}&Platform=Linux&Protocol={}", cat, tier.url_part(), fet, protocol))?)
+        Ok(Url::parse(&format!("https://account.protonvpn.com/api/vpn/config?Category={}&Tier={}&Platform=Linux&Protocol={}", cat, tier.url_part(), protocol))?)
     }
 }
 impl OpenVpnProvider for ProtonVPN {
@@ -92,16 +89,34 @@ impl OpenVpnProvider for ProtonVPN {
             // Dummy as not used for Free
             ConfigType::Standard
         };
-        let feature_choice = if tier != Tier::Free {
-            Feature::index_to_variant(uiclient.get_configuration_choice(&Feature::default())?)
-        } else {
-            Feature::Normal
-        };
         let protocol = OpenVpnProtocol::index_to_variant(
             uiclient.get_configuration_choice(&OpenVpnProtocol::default())?,
         );
-        let url = self.build_url(&config_choice, &tier, &feature_choice, &protocol)?;
-        let zipfile = reqwest::blocking::get(url)?;
+
+        let auth_cookie: &'static str = Box::leak(uiclient.get_input(Input {
+            prompt: "Please log-in at https://account.protonvpn.com/dashboard and then visit https://account.protonvpn.com/api/vpn/v2/users and copy the value of the cookie starting with \"AUTH-\" in the request from your browser's network request inspector".to_owned(),
+             validator: Some(Box::new(|s: &String| if s.starts_with("AUTH-") {Ok(())} else {Err("AUTH cookie must start with AUTH-".to_owned())}))
+             })?.replace(';', "").trim().to_owned().into_boxed_str());
+        debug!("Using AUTH cookie: {}", &auth_cookie);
+
+        let re = Regex::new("AUTH-([^=]+)=").unwrap();
+        let uid = re
+            .captures(auth_cookie)
+            .and_then(|c| c.get(1))
+            .ok_or(anyhow!("Failed to parse auth cookie"))?;
+        let url = self.build_url(&config_choice, &tier, &protocol)?;
+
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, HeaderValue::from_static(auth_cookie));
+
+        headers.insert(
+            HeaderName::from_static("x-pm-uid"),
+            HeaderValue::from_static(uid.as_str()),
+        );
+        let client = reqwest::blocking::Client::new();
+
+        let zipfile = client.get(url).headers(headers).send()?;
+
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
         let openvpn_dir = self.openvpn_dir()?;
         create_dir_all(&openvpn_dir)?;
@@ -127,13 +142,22 @@ impl OpenVpnProvider for ProtonVPN {
                 .map(|x| x.to_str().expect("Could not convert OsStr"))
             {
                 // Also handle server case from free servers
-                let mut hostname = None;
+                let mut hostname: Option<String> = None;
                 let mut code = file.name().split('.').next().unwrap();
-                if code.contains('-') {
+                if code.contains("free") {
+                    // Free case
                     let mut iter_split = code.split('-');
                     let fcode = iter_split.next().unwrap();
-                    hostname = Some(iter_split.next().unwrap());
+                    hostname = Some(iter_split.next().unwrap().to_owned());
                     code = fcode;
+                } else if code.contains('-') {
+                    // SecureCore
+                    let mut iter_split = code.split('-');
+                    let start = iter_split.next().unwrap();
+                    let end = iter_split.next().unwrap();
+                    let number = iter_split.next().unwrap();
+                    hostname = Some(format!("{}_{}", start, number));
+                    code = end;
                 }
                 let country = code_map
                     .get(code)
@@ -230,66 +254,6 @@ impl ConfigurationChoice for Tier {
             match self {
                 Self::Plus => "Plus Account provides more VPN servers and SecureCore configuration",
                 Self::Free => "Free VPN servers only",
-            }
-            .to_string(),
-        )
-    }
-}
-// {0: "Normal", 1: "Secure-Core", 2: "Tor", 4: "P2P"}
-#[derive(EnumIter, PartialEq)]
-enum Feature {
-    P2P,
-    Tor,
-    Normal,
-}
-
-impl Feature {
-    fn url_part(&self) -> String {
-        match self {
-            Self::P2P => "4".to_string(),
-            Self::Tor => "2".to_string(),
-            Self::Normal => "0".to_string(),
-        }
-    }
-    fn index_to_variant(index: usize) -> Self {
-        Self::iter().nth(index).expect("Invalid index")
-    }
-}
-
-impl Display for Feature {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::P2P => "P2P",
-            Self::Tor => "Tor",
-            Self::Normal => "Normal",
-        };
-        write!(f, "{s}")
-    }
-}
-
-impl Default for Feature {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
-
-impl ConfigurationChoice for Feature {
-    fn prompt(&self) -> String {
-        "Please choose a server feature".to_string()
-    }
-
-    fn all_names(&self) -> Vec<String> {
-        Self::iter().map(|x| format!("{x}")).collect()
-    }
-    fn all_descriptions(&self) -> Option<Vec<String>> {
-        Some(Self::iter().map(|x| x.description().unwrap()).collect())
-    }
-    fn description(&self) -> Option<String> {
-        Some(
-            match self {
-                Self::P2P => "Connect via torrent optmized network (Plus accounts only)",
-                Self::Tor => "Connect via Tor network (Plus accounts only)",
-                Self::Normal => "Standard (available servers depend on account tier)",
             }
             .to_string(),
         )

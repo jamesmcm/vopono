@@ -453,7 +453,24 @@ for the same (note the instructions on disabling WebRTC). I noticed that
 when using IPv6 with OpenVPN it incorrectly states you are not connected
 via AzireVPN though (Wireguard works correctly).
 
+ProtonVPN users must log-in to the dashboard via a web browser during
+the `vopono sync` process in order to copy the `AUTH-*` cookie to
+access the OpenVPN configuration files, and the OpenVPN specific
+credentials to use them.
+
 ### VPN Provider limitations
+
+#### ProtonVPN
+
+Due to the way Wireguard configuration is handled, this should be
+generated online and then used as a custom configuration, e.g.:
+
+```bash
+$ vopono -v exec --provider custom --custom testwg-UK-17.conf --protocol wireguard firefox-developer-edition
+```
+
+Note that port forwarding is not supported for ProtonVPN (but is for
+Mullvad).
 
 #### PrivateInternetAccess
 
