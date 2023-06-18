@@ -79,10 +79,10 @@ impl MozillaVPN {
         let mut code_verifier_random = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut code_verifier_random);
         let mut code_verifier = [0u8; 43];
-        let _ = BASE64_URL_SAFE_NO_PAD.encode_slice(code_verifier_random, &mut code_verifier);
+        BASE64_URL_SAFE_NO_PAD.encode_slice(code_verifier_random, &mut code_verifier)?;
         let mut code_challenge = String::with_capacity(43);
-        let _ = BASE64_URL_SAFE_NO_PAD
-            .encode_string(sha2::Sha256::digest(&code_verifier), &mut code_challenge);
+        BASE64_URL_SAFE_NO_PAD
+            .encode_string(sha2::Sha256::digest(code_verifier), &mut code_challenge);
 
         use tiny_http::{Method, Server};
 
@@ -107,21 +107,18 @@ impl MozillaVPN {
         let code_url_regex = regex::Regex::new(r"\A/\?code=([0-9a-f]{80})\z").unwrap();
         for request in server.incoming_requests() {
             if *request.method() == Method::Get {
-                match code_url_regex.captures(request.url()) {
-                    Some(caps) => {
-                        code = caps.get(1).unwrap();
-                        let response = client
-                            .post(&format!("{}/vpn/login/verify", Self::V2_URL))
-                            .header("User-Agent", "Why do you need a user agent???")
-                            .json(&AccessTokenRequest {
-                                code: code.as_str(),
-                                code_verifier: std::str::from_utf8(&code_verifier).unwrap(),
-                            })
-                            .send()
-                            .unwrap();
-                        return Ok(response.json::<Login>().unwrap());
-                    }
-                    None => (),
+                if let Some(caps) = code_url_regex.captures(request.url()) {
+                    code = caps.get(1).unwrap();
+                    let response = client
+                        .post(format!("{}/vpn/login/verify", Self::V2_URL))
+                        .header("User-Agent", "Why do you need a user agent???")
+                        .json(&AccessTokenRequest {
+                            code: code.as_str(),
+                            code_verifier: std::str::from_utf8(&code_verifier).unwrap(),
+                        })
+                        .send()
+                        .unwrap();
+                    return Ok(response.json::<Login>().unwrap());
                 }
             }
         }
