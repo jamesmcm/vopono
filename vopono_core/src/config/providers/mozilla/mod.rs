@@ -2,17 +2,14 @@ mod wireguard;
 
 use super::{Provider, WireguardProvider};
 use crate::config::vpn::Protocol;
-use crate::util::get_username;
-use anyhow::anyhow;
-use log::{info, warn};
+use base64::Engine;
 use reqwest::blocking::Client;
 use serde::Deserialize;
 
-#[derive(Deserialize, Debug)]
-struct LoginURLs {
-    login_url: String,
-    verification_url: String,
-    poll_interval: u64,
+#[derive(serde::Serialize)]
+struct AccessTokenRequest<'a> {
+    code: &'a str,
+    code_verifier: &'a str,
 }
 
 #[derive(Deserialize, Debug)]
@@ -66,6 +63,8 @@ impl Provider for MozillaVPN {
 }
 
 impl MozillaVPN {
+    const V2_URL: &'static str = "https://vpn.mozilla.org/api/v2";
+
     fn base_url(&self) -> &'static str {
         "https://vpn.mozilla.org/api/v1"
     }
@@ -73,47 +72,57 @@ impl MozillaVPN {
     // TODO: Make this work with GUI - i.e. if terminal is not accessible
     /// Login with OAuth login (adapted from MozWire crate: https://github.com/NilsIrl/MozWire/blob/trunk/src/main.rs )
     fn get_login(&self, client: &Client) -> anyhow::Result<Login> {
-        let login = client
-            .post(&format!("{}/vpn/login", self.base_url()))
-            .send()
-            .unwrap()
-            .json::<LoginURLs>()
-            .unwrap();
-        info!(
-            "MozillaVPN requires an OAuth login to get the authentication token. Please visit: {}.",
-            login.login_url
+        // no token given
+        use base64::prelude::BASE64_URL_SAFE_NO_PAD;
+        use rand::RngCore;
+        use sha2::Digest;
+        let mut code_verifier_random = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut code_verifier_random);
+        let mut code_verifier = [0u8; 43];
+        BASE64_URL_SAFE_NO_PAD.encode_slice(code_verifier_random, &mut code_verifier)?;
+        let mut code_challenge = String::with_capacity(43);
+        BASE64_URL_SAFE_NO_PAD
+            .encode_string(sha2::Sha256::digest(code_verifier), &mut code_challenge);
+
+        use tiny_http::{Method, Server};
+
+        let server = Server::http("127.0.0.1:0").unwrap();
+
+        let login_url = format!(
+            "{}/vpn/login/linux?code_challenge_method=S256&code_challenge={}&port={}",
+            Self::V2_URL,
+            code_challenge,
+            server.server_addr().port()
         );
-        // Set directory permissions before dropping out of sudo so we can launch browser
-        crate::util::set_config_permissions()?;
-        let nixuser = nix::unistd::User::from_name(&get_username()?)?.expect("Failed to get user");
 
-        nix::unistd::setgid(nixuser.gid)?;
-        nix::unistd::setuid(nixuser.uid)?;
+        eprint!("Please visit {}.", login_url);
 
-        // Need to drop out of sudo to launch browser: https://github.com/amodm/webbrowser-rs/issues/30
-        match webbrowser::open(&login.login_url) {
-            Ok(_) => info!("Link opened in browser: {}", &login.login_url),
-            Err(_) => warn!(
-                "Failed to open link in browser, please visit it manually: {}",
-                &login.login_url
-            ),
+        match webbrowser::open(&login_url) {
+            Ok(_) => eprint!(" Link opened in browser."),
+            Err(_) => eprint!(" Failed to open link in browser, please visit it manually."),
         }
+        eprintln!();
 
-        let poll_interval = std::time::Duration::from_secs(login.poll_interval);
-        loop {
-            let response = client.get(&login.verification_url).send().unwrap();
-            if response.status() == reqwest::StatusCode::OK {
-                info!("Mozilla Login successful");
-                break Ok(response.json::<Login>().unwrap());
-            } else {
-                match response.json::<Error>().unwrap() {
-                    // errno 126 is pending verification
-                    Error { errno: 126, .. } => {}
-                    error => break Err(anyhow!("Login failed: {:?}", error)),
+        let code;
+        let code_url_regex = regex::Regex::new(r"\A/\?code=([0-9a-f]{80})\z").unwrap();
+        for request in server.incoming_requests() {
+            if *request.method() == Method::Get {
+                if let Some(caps) = code_url_regex.captures(request.url()) {
+                    code = caps.get(1).unwrap();
+                    let response = client
+                        .post(format!("{}/vpn/login/verify", Self::V2_URL))
+                        .header("User-Agent", "Why do you need a user agent???")
+                        .json(&AccessTokenRequest {
+                            code: code.as_str(),
+                            code_verifier: std::str::from_utf8(&code_verifier).unwrap(),
+                        })
+                        .send()
+                        .unwrap();
+                    return Ok(response.json::<Login>().unwrap());
                 }
             }
-            std::thread::sleep(poll_interval);
         }
+        unreachable!("Server closed without receiving code")
     }
 }
 
