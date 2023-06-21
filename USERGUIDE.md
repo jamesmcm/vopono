@@ -491,6 +491,9 @@ I recommend using [MozWire](https://github.com/NilsIrl/MozWire) to manage this.
 iVPN Wireguard keypairs must be uploaded manually, as the Client Area is
 behind a captcha login.
 
+#### NordVPN
+Starting 27 June 2023, the required user credentials are no longer your NordVPN login details but need to be generated in the user control panel, under Services → NordVPN. Scroll down and locate the Manual Setup tab, then click on Set up NordVPN manually and follow instructions. Copy your service credentials and re-sync NordVPN configuration inside Vopono.
+
 ### Tunnel Port Forwarding
 
 Some providers allow port forwarding inside the tunnel, so you can open
