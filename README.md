@@ -7,7 +7,7 @@ as normal.
 
 vopono includes built-in killswitches for both Wireguard and OpenVPN.
 
-Currently Mullvad, AzireVPN, MozillaVPN, TigerVPN, ProtonVPN, iVPN,
+Currently Mullvad, AzireVPN, MozillaVPN, ProtonVPN, iVPN,
 NordVPN, AirVPN, HMA (HideMyAss) and PrivateInternetAccess are supported directly, with custom
 configuration files also supported with the `--custom` argument.
 
@@ -29,7 +29,6 @@ lynx all running through different VPN connections:
 | AzireVPN              | ✅              | ✅                |
 | iVPN                  | ✅              | ✅                |
 | PrivateInternetAccess | ✅              | ✅\*\*            |
-| TigerVPN              | ✅              | ❌                |
 | ProtonVPN             | ✅              | ❓\*              |
 | MozillaVPN            | ❌              | ✅                |
 | NordVPN               | ✅              | ❌                |
@@ -38,8 +37,7 @@ lynx all running through different VPN connections:
 
 \* For ProtonVPN you can generate and download specific Wireguard config
 files, and use them as a custom provider config. See the [User Guide](USERGUIDE.md)
-for details - note that port forwarding is not supported for ProtonVPN
-(but is for Mullvad).
+for details - note that port forwarding is currently not supported for ProtonVPN.
 
 \*\* Port forwarding is not currently supported for PrivateInternetAccess.
 

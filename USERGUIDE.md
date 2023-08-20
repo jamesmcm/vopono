@@ -174,9 +174,6 @@ If it is missing you will be prompted for your credentials.
 For PrivateInternetAccess, HMA (HideMyAss) and AzireVPN these should be the same as your account
 credentials.
 
-For TigerVPN you can view your OpenVPN credentials [online on the "geeks" dashboard](https://www.tigervpn.com/dashboard/geeks).
-The OpenVPN credentials are **not** the same as your TigerVPN account credentials.
-
 For Mullvad your OpenVPN credentials are your account code as your username, and `m` as the password.
 
 For ProtonVPN you can view your OpenVPN credentials [online on your account dashboard](https://account.protonvpn.com/account#openvpn).
@@ -209,8 +206,6 @@ For Mullvad, valid ports are: 1300, 1301, 1302, 1194, 1195, 1196, 1197, or 53 fo
 80 or 443 for TCP,
 
 For PrivateInternetAccess valid ports are 1198 for UDP and 502 for TCP.
-
-For TigerVPN valid ports are 1194 for UDP or 443 for TCP.
 
 #### Shadowsocks socks-proxy
 
@@ -469,8 +464,7 @@ generated online and then used as a custom configuration, e.g.:
 $ vopono -v exec --provider custom --custom testwg-UK-17.conf --protocol wireguard firefox-developer-edition
 ```
 
-Note that port forwarding is not supported for ProtonVPN (but is for
-Mullvad).
+Note that port forwarding is currently not supported for ProtonVPN.
 
 #### PrivateInternetAccess
 
@@ -500,11 +494,6 @@ Some providers allow port forwarding inside the tunnel, so you can open
 some ports inside the network namespace which can be accessed via the
 Wireguard/OpenVPN tunnel (this can be important for BitTorrent
 connectivity, etc.).
-
-Mullvad tunnel port forwarding works for both Wireguard and OpenVPN. You will
-need to enable the ports in your [Mullvad account](https://mullvad.net/en/account/#/ports).
-Remember to open the port with the `-o PORTNUMBER` argument to
-`vopono exec` if you have the killswitch enabled!
 
 For iVPN port forwarding also works the same way, however it is **only
 supported for OpenVPN** on iVPN's side. So remember to pass

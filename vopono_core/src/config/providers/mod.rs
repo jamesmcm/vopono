@@ -7,7 +7,6 @@ mod mullvad;
 mod nordvpn;
 mod pia;
 mod protonvpn;
-mod tigervpn;
 mod ui;
 
 use crate::config::vpn::Protocol;
@@ -34,7 +33,6 @@ pub use ui::*;
 pub enum VpnProvider {
     PrivateInternetAccess,
     Mullvad,
-    TigerVPN,
     ProtonVPN,
     MozillaVPN,
     AzireVPN,
@@ -51,7 +49,6 @@ impl VpnProvider {
         match self {
             Self::PrivateInternetAccess => Box::new(pia::PrivateInternetAccess {}),
             Self::Mullvad => Box::new(mullvad::Mullvad {}),
-            Self::TigerVPN => Box::new(tigervpn::TigerVPN {}),
             Self::ProtonVPN => Box::new(protonvpn::ProtonVPN {}),
             Self::MozillaVPN => Box::new(mozilla::MozillaVPN {}),
             Self::AzireVPN => Box::new(azirevpn::AzireVPN {}),
@@ -67,7 +64,6 @@ impl VpnProvider {
         match self {
             Self::PrivateInternetAccess => Ok(Box::new(pia::PrivateInternetAccess {})),
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
-            Self::TigerVPN => Ok(Box::new(tigervpn::TigerVPN {})),
             Self::ProtonVPN => Ok(Box::new(protonvpn::ProtonVPN {})),
             Self::AzireVPN => Ok(Box::new(azirevpn::AzireVPN {})),
             Self::AirVPN => Ok(Box::new(airvpn::AirVPN {})),
