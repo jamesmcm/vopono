@@ -49,7 +49,7 @@ impl Wireguard {
             // TODO: Maybe properly parse ini format
 
             // Valid keys for wireguard config (see wg(8):CONFIGURATION FILE FORMAT)
-            let allow_keys = vec![
+            let allow_keys = [
                 "PrivateKey",
                 "ListenPort",
                 "FwMark",

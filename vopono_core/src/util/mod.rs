@@ -471,7 +471,7 @@ pub fn get_lock_namespaces() -> anyhow::Result<HashMap<String, Vec<Lockfile>>> {
             let lock: Lockfile = ron::de::from_reader(lockfile)?;
             namespaces
                 .entry(lock.ns.name.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(lock);
             Ok(())
         })?;

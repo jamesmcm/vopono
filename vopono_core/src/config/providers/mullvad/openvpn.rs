@@ -123,10 +123,7 @@ impl OpenVpnProvider for Mullvad {
                 format!("remote {}.mullvad.net {}", relay.hostname, port)
             };
 
-            file_set
-                .entry(file_name)
-                .or_insert_with(Vec::new)
-                .push(remote_string);
+            file_set.entry(file_name).or_default().push(remote_string);
         }
 
         let bridge_vec = if use_bridges {
