@@ -16,13 +16,12 @@ directories-next = "2"
 log = "0.4"
 which = "4"
 users = "0.11"
-nix = "0.26"
+nix = { version = "0.27", features = ["user", "signal", "fs", "process"] }
 serde = { version = "1", features = ["derive", "std"] }
 csv = "1"
 regex = "1"
 ron = "0.8"
 walkdir = "2"
-# Must use rand 0.7 for compatibility with x25519-dalek for now
 rand = "0.8"
 toml = "0.7"
 ipnet = { version = "2", features = ["serde"] }
@@ -42,4 +41,4 @@ webbrowser = "0.8"
 serde_json = "1"
 signal-hook = "0.3"
 sha2 = "0.10.6"
-tiny_http = "0.11.0"
+tiny_http = "0.12"

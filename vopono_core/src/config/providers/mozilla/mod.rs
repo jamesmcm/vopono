@@ -92,7 +92,11 @@ impl MozillaVPN {
             "{}/vpn/login/linux?code_challenge_method=S256&code_challenge={}&port={}",
             Self::V2_URL,
             code_challenge,
-            server.server_addr().port()
+            server
+                .server_addr()
+                .to_ip()
+                .expect("Failed to get SocketAddr")
+                .port()
         );
 
         eprint!("Please visit {}.", login_url);

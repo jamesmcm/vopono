@@ -17,7 +17,7 @@ vopono_core = { path = "vopono_core" }
 anyhow = "1"
 directories-next = "2"
 log = "0.4"
-pretty_env_logger = "0.4"
+pretty_env_logger = "0.5"
 clap = { version = "4", features = ["derive"] }
 which = "4"
 dialoguer = "0.10"
@@ -26,7 +26,7 @@ signal-hook = "0.3"
 walkdir = "2"
 chrono = "0.4"
 bs58 = "0.5"
-nix = "0.26"
+nix = { version = "0.27", features = ["signal", "process"] }
 config = "0.13"
 basic_tcp_proxy = "0.3.2"
 strum = "0.25"
