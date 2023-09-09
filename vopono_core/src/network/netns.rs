@@ -7,6 +7,7 @@ use super::openfortivpn::OpenFortiVpn;
 use super::openvpn::OpenVpn;
 use super::shadowsocks::Shadowsocks;
 use super::veth_pair::VethPair;
+use super::warp::Warp;
 use super::wireguard::Wireguard;
 use crate::config::providers::{UiClient, VpnProvider};
 use crate::config::vpn::Protocol;
@@ -36,6 +37,7 @@ pub struct NetworkNamespace {
     pub veth_pair_ips: Option<VethPairIPs>,
     pub openconnect: Option<OpenConnect>,
     pub openfortivpn: Option<OpenFortiVpn>,
+    pub warp: Option<Warp>,
     pub provider: VpnProvider,
     pub protocol: Protocol,
     pub firewall: Firewall,
@@ -93,6 +95,7 @@ impl NetworkNamespace {
             veth_pair_ips: None,
             openconnect: None,
             openfortivpn: None,
+            warp: None,
             provider,
             protocol,
             firewall,
@@ -350,6 +353,16 @@ impl NetworkNamespace {
             hosts_entries,
             firewall,
         )?);
+        Ok(())
+    }
+
+    pub fn run_warp(
+        &mut self,
+        open_ports: Option<&Vec<u16>>,
+        forward_ports: Option<&Vec<u16>>,
+        firewall: Firewall,
+    ) -> anyhow::Result<()> {
+        self.warp = Some(Warp::run(self, open_ports, forward_ports, firewall)?);
         Ok(())
     }
 

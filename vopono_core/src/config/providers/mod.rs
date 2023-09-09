@@ -8,6 +8,7 @@ mod nordvpn;
 mod pia;
 mod protonvpn;
 mod ui;
+mod warp;
 
 use crate::config::vpn::Protocol;
 use crate::util::vopono_dir;
@@ -40,6 +41,7 @@ pub enum VpnProvider {
     IVPN,
     NordVPN,
     HMA,
+    Warp,
     Custom,
 }
 
@@ -56,6 +58,7 @@ impl VpnProvider {
             Self::IVPN => Box::new(ivpn::IVPN {}),
             Self::NordVPN => Box::new(nordvpn::NordVPN {}),
             Self::HMA => Box::new(hma::HMA {}),
+            Self::Warp => Box::new(warp::Warp {}),
             Self::Custom => unimplemented!("Custom provider uses separate logic"),
         }
     }
@@ -70,6 +73,7 @@ impl VpnProvider {
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::NordVPN => Ok(Box::new(nordvpn::NordVPN {})),
             Self::HMA => Ok(Box::new(hma::HMA {})),
+            Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
             Self::MozillaVPN => Err(anyhow!("MozillaVPN only supports Wireguard!")),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
         }
@@ -83,6 +87,7 @@ impl VpnProvider {
             Self::AzireVPN => Ok(Box::new(azirevpn::AzireVPN {})),
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
+            Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
             _ => Err(anyhow!("Wireguard not implemented")),
         }
     }
@@ -91,6 +96,7 @@ impl VpnProvider {
         match self {
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
             Self::Custom => Err(anyhow!("Start Shadowsocks manually for custom provider")),
+            Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
             _ => Err(anyhow!("Shadowsocks not supported")),
         }
     }
