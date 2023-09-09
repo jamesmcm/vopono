@@ -228,8 +228,10 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         if provider == VpnProvider::Custom {
             bail!("Must provide config file if using custom VPN Provider");
         }
+
         server_name = command
             .server
+            .or_else(|| if provider == VpnProvider::Warp {Some("warp".to_owned())} else {None})
             .or_else(|| {
                 vopono_config_settings
                     .get("server")
