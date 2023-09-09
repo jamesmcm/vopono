@@ -10,6 +10,7 @@ vopono includes built-in killswitches for both Wireguard and OpenVPN.
 Currently Mullvad, AzireVPN, MozillaVPN, ProtonVPN, iVPN,
 NordVPN, AirVPN, HMA (HideMyAss) and PrivateInternetAccess are supported directly, with custom
 configuration files also supported with the `--custom` argument.
+Cloudflare Warp is also supported.
 
 For custom connections the OpenConnect and OpenFortiVPN protocols are
 also supported (e.g. for enterprise VPNs). See the [vopono User Guide](USERGUIDE.md) for more details.
@@ -34,12 +35,19 @@ lynx all running through different VPN connections:
 | NordVPN               | ✅              | ❌                |
 | HMA (HideMyAss)       | ✅              | ❌                |
 | AirVPN                | ✅              | ❌                |
+| Cloudflare Warp\*\*\* | ❌              | ❌                |
 
 \* For ProtonVPN you can generate and download specific Wireguard config
 files, and use them as a custom provider config. See the [User Guide](USERGUIDE.md)
 for details - note that port forwarding is currently not supported for ProtonVPN.
 
 \*\* Port forwarding is not currently supported for PrivateInternetAccess.
+
+\*\*\* Cloudflare Warp uses its own protocol. Set both the provider and
+protocol to `warp`. Note you must first register with `sudo warp-cli
+register` and then run it once with `sudo warp-svc` and `sudo warp-cli
+connect` outside of vopono. Please verify this works first before trying
+it with vopono.
 
 ## Usage
 

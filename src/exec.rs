@@ -259,11 +259,18 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
     }
 
-    if provider != VpnProvider::Custom {
+    if (provider == VpnProvider::Warp && protocol != Protocol::Warp)
+        || (provider != VpnProvider::Warp && protocol == Protocol::Warp)
+    {
+        bail!("Cloudflare Warp protocol must use Warp provider");
+    }
+
+    if provider != VpnProvider::Custom && protocol != Protocol::Warp {
         // Check config files exist for provider
         let cdir = match protocol {
             Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
             Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
+            Protocol::Warp => unreachable!("Unreachable, Warp must use Warp provider"),
             Protocol::OpenConnect => bail!("OpenConnect must use Custom provider"),
             Protocol::OpenFortiVpn => bail!("OpenFortiVpn must use Custom provider"),
         }?;
@@ -332,12 +339,15 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     }?;
     debug!("Interface: {}", &interface.name);
 
-    let config_file = if provider != VpnProvider::Custom {
+    let config_file = if protocol == Protocol::Warp {
+        None
+    } else if provider != VpnProvider::Custom {
         let cdir = match protocol {
             Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
             Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
             Protocol::OpenConnect => bail!("OpenConnect must use Custom provider"),
             Protocol::OpenFortiVpn => bail!("OpenFortiVpn must use Custom provider"),
+            Protocol::Warp => unreachable!(),
         }?;
         Some(get_config_from_alias(&cdir, &server_name)?)
     } else {
@@ -389,6 +399,11 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         )?;
         _sysctl = SysCtl::enable_ipv4_forwarding();
         match protocol {
+            Protocol::Warp => ns.run_warp(
+                command.open_ports.as_ref(),
+                command.forward_ports.as_ref(),
+                firewall,
+            )?,
             Protocol::OpenVpn => {
                 // Handle authentication check
                 let auth_file = if provider != VpnProvider::Custom {

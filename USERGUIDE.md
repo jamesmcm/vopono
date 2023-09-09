@@ -453,6 +453,21 @@ the `vopono sync` process in order to copy the `AUTH-*` cookie to
 access the OpenVPN configuration files, and the OpenVPN specific
 credentials to use them.
 
+Cloudflare Warp users must first register with Warp via the CLI client:
+```
+$ sudo warp-cli register
+```
+And then run Warp once to enable automatic connection on service
+availability:
+```
+$ sudo warp-svc
+$ sudo warp-cli connect
+```
+You can then kill `warp-svc` and run it via vopono:
+```
+$ vopono -v exec --no-killswitch --provider warp --protocol warp firefox-developer-edition
+```
+
 ### VPN Provider limitations
 
 #### ProtonVPN

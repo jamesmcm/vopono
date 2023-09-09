@@ -10,4 +10,5 @@ pub mod openvpn;
 pub mod shadowsocks;
 pub mod sysctl;
 pub mod veth_pair;
+pub mod warp;
 pub mod wireguard;

@@ -39,6 +39,7 @@ pub fn synch(
     protocol: Option<Protocol>,
     uiclient: &dyn UiClient,
 ) -> anyhow::Result<()> {
+    // TODO: Separate availability from functionality, so we can filter disabled protocols from the UI
     match protocol {
         Some(Protocol::OpenVpn) => {
             info!("Starting OpenVPN configuration...");
@@ -56,6 +57,9 @@ pub fn synch(
         }
         Some(Protocol::OpenFortiVpn) => {
             error!("vopono sync not supported for OpenFortiVpn protocol");
+        }
+        Some(Protocol::Warp) => {
+            error!("vopono sync not supported for Cloudflare Warp protocol");
         }
         // TODO: Fix this asking for same credentials twice
         None => {
