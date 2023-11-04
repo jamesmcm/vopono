@@ -24,30 +24,31 @@ lynx all running through different VPN connections:
 
 ## Supported Providers
 
-| Provider              | OpenVPN support | Wireguard support |
-| --------------------- | --------------- | ----------------- |
-| Mullvad               | ✅              | ✅                |
-| AzireVPN              | ✅              | ✅                |
-| iVPN                  | ✅              | ✅                |
-| PrivateInternetAccess | ✅              | ✅\*\*            |
-| ProtonVPN             | ✅              | ❓\*              |
-| MozillaVPN            | ❌              | ✅                |
-| NordVPN               | ✅              | ❌                |
-| HMA (HideMyAss)       | ✅              | ❌                |
-| AirVPN                | ✅              | ❌                |
-| Cloudflare Warp\*\*\* | ❌              | ❌                |
+| Provider                | OpenVPN support | Wireguard support |
+| ----------------------- | --------------- | ----------------- |
+| Mullvad                 | ✅              | ✅                |
+| AzireVPN                | ✅              | ✅                |
+| iVPN                    | ✅              | ✅                |
+| PrivateInternetAccess   | ✅              | ✅\*              |
+| ProtonVPN               | ✅\*\*          | ✅\*\*\*          |
+| MozillaVPN              | ❌              | ✅                |
+| NordVPN                 | ✅              | ❌                |
+| HMA (HideMyAss)         | ✅              | ❌                |
+| AirVPN                  | ✅              | ❌                |
+| Cloudflare Warp\*\*\*\* | ❌              | ❌                |
 
-\* For ProtonVPN you can generate and download specific Wireguard config
+\* Port forwarding is not currently supported for PrivateInternetAccess. PRs welcome.
+
+\*\* See the [User Guide](USERGUIDE.md) for authentication instructions for generating the OpenVPN config files via `vopono sync`. You must copy the authentication header of the form `AUTH-xxx=yyy` where `yyy` is the value of the `x-pm-uid` header in the same request when logged in, in your web browser.
+
+\*\*\* For ProtonVPN you can generate and download specific Wireguard config
 files, and use them as a custom provider config. See the [User Guide](USERGUIDE.md)
-for details - note that port forwarding is currently not supported for ProtonVPN.
+for details. [Port Forwarding](https://protonvpn.com/support/port-forwarding-manual-setup/) is supported with the `--protonvpn-port-forwarding` argument for both OpenVPN and Wireguard (with `--provider custom --custom xxx.conf --protocol wireguard` ), note for OpenVPN you must generate the OpenVPN config files appending `+pmp` to your OpenVPN username, and you must choose servers which support this feature (e.g. at the time of writing, the Romania servers do). The assigned port is then printed to the terminal where vopono was launched - this should then be set in any applications that require it.
 
-\*\* Port forwarding is not currently supported for PrivateInternetAccess.
 
-\*\*\* Cloudflare Warp uses its own protocol. Set both the provider and
-protocol to `warp`. Note you must first register with `sudo warp-cli
-register` and then run it once with `sudo warp-svc` and `sudo warp-cli
-connect` outside of vopono. Please verify this works first before trying
-it with vopono.
+\*\*\*\* Cloudflare Warp uses its own protocol. Set both the provider and
+protocol to `warp`. Note you must first register with `sudo warp-cli register` and then run it once with `sudo warp-svc` and `sudo warp-cli connect` outside of vopono. Please verify this works first before trying it with vopono.
+
 
 ## Usage
 
