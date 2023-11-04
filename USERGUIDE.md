@@ -479,6 +479,8 @@ $ vopono -v exec --provider custom --custom testwg-UK-17.conf --protocol wiregua
 
 Port forwarding can be enabled with the `--protonvpn-port-forwarding` argument, but requires using a server that supports port forwarding. 
 
+`natpmpc` must be installed e.g. via the `libnatpmp` package on Arch Linux.
+
 Note for OpenVPN you must generate the OpenVPN config files appending `+pmp` to your OpenVPN username (i.e. what will be written to `~/.config/vopono/proton/openvpn/auth.txt`)
 
 Note the usual `-o` / `--open-ports` argument has no effect here as we only know the port number assigned after connecting to ProtonVPN.

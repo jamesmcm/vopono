@@ -23,6 +23,16 @@ impl Natpmpc {
     pub fn new(ns: &NetworkNamespace) -> anyhow::Result<Self> {
         let gateway_str = PROTONVPN_GATEWAY.to_string();
 
+        if let Err(x) = which::which("natpmpc") {
+            log::error!(
+                "natpmpc not found. Is natpmpc installed and on PATH? (e.g. libnatpmp package)"
+            );
+            return Err(anyhow::anyhow!(
+                "natpmpc not found. Is natpmpc installed and on PATH?: {:?}",
+                x
+            ));
+        }
+
         // Check output for readnatpmpresponseorretry returned 0 (OK)
         // If receive readnatpmpresponseorretry returned -7
         // Then prompt user to choose different gateway

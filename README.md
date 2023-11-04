@@ -43,7 +43,7 @@ lynx all running through different VPN connections:
 
 \*\*\* For ProtonVPN you can generate and download specific Wireguard config
 files, and use them as a custom provider config. See the [User Guide](USERGUIDE.md)
-for details. [Port Forwarding](https://protonvpn.com/support/port-forwarding-manual-setup/) is supported with the `--protonvpn-port-forwarding` argument for both OpenVPN and Wireguard (with `--provider custom --custom xxx.conf --protocol wireguard` ), note for OpenVPN you must generate the OpenVPN config files appending `+pmp` to your OpenVPN username, and you must choose servers which support this feature (e.g. at the time of writing, the Romania servers do). The assigned port is then printed to the terminal where vopono was launched - this should then be set in any applications that require it.
+for details. [Port Forwarding](https://protonvpn.com/support/port-forwarding-manual-setup/) is supported with the `--protonvpn-port-forwarding` argument for both OpenVPN and Wireguard (with `--provider custom --custom xxx.conf --protocol wireguard` ). `natpmpc` must be installed. Note for OpenVPN you must generate the OpenVPN config files appending `+pmp` to your OpenVPN username, and you must choose servers which support this feature (e.g. at the time of writing, the Romania servers do). The assigned port is then printed to the terminal where vopono was launched - this should then be set in any applications that require it.
 
 
 \*\*\*\* Cloudflare Warp uses its own protocol. Set both the provider and
