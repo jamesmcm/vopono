@@ -98,11 +98,16 @@ impl Wireguard {
             .to_string();
         assert!(if_name.len() <= 15, "ifname must be <= 15 chars: {if_name}");
 
-        namespace.exec(&["ip", "link", "add", &if_name, "type", "wireguard"])?;
+        NetworkNamespace::exec(
+            &namespace.name,
+            &["ip", "link", "add", &if_name, "type", "wireguard"],
+        )?;
 
-        namespace
-            .exec(&["wg", "setconf", &if_name, "/tmp/vopono_nft.conf"])
-            .context("Failed to run wg setconf - is wireguard-tools installed?")?;
+        NetworkNamespace::exec(
+            &namespace.name,
+            &["wg", "setconf", &if_name, "/tmp/vopono_nft.conf"],
+        )
+        .context("Failed to run wg setconf - is wireguard-tools installed?")?;
         std::fs::remove_file("/tmp/vopono_nft.conf")
             .context("Deleting file: /tmp/vopono_nft.conf")
             .ok();
@@ -110,32 +115,41 @@ impl Wireguard {
         for address in config.interface.address.iter() {
             match address {
                 IpNet::V6(address) => {
-                    namespace.exec(&[
-                        "ip",
-                        "-6",
-                        "address",
-                        "add",
-                        &address.to_string(),
-                        "dev",
-                        &if_name,
-                    ])?;
+                    NetworkNamespace::exec(
+                        &namespace.name,
+                        &[
+                            "ip",
+                            "-6",
+                            "address",
+                            "add",
+                            &address.to_string(),
+                            "dev",
+                            &if_name,
+                        ],
+                    )?;
                 }
                 IpNet::V4(address) => {
-                    namespace.exec(&[
-                        "ip",
-                        "-4",
-                        "address",
-                        "add",
-                        &address.to_string(),
-                        "dev",
-                        &if_name,
-                    ])?;
+                    NetworkNamespace::exec(
+                        &namespace.name,
+                        &[
+                            "ip",
+                            "-4",
+                            "address",
+                            "add",
+                            &address.to_string(),
+                            "dev",
+                            &if_name,
+                        ],
+                    )?;
                 }
             }
         }
 
         // TODO: Handle custom MTU
-        namespace.exec(&["ip", "link", "set", "mtu", "1420", "up", "dev", &if_name])?;
+        NetworkNamespace::exec(
+            &namespace.name,
+            &["ip", "link", "set", "mtu", "1420", "up", "dev", &if_name],
+        )?;
 
         let dns: Vec<IpAddr> = dns
             .cloned()
@@ -147,54 +161,72 @@ impl Wireguard {
         // TODO: DNS suffixes?
         namespace.dns_config(&dns, &[], hosts_entries)?;
         let fwmark = "51820";
-        namespace.exec(&["wg", "set", &if_name, "fwmark", fwmark])?;
+        NetworkNamespace::exec(&namespace.name, &["wg", "set", &if_name, "fwmark", fwmark])?;
 
         // IPv4 routes
-        namespace.exec(&[
-            "ip",
-            "-4",
-            "route",
-            "add",
-            "0.0.0.0/0",
-            "dev",
-            &if_name,
-            "table",
-            fwmark,
-        ])?;
-        namespace.exec(&[
-            "ip", "-4", "rule", "add", "not", "fwmark", fwmark, "table", fwmark,
-        ])?;
-        namespace.exec(&[
-            "ip",
-            "-4",
-            "rule",
-            "add",
-            "table",
-            "main",
-            "suppress_prefixlength",
-            "0",
-        ])?;
-        sudo_command(&["sysctl", "-q", "net.ipv4.conf.all.src_valid_mark=1"])?;
-        // IPv6
-        if disable_ipv6 {
-            crate::network::firewall::disable_ipv6(namespace, firewall)?;
-        } else {
-            namespace.exec(&[
-                "ip", "-6", "route", "add", "::/0", "dev", &if_name, "table", fwmark,
-            ])?;
-            namespace.exec(&[
-                "ip", "-6", "rule", "add", "not", "fwmark", fwmark, "table", fwmark,
-            ])?;
-            namespace.exec(&[
+        NetworkNamespace::exec(
+            &namespace.name,
+            &[
                 "ip",
-                "-6",
+                "-4",
+                "route",
+                "add",
+                "0.0.0.0/0",
+                "dev",
+                &if_name,
+                "table",
+                fwmark,
+            ],
+        )?;
+        NetworkNamespace::exec(
+            &namespace.name,
+            &[
+                "ip", "-4", "rule", "add", "not", "fwmark", fwmark, "table", fwmark,
+            ],
+        )?;
+        NetworkNamespace::exec(
+            &namespace.name,
+            &[
+                "ip",
+                "-4",
                 "rule",
                 "add",
                 "table",
                 "main",
                 "suppress_prefixlength",
                 "0",
-            ])?;
+            ],
+        )?;
+        sudo_command(&["sysctl", "-q", "net.ipv4.conf.all.src_valid_mark=1"])?;
+        // IPv6
+        if disable_ipv6 {
+            crate::network::firewall::disable_ipv6(namespace, firewall)?;
+        } else {
+            NetworkNamespace::exec(
+                &namespace.name,
+                &[
+                    "ip", "-6", "route", "add", "::/0", "dev", &if_name, "table", fwmark,
+                ],
+            )?;
+            NetworkNamespace::exec(
+                &namespace.name,
+                &[
+                    "ip", "-6", "rule", "add", "not", "fwmark", fwmark, "table", fwmark,
+                ],
+            )?;
+            NetworkNamespace::exec(
+                &namespace.name,
+                &[
+                    "ip",
+                    "-6",
+                    "rule",
+                    "add",
+                    "table",
+                    "main",
+                    "suppress_prefixlength",
+                    "0",
+                ],
+            )?;
         }
 
         match firewall {
@@ -251,7 +283,7 @@ impl Wireguard {
                     write!(f, "{nftcmd}")?;
                 }
 
-                namespace.exec(&["nft", "-f", "/tmp/vopono_nft.sh"])?;
+                NetworkNamespace::exec(&namespace.name, &["nft", "-f", "/tmp/vopono_nft.sh"])?;
                 std::fs::remove_file("/tmp/vopono_nft.sh")
                     .context("Deleting file: /tmp/vopono_nft.sh")
                     .ok();
@@ -260,47 +292,53 @@ impl Wireguard {
                 for address in config.interface.address.iter() {
                     match address {
                         IpNet::V6(address) => {
-                            namespace.exec(&[
-                                "ip6tables",
-                                "-t",
-                                "raw",
-                                "-A",
-                                "PREROUTING",
-                                "!",
-                                "-i",
-                                &if_name,
-                                "-d",
-                                &address.to_string(),
-                                "-m",
-                                "addrtype",
-                                "!",
-                                "--src-type",
-                                "LOCAL",
-                                "-j",
-                                "DROP",
-                            ])?;
+                            NetworkNamespace::exec(
+                                &namespace.name,
+                                &[
+                                    "ip6tables",
+                                    "-t",
+                                    "raw",
+                                    "-A",
+                                    "PREROUTING",
+                                    "!",
+                                    "-i",
+                                    &if_name,
+                                    "-d",
+                                    &address.to_string(),
+                                    "-m",
+                                    "addrtype",
+                                    "!",
+                                    "--src-type",
+                                    "LOCAL",
+                                    "-j",
+                                    "DROP",
+                                ],
+                            )?;
                         }
 
                         IpNet::V4(address) => {
-                            namespace.exec(&[
-                                "iptables",
-                                "-t",
-                                "raw",
-                                "-A",
-                                "PREROUTING",
-                                "!",
-                                "-i",
-                                &if_name,
-                                "-d",
-                                &address.to_string(),
-                                "-m",
-                                "addrtype",
-                                "!",
-                                "--src-type",
-                                "LOCAL",
-                                "-j",
-                                "DROP",
-                            ])?;
+                            NetworkNamespace::exec(
+                                &namespace.name,
+                                &[
+                                    "iptables",
+                                    "-t",
+                                    "raw",
+                                    "-A",
+                                    "PREROUTING",
+                                    "!",
+                                    "-i",
+                                    &if_name,
+                                    "-d",
+                                    &address.to_string(),
+                                    "-m",
+                                    "addrtype",
+                                    "!",
+                                    "--src-type",
+                                    "LOCAL",
+                                    "-j",
+                                    "DROP",
+                                ],
+                            )?;
                         }
                     }
                 }
@@ -312,31 +350,37 @@ impl Wireguard {
                 };
 
                 for ipcmd in ipcmds {
-                    namespace.exec(&[
-                        ipcmd,
-                        "-t",
-                        "mangle",
-                        "-A",
-                        "POSTROUTING",
-                        "-p",
-                        "udp",
-                        "-j",
-                        "MARK",
-                        "--set-mark",
-                        fwmark,
-                    ])?;
-                    namespace.exec(&[
-                        ipcmd,
-                        "-t",
-                        "mangle",
-                        "-A",
-                        "PREROUTING",
-                        "-p",
-                        "udp",
-                        "-j",
-                        "CONNMARK",
-                        "--save-mark",
-                    ])?;
+                    NetworkNamespace::exec(
+                        &namespace.name,
+                        &[
+                            ipcmd,
+                            "-t",
+                            "mangle",
+                            "-A",
+                            "POSTROUTING",
+                            "-p",
+                            "udp",
+                            "-j",
+                            "MARK",
+                            "--set-mark",
+                            fwmark,
+                        ],
+                    )?;
+                    NetworkNamespace::exec(
+                        &namespace.name,
+                        &[
+                            ipcmd,
+                            "-t",
+                            "mangle",
+                            "-A",
+                            "PREROUTING",
+                            "-p",
+                            "udp",
+                            "-j",
+                            "CONNMARK",
+                            "--save-mark",
+                        ],
+                    )?;
                 }
             }
         };
@@ -372,8 +416,9 @@ pub fn killswitch(
     debug!("Setting Wireguard killswitch....");
     match firewall {
         Firewall::IpTables => {
-            netns
-                .exec(&[
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
                     "iptables",
                     "-A",
                     "OUTPUT",
@@ -392,64 +437,73 @@ pub fn killswitch(
                     "LOCAL",
                     "-j",
                     "REJECT",
-                ])
-                .context("Executing ip6tables")?;
+                ],
+            )
+            .context("Executing ip6tables")?;
 
-            netns.exec(&[
-                "ip6tables",
-                "-A",
-                "OUTPUT",
-                "!",
-                "-o",
-                ifname,
-                "-m",
-                "mark",
-                "!",
-                "--mark",
-                fwmark,
-                "-m",
-                "addrtype",
-                "!",
-                "--dst-type",
-                "LOCAL",
-                "-j",
-                "REJECT",
-            ])?;
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
+                    "ip6tables",
+                    "-A",
+                    "OUTPUT",
+                    "!",
+                    "-o",
+                    ifname,
+                    "-m",
+                    "mark",
+                    "!",
+                    "--mark",
+                    fwmark,
+                    "-m",
+                    "addrtype",
+                    "!",
+                    "--dst-type",
+                    "LOCAL",
+                    "-j",
+                    "REJECT",
+                ],
+            )?;
         }
         Firewall::NfTables => {
-            netns
-                .exec(&["nft", "add", "table", "inet", &netns.name])
+            NetworkNamespace::exec(&netns.name, &["nft", "add", "table", "inet", &netns.name])
                 .context("Executing nft")?;
-            netns.exec(&[
-                "nft",
-                "add",
-                "chain",
-                "inet",
+            NetworkNamespace::exec(
                 &netns.name,
-                "output",
-                "{ type filter hook output priority -500 ; policy accept; }",
-            ])?;
-            netns.exec(&[
-                "nft",
-                "add",
-                "rule",
-                "inet",
+                &[
+                    "nft",
+                    "add",
+                    "chain",
+                    "inet",
+                    &netns.name,
+                    "output",
+                    "{ type filter hook output priority -500 ; policy accept; }",
+                ],
+            )?;
+            NetworkNamespace::exec(
                 &netns.name,
-                "output",
-                "oifname",
-                "!=",
-                ifname,
-                "mark",
-                "!=",
-                fwmark,
-                "fib",
-                "daddr",
-                "type",
-                "!=",
-                "local",
-                "counter",
-                "reject",
-            ])?;
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "output",
+                    "oifname",
+                    "!=",
+                    ifname,
+                    "mark",
+                    "!=",
+                    fwmark,
+                    "fib",
+                    "daddr",
+                    "type",
+                    "!=",
+                    "local",
+                    "counter",
+                    "reject",
+                ],
+            )?;
         }
     }
     Ok(())

@@ -11,75 +11,93 @@ pub fn open_ports(
     for port in ports {
         match firewall {
             Firewall::IpTables => {
-                netns.exec(&[
-                    "iptables",
-                    "-I",
-                    "INPUT",
-                    "-p",
-                    "tcp",
-                    "--dport",
-                    &port.to_string(),
-                    "-j",
-                    "ACCEPT",
-                ])?;
-                netns.exec(&[
-                    "iptables",
-                    "-I",
-                    "OUTPUT",
-                    "-p",
-                    "tcp",
-                    "--sport",
-                    &port.to_string(),
-                    "-j",
-                    "ACCEPT",
-                ])?;
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[
+                        "iptables",
+                        "-I",
+                        "INPUT",
+                        "-p",
+                        "tcp",
+                        "--dport",
+                        &port.to_string(),
+                        "-j",
+                        "ACCEPT",
+                    ],
+                )?;
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[
+                        "iptables",
+                        "-I",
+                        "OUTPUT",
+                        "-p",
+                        "tcp",
+                        "--sport",
+                        &port.to_string(),
+                        "-j",
+                        "ACCEPT",
+                    ],
+                )?;
             }
             Firewall::NfTables => {
-                netns.exec(&["nft", "add", "table", "inet", &netns.name])?;
-                netns.exec(&[
-                    "nft",
-                    "add",
-                    "chain",
-                    "inet",
+                NetworkNamespace::exec(&netns.name, &["nft", "add", "table", "inet", &netns.name])?;
+                NetworkNamespace::exec(
                     &netns.name,
-                    "input",
-                    "{ type filter hook input priority 100 ; }",
-                ])?;
-                netns.exec(&[
-                    "nft",
-                    "insert",
-                    "rule",
-                    "inet",
+                    &[
+                        "nft",
+                        "add",
+                        "chain",
+                        "inet",
+                        &netns.name,
+                        "input",
+                        "{ type filter hook input priority 100 ; }",
+                    ],
+                )?;
+                NetworkNamespace::exec(
                     &netns.name,
-                    "input",
-                    "tcp",
-                    "dport",
-                    &port.to_string(),
-                    "counter",
-                    "accept",
-                ])?;
-                netns.exec(&[
-                    "nft",
-                    "add",
-                    "chain",
-                    "inet",
+                    &[
+                        "nft",
+                        "insert",
+                        "rule",
+                        "inet",
+                        &netns.name,
+                        "input",
+                        "tcp",
+                        "dport",
+                        &port.to_string(),
+                        "counter",
+                        "accept",
+                    ],
+                )?;
+                NetworkNamespace::exec(
                     &netns.name,
-                    "output",
-                    "{ type filter hook output priority 100 ; }",
-                ])?;
-                netns.exec(&[
-                    "nft",
-                    "insert",
-                    "rule",
-                    "inet",
+                    &[
+                        "nft",
+                        "add",
+                        "chain",
+                        "inet",
+                        &netns.name,
+                        "output",
+                        "{ type filter hook output priority 100 ; }",
+                    ],
+                )?;
+                NetworkNamespace::exec(
                     &netns.name,
-                    "output",
-                    "tcp",
-                    "sport",
-                    &port.to_string(),
-                    "counter",
-                    "accept",
-                ])?;
+                    &[
+                        "nft",
+                        "insert",
+                        "rule",
+                        "inet",
+                        &netns.name,
+                        "output",
+                        "tcp",
+                        "sport",
+                        &port.to_string(),
+                        "counter",
+                        "accept",
+                    ],
+                )?;
             }
         }
     }

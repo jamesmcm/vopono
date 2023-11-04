@@ -2,6 +2,7 @@ pub mod application_wrapper;
 pub mod dns_config;
 pub mod firewall;
 pub mod host_masquerade;
+pub mod natpmpc;
 pub mod netns;
 pub mod network_interface;
 pub mod openconnect;

@@ -13,7 +13,7 @@ use crate::config::providers::{UiClient, VpnProvider};
 use crate::config::vpn::Protocol;
 use crate::network::host_masquerade::FirewallException;
 use crate::util::{config_dir, set_config_permissions, sudo_command};
-use anyhow::Context;
+use anyhow::{anyhow, Context};
 use log::{debug, info, warn};
 use nix::unistd;
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,7 @@ use std::fs::File;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -46,7 +46,7 @@ pub struct NetworkNamespace {
     pub predown_group: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VethPairIPs {
     pub host_ip: IpAddr,
     pub namespace_ip: IpAddr,
@@ -107,7 +107,7 @@ impl NetworkNamespace {
 
     #[allow(clippy::too_many_arguments)]
     pub fn exec_no_block(
-        &self,
+        netns_name: &str,
         command: &[&str],
         user: Option<String>,
         group: Option<String>,
@@ -117,7 +117,7 @@ impl NetworkNamespace {
         set_dir: Option<PathBuf>,
     ) -> anyhow::Result<std::process::Child> {
         let mut handle = Command::new("ip");
-        handle.args(["netns", "exec", &self.name]);
+        handle.args(["netns", "exec", netns_name]);
         if let Some(cdir) = set_dir {
             handle.current_dir(cdir);
         }
@@ -155,7 +155,7 @@ impl NetworkNamespace {
 
         debug!(
             "ip netns exec {}{} {}",
-            &self.name,
+            netns_name,
             sudo_string.unwrap_or_else(|| String::from("")),
             command.join(" ")
         );
@@ -163,16 +163,24 @@ impl NetworkNamespace {
         Ok(handle)
     }
 
-    pub fn exec(&self, command: &[&str]) -> anyhow::Result<()> {
-        self.exec_no_block(command, None, None, false, false, false, None)?
-            .wait()?;
+    pub fn exec(netns_name: &str, command: &[&str]) -> anyhow::Result<()> {
+        Self::exec_no_block(netns_name, command, None, None, false, false, false, None)?.wait()?;
         Ok(())
     }
 
+    pub fn exec_with_output(netns_name: &str, command: &[&str]) -> anyhow::Result<Output> {
+        Self::exec_no_block(netns_name, command, None, None, false, true, false, None)?
+            .wait_with_output()
+            .map_err(|e| anyhow!("Process Output error: {e:?}"))
+    }
+
     pub fn add_loopback(&self) -> anyhow::Result<()> {
-        self.exec(&["ip", "addr", "add", "127.0.0.1/8", "dev", "lo"])
-            .with_context(|| format!("Failed to add loopback adapter in netns: {}", &self.name))?;
-        self.exec(&["ip", "link", "set", "lo", "up"])
+        Self::exec(
+            &self.name,
+            &["ip", "addr", "add", "127.0.0.1/8", "dev", "lo"],
+        )
+        .with_context(|| format!("Failed to add loopback adapter in netns: {}", &self.name))?;
+        Self::exec(&self.name, &["ip", "link", "set", "lo", "up"])
             .with_context(|| format!("Failed to start networking in netns: {}", &self.name))?;
         Ok(())
     }
@@ -213,32 +221,41 @@ impl NetworkNamespace {
             format!("Failed to assign static IP to veth destination: {veth_dest}")
         })?;
 
-        self.exec(&["ip", "addr", "add", &veth_source_ip, "dev", veth_source])
-            .with_context(|| format!("Failed to assign static IP to veth source: {veth_source}"))?;
-        self.exec(&[
-            "ip",
-            "route",
-            "add",
-            "default",
-            "via",
-            &ip_nosub,
-            "dev",
-            veth_source,
-        ])
+        Self::exec(
+            &self.name,
+            &["ip", "addr", "add", &veth_source_ip, "dev", veth_source],
+        )
+        .with_context(|| format!("Failed to assign static IP to veth source: {veth_source}"))?;
+        Self::exec(
+            &self.name,
+            &[
+                "ip",
+                "route",
+                "add",
+                "default",
+                "via",
+                &ip_nosub,
+                "dev",
+                veth_source,
+            ],
+        )
         .with_context(|| format!("Failed to assign static IP to veth source: {veth_source}"))?;
 
         if let Some(my_hosts) = hosts {
             for host in my_hosts {
-                self.exec(&[
-                    "ip",
-                    "route",
-                    "add",
-                    &host.to_string(),
-                    "via",
-                    &ip_nosub,
-                    "dev",
-                    veth_source,
-                ])
+                Self::exec(
+                    &self.name,
+                    &[
+                        "ip",
+                        "route",
+                        "add",
+                        &host.to_string(),
+                        "via",
+                        &ip_nosub,
+                        "dev",
+                        veth_source,
+                    ],
+                )
                 .with_context(|| {
                     format!("Failed to assign hosts route {host} to veth source: {veth_source}")
                 })?;
@@ -246,7 +263,7 @@ impl NetworkNamespace {
         }
 
         if allow_host_access {
-            self.exec(&[
+            Self::exec(&self.name, &[
                 "ip",
                 "route",
                 "add",

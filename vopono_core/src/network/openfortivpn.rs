@@ -47,9 +47,17 @@ impl OpenFortiVpn {
         std::fs::remove_file(&pppd_log).ok();
 
         // TODO - better handle forwarding output when blocking on password entry (no newline!)
-        let mut handle = netns
-            .exec_no_block(&command_vec, None, None, false, true, false, None)
-            .context("Failed to launch OpenFortiVPN - is openfortivpn installed?")?;
+        let mut handle = NetworkNamespace::exec_no_block(
+            &netns.name,
+            &command_vec,
+            None,
+            None,
+            false,
+            true,
+            false,
+            None,
+        )
+        .context("Failed to launch OpenFortiVPN - is openfortivpn installed?")?;
         let stdout = handle.stdout.take().unwrap();
         let id = handle.id();
 
@@ -81,15 +89,18 @@ impl OpenFortiVpn {
         let remote_peer = get_remote_peer(&pppd_log)?;
 
         debug!("Found OpenFortiVPN route: {:?}", remote_peer);
-        netns.exec(&["ip", "route", "del", "default"])?;
-        netns.exec(&[
-            "ip",
-            "route",
-            "add",
-            "default",
-            "via",
-            &remote_peer.to_string(),
-        ])?;
+        NetworkNamespace::exec(&netns.name, &["ip", "route", "del", "default"])?;
+        NetworkNamespace::exec(
+            &netns.name,
+            &[
+                "ip",
+                "route",
+                "add",
+                "default",
+                "via",
+                &remote_peer.to_string(),
+            ],
+        )?;
 
         let dns = get_dns(&buffer)?;
         let dns_ip: Vec<IpAddr> = (dns.0).into_iter().map(IpAddr::from).collect();

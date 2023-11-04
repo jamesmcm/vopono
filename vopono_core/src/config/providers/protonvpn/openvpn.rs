@@ -61,7 +61,7 @@ impl OpenVpnProvider for ProtonVPN {
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
         let username = uiclient.get_input(Input {
             prompt:
-                "ProtonVPN OpenVPN username (see: https://account.protonvpn.com/account#openvpn )"
+                "ProtonVPN OpenVPN username (see: https://account.protonvpn.com/account#openvpn ) - add +pmp suffix if using --protonvpn-port-forwarding - note not all servers support this feature"
                     .to_string(),
             validator: None,
         })?;
@@ -94,16 +94,21 @@ impl OpenVpnProvider for ProtonVPN {
         );
 
         let auth_cookie: &'static str = Box::leak(uiclient.get_input(Input {
-            prompt: "Please log-in at https://account.protonvpn.com/dashboard and then visit https://account.protonvpn.com/api/vpn/v2/users and copy the value of the cookie starting with \"AUTH-\" in the request from your browser's network request inspector".to_owned(),
+            prompt: "Please log-in at https://account.protonvpn.com/dashboard and then visit https://account.protonvpn.com/account and copy the value of the cookie of the form \"AUTH-xxx=yyy\" where xxx is equal to the value of the \"x-pm-uid\" request header, in the request from your browser's network request inspector (check the request it makes to https://account.protonvpn.com/api/vpn for example). Note there may be multiple AUTH-xxx=yyy request headers, copy the one where xxx is equal to the value of the x-pm-uid header.".to_owned(),
              validator: Some(Box::new(|s: &String| if s.starts_with("AUTH-") {Ok(())} else {Err("AUTH cookie must start with AUTH-".to_owned())}))
              })?.replace(';', "").trim().to_owned().into_boxed_str());
         debug!("Using AUTH cookie: {}", &auth_cookie);
 
-        let re = Regex::new("AUTH-([^=]+)=").unwrap();
-        let uid = re
+        let uid_re = Regex::new("AUTH-([^=]+)=").unwrap();
+        let uid = uid_re
             .captures(auth_cookie)
             .and_then(|c| c.get(1))
-            .ok_or(anyhow!("Failed to parse auth cookie"))?;
+            .ok_or(anyhow!("Failed to parse uid from auth cookie"))?;
+        info!(
+            "x-pm-uid should be {} according to AUTH cookie: {}",
+            uid.as_str(),
+            auth_cookie
+        );
         let url = self.build_url(&config_choice, &tier, &protocol)?;
 
         let mut headers = HeaderMap::new();

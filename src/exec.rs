@@ -14,6 +14,7 @@ use vopono_core::config::providers::{UiClient, VpnProvider};
 use vopono_core::config::vpn::{verify_auth, Protocol};
 use vopono_core::network::application_wrapper::ApplicationWrapper;
 use vopono_core::network::firewall::Firewall;
+use vopono_core::network::natpmpc::Natpmpc;
 use vopono_core::network::netns::NetworkNamespace;
 use vopono_core::network::network_interface::{get_active_interfaces, NetworkInterface};
 use vopono_core::network::shadowsocks::uses_shadowsocks;
@@ -56,10 +57,9 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         .map(|x| x.to_variant())
         .ok_or_else(|| anyhow!(""))
         .or_else(|_| {
-            vopono_config_settings.get("firewall").map_err(|e| {
-                debug!("vopono config.toml: {:?}", e);
-                anyhow!("Failed to read config file")
-            })
+            vopono_config_settings
+                .get("firewall")
+                .map_err(|_e| anyhow!("Failed to read config file"))
         })
         .or_else(|_x| vopono_core::util::get_firewall())?;
 
@@ -67,10 +67,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     let custom_config = command.custom_config.clone().or_else(|| {
         vopono_config_settings
             .get("custom_config")
-            .map_err(|e| {
-                debug!("vopono config.toml: {:?}", e);
-                anyhow!("Failed to read config file")
-            })
+            .map_err(|_e| anyhow!("Failed to read config file"))
             .ok()
     });
 
@@ -78,10 +75,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     let custom_netns_name = command.custom_netns_name.clone().or_else(|| {
         vopono_config_settings
             .get("custom_netns_name")
-            .map_err(|e| {
-                debug!("vopono config.toml: {:?}", e);
-                anyhow!("Failed to read config file")
-            })
+            .map_err(|_e| anyhow!("Failed to read config file"))
             .ok()
     });
 
@@ -89,29 +83,20 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     let mut open_hosts = command.open_hosts.clone().or_else(|| {
         vopono_config_settings
             .get("open_hosts")
-            .map_err(|e| {
-                debug!("vopono config.toml: {:?}", e);
-                anyhow!("Failed to read config file")
-            })
+            .map_err(|_e| anyhow!("Failed to read config file"))
             .ok()
     });
     let allow_host_access = command.allow_host_access
         || vopono_config_settings
             .get("allow_host_access")
-            .map_err(|e| {
-                debug!("vopono config.toml: {:?}", e);
-                anyhow!("Failed to read config file")
-            })
+            .map_err(|_e| anyhow!("Failed to read config file"))
             .unwrap_or(false);
 
     // Assign postup script from args or vopono config file
     let postup = command.postup.clone().or_else(|| {
         vopono_config_settings
             .get("postup")
-            .map_err(|e| {
-                debug!("vopono config.toml: {:?}", e);
-                anyhow!("Failed to read config file")
-            })
+            .map_err(|_e| anyhow!("Failed to read config file"))
             .ok()
     });
 
@@ -119,10 +104,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     let predown = command.predown.clone().or_else(|| {
         vopono_config_settings
             .get("predown")
-            .map_err(|e| {
-                debug!("vopono config.toml: {:?}", e);
-                anyhow!("Failed to read config file")
-            })
+            .map_err(|_e| anyhow!("Failed to read config file"))
             .ok()
     });
 
@@ -130,10 +112,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     let user = if command.user.is_none() {
         vopono_config_settings
             .get("user")
-            .map_err(|e| {
-                debug!("vopono config.toml: {:?}", e);
-                anyhow!("Failed to read config file")
-            })
+            .map_err(|_e| anyhow!("Failed to read config file"))
             .ok()
             .or_else(|| std::env::var("SUDO_USER").ok())
     } else {
@@ -144,10 +123,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     let group = if command.group.is_none() {
         vopono_config_settings
             .get("group")
-            .map_err(|e| {
-                debug!("vopono config.toml: {:?}", e);
-                anyhow!("Failed to read config file")
-            })
+            .map_err(|_e| anyhow!("Failed to read config file"))
             .ok()
     } else {
         command.group
@@ -157,23 +133,28 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     let working_directory = if command.working_directory.is_none() {
         vopono_config_settings
             .get("working-directory")
-            .map_err(|e| {
-                debug!("vopono config.toml: {:?}", e);
-                anyhow!("Failed to read config file")
-            })
+            .map_err(|_e| anyhow!("Failed to read config file"))
             .ok()
     } else {
         command.working_directory
+    };
+
+    // Port forwarding for ProtonVPN
+    let protonvpn_port_forwarding = if !command.protonvpn_port_forwarding {
+        vopono_config_settings
+            .get("protonvpn-port-forwarding")
+            .map_err(|_e| anyhow!("Failed to read config file"))
+            .ok()
+            .unwrap_or(false)
+    } else {
+        command.protonvpn_port_forwarding
     };
 
     // Assign DNS server from args or vopono config file
     let base_dns = command.dns.clone().or_else(|| {
         vopono_config_settings
             .get("dns")
-            .map_err(|e| {
-                debug!("vopono config.toml: {:?}", e);
-                anyhow!("Failed to read config file")
-            })
+            .map_err(|_e| anyhow!("Failed to read config file"))
             .ok()
     });
 
@@ -199,10 +180,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                 .or_else(|| {
                     vopono_config_settings
                         .get("server")
-                        .map_err(|e| {
-                            debug!("vopono config.toml: {:?}", e);
-                            anyhow!("Failed to read config file")
-                        })
+                        .map_err(|_e| anyhow!("Failed to read config file"))
                         .ok()
                 })
                 .or_else(|| Some(String::new()))
@@ -216,10 +194,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             .or_else(|| {
                 vopono_config_settings
                     .get("provider")
-                    .map_err(|e| {
-                        debug!("vopono config.toml: {:?}", e);
-                        anyhow!("Failed to read config file")
-                    })
+                    .map_err(|_e| anyhow!("Failed to read config file"))
                     .ok()
             })
             .expect(
@@ -235,8 +210,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             .or_else(|| {
                 vopono_config_settings
                     .get("server")
-                    .map_err(|e| {
-                        debug!("vopono config.toml: {:?}", e);
+                    .map_err(|_e| {
                         anyhow!("Failed to read config file")
                     })
                     .ok()
@@ -252,10 +226,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             .or_else(|| {
                 vopono_config_settings
                     .get("protocol")
-                    .map_err(|e| {
-                        debug!("vopono config.toml: {:?}", e);
-                        anyhow!("Failed to read config file")
-                    })
+                    .map_err(|_e| anyhow!("Failed to read config file"))
                     .ok()
             })
             .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
@@ -525,7 +496,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         // for the PostUp script and the application:
         std::env::set_var(
             "VOPONO_NS_IP",
-            &ns.veth_pair_ips.as_ref().unwrap().namespace_ip.to_string(),
+            ns.veth_pair_ips.as_ref().unwrap().namespace_ip.to_string(),
         );
 
         // Run PostUp script (if any)
@@ -560,10 +531,25 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     // Set env var referring to the host IP for the application:
     std::env::set_var(
         "VOPONO_HOST_IP",
-        &ns.veth_pair_ips.as_ref().unwrap().host_ip.to_string(),
+        ns.veth_pair_ips.as_ref().unwrap().host_ip.to_string(),
     );
 
     let ns = ns.write_lockfile(&command.application)?;
+
+    let natpmpc = if protonvpn_port_forwarding {
+        vopono_core::util::open_hosts(
+            &ns,
+            vec![vopono_core::network::natpmpc::PROTONVPN_GATEWAY],
+            firewall,
+        )?;
+        Some(Natpmpc::new(&ns)?)
+    } else {
+        None
+    };
+
+    if let Some(pmpc) = natpmpc.as_ref() {
+        vopono_core::util::open_ports(&ns, &[pmpc.local_port], firewall)?;
+    }
 
     let application = ApplicationWrapper::new(
         &ns,
@@ -571,6 +557,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         user,
         group,
         working_directory.map(PathBuf::from),
+        natpmpc,
     )?;
 
     // Launch TCP proxy server on other threads if forwarding ports
@@ -598,6 +585,10 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         "Application {} launched in network namespace {} with pid {}",
         &command.application, &ns.name, pid
     );
+
+    if let Some(pmpc) = application.protonvpn_port_forwarding.as_ref() {
+        info!("ProtonVPN Port Forwarding on port {}", pmpc.local_port)
+    }
     let output = application.wait_with_output()?;
     io::stdout().write_all(output.stdout.as_slice())?;
 

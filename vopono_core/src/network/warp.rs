@@ -31,9 +31,17 @@ impl Warp {
 
         info!("Launching Warp...");
 
-        let handle = netns
-            .exec_no_block(&["warp-svc"], None, None, false, false, false, None)
-            .context("Failed to launch warp-svc - is waro-svc installed?")?;
+        let handle = NetworkNamespace::exec_no_block(
+            &netns.name,
+            &["warp-svc"],
+            None,
+            None,
+            false,
+            false,
+            false,
+            None,
+        )
+        .context("Failed to launch warp-svc - is waro-svc installed?")?;
 
         let id = handle.id();
 

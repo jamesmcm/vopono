@@ -10,31 +10,37 @@ pub fn open_hosts(
     for host in hosts {
         match firewall {
             Firewall::IpTables => {
-                netns.exec(&[
-                    "iptables",
-                    "-I",
-                    "OUTPUT",
-                    "1",
-                    "-d",
-                    &host.to_string(),
-                    "-j",
-                    "ACCEPT",
-                ])?;
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[
+                        "iptables",
+                        "-I",
+                        "OUTPUT",
+                        "1",
+                        "-d",
+                        &host.to_string(),
+                        "-j",
+                        "ACCEPT",
+                    ],
+                )?;
             }
             Firewall::NfTables => {
-                netns.exec(&[
-                    "nft",
-                    "insert",
-                    "rule",
-                    "inet",
+                NetworkNamespace::exec(
                     &netns.name,
-                    "output",
-                    "ip",
-                    "daddr",
-                    &host.to_string(),
-                    "counter",
-                    "accept",
-                ])?;
+                    &[
+                        "nft",
+                        "insert",
+                        "rule",
+                        "inet",
+                        &netns.name,
+                        "output",
+                        "ip",
+                        "daddr",
+                        &host.to_string(),
+                        "counter",
+                        "accept",
+                    ],
+                )?;
             }
         }
     }
