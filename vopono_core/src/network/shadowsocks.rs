@@ -66,9 +66,17 @@ impl Shadowsocks {
             encrypt_method,
         ];
 
-        let handle = netns
-            .exec_no_block(&command_vec, None, None, true, false, false, None)
-            .context("Failed to launch Shadowsocks - is shadowsocks-libev installed?")?;
+        let handle = NetworkNamespace::exec_no_block(
+            &netns.name,
+            &command_vec,
+            None,
+            None,
+            true,
+            false,
+            false,
+            None,
+        )
+        .context("Failed to launch Shadowsocks - is shadowsocks-libev installed?")?;
 
         Ok(Self { pid: handle.id() })
     }

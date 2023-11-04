@@ -438,20 +438,59 @@ Mullvad wireguard       usa-us52.conf
 
 ## VPN Provider specific details
 
+### Mullvad
+
 Mullvad users can use [mullvad.net/en/check](https://mullvad.net/en/check/) to
 check the security of their browser's connection. This was used with the
 Mullvad configuration to verify that there is no DNS leaking or
 BitTorrent leaking for both the OpenVPN and Wireguard configurations.
+
+
+### AzireVPN
 
 AzireVPN users can use [their security check page](https://www.azirevpn.com/check)
 for the same (note the instructions on disabling WebRTC). I noticed that
 when using IPv6 with OpenVPN it incorrectly states you are not connected
 via AzireVPN though (Wireguard works correctly).
 
+### ProtonVPN
+
+#### OpenVPN Sync and authentication
+
 ProtonVPN users must log-in to the dashboard via a web browser during
 the `vopono sync` process in order to copy the `AUTH-*` cookie to
 access the OpenVPN configuration files, and the OpenVPN specific
 credentials to use them.
+
+Note that there may be multiple `AUTH-xxx=yyy` cookies - the specific one we need is where `xxx` is equal to the value of the `x-pm-uid` header in the same request.
+
+![AUTH cookie example](protonvpn_header.png)
+
+#### Wireguard servers
+
+Due to the way Wireguard configuration generation is handled, this should be
+generated online and then used as a custom configuration, e.g.:
+
+```bash
+$ vopono -v exec --provider custom --custom testwg-UK-17.conf --protocol wireguard --protonvpn-port-forwarding firefox-developer-edition
+```
+
+#### Port Forwarding
+
+Port forwarding can be enabled with the `--protonvpn-port-forwarding` argument, but requires using a server that supports port forwarding. 
+
+Note for OpenVPN you must generate the OpenVPN config files appending `+pmp` to your OpenVPN username (i.e. what will be written to `~/.config/vopono/proton/openvpn/auth.txt`)
+
+Note the usual `-o` / `--open-ports` argument has no effect here as we only know the port number assigned after connecting to ProtonVPN.
+
+The port you are allocated will then be printed to the console like:
+```
+ 2023-11-04T14:47:31.416Z INFO  vopono::exec                            > ProtonVPN Port Forwarding on port 62508
+```
+
+And that is the port you would then set up in applications that require it.
+
+### Cloudflare Warp
 
 Cloudflare Warp users must first register with Warp via the CLI client:
 ```
@@ -469,17 +508,6 @@ $ vopono -v exec --no-killswitch --provider warp --protocol warp firefox-develop
 ```
 
 ### VPN Provider limitations
-
-#### ProtonVPN
-
-Due to the way Wireguard configuration is handled, this should be
-generated online and then used as a custom configuration, e.g.:
-
-```bash
-$ vopono -v exec --provider custom --custom testwg-UK-17.conf --protocol wireguard firefox-developer-edition
-```
-
-Note that port forwarding is currently not supported for ProtonVPN.
 
 #### PrivateInternetAccess
 

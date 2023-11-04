@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 
-use super::netns::NetworkNamespace;
+use super::{natpmpc::Natpmpc, netns::NetworkNamespace};
 use crate::util::get_all_running_process_names;
 use log::warn;
 
 pub struct ApplicationWrapper {
     pub handle: std::process::Child,
+    pub protonvpn_port_forwarding: Option<Natpmpc>,
 }
 
 impl ApplicationWrapper {
@@ -15,6 +16,7 @@ impl ApplicationWrapper {
         user: Option<String>,
         group: Option<String>,
         working_directory: Option<PathBuf>,
+        protonvpn_port_forwarding: Option<Natpmpc>,
     ) -> anyhow::Result<Self> {
         let running_processes = get_all_running_process_names();
         let app_vec = application.split_whitespace().collect::<Vec<_>>();
@@ -37,7 +39,8 @@ impl ApplicationWrapper {
             }
         }
 
-        let handle = netns.exec_no_block(
+        let handle = NetworkNamespace::exec_no_block(
+            &netns.name,
             app_vec.as_slice(),
             user,
             group,
@@ -46,7 +49,10 @@ impl ApplicationWrapper {
             false,
             working_directory,
         )?;
-        Ok(Self { handle })
+        Ok(Self {
+            handle,
+            protonvpn_port_forwarding,
+        })
     }
 
     pub fn wait_with_output(self) -> anyhow::Result<std::process::Output> {

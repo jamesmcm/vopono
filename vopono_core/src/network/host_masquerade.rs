@@ -5,7 +5,7 @@ use anyhow::Context;
 use log::debug;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct HostMasquerade {
     ip_mask: String,
     interface: NetworkInterface,
@@ -122,7 +122,7 @@ impl Drop for HostMasquerade {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct FirewallException {
     host_interface: NetworkInterface,
     ns_interface: NetworkInterface,

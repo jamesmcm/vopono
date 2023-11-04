@@ -212,6 +212,10 @@ pub struct ExecCommand {
     /// Useful for accessing services on the host locally
     #[clap(long = "allow-host-access")]
     pub allow_host_access: bool,
+
+    /// Enable port forwarding for ProtonVPN connections
+    #[clap(long = "protonvpn-port-forwarding")]
+    pub protonvpn_port_forwarding: bool,
 }
 
 #[derive(Parser)]

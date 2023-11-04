@@ -151,7 +151,7 @@ impl WireguardProvider for MozillaVPN {
 
         // Get user info again in case we uploaded new key
         let user_info: User = client
-            .get(&format!("{}/vpn/account", self.base_url()))
+            .get(format!("{}/vpn/account", self.base_url()))
             .bearer_auth(login.token)
             .send()?
             .json()?;

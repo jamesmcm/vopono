@@ -49,9 +49,17 @@ impl OpenConnect {
             command_vec.push(server.as_ref());
         }
 
-        let handle = netns
-            .exec_no_block(&command_vec, None, None, false, false, true, None)
-            .context("Failed to launch OpenConnect - is openconnect installed?")?;
+        let handle = NetworkNamespace::exec_no_block(
+            &netns.name,
+            &command_vec,
+            None,
+            None,
+            false,
+            false,
+            true,
+            None,
+        )
+        .context("Failed to launch OpenConnect - is openconnect installed?")?;
 
         handle
             .stdin

@@ -63,9 +63,9 @@ impl OpenVpn {
         ])
         .to_vec();
 
-        if auth_file.is_some() {
+        if let Some(af_ref) = auth_file.as_ref() {
             command_vec.push("--auth-user-pass");
-            command_vec.push(auth_file.as_ref().unwrap().as_os_str().to_str().unwrap());
+            command_vec.push(af_ref.as_os_str().to_str().unwrap());
         }
 
         let ipv6_disabled = std::fs::read_to_string("/sys/module/ipv6/parameters/disable")
@@ -100,17 +100,17 @@ impl OpenVpn {
         debug!("Found remotes: {:?}", &remotes);
         let working_dir = PathBuf::from(config_file_path.parent().unwrap());
 
-        let handle = netns
-            .exec_no_block(
-                &command_vec,
-                None,
-                None,
-                true,
-                false,
-                false,
-                Some(working_dir),
-            )
-            .context("Failed to launch OpenVPN - is openvpn installed?")?;
+        let handle = NetworkNamespace::exec_no_block(
+            &netns.name,
+            &command_vec,
+            None,
+            None,
+            true,
+            false,
+            false,
+            Some(working_dir),
+        )
+        .context("Failed to launch OpenVPN - is openvpn installed?")?;
         let id = handle.id();
         let mut buffer = String::with_capacity(16384);
 
@@ -239,23 +239,35 @@ pub fn killswitch(
             };
 
             for ipcmd in ipcmds {
-                netns.exec(&[ipcmd, "-P", "INPUT", "DROP"])?;
-                netns.exec(&[ipcmd, "-P", "FORWARD", "DROP"])?;
-                netns.exec(&[ipcmd, "-P", "OUTPUT", "DROP"])?;
-                netns.exec(&[
-                    ipcmd,
-                    "-A",
-                    "INPUT",
-                    "-m",
-                    "conntrack",
-                    "--ctstate",
-                    "RELATED,ESTABLISHED",
-                    "-j",
-                    "ACCEPT",
-                ])?;
-                netns.exec(&[ipcmd, "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"])?;
-                netns.exec(&[ipcmd, "-A", "INPUT", "-i", "tun+", "-j", "ACCEPT"])?;
-                netns.exec(&[ipcmd, "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"])?;
+                NetworkNamespace::exec(&netns.name, &[ipcmd, "-P", "INPUT", "DROP"])?;
+                NetworkNamespace::exec(&netns.name, &[ipcmd, "-P", "FORWARD", "DROP"])?;
+                NetworkNamespace::exec(&netns.name, &[ipcmd, "-P", "OUTPUT", "DROP"])?;
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[
+                        ipcmd,
+                        "-A",
+                        "INPUT",
+                        "-m",
+                        "conntrack",
+                        "--ctstate",
+                        "RELATED,ESTABLISHED",
+                        "-j",
+                        "ACCEPT",
+                    ],
+                )?;
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[ipcmd, "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"],
+                )?;
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[ipcmd, "-A", "INPUT", "-i", "tun+", "-j", "ACCEPT"],
+                )?;
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[ipcmd, "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"],
+                )?;
 
                 // TODO: Tidy this up - remote can be IPv4 or IPv6 address or hostname
                 for remote in remotes {
@@ -265,72 +277,87 @@ pub fn killswitch(
                         // resolution working
                         Host::IPv4(ip) => {
                             if ipcmd == "iptables" {
-                                netns.exec(&[
-                                    ipcmd,
-                                    "-A",
-                                    "OUTPUT",
-                                    "-p",
-                                    &remote.protocol.to_string(),
-                                    "-m",
-                                    &remote.protocol.to_string(),
-                                    "-d",
-                                    &ip.to_string(),
-                                    "--dport",
-                                    port_str.as_str(),
-                                    "-j",
-                                    "ACCEPT",
-                                ])?;
+                                NetworkNamespace::exec(
+                                    &netns.name,
+                                    &[
+                                        ipcmd,
+                                        "-A",
+                                        "OUTPUT",
+                                        "-p",
+                                        &remote.protocol.to_string(),
+                                        "-m",
+                                        &remote.protocol.to_string(),
+                                        "-d",
+                                        &ip.to_string(),
+                                        "--dport",
+                                        port_str.as_str(),
+                                        "-j",
+                                        "ACCEPT",
+                                    ],
+                                )?;
                             }
                         }
                         Host::IPv6(ip) => {
                             if ipcmd == "ip6tables" {
-                                netns.exec(&[
+                                NetworkNamespace::exec(
+                                    &netns.name,
+                                    &[
+                                        ipcmd,
+                                        "-A",
+                                        "OUTPUT",
+                                        "-p",
+                                        &remote.protocol.to_string(),
+                                        "-m",
+                                        &remote.protocol.to_string(),
+                                        "-d",
+                                        &ip.to_string(),
+                                        "--dport",
+                                        port_str.as_str(),
+                                        "-j",
+                                        "ACCEPT",
+                                    ],
+                                )?;
+                            }
+                        }
+                        Host::Hostname(_name) => {
+                            NetworkNamespace::exec(
+                                &netns.name,
+                                &[
                                     ipcmd,
                                     "-A",
                                     "OUTPUT",
                                     "-p",
                                     &remote.protocol.to_string(),
+                                    // "-d",
+                                    // &name.to_string(),
                                     "-m",
                                     &remote.protocol.to_string(),
-                                    "-d",
-                                    &ip.to_string(),
                                     "--dport",
                                     port_str.as_str(),
                                     "-j",
                                     "ACCEPT",
-                                ])?;
-                            }
-                        }
-                        Host::Hostname(_name) => {
-                            netns.exec(&[
-                                ipcmd,
-                                "-A",
-                                "OUTPUT",
-                                "-p",
-                                &remote.protocol.to_string(),
-                                // "-d",
-                                // &name.to_string(),
-                                "-m",
-                                &remote.protocol.to_string(),
-                                "--dport",
-                                port_str.as_str(),
-                                "-j",
-                                "ACCEPT",
-                            ])?;
+                                ],
+                            )?;
                         }
                     }
                 }
 
-                netns.exec(&[ipcmd, "-A", "OUTPUT", "-o", "tun+", "-j", "ACCEPT"])?;
-                netns.exec(&[
-                    ipcmd,
-                    "-A",
-                    "OUTPUT",
-                    "-j",
-                    "REJECT",
-                    "--reject-with",
-                    "icmp-net-unreachable",
-                ])?;
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[ipcmd, "-A", "OUTPUT", "-o", "tun+", "-j", "ACCEPT"],
+                )?;
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[
+                        ipcmd,
+                        "-A",
+                        "OUTPUT",
+                        "-j",
+                        "REJECT",
+                        "--reject-with",
+                        "icmp-net-unreachable",
+                    ],
+                )?;
             }
         }
         Firewall::NfTables => {
@@ -338,83 +365,104 @@ pub fn killswitch(
                 crate::network::firewall::disable_ipv6(netns, firewall)?;
             }
             // TODO:
-            netns.exec(&["nft", "add", "table", "inet", &netns.name])?;
-            netns.exec(&[
-                "nft",
-                "add",
-                "chain",
-                "inet",
+            NetworkNamespace::exec(&netns.name, &["nft", "add", "table", "inet", &netns.name])?;
+            NetworkNamespace::exec(
                 &netns.name,
-                "input",
-                "{ type filter hook input priority 100 ; policy drop; }",
-            ])?;
-            netns.exec(&[
-                "nft",
-                "add",
-                "chain",
-                "inet",
+                &[
+                    "nft",
+                    "add",
+                    "chain",
+                    "inet",
+                    &netns.name,
+                    "input",
+                    "{ type filter hook input priority 100 ; policy drop; }",
+                ],
+            )?;
+            NetworkNamespace::exec(
                 &netns.name,
-                "forward",
-                "{ type filter hook forward priority 100 ; policy drop; }",
-            ])?;
-            netns.exec(&[
-                "nft",
-                "add",
-                "chain",
-                "inet",
+                &[
+                    "nft",
+                    "add",
+                    "chain",
+                    "inet",
+                    &netns.name,
+                    "forward",
+                    "{ type filter hook forward priority 100 ; policy drop; }",
+                ],
+            )?;
+            NetworkNamespace::exec(
                 &netns.name,
-                "output",
-                "{ type filter hook output priority 100 ; policy drop; }",
-            ])?;
-            netns.exec(&[
-                "nft",
-                "add",
-                "rule",
-                "inet",
+                &[
+                    "nft",
+                    "add",
+                    "chain",
+                    "inet",
+                    &netns.name,
+                    "output",
+                    "{ type filter hook output priority 100 ; policy drop; }",
+                ],
+            )?;
+            NetworkNamespace::exec(
                 &netns.name,
-                "input",
-                "ct",
-                "state",
-                "related,established",
-                "counter",
-                "accept",
-            ])?;
-            netns.exec(&[
-                "nft",
-                "add",
-                "rule",
-                "inet",
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "input",
+                    "ct",
+                    "state",
+                    "related,established",
+                    "counter",
+                    "accept",
+                ],
+            )?;
+            NetworkNamespace::exec(
                 &netns.name,
-                "input",
-                "iifname",
-                "\"lo\"",
-                "counter",
-                "accept",
-            ])?;
-            netns.exec(&[
-                "nft",
-                "add",
-                "rule",
-                "inet",
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "input",
+                    "iifname",
+                    "\"lo\"",
+                    "counter",
+                    "accept",
+                ],
+            )?;
+            NetworkNamespace::exec(
                 &netns.name,
-                "input",
-                "iifname",
-                "\"tun*\"",
-                "counter",
-                "accept",
-            ])?;
-            netns.exec(&[
-                "nft",
-                "add",
-                "rule",
-                "inet",
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "input",
+                    "iifname",
+                    "\"tun*\"",
+                    "counter",
+                    "accept",
+                ],
+            )?;
+            NetworkNamespace::exec(
                 &netns.name,
-                "output",
-                "oifname",
-                "\"lo\"",
-                "counter",
-                "accept",
-            ])?;
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "output",
+                    "oifname",
+                    "\"lo\"",
+                    "counter",
+                    "accept",
+                ],
+            )?;
 
             for remote in remotes {
                 let port_str = format!("{}", remote.port);
@@ -422,90 +470,105 @@ pub fn killswitch(
                     // TODO: Fix this to specify destination address - but need hostname
                     // resolution working
                     Host::IPv4(ip) => {
-                        netns.exec(&[
-                            "nft",
-                            "add",
-                            "rule",
-                            "inet",
+                        NetworkNamespace::exec(
                             &netns.name,
-                            "output",
-                            "ip",
-                            "daddr",
-                            &ip.to_string(),
-                            &remote.protocol.to_string(),
-                            "dport",
-                            port_str.as_str(),
-                            "counter",
-                            "accept",
-                        ])?;
+                            &[
+                                "nft",
+                                "add",
+                                "rule",
+                                "inet",
+                                &netns.name,
+                                "output",
+                                "ip",
+                                "daddr",
+                                &ip.to_string(),
+                                &remote.protocol.to_string(),
+                                "dport",
+                                port_str.as_str(),
+                                "counter",
+                                "accept",
+                            ],
+                        )?;
                     }
                     Host::IPv6(ip) => {
-                        netns.exec(&[
-                            "nft",
-                            "add",
-                            "rule",
-                            "inet",
+                        NetworkNamespace::exec(
                             &netns.name,
-                            "output",
-                            "ip6",
-                            "daddr",
-                            &ip.to_string(),
-                            &remote.protocol.to_string(),
-                            "dport",
-                            port_str.as_str(),
-                            "counter",
-                            "accept",
-                        ])?;
+                            &[
+                                "nft",
+                                "add",
+                                "rule",
+                                "inet",
+                                &netns.name,
+                                "output",
+                                "ip6",
+                                "daddr",
+                                &ip.to_string(),
+                                &remote.protocol.to_string(),
+                                "dport",
+                                port_str.as_str(),
+                                "counter",
+                                "accept",
+                            ],
+                        )?;
                     }
                     Host::Hostname(_name) => {
                         // TODO: Does this work with nftables?
-                        netns.exec(&[
-                            "nft",
-                            "add",
-                            "rule",
-                            "inet",
+                        NetworkNamespace::exec(
                             &netns.name,
-                            "output",
-                            // "ip",
-                            // "daddr",
-                            // &name.to_string(),
-                            &remote.protocol.to_string(),
-                            "dport",
-                            port_str.as_str(),
-                            "counter",
-                            "accept",
-                        ])?;
+                            &[
+                                "nft",
+                                "add",
+                                "rule",
+                                "inet",
+                                &netns.name,
+                                "output",
+                                // "ip",
+                                // "daddr",
+                                // &name.to_string(),
+                                &remote.protocol.to_string(),
+                                "dport",
+                                port_str.as_str(),
+                                "counter",
+                                "accept",
+                            ],
+                        )?;
                     }
                 }
             }
 
-            netns.exec(&[
-                "nft",
-                "add",
-                "rule",
-                "inet",
+            NetworkNamespace::exec(
                 &netns.name,
-                "output",
-                "oifname",
-                "\"tun*\"",
-                "counter",
-                "accept",
-            ])?;
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "output",
+                    "oifname",
+                    "\"tun*\"",
+                    "counter",
+                    "accept",
+                ],
+            )?;
 
-            netns.exec(&[
-                "nft",
-                "add",
-                "rule",
-                "inet",
+            NetworkNamespace::exec(
                 &netns.name,
-                "output",
-                "counter",
-                "reject",
-                "with",
-                "icmp",
-                "type",
-                "net-unreachable",
-            ])?;
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "output",
+                    "counter",
+                    "reject",
+                    "with",
+                    "icmp",
+                    "type",
+                    "net-unreachable",
+                ],
+            )?;
         }
     }
     Ok(())

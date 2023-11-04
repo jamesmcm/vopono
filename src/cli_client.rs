@@ -38,26 +38,23 @@ impl UiClient for CliClient {
     }
 
     fn get_input(&self, inp: Input) -> anyhow::Result<String> {
-        let mut d = dialoguer::Input::<String>::new();
-
-        d.with_prompt(&inp.prompt);
+        let mut d = dialoguer::Input::<String>::new().with_prompt(&inp.prompt);
 
         if inp.validator.is_some() {
-            d.validate_with(inp.validator.unwrap());
+            d = d.validate_with(inp.validator.unwrap());
         };
 
         Ok(d.interact()?)
     }
 
     fn get_input_numeric_u16(&self, inp: InputNumericu16) -> anyhow::Result<u16> {
-        let mut d = dialoguer::Input::<u16>::new();
-        d.with_prompt(&inp.prompt);
+        let mut d = dialoguer::Input::<u16>::new().with_prompt(&inp.prompt);
 
         if inp.default.is_some() {
-            d.default(inp.default.unwrap());
+            d = d.default(inp.default.unwrap());
         }
         if inp.validator.is_some() {
-            d.validate_with(inp.validator.unwrap());
+            d = d.validate_with(inp.validator.unwrap());
         }
 
         Ok(d.interact()?)
@@ -66,9 +63,9 @@ impl UiClient for CliClient {
     fn get_password(&self, pw: Password) -> anyhow::Result<String> {
         let mut req = dialoguer::Password::new();
         if pw.confirm {
-            req.with_confirmation("Confirm password", "Passwords did not match");
+            req = req.with_confirmation("Confirm password", "Passwords did not match");
         };
-        req.with_prompt(pw.prompt);
+        req = req.with_prompt(pw.prompt);
         Ok(req.interact()?)
     }
 }
