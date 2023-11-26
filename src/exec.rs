@@ -150,6 +150,17 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         command.protonvpn_port_forwarding
     };
 
+    // Create netns only
+    let create_netns_only = if !command.create_netns_only {
+        vopono_config_settings
+            .get("create-netns-only")
+            .map_err(|_e| anyhow!("Failed to read config file"))
+            .ok()
+            .unwrap_or(false)
+    } else {
+        command.create_netns_only
+    };
+
     // Assign DNS server from args or vopono config file
     let base_dns = command.dns.clone().or_else(|| {
         vopono_config_settings
@@ -551,15 +562,6 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         vopono_core::util::open_ports(&ns, &[pmpc.local_port], firewall)?;
     }
 
-    let application = ApplicationWrapper::new(
-        &ns,
-        &command.application,
-        user,
-        group,
-        working_directory.map(PathBuf::from),
-        natpmpc,
-    )?;
-
     // Launch TCP proxy server on other threads if forwarding ports
     // TODO: Fix when running as root
     let mut proxy = Vec::new();
@@ -580,27 +582,46 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         }
     }
 
-    let pid = application.handle.id();
-    info!(
-        "Application {} launched in network namespace {} with pid {}",
-        &command.application, &ns.name, pid
-    );
+    if !create_netns_only {
+        let application = ApplicationWrapper::new(
+            &ns,
+            &command.application,
+            user,
+            group,
+            working_directory.map(PathBuf::from),
+            natpmpc,
+        )?;
 
-    if let Some(pmpc) = application.protonvpn_port_forwarding.as_ref() {
-        info!("ProtonVPN Port Forwarding on port {}", pmpc.local_port)
-    }
-    let output = application.wait_with_output()?;
-    io::stdout().write_all(output.stdout.as_slice())?;
-
-    // Allow daemons to leave namespace open
-    if vopono_core::util::check_process_running(pid) {
+        let pid = application.handle.id();
         info!(
-            "Process {} still running, assumed to be daemon - will leave network namespace alive until ctrl+C received",
-            pid
+            "Application {} launched in network namespace {} with pid {}",
+            &command.application, &ns.name, pid
         );
-        stay_alive(Some(pid), signals);
-    } else if command.keep_alive {
-        info!("Keep-alive flag active - will leave network namespace alive until ctrl+C received");
+
+        if let Some(pmpc) = application.protonvpn_port_forwarding.as_ref() {
+            info!("ProtonVPN Port Forwarding on port {}", pmpc.local_port)
+        }
+        let output = application.wait_with_output()?;
+        io::stdout().write_all(output.stdout.as_slice())?;
+
+        // Allow daemons to leave namespace open
+        if vopono_core::util::check_process_running(pid) {
+            info!(
+            "Process {} still running, assumed to be daemon - will leave network namespace {} alive until ctrl+C received",
+            pid, &ns.name
+        );
+            stay_alive(Some(pid), signals);
+        } else if command.keep_alive {
+            info!(
+                "Keep-alive flag active - will leave network namespace {} alive until ctrl+C received", &ns.name
+            );
+            stay_alive(None, signals);
+        }
+    } else {
+        info!(
+            "Created netns {} - will leave network namespace alive until ctrl+C received",
+            &ns.name
+        );
         stay_alive(None, signals);
     }
 

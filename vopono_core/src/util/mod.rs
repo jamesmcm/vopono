@@ -353,8 +353,7 @@ pub fn elevate_privileges(askpass: bool) -> anyhow::Result<()> {
             .status()
             .context(format!("Executing sudo {} {:?}", sudo_flags, &args))?;
 
-        // Deprecated - do we need to handle flag here?
-        // cleanup::cleanup_signal(SIGINT)?;
+        // TODO: Could handle executing with non-sudo firejail here
 
         if terminated.load(Ordering::SeqCst) {
             // we received a sigint,

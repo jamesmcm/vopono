@@ -21,6 +21,22 @@ entire shell sessions inside vopono.
 Note that the order of command-line arguments matters, as the `--dns`
 argument can take a list of DNS servers for example.
 
+### Creating only Network Namespace
+
+You can run vopono to create only the network namespace using the
+`--create-netns-only` argument, the application related arguments are
+then ignored (pass anything as the application name). This can be useful
+for debugging connection issues.
+
+This can also be used to launch an application without sudo via firejail
+- e.g. (where `none` is passed as the dummy application):
+
+```bash
+$ vopono -v exec --provider protonvpn --server japan --protocol openvpn --create-netns-only none
+2023-11-26T11:17:52.623Z INFO  vopono::exec > Created netns vo_pr_japan - will leave network namespace alive until ctrl+C received
+$ firejail --netns=vo_pr_japan firefox-developer-edition
+```
+
 ### Configuration file
 
 You can save default configuration options in the config file
