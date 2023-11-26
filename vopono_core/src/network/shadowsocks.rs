@@ -16,7 +16,6 @@ use log::{debug, error};
 use rand::seq::SliceRandom;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::convert::TryFrom;
 use std::fs::read_to_string;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
@@ -95,9 +94,9 @@ pub fn uses_shadowsocks(openvpn_config: &Path) -> anyhow::Result<Option<(IpAddr,
     }
     debug!("socks-proxy detected, will launch Shadowsocks server");
     Ok(Some((
-        IpAddr::try_from(Ipv4Addr::from_str(
+        IpAddr::from(Ipv4Addr::from_str(
             cap.as_ref().unwrap().get(1).unwrap().as_str(),
-        )?)?,
+        )?),
         cap.unwrap().get(2).unwrap().as_str().parse::<u16>()?,
     )))
 }
@@ -113,9 +112,9 @@ pub fn get_routes_from_config(path: &Path) -> anyhow::Result<Vec<IpAddr>> {
     let caps = re.captures_iter(&file_string);
 
     for cap in caps {
-        output_vec.push(IpAddr::try_from(Ipv4Addr::from_str(
+        output_vec.push(IpAddr::from(Ipv4Addr::from_str(
             cap.get(1).unwrap().as_str(),
-        )?)?);
+        )?));
     }
 
     if output_vec.is_empty() {

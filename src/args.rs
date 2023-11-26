@@ -216,6 +216,10 @@ pub struct ExecCommand {
     /// Enable port forwarding for ProtonVPN connections
     #[clap(long = "protonvpn-port-forwarding")]
     pub protonvpn_port_forwarding: bool,
+
+    /// Only create network namespace (does not run application)
+    #[clap(long = "create-netns-only")]
+    pub create_netns_only: bool,
 }
 
 #[derive(Parser)]
