@@ -120,7 +120,8 @@ impl OpenVpnProvider for Mullvad {
                     relay.ipv4_addr_in, port, relay.hostname
                 )
             } else {
-                format!("remote {}.mullvad.net {}", relay.hostname, port)
+                // TODO: Use fqdn here?
+                format!("remote {}.relays.mullvad.net {}", relay.hostname, port)
             };
 
             file_set.entry(file_name).or_default().push(remote_string);

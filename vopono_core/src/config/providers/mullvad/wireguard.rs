@@ -1,39 +1,19 @@
 use super::Mullvad;
-use super::{AuthToken, UserInfo, UserResponse, WireguardProvider};
-use crate::config::providers::{BoolChoice, ConfigurationChoice, Input, InputNumericu16, UiClient};
+use super::WireguardProvider;
+use crate::config::providers::{ConfigurationChoice, Input, InputNumericu16, UiClient};
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
-use crate::util::wireguard::{generate_keypair, generate_public_key, WgKey, WgPeer};
-use anyhow::{anyhow, Context};
+use crate::util::wireguard::{generate_public_key, WgKey, WgPeer};
+use anyhow::Context;
 use ipnet::IpNet;
 use log::{debug, info};
 use regex::Regex;
 use reqwest::blocking::Client;
-use reqwest::header::AUTHORIZATION;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::fs::create_dir_all;
 use std::io::Write;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
-
-impl Mullvad {
-    fn upload_wg_key(client: &Client, auth_token: &str, keypair: &WgKey) -> anyhow::Result<()> {
-        let mut map = HashMap::new();
-        map.insert("pubkey", keypair.public.clone());
-        client
-            .post("https://api.mullvad.net/www/wg-pubkeys/add/")
-            .header(AUTHORIZATION, format!("Token {auth_token}"))
-            .json(&map)
-            .send()?
-            .error_for_status()
-            .context("Failed to upload keypair to Mullvad")?;
-        info!(
-            "Public key submitted to Mullvad. Private key will be saved in generated config files."
-        );
-        Ok(())
-    }
-}
 
 impl WireguardProvider for Mullvad {
     fn create_wireguard_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
@@ -47,46 +27,15 @@ impl WireguardProvider for Mullvad {
             .send()?
             .json().with_context(|| "Failed to parse Mullvad relays response - try again after a few minutes or report an issue if it is persistent")?;
 
-        let username = self.request_mullvad_username(uiclient)?;
-        let auth: AuthToken = client
-            .get(format!("https://api.mullvad.net/www/accounts/{username}/"))
-            .send()?
-            .json()?;
-
-        let user_info: UserResponse = client
-            .get("https://api.mullvad.net/www/me/")
-            .header(AUTHORIZATION, format!("Token {}", auth.auth_token))
-            .send()?
-            .json()?;
-
-        let user_info = user_info.account;
-        debug!("Received user info: {:?}", user_info);
-
-        let keypair: WgKey = prompt_for_wg_key(user_info, &client, &auth.auth_token, uiclient)?;
+        let (keypair, ipv4_net, ipv6_net) = prompt_for_wg_key(uiclient)?;
 
         debug!("Chosen keypair: {:?}", keypair);
-        // Get user info again in case we uploaded new key
-        let user_info: UserResponse = client
-            .get("https://api.mullvad.net/www/me/")
-            .header(AUTHORIZATION, format!("Token {}", auth.auth_token))
-            .send()?
-            .json()?;
-
-        let user_info = user_info.account;
-        let wg_peer = user_info
-            .wg_peers
-            .iter()
-            .find(|x| x.key.public == keypair.public)
-            .ok_or_else(|| anyhow!("Did not find key: {} in Mullvad account", keypair.public))?;
 
         // TODO: Hardcoded IP - can we scrape this anywhere?
         let dns = std::net::Ipv4Addr::new(193, 138, 218, 74);
         let interface = WireguardInterface {
             private_key: keypair.private.clone(),
-            address: vec![
-                IpNet::from(wg_peer.ipv4_address),
-                IpNet::from(wg_peer.ipv6_address),
-            ],
+            address: vec![ipv4_net, ipv6_net],
             dns: Some(vec![IpAddr::from(dns)]),
         };
 
@@ -162,7 +111,6 @@ struct WireguardRelay {
     ipv6_addr_in: std::net::Ipv6Addr,
     pubkey: String,
     multihop_port: u16,
-    socks_name: String,
 }
 
 struct Devices {
@@ -188,69 +136,48 @@ impl ConfigurationChoice for Devices {
     }
 }
 
-fn prompt_for_wg_key(
-    user_info: UserInfo,
-    client: &Client,
-    auth_token: &str,
-    uiclient: &dyn UiClient,
-) -> anyhow::Result<WgKey> {
-    if !user_info.wg_peers.is_empty() {
-        let existing = Devices { devices: user_info.wg_peers.clone()};
+fn prompt_for_wg_key(uiclient: &dyn UiClient) -> anyhow::Result<(WgKey, IpNet, IpNet)> {
+    // TODO: We could also generate new private key first - generate_keypair()
+    let private_key = uiclient.get_input(Input {
+        prompt: "Enter your Wireguard Private key and upload the Public Key as a Mullvad device"
+            .to_owned(),
+        validator: Some(Box::new(
+            move |private_key: &String| -> Result<(), String> {
+                let private_key = private_key.trim();
 
-        let selection = uiclient.get_configuration_choice(&existing)?;
-
-        if selection >= user_info.wg_peers.len() {
-            if user_info.wg_peers.len() >= user_info.max_wg_peers as usize
-                || !user_info.can_add_wg_peers
-            {
-                return Err(anyhow!("Cannot add more Wireguard keypairs to this account. Try to delete existing keypairs."));
-            }
-            let keypair = generate_keypair()?;
-            Mullvad::upload_wg_key(client, auth_token, &keypair)?;
-            Ok(keypair)
-        } else {
-            let pubkey_clone =  user_info.wg_peers[selection].key.public.clone();
-            let private_key = uiclient.get_input(Input{
-                    prompt: format!("Private key for {}",
-                    &user_info.wg_peers[selection].key.public
-                ),
-        validator: Some(Box::new(move |private_key: &String| -> Result<(), String> {
-
-            let private_key = private_key.trim();
-
-            if private_key.len() != 44 {
-                return Err("Expected private key length of 44 characters".to_string()
-                );
-            }
-
-            match generate_public_key(private_key) {
-                Ok(public_key) => {
-            if public_key != pubkey_clone {
-                return Err("Private key does not match public key".to_string());
-            }
-            Ok(())
+                if private_key.len() != 44 {
+                    Err("Expected private key length of 44 characters".to_string())
+                } else {
+                    Ok(())
                 }
-                Err(_) => Err("Failed to generate public key".to_string())
-        }}))})?;
+            },
+        )),
+    })?;
 
+    let ipv4_address = IpNet::from_str(&uiclient.get_input(Input {
+        prompt: "Enter the IPv4 address range Mullvad returned after adding the device".to_owned(),
+        validator: Some(Box::new(move |_ip: &String| -> Result<(), String> {
+            // TODO: Ipv4 range validator
+            Ok(())
+        })),
+    })?)?;
 
-            Ok(WgKey {
-                public: user_info.wg_peers[selection].key.public.clone(),
-                private: private_key,
-            })
-        }
-    } else if uiclient.get_bool_choice(BoolChoice{
-            prompt:
-                "No Wireguard keys currently exist on your Mullvad account, would you like to generate a new keypair?".to_string(),
-            default: true,
-    })?
-             {
-                let keypair = generate_keypair()?;
-                Mullvad::upload_wg_key(client, auth_token, &keypair)?;
-                Ok(keypair)
-        } else {
-            Err(anyhow!("Wireguard requires a keypair, either upload one to Mullvad or let vopono generate one"))
-    }
+    let ipv6_address = IpNet::from_str(&uiclient.get_input(Input {
+        prompt: "Enter the IPv6 address range Mullvad returned after adding the device".to_owned(),
+        validator: Some(Box::new(move |_ip: &String| -> Result<(), String> {
+            // TODO: Ipv4 range validator
+            Ok(())
+        })),
+    })?)?;
+
+    Ok((
+        WgKey {
+            public: generate_public_key(&private_key).expect("Failed to generate public key"),
+            private: private_key,
+        },
+        ipv4_address,
+        ipv6_address,
+    ))
 }
 
 fn request_port(uiclient: &dyn UiClient) -> anyhow::Result<u16> {
