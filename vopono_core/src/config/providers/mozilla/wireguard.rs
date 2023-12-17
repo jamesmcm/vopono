@@ -280,7 +280,6 @@ struct WireguardRelay {
     ipv6_addr_in: std::net::Ipv6Addr,
     pubkey: String,
     multihop_port: u16,
-    socks_name: String,
 }
 
 #[derive(Serialize, Debug)]

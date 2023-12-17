@@ -10,11 +10,6 @@ use crate::util::wireguard::WgPeer;
 use anyhow::anyhow;
 use serde::Deserialize;
 
-#[derive(Deserialize, Debug)]
-struct AuthToken {
-    auth_token: String,
-}
-
 #[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
 struct UserInfo {
@@ -23,12 +18,6 @@ struct UserInfo {
     max_wg_peers: u8,
     can_add_wg_peers: bool,
     wg_peers: Vec<WgPeer>,
-}
-
-// TODO: use Json::Value to remove this?
-#[derive(Deserialize, Debug)]
-struct UserResponse {
-    account: UserInfo,
 }
 
 pub struct Mullvad {}
