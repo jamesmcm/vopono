@@ -15,6 +15,8 @@ use vopono_core::config::vpn::{verify_auth, Protocol};
 use vopono_core::network::application_wrapper::ApplicationWrapper;
 use vopono_core::network::firewall::Firewall;
 use vopono_core::network::natpmpc::Natpmpc;
+use vopono_core::network::piapf::Piapf;
+use vopono_core::network::Forwarder;
 use vopono_core::network::netns::NetworkNamespace;
 use vopono_core::network::network_interface::{get_active_interfaces, NetworkInterface};
 use vopono_core::network::shadowsocks::uses_shadowsocks;
@@ -139,15 +141,15 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         command.working_directory
     };
 
-    // Port forwarding for ProtonVPN
-    let protonvpn_port_forwarding = if !command.protonvpn_port_forwarding {
+    // Port forwarding
+    let port_forwarding = if !command.port_forwarding {
         vopono_config_settings
-            .get("protonvpn-port-forwarding")
+            .get("port-forwarding")
             .map_err(|_e| anyhow!("Failed to read config file"))
             .ok()
             .unwrap_or(false)
     } else {
-        command.protonvpn_port_forwarding
+        command.port_forwarding
     };
 
     // Create netns only
@@ -547,19 +549,30 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
 
     let ns = ns.write_lockfile(&command.application)?;
 
-    let natpmpc = if protonvpn_port_forwarding {
-        vopono_core::util::open_hosts(
-            &ns,
-            vec![vopono_core::network::natpmpc::PROTONVPN_GATEWAY],
-            firewall,
-        )?;
-        Some(Natpmpc::new(&ns)?)
+    let forwarder: Option<Box<dyn Forwarder>> = if port_forwarding {
+        match provider {
+            VpnProvider::PrivateInternetAccess => {
+                Some(Box::new(Piapf::new(&ns, &protocol)?))
+            },
+            VpnProvider::ProtonVPN => {
+                vopono_core::util::open_hosts(
+                    &ns,
+                    vec![vopono_core::network::natpmpc::PROTONVPN_GATEWAY],
+                    firewall,
+                )?;
+                Some(Box::new(Natpmpc::new(&ns)?))
+            },
+            _ => {
+                anyhow::bail!("Port forwarding not supported for the selected provider");
+            }
+        }
     } else {
         None
     };
 
-    if let Some(pmpc) = natpmpc.as_ref() {
-        vopono_core::util::open_ports(&ns, &[pmpc.local_port], firewall)?;
+    // TODO: The forwarder should probably be able to do this (pass firewall?)
+    if let Some(fwd) = forwarder.as_ref() {
+        vopono_core::util::open_ports(&ns, &[fwd.forwarded_port()], firewall)?;
     }
 
     // Launch TCP proxy server on other threads if forwarding ports
@@ -589,7 +602,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             user,
             group,
             working_directory.map(PathBuf::from),
-            natpmpc,
+            forwarder,
         )?;
 
         let pid = application.handle.id();
@@ -598,8 +611,8 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             &command.application, &ns.name, pid
         );
 
-        if let Some(pmpc) = application.protonvpn_port_forwarding.as_ref() {
-            info!("ProtonVPN Port Forwarding on port {}", pmpc.local_port)
+        if let Some(fwd) = application.port_forwarding.as_ref() {
+            info!("Port Forwarding on port {}", fwd.forwarded_port())
         }
         let output = application.wait_with_output()?;
         io::stdout().write_all(output.stdout.as_slice())?;

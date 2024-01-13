@@ -90,6 +90,7 @@ impl OpenVpnProvider for PrivateInternetAccess {
         }
         Ok(())
     }
+    
 }
 
 #[derive(EnumIter, PartialEq)]

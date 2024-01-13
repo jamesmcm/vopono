@@ -3,6 +3,7 @@ pub mod dns_config;
 pub mod firewall;
 pub mod host_masquerade;
 pub mod natpmpc;
+pub mod piapf;
 pub mod netns;
 pub mod network_interface;
 pub mod openconnect;
@@ -13,3 +14,9 @@ pub mod sysctl;
 pub mod veth_pair;
 pub mod warp;
 pub mod wireguard;
+
+pub trait Forwarder {
+
+    fn forwarded_port(&self) -> u16;
+
+}

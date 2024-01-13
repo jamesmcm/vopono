@@ -93,7 +93,7 @@ impl PrivateInternetAccess {
     const PORT: u16 = 1337;
     const CERT: &'static [u8] = include_bytes!("ca.rsa.4096.crt");
 
-    fn get_pia_token(user: &str, pass: &str) -> anyhow::Result<String> {
+    pub fn get_pia_token(user: &str, pass: &str) -> anyhow::Result<String> {
         let token: PiaToken = Client::new()
             .get("https://www.privateinternetaccess.com/gtoken/generateToken")
             .basic_auth(user, Some(pass))
@@ -137,6 +137,13 @@ impl PrivateInternetAccess {
     fn config_file_path(&self) -> anyhow::Result<PathBuf> {
         Ok(self.wireguard_dir()?.join("config.txt"))
     }
+    
+    pub fn load_wireguard_auth(&self) -> anyhow::Result<(String, String)> {
+        let config_file = File::open(self.config_file_path()?)?;
+        let config: Config = serde_json::from_reader(config_file)?;
+        Ok((config.user, config.pass))
+    }
+
 }
 
 impl WireguardProvider for PrivateInternetAccess {
@@ -224,7 +231,7 @@ impl WireguardProvider for PrivateInternetAccess {
 
         Ok(())
     }
-
+    
     fn wireguard_preup(&self, wg_config_file: &Path) -> anyhow::Result<()> {
         let pia_config_file = File::open(self.config_file_path()?)?;
         let pia_config: Config = serde_json::from_reader(pia_config_file)?;

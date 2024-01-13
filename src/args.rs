@@ -213,9 +213,9 @@ pub struct ExecCommand {
     #[clap(long = "allow-host-access")]
     pub allow_host_access: bool,
 
-    /// Enable port forwarding for ProtonVPN connections
-    #[clap(long = "protonvpn-port-forwarding")]
-    pub protonvpn_port_forwarding: bool,
+    /// Enable port forwarding for if supported
+    #[clap(long = "port-forwarding")]
+    pub port_forwarding: bool,
 
     /// Only create network namespace (does not run application)
     #[clap(long = "create-netns-only")]
