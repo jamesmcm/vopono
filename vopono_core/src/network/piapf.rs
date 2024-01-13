@@ -44,8 +44,8 @@ impl Piapf {
         }
         let re = Regex::new(r" *1 *(?P<gateway>\d{1,3}.\d{1,3}.\d{1,3}.\d{1,3}).*").unwrap();
         let result = String::from_utf8_lossy(&traceroute_response.stdout);
-        let second_line = result.lines().skip(1).next().unwrap();
-        let vpn_gateway = re.captures(&second_line).unwrap().get(1).unwrap().as_str().to_string();
+        let second_line = result.lines().nth(1).unwrap();
+        let vpn_gateway = re.captures(second_line).unwrap().get(1).unwrap().as_str().to_string();
         
         log::info!("PIA gateway: {}", vpn_gateway);
         
