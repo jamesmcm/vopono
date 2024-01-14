@@ -1,5 +1,4 @@
-use super::PrivateInternetAccess;
-use super::WireguardProvider;
+use super::{PrivateInternetAccess,Provider,WireguardProvider};
 use crate::config::providers::{BoolChoice, UiClient};
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
@@ -104,6 +103,16 @@ impl PrivateInternetAccess {
             PiaToken::Ok { token } => Ok(token),
             PiaToken::Err { message } => Err(anyhow!("{}", message)),
         }
+    }
+    
+    pub fn pia_cert_path(&self) -> anyhow::Result<PathBuf> {
+        Ok(self.provider_dir()?.join("ca.rsa.4096.crt"))
+    }
+    
+    pub fn write_pia_cert(&self) -> anyhow::Result<()> {
+        let mut cert_file = File::create(self.pia_cert_path()?)?;
+        cert_file.write_all(Self::CERT)?;
+        Ok(())
     }
 
     fn add_key(
@@ -228,6 +237,9 @@ impl WireguardProvider for PrivateInternetAccess {
         // Write PrivateInternetAccess config file
         let pia_config_file = File::create(self.config_file_path()?)?;
         serde_json::to_writer(pia_config_file, &config)?;
+        
+        // Write PIA certificate
+        self.write_pia_cert()?;
 
         Ok(())
     }

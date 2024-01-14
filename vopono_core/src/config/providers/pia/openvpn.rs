@@ -88,6 +88,10 @@ impl OpenVpnProvider for PrivateInternetAccess {
             let mut outfile = File::create(auth_file)?;
             write!(outfile, "{user}\n{pass}")?;
         }
+        
+        // Write PIA certificate 
+        self.write_pia_cert()?;
+        
         Ok(())
     }
     

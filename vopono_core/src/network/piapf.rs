@@ -29,6 +29,7 @@ struct ThreadParams {
     pub payload: String,
     pub hostname: String,
     pub gateway: String,
+    pub pia_cert_path: String,
 }
 
 impl Piapf {
@@ -42,10 +43,10 @@ impl Piapf {
             log::error!("Could not locate gateway with traceroute");
             anyhow::bail!("Could not locate gateway with traceroute")
         }
-        let re = Regex::new(r" *1 *(?P<gateway>\d{1,3}.\d{1,3}.\d{1,3}.\d{1,3}).*").unwrap();
+        let re = Regex::new(r" *1 *(?P<gateway>\d{1,3}.\d{1,3}.\d{1,3}.\d{1,3}).*").expect("Unable to compile regex");
         let result = String::from_utf8_lossy(&traceroute_response.stdout);
-        let second_line = result.lines().nth(1).unwrap();
-        let vpn_gateway = re.captures(second_line).unwrap().get(1).unwrap().as_str().to_string();
+        let second_line = result.lines().nth(1).expect("Missing second line (first hop) in traceroute");
+        let vpn_gateway = re.captures(second_line).expect("No captures from traceroute output").get(1).expect("No matching IP group in traceroute").as_str().to_string();
         
         log::info!("PIA gateway: {}", vpn_gateway);
         
@@ -72,13 +73,15 @@ impl Piapf {
         //log::info!("PIA u/p: {} / {}", pia_user, pia_pass);
         
         let pia_token = PrivateInternetAccess::get_pia_token(&pia_user, &pia_pass)?;
+        let pia_cert_path = pia.pia_cert_path()?.display().to_string();
         
         log::info!("PIA pia_token: {}", pia_token);
+        log::info!("PIA pia_cert_path: {}", pia_cert_path);
 
         let get_response = NetworkNamespace::exec_with_output(&ns.name, &["curl", 
             "-s", "-m", "5",
             "--connect-to", &format!("{}::{}:", vpn_hostname, vpn_gateway).to_string(),
-            "--cacert", "/home/benland100/vopono/vopono_core/src/config/providers/pia/ca.rsa.4096.crt", //FIXME: how to get this path?
+            "--cacert", &pia_cert_path,
             "-G", "--data-urlencode", &format!("token={}",pia_token).to_string(),
             &format!("https://{}:19999/getSignature",vpn_hostname).to_string() ] )?;
         if !get_response.status.success() {
@@ -92,19 +95,20 @@ impl Piapf {
             anyhow::bail!("Signature for port forward from PIA API not OK");
         }
         
-        let signature = parsed["signature"].as_str().unwrap().to_string();
-        let payload = parsed["payload"].as_str().unwrap().to_string();
+        let signature = parsed["signature"].as_str().expect("getSignature response missing signature").to_string();
+        let payload = parsed["payload"].as_str().expect("getSignature response missing payload").to_string();
         let decoded = BASE64_STANDARD.decode(&payload)?;
         let parsed = json::parse(String::from_utf8_lossy(&decoded).as_ref())?;
-        let port = parsed["port"].as_u16().unwrap();
+        let port = parsed["port"].as_u16().expect("getSignature response missing port");
 
         let params = ThreadParams {
             netns_name: ns.name.clone(),
             hostname: vpn_hostname,
             gateway: vpn_gateway,
-            signature: signature,
-            payload: payload,
-            port: port,
+            pia_cert_path,
+            signature,
+            payload,
+            port,
         };
         Self::refresh_port(&params)?;
         let (send, recv) = mpsc::channel::<bool>();
@@ -112,7 +116,7 @@ impl Piapf {
 
         log::info!("PIA forwarded local port: {port}");
         Ok(Self {
-            port: port,
+            port,
             loop_thread_handle: Some(handle),
             send_channel: send,
         })
@@ -123,7 +127,7 @@ impl Piapf {
         let bind_response = NetworkNamespace::exec_with_output(&params.netns_name, &["curl", 
             "-Gs", "-m", "5",
             "--connect-to", &format!("{}::{}:", params.hostname, params.gateway).to_string(),
-            "--cacert", "/home/benland100/vopono/vopono_core/src/config/providers/pia/ca.rsa.4096.crt", //FIXME: how to get this path?
+            "--cacert", &params.pia_cert_path,
             "--data-urlencode", &format!("payload={}", params.payload).to_string(),
             "--data-urlencode", &format!("signature={}", params.signature).to_string(),
             &format!("https://{}:19999/bindPort", params.hostname).to_string() ], )?;
