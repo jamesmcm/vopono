@@ -31,13 +31,14 @@ struct ThreadParams {
     pub hostname: String,
     pub gateway: String,
     pub pia_cert_path: String,
+    pub callback: Option<String>,
 }
 
 impl Piapf {
-    pub fn new(ns: &NetworkNamespace, config_file: &String, protocol: &Protocol) -> anyhow::Result<Self> {
+    pub fn new(ns: &NetworkNamespace, config_file: &String, protocol: &Protocol, callback: Option<&String>) -> anyhow::Result<Self> {
         let pia = PrivateInternetAccess {}; //This is a bit weird, no? There's no state, so effectively all the methods are static...
         
-        if ! which("traceroute").is_ok() {
+        if which("traceroute").is_err() {
             log::error!("The traceroute utility is necessary for PIA port forwarding. Please install traceroute.");
             anyhow::bail!("The traceroute utility is necessary for PIA port forwarding. Please install traceroute.")
         }
@@ -115,6 +116,7 @@ impl Piapf {
             signature,
             payload,
             port,
+            callback: callback.cloned(),
         };
         Self::refresh_port(&params)?;
         let (send, recv) = mpsc::channel::<bool>();
@@ -149,10 +151,11 @@ impl Piapf {
             anyhow::bail!("Bind for port forward from PIA API not OK");
         }
         
-        //FIXME: its very useful to have a configurable callback script to receive the port number
-        let refresh_response = NetworkNamespace::exec_with_output(&params.netns_name, &["/home/benland100/vopono/test_callback.sh", &params.port.to_string()], )?;
-        if !refresh_response.status.success() {
-            log::info!("Callback script was unsuccessful!");
+        if let Some(cb) = &params.callback {
+            let refresh_response = NetworkNamespace::exec_with_output(&params.netns_name, &[&cb, &params.port.to_string()], )?;
+            if !refresh_response.status.success() {
+                log::info!("Callback script was unsuccessful!");
+            }
         }
         
         log::info!("Successfully updated claim to port {}", params.port);

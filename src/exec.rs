@@ -550,6 +550,15 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     let ns = ns.write_lockfile(&command.application)?;
 
     let forwarder: Option<Box<dyn Forwarder>> = if port_forwarding {
+    
+        let callback = command
+            .port_forwarding_callback
+            .or_else(|| {
+                vopono_config_settings
+                    .get("port_forwarding_callback")
+                    .map_err(|_e| anyhow!("Failed to read config file"))
+                    .ok()
+            });
         match provider {
             VpnProvider::PrivateInternetAccess => {
                 let conf_path = config_file
@@ -558,7 +567,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                     .file_name().unwrap()
                     .to_str().expect("No filename for PIA config file")
                     .to_string();
-                Some(Box::new(Piapf::new(&ns, &conf_name, &protocol)?))
+                Some(Box::new(Piapf::new(&ns, &conf_name, &protocol, callback.as_ref())?))
             },
             VpnProvider::ProtonVPN => {
                 vopono_core::util::open_hosts(
