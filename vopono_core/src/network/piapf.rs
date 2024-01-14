@@ -34,7 +34,7 @@ struct ThreadParams {
 }
 
 impl Piapf {
-    pub fn new(ns: &NetworkNamespace, protocol: &Protocol) -> anyhow::Result<Self> {
+    pub fn new(ns: &NetworkNamespace, config_file: &String, protocol: &Protocol) -> anyhow::Result<Self> {
         let pia = PrivateInternetAccess {}; //This is a bit weird, no? There's no state, so effectively all the methods are static...
         
         if ! which("traceroute").is_ok() {
@@ -57,8 +57,8 @@ impl Piapf {
         log::info!("PIA gateway: {}", vpn_gateway);
         
         let vpn_hostname = match protocol {
-            Protocol::OpenVpn => "nl-amsterdam.privacy.network".to_string(), // FIXME: Parse this from the OpenVPN conf?
-            Protocol::Wireguard => "nl-amsterdam.privacy.network".to_string(), // FIXME: [Insert clever idea to get wireguard endpoint hostname here] 
+            Protocol::OpenVpn => pia.hostname_for_openvpn_conf(config_file)?,
+            Protocol::Wireguard => pia.hostname_for_wireguard_conf(config_file)?,
             _ => {
                 log::error!("PIA port forwarding only supported for OpenVPN and Wireguard");
                 anyhow::bail!("PIA port forwarding only supported for OpenVPN and Wireguard")

@@ -431,7 +431,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                 }
 
                 ns.run_openvpn(
-                    config_file.expect("No config file provided"),
+                    config_file.clone().expect("No config file provided"),
                     auth_file,
                     &dns,
                     !command.no_killswitch,
@@ -466,7 +466,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             }
             Protocol::Wireguard => {
                 ns.run_wireguard(
-                    config_file.expect("No config file provided"),
+                    config_file.clone().expect("No config file provided"),
                     !command.no_killswitch,
                     command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
@@ -481,7 +481,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                 // TODO: DNS suffixes?
                 ns.dns_config(&dns, &[], command.hosts_entries.as_ref())?;
                 ns.run_openconnect(
-                    config_file.expect("No OpenConnect config file provided"),
+                    config_file.clone().expect("No OpenConnect config file provided"),
                     command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
                     firewall,
@@ -492,7 +492,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             Protocol::OpenFortiVpn => {
                 // TODO: DNS handled by OpenFortiVpn directly?
                 ns.run_openfortivpn(
-                    config_file.expect("No OpenFortiVPN config file provided"),
+                    config_file.clone().expect("No OpenFortiVPN config file provided"),
                     command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
                     command.hosts_entries.as_ref(),
@@ -552,7 +552,13 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     let forwarder: Option<Box<dyn Forwarder>> = if port_forwarding {
         match provider {
             VpnProvider::PrivateInternetAccess => {
-                Some(Box::new(Piapf::new(&ns, &protocol)?))
+                let conf_path = config_file
+                    .expect("No PIA config file provided");
+                let conf_name = conf_path
+                    .file_name().unwrap()
+                    .to_str().expect("No filename for PIA config file")
+                    .to_string();
+                Some(Box::new(Piapf::new(&ns, &conf_name, &protocol)?))
             },
             VpnProvider::ProtonVPN => {
                 vopono_core::util::open_hosts(
