@@ -7,6 +7,7 @@ use std::{
 };
 use base64::prelude::*;
 use regex::Regex;
+use which::which;
 
 use super::netns::NetworkNamespace;
 use super::Forwarder;
@@ -36,9 +37,14 @@ impl Piapf {
     pub fn new(ns: &NetworkNamespace, protocol: &Protocol) -> anyhow::Result<Self> {
         let pia = PrivateInternetAccess {}; //This is a bit weird, no? There's no state, so effectively all the methods are static...
         
+        if ! which("traceroute").is_ok() {
+            log::error!("The traceroute utility is necessary for PIA port forwarding. Please install traceroute.");
+            anyhow::bail!("The traceroute utility is necessary for PIA port forwarding. Please install traceroute.")
+        }
+        
         let traceroute_response = NetworkNamespace::exec_with_output(
-            &ns.name, 
-            &["traceroute", "-n", "-m", "1", "privateinternetaccess.com" ], )?;
+            &ns.name,  &["traceroute", "-n", 
+            "-m", "1", "privateinternetaccess.com" ] )?;
         if !traceroute_response.status.success() {
             log::error!("Could not locate gateway with traceroute");
             anyhow::bail!("Could not locate gateway with traceroute")
