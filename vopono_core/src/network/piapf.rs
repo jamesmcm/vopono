@@ -13,10 +13,10 @@ use super::netns::NetworkNamespace;
 use super::Forwarder;
 
 use crate::config::vpn::Protocol;
-use crate::config::providers::OpenVpnProvider; // Added load_openvpn_auth to this trait 
-use crate::config::providers::pia::PrivateInternetAccess;  // Added load_wireguard_auth to this struct 
+use crate::config::providers::OpenVpnProvider;
+use crate::config::providers::pia::PrivateInternetAccess;
 
-/// Used to provide port forwarding for ProtonVPN
+/// Used to provide port forwarding for PrivateInternetAccess
 pub struct Piapf {
     pub port: u16,
     loop_thread_handle: Option<JoinHandle<()>>,
@@ -36,7 +36,7 @@ struct ThreadParams {
 
 impl Piapf {
     pub fn new(ns: &NetworkNamespace, config_file: &String, protocol: &Protocol, callback: Option<&String>) -> anyhow::Result<Self> {
-        let pia = PrivateInternetAccess {}; //This is a bit weird, no? There's no state, so effectively all the methods are static...
+        let pia = PrivateInternetAccess {};
         
         if which("traceroute").is_err() {
             log::error!("The traceroute utility is necessary for PIA port forwarding. Please install traceroute.");
