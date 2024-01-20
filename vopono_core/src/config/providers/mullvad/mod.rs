@@ -1,23 +1,45 @@
 mod openvpn;
 mod wireguard;
 
+use std::fmt::Display;
+
 use super::{
     ConfigurationChoice, Input, OpenVpnProvider, Provider, ShadowsocksProvider, UiClient,
     WireguardProvider,
 };
 use crate::config::vpn::Protocol;
-use crate::util::wireguard::WgPeer;
 use anyhow::anyhow;
 use serde::Deserialize;
 
-#[allow(dead_code)]
+#[derive(Deserialize, Debug)]
+struct AccessToken {
+    access_token: String,
+}
+
 #[derive(Deserialize, Debug, Clone)]
 struct UserInfo {
-    max_ports: u8,
-    active: bool,
-    max_wg_peers: u8,
-    can_add_wg_peers: bool,
-    wg_peers: Vec<WgPeer>,
+    expiry: String,
+    max_devices: u8,
+    can_add_devices: bool,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct Device {
+    name: String,
+    pubkey: String,
+    created: String,
+    ipv4_address: String,
+    ipv6_address: String,
+}
+
+impl Display for Device {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {} (created: {})",
+            self.name, self.pubkey, self.created
+        )
+    }
 }
 
 pub struct Mullvad {}
