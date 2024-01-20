@@ -1,4 +1,4 @@
-use super::{PrivateInternetAccess,Provider,WireguardProvider};
+use super::{PrivateInternetAccess, Provider, WireguardProvider};
 use crate::config::providers::{BoolChoice, UiClient};
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
@@ -105,11 +105,11 @@ impl PrivateInternetAccess {
             PiaToken::Err { message } => Err(anyhow!("{}", message)),
         }
     }
-    
+
     pub fn pia_cert_path(&self) -> anyhow::Result<PathBuf> {
         Ok(self.provider_dir()?.join("ca.rsa.4096.crt"))
     }
-    
+
     pub fn write_pia_cert(&self) -> anyhow::Result<()> {
         let mut cert_file = File::create(self.pia_cert_path()?)?;
         cert_file.write_all(Self::CERT)?;
@@ -147,26 +147,27 @@ impl PrivateInternetAccess {
     fn wireguard_config_file_path(&self) -> anyhow::Result<PathBuf> {
         Ok(self.wireguard_dir()?.join("config.txt"))
     }
-    
+
     pub fn load_wireguard_auth(&self) -> anyhow::Result<(String, String)> {
         let config_file = File::open(self.wireguard_config_file_path()?)?;
         let config: Config = serde_json::from_reader(config_file)?;
         Ok((config.user, config.pass))
     }
-    
+
     //This only works if wireguard was sync'd
-    pub fn hostname_for_wireguard_conf(&self, config_file: &String) -> anyhow::Result<String> { 
+    pub fn hostname_for_wireguard_conf(&self, config_file: &String) -> anyhow::Result<String> {
         let pia_config_file = File::open(self.wireguard_config_file_path()?)?;
         let pia_config: Config = serde_json::from_reader(pia_config_file)?;
-        
+
         let hostname = pia_config
             .hostname_lookup
             .get(config_file)
-            .with_context(|| format!("Could not find matching hostname for wireguard conf {config_file}"))?;
-        
+            .with_context(|| {
+                format!("Could not find matching hostname for wireguard conf {config_file}")
+            })?;
+
         Ok(hostname.to_string())
     }
-
 }
 
 impl WireguardProvider for PrivateInternetAccess {
@@ -219,9 +220,11 @@ impl WireguardProvider for PrivateInternetAccess {
             if only_port_forwarding && !region.port_forward {
                 continue;
             }
-            
+
             info!("Associating {id} with hostname {}", region.dns);
-            config.hostname_lookup.insert(format!("{id}.conf"), region.dns);
+            config
+                .hostname_lookup
+                .insert(format!("{id}.conf"), region.dns);
 
             // The servers are randomized on each request so we can just use the first one
             if let Some(wg_server) = region.servers.wg.as_ref().and_then(|s| s.first()) {
@@ -255,13 +258,13 @@ impl WireguardProvider for PrivateInternetAccess {
         // Write PrivateInternetAccess wireguard config file
         let pia_config_file = File::create(self.wireguard_config_file_path()?)?;
         serde_json::to_writer(pia_config_file, &config)?;
-        
+
         // Write PIA certificate
         self.write_pia_cert()?;
 
         Ok(())
     }
-    
+
     fn wireguard_preup(&self, wg_config_file: &Path) -> anyhow::Result<()> {
         let pia_config_file = File::open(self.wireguard_config_file_path()?)?;
         let pia_config: Config = serde_json::from_reader(pia_config_file)?;

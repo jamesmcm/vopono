@@ -61,7 +61,7 @@ impl OpenVpnProvider for ProtonVPN {
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
         let username = uiclient.get_input(Input {
             prompt:
-                "ProtonVPN OpenVPN username (see: https://account.protonvpn.com/account#openvpn ) - add +pmp suffix if using --protonvpn-port-forwarding - note not all servers support this feature"
+                "ProtonVPN OpenVPN username (see: https://account.protonvpn.com/account#openvpn ) - add +pmp suffix if using --port-forwarding - note not all servers support this feature"
                     .to_string(),
             validator: None,
         })?;

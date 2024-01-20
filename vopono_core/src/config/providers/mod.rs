@@ -15,10 +15,10 @@ use crate::util::vopono_dir;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::{
-    net::IpAddr, 
-    path::{Path, PathBuf},
     fs::File,
-    io::{BufReader, BufRead},
+    io::{BufRead, BufReader},
+    net::IpAddr,
+    path::{Path, PathBuf},
 };
 use strum_macros::{Display, EnumIter};
 // TODO: Consider removing this re-export
@@ -141,7 +141,6 @@ pub trait OpenVpnProvider: Provider {
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)>;
     fn auth_file_path(&self) -> anyhow::Result<Option<PathBuf>>;
 
-    
     fn load_openvpn_auth(&self) -> anyhow::Result<(String, String)> {
         let auth_file = self.auth_file_path()?;
         if let Some(auth_file) = auth_file {

@@ -216,7 +216,7 @@ pub struct ExecCommand {
     /// Enable port forwarding for if supported
     #[clap(long = "port-forwarding")]
     pub port_forwarding: bool,
-    
+
     /// Path or alias to executable script or binary to be called with the port as an argumnet
     /// when the port forwarding is refreshed (PIA only)
     #[clap(long = "port-forwarding-callback")]

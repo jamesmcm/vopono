@@ -15,12 +15,12 @@ use vopono_core::config::vpn::{verify_auth, Protocol};
 use vopono_core::network::application_wrapper::ApplicationWrapper;
 use vopono_core::network::firewall::Firewall;
 use vopono_core::network::natpmpc::Natpmpc;
-use vopono_core::network::piapf::Piapf;
-use vopono_core::network::Forwarder;
 use vopono_core::network::netns::NetworkNamespace;
 use vopono_core::network::network_interface::{get_active_interfaces, NetworkInterface};
+use vopono_core::network::piapf::Piapf;
 use vopono_core::network::shadowsocks::uses_shadowsocks;
 use vopono_core::network::sysctl::SysCtl;
+use vopono_core::network::Forwarder;
 use vopono_core::util::vopono_dir;
 use vopono_core::util::{get_config_file_protocol, get_config_from_alias};
 use vopono_core::util::{get_existing_namespaces, get_target_subnet};
@@ -484,7 +484,9 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                 // TODO: DNS suffixes?
                 ns.dns_config(&dns, &[], command.hosts_entries.as_ref())?;
                 ns.run_openconnect(
-                    config_file.clone().expect("No OpenConnect config file provided"),
+                    config_file
+                        .clone()
+                        .expect("No OpenConnect config file provided"),
                     command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
                     firewall,
@@ -495,7 +497,9 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             Protocol::OpenFortiVpn => {
                 // TODO: DNS handled by OpenFortiVpn directly?
                 ns.run_openfortivpn(
-                    config_file.clone().expect("No OpenFortiVPN config file provided"),
+                    config_file
+                        .clone()
+                        .expect("No OpenFortiVPN config file provided"),
                     command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
                     command.hosts_entries.as_ref(),
@@ -553,25 +557,28 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     let ns = ns.write_lockfile(&command.application)?;
 
     let forwarder: Option<Box<dyn Forwarder>> = if port_forwarding {
-    
-        let callback = command
-            .port_forwarding_callback
-            .or_else(|| {
-                vopono_config_settings
-                    .get("port_forwarding_callback")
-                    .map_err(|_e| anyhow!("Failed to read config file"))
-                    .ok()
-            });
+        let callback = command.port_forwarding_callback.or_else(|| {
+            vopono_config_settings
+                .get("port_forwarding_callback")
+                .map_err(|_e| anyhow!("Failed to read config file"))
+                .ok()
+        });
         match provider {
             VpnProvider::PrivateInternetAccess => {
-                let conf_path = config_file
-                    .expect("No PIA config file provided");
+                let conf_path = config_file.expect("No PIA config file provided");
                 let conf_name = conf_path
-                    .file_name().unwrap()
-                    .to_str().expect("No filename for PIA config file")
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .expect("No filename for PIA config file")
                     .to_string();
-                Some(Box::new(Piapf::new(&ns, &conf_name, &protocol, callback.as_ref())?))
-            },
+                Some(Box::new(Piapf::new(
+                    &ns,
+                    &conf_name,
+                    &protocol,
+                    callback.as_ref(),
+                )?))
+            }
             VpnProvider::ProtonVPN => {
                 vopono_core::util::open_hosts(
                     &ns,
@@ -579,7 +586,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                     firewall,
                 )?;
                 Some(Box::new(Natpmpc::new(&ns)?))
-            },
+            }
             _ => {
                 anyhow::bail!("Port forwarding not supported for the selected provider");
             }

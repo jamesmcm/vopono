@@ -131,9 +131,7 @@ impl Drop for Natpmpc {
 }
 
 impl Forwarder for Natpmpc {
-
     fn forwarded_port(&self) -> u16 {
         self.local_port
     }
-    
 }

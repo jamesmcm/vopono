@@ -1,12 +1,12 @@
 use std::path::PathBuf;
 
-use super::{Forwarder, netns::NetworkNamespace};
+use super::{netns::NetworkNamespace, Forwarder};
 use crate::util::get_all_running_process_names;
 use log::warn;
 
 pub struct ApplicationWrapper {
     pub handle: std::process::Child,
-    pub port_forwarding: Option<Box<dyn Forwarder>>
+    pub port_forwarding: Option<Box<dyn Forwarder>>,
 }
 
 impl ApplicationWrapper {
