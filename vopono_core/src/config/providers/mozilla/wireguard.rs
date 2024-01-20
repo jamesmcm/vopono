@@ -45,6 +45,7 @@ impl ConfigurationChoice for Devices {
     }
 }
 
+// TODO: Update API calls for new API
 impl MozillaVPN {
     fn upload_new_device(
         &self,

@@ -23,7 +23,7 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
-use sysinfo::{PidExt, ProcessExt, ProcessRefreshKind, RefreshKind, System, SystemExt};
+use sysinfo::{ProcessRefreshKind, RefreshKind, System};
 use users::{get_current_uid, get_user_by_uid};
 use walkdir::WalkDir;
 use which::which;

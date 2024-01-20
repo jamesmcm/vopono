@@ -19,7 +19,7 @@ directories-next = "2"
 log = "0.4"
 pretty_env_logger = "0.5"
 clap = { version = "4", features = ["derive"] }
-which = "5"
+which = "6"
 dialoguer = "0.11"
 compound_duration = "1"
 signal-hook = "0.3"

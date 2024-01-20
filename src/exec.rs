@@ -169,6 +169,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             .ok()
     });
 
+    // TODO: Modify this to allow creating base netns only
     // Assign protocol and server from args or vopono config file or custom config if used
     if let Some(path) = &custom_config {
         protocol = command
@@ -382,6 +383,8 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             firewall,
         )?;
         _sysctl = SysCtl::enable_ipv4_forwarding();
+
+        // TODO: Skip this if netns config only
         match protocol {
             Protocol::Warp => ns.run_warp(
                 command.open_ports.as_ref(),
