@@ -8,6 +8,7 @@ use std::{
 };
 
 use super::netns::NetworkNamespace;
+use super::Forwarder;
 
 // TODO: Move this to ProtonVPN provider
 pub const PROTONVPN_GATEWAY: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 2, 0, 1));
@@ -126,5 +127,11 @@ impl Drop for Natpmpc {
             self.send_channel.send(true).ok();
             h.join().ok();
         }
+    }
+}
+
+impl Forwarder for Natpmpc {
+    fn forwarded_port(&self) -> u16 {
+        self.local_port
     }
 }

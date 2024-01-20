@@ -5,7 +5,7 @@ mod ivpn;
 mod mozilla;
 mod mullvad;
 mod nordvpn;
-mod pia;
+pub mod pia;
 mod protonvpn;
 mod ui;
 mod warp;
@@ -14,8 +14,12 @@ use crate::config::vpn::Protocol;
 use crate::util::vopono_dir;
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use std::{net::IpAddr, path::Path};
+use std::{
+    fs::File,
+    io::{BufRead, BufReader},
+    net::IpAddr,
+    path::{Path, PathBuf},
+};
 use strum_macros::{Display, EnumIter};
 // TODO: Consider removing this re-export
 pub use ui::*;
@@ -136,6 +140,20 @@ pub trait OpenVpnProvider: Provider {
     fn provider_dns(&self) -> Option<Vec<IpAddr>>;
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)>;
     fn auth_file_path(&self) -> anyhow::Result<Option<PathBuf>>;
+
+    fn load_openvpn_auth(&self) -> anyhow::Result<(String, String)> {
+        let auth_file = self.auth_file_path()?;
+        if let Some(auth_file) = auth_file {
+            let mut reader = BufReader::new(File::open(auth_file)?);
+            let mut user = String::new();
+            reader.read_line(&mut user)?;
+            let mut pass = String::new();
+            reader.read_line(&mut pass)?;
+            Ok((user.trim().to_string(), pass.trim().to_string()))
+        } else {
+            Err(anyhow!("Auth file required to load credentials!"))
+        }
+    }
 
     fn openvpn_dir(&self) -> anyhow::Result<PathBuf> {
         Ok(self.provider_dir()?.join("openvpn"))

@@ -8,8 +8,13 @@ pub mod network_interface;
 pub mod openconnect;
 pub mod openfortivpn;
 pub mod openvpn;
+pub mod piapf;
 pub mod shadowsocks;
 pub mod sysctl;
 pub mod veth_pair;
 pub mod warp;
 pub mod wireguard;
+
+pub trait Forwarder {
+    fn forwarded_port(&self) -> u16;
+}

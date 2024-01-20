@@ -488,12 +488,12 @@ Due to the way Wireguard configuration generation is handled, this should be
 generated online and then used as a custom configuration, e.g.:
 
 ```bash
-$ vopono -v exec --provider custom --custom testwg-UK-17.conf --protocol wireguard --protonvpn-port-forwarding firefox-developer-edition
+$ vopono -v exec --provider custom --custom testwg-UK-17.conf --protocol wireguard --port-forwarding firefox-developer-edition
 ```
 
 #### Port Forwarding
 
-Port forwarding can be enabled with the `--protonvpn-port-forwarding` argument, but requires using a server that supports port forwarding. 
+Port forwarding can be enabled with the `--port-forwarding` argument, but requires using a server that supports port forwarding.
 
 `natpmpc` must be installed e.g. via the `libnatpmp` package on Arch Linux.
 
@@ -507,6 +507,10 @@ The port you are allocated will then be printed to the console like:
 ```
 
 And that is the port you would then set up in applications that require it.
+
+### PrivateInternetAccess
+
+Port forwaring supported with the `--port-forwarding` option, use the `--port-forwarding-callback` option to specify a command to run when the port is refreshed.
 
 ### Cloudflare Warp
 
@@ -525,9 +529,9 @@ You can then kill `warp-svc` and run it via vopono:
 $ vopono -v exec --no-killswitch --provider warp --protocol warp firefox-developer-edition
 ```
 
-### VPN Provider limitations
+## VPN Provider limitations
 
-#### PrivateInternetAccess
+### PrivateInternetAccess
 
 Wireguard support for PrivateInternetAccess (PIA) requires the use of a
 user token to get the latest servers at time of use. See [issue 9](https://github.com/jamesmcm/vopono/issues/9) for details,
@@ -535,21 +539,21 @@ and PIA's [official script for Wireguard access](https://github.com/pia-foss/man
 
 So if you encounter connection issues, first try re-running `vopono sync`.
 
-#### MozillaVPN
+### MozillaVPN
 
 There is no easy way to delete MozillaVPN devices (Wireguard keypairs),
 unlike Mullvad this _cannot_ be done on the webpage.
 I recommend using [MozWire](https://github.com/NilsIrl/MozWire) to manage this.
 
-#### iVPN
+### iVPN
 
 iVPN Wireguard keypairs must be uploaded manually, as the Client Area is
 behind a captcha login.
 
-#### NordVPN
+### NordVPN
 Starting 27 June 2023, the required user credentials are no longer your NordVPN login details but need to be generated in the user control panel, under Services → NordVPN. Scroll down and locate the Manual Setup tab, then click on Set up NordVPN manually and follow instructions. Copy your service credentials and re-sync NordVPN configuration inside Vopono.
 
-### Tunnel Port Forwarding
+## Tunnel Port Forwarding
 
 Some providers allow port forwarding inside the tunnel, so you can open
 some ports inside the network namespace which can be accessed via the
