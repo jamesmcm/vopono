@@ -43,11 +43,20 @@ lynx all running through different VPN connections:
 
 \*\*\* For ProtonVPN you can generate and download specific Wireguard config
 files, and use them as a custom provider config. See the [User Guide](USERGUIDE.md)
-for details. [Port Forwarding](https://protonvpn.com/support/port-forwarding-manual-setup/) is supported with the `--port-forwarding` argument for both OpenVPN and Wireguard (with `--provider custom --custom xxx.conf --protocol wireguard` ). `natpmpc` must be installed. Note for OpenVPN you must generate the OpenVPN config files appending `+pmp` to your OpenVPN username, and you must choose servers which support this feature (e.g. at the time of writing, the Romania servers do). The assigned port is then printed to the terminal where vopono was launched - this should then be set in any applications that require it.
+for details. [Port Forwarding](https://protonvpn.com/support/port-forwarding-manual-setup/) is supported with the `--port-forwarding` argument for both OpenVPN and Wireguard.
+Note for using a custom config with Wireguard, the port forwarding implementation to be used should be specified with `--custom-port-forwarding`
+(i.e. with `--provider custom --custom xxx.conf --protocol wireguard --custom-port-forwarding protonvpn` ). `natpmpc` must be installed.
+Note for OpenVPN you must generate the OpenVPN config files appending `+pmp` to your OpenVPN username, and you must choose servers which support this feature
+(e.g. at the time of writing, the Romania servers do). The assigned port is then printed to the terminal where vopono was launched - this should then be set in any applications that require it.
+The port can also be passed to a custom script that will be executed
+within the network namespace via the `--port-forwarding-callback`
+argument.
 
 
 \*\*\*\* Cloudflare Warp uses its own protocol. Set both the provider and
-protocol to `warp`. Note you must first register with `sudo warp-cli register` and then run it once with `sudo warp-svc` and `sudo warp-cli connect` outside of vopono. Please verify this works first before trying it with vopono.
+protocol to `warp`. Note you must first register with `sudo warp-cli register` and then run it once with `sudo warp-svc` and `sudo warp-cli connect` outside of vopono.
+Please verify this works first before trying it with vopono. Note there
+may also be issues with Warp overriding the DNS settings.
 
 
 ## Usage
@@ -175,7 +184,7 @@ $ rustc --version
 - When launching a new application in an existing vopono namespace, any
   modifications to the firewall rules (i.e. forwarding and opening
   ports) will not be applied (they are only used when creating the
-  namespace).
+  namespace). The same applies for port forwarding.
 - OpenVPN credentials are always stored in plaintext in configuration - may add
   option to not store credentials, but it seems OpenVPN needs them
   provided in plaintext.

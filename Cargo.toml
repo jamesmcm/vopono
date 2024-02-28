@@ -26,11 +26,11 @@ signal-hook = "0.3"
 walkdir = "2"
 chrono = "0.4"
 bs58 = "0.5"
-nix = { version = "0.27", features = ["signal", "process"] }
-config = "0.13"
+nix = { version = "0.28", features = ["signal", "process"] }
+config = "0.14"
 basic_tcp_proxy = "0.3.2"
-strum = "0.25"
-strum_macros = "0.25"
+strum = "0.26"
+strum_macros = "0.26"
 
 [package.metadata.rpm]
 package = "vopono"

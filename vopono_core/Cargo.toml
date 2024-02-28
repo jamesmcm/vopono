@@ -16,7 +16,7 @@ directories-next = "2"
 log = "0.4"
 which = "6"
 users = "0.11"
-nix = { version = "0.27", features = ["user", "signal", "fs", "process"] }
+nix = { version = "0.28", features = ["user", "signal", "fs", "process"] }
 serde = { version = "1", features = ["derive", "std"] }
 csv = "1"
 regex = "1"
@@ -33,8 +33,8 @@ reqwest = { default-features = false, version = "0.11", features = [
 sysinfo = "0.30"
 base64 = "0.21"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-strum = "0.25"
-strum_macros = "0.25"
+strum = "0.26"
+strum_macros = "0.26"
 zip = "0.6"
 maplit = "1"
 webbrowser = "0.8"

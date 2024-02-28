@@ -144,7 +144,6 @@ pub struct ExecCommand {
     pub working_directory: Option<String>,
 
     /// Custom VPN Provider - OpenVPN or Wireguard config file (will override other settings)
-    // TODO: Check From OsStr part works
     #[clap(long = "custom")]
     pub custom_config: Option<PathBuf>,
 
@@ -216,6 +215,10 @@ pub struct ExecCommand {
     /// Enable port forwarding for if supported
     #[clap(long = "port-forwarding")]
     pub port_forwarding: bool,
+
+    /// Port forwarding implementation to use for custom config file with --custom-config
+    #[clap(long = "custom-port-forwarding", ignore_case = true)]
+    pub custom_port_forwarding: Option<WrappedArg<VpnProvider>>,
 
     /// Path or alias to executable script or binary to be called with the port as an argumnet
     /// when the port forwarding is refreshed (PIA only)

@@ -46,6 +46,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         std::fs::OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(false)
             .read(true)
             .open(&config_path)?;
     }
@@ -151,6 +152,21 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     } else {
         command.port_forwarding
     };
+
+    // Custom port forwarding (implementation to use for --custom-config)
+    // TODO: Allow fully custom handling separate callback script?
+    let custom_port_forwarding: Option<VpnProvider> = command
+        .custom_port_forwarding
+        .map(|x| x.to_variant())
+        .or_else(|| {
+            vopono_config_settings
+                .get("custom_port_forwarding")
+                .map_err(|_e| anyhow!("Failed to read config file"))
+                .ok()
+        });
+    if custom_port_forwarding.is_some() && custom_config.is_none() {
+        warn!("Custom port forwarding implementation is set, but not using custom provider config file. custom-port-forwarding setting will be ignored");
+    }
 
     // Create netns only
     let create_netns_only = if !command.create_netns_only {
@@ -338,10 +354,11 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         }?;
         Some(get_config_from_alias(&cdir, &server_name)?)
     } else {
-        Some(custom_config.expect("No custom config provided"))
+        Some(custom_config.clone().expect("No custom config provided"))
     };
 
     // Better to check for lockfile exists?
+    let using_existing_netns;
     if get_existing_namespaces()?.contains(&ns_name) {
         // If namespace exists, read its lock config
         info!(
@@ -349,7 +366,9 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             &ns_name
         );
         ns = NetworkNamespace::from_existing(ns_name)?;
+        using_existing_netns = true;
     } else {
+        using_existing_netns = false;
         ns = NetworkNamespace::new(
             ns_name.clone(),
             provider.clone(),
@@ -556,15 +575,36 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
 
     let ns = ns.write_lockfile(&command.application)?;
 
-    let forwarder: Option<Box<dyn Forwarder>> = if port_forwarding {
+    //  Does not re-run if re-using existing namespace
+    if using_existing_netns && (port_forwarding || custom_port_forwarding.is_some()) {
+        warn!("Re-using existing network namespace {} - will not run port forwarder, should be run when netns first created", &ns.name);
+    }
+    let forwarder: Option<Box<dyn Forwarder>> = if (port_forwarding
+        || custom_port_forwarding.is_some())
+        && !using_existing_netns
+    {
+        let provider_or_custom = if custom_config.is_some() {
+            custom_port_forwarding
+        } else {
+            Some(provider)
+        };
+
+        if provider_or_custom.is_some() {
+            debug!(
+                "Will use {:?} as provider for port forwarding",
+                &provider_or_custom
+            );
+        }
+
         let callback = command.port_forwarding_callback.or_else(|| {
             vopono_config_settings
                 .get("port_forwarding_callback")
                 .map_err(|_e| anyhow!("Failed to read config file"))
                 .ok()
         });
-        match provider {
-            VpnProvider::PrivateInternetAccess => {
+
+        match provider_or_custom {
+            Some(VpnProvider::PrivateInternetAccess) => {
                 let conf_path = config_file.expect("No PIA config file provided");
                 let conf_name = conf_path
                     .file_name()
@@ -579,16 +619,21 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                     callback.as_ref(),
                 )?))
             }
-            VpnProvider::ProtonVPN => {
+            Some(VpnProvider::ProtonVPN) => {
                 vopono_core::util::open_hosts(
                     &ns,
                     vec![vopono_core::network::natpmpc::PROTONVPN_GATEWAY],
                     firewall,
                 )?;
-                Some(Box::new(Natpmpc::new(&ns)?))
+                Some(Box::new(Natpmpc::new(&ns, callback.as_ref())?))
             }
-            _ => {
-                anyhow::bail!("Port forwarding not supported for the selected provider");
+            Some(p) => {
+                warn!("Port forwarding not supported for the selected provider: {} - ignoring --port-forwarding", p);
+                None
+            }
+            None => {
+                warn!("--port-forwarding set but --custom-port-forwarding provider not provided for --custom-config usage. Ignoring --port-forwarding");
+                None
             }
         }
     } else {
