@@ -488,7 +488,7 @@ Due to the way Wireguard configuration generation is handled, this should be
 generated online and then used as a custom configuration, e.g.:
 
 ```bash
-$ vopono -v exec --provider custom --custom testwg-UK-17.conf --protocol wireguard --port-forwarding firefox-developer-edition
+$ vopono -v exec --provider custom --custom testwg-UK-17.conf --protocol wireguard --custom-port-forwarding protonvpn firefox-developer-edition
 ```
 
 #### Port Forwarding
@@ -508,9 +508,20 @@ The port you are allocated will then be printed to the console like:
 
 And that is the port you would then set up in applications that require it.
 
+For Wireguard custom configs mentioned above, you must set the
+`--custom-port-forwarding protonvpn` argument, so vopono knows which
+port forwarding implementation to use for the custom config file.
+
+The port can also be passed to a script (which will be executed within
+the network namespace every 45 seconds when the port is refreshed) by passing the script 
+as the `--port-forwarding-callback` argument - the port will be passed
+as the first argument (i.e. `$1`).
+
 ### PrivateInternetAccess
 
 Port forwaring supported with the `--port-forwarding` option, use the `--port-forwarding-callback` option to specify a command to run when the port is refreshed.
+
+Note the usual `-o` / `--open-ports` argument has no effect here as we only know the port number assigned after connecting to PIA.
 
 ### Cloudflare Warp
 

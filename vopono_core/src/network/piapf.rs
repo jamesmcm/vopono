@@ -169,6 +169,7 @@ impl Piapf {
         })
     }
 
+    // TODO: Refactor methods below into Trait
     fn refresh_port(params: &ThreadParams) -> anyhow::Result<u16> {
         let bind_response = NetworkNamespace::exec_with_output(
             &params.netns_name,
@@ -203,10 +204,17 @@ impl Piapf {
         if let Some(cb) = &params.callback {
             let refresh_response = NetworkNamespace::exec_with_output(
                 &params.netns_name,
-                &[&cb, &params.port.to_string()],
+                &[cb, &params.port.to_string()],
             )?;
             if !refresh_response.status.success() {
-                log::info!("Callback script was unsuccessful!");
+                log::error!(
+                    "Port forwarding callback script was unsuccessful!: stdout: {:?}, stderr: {:?}, exit code: {}",
+                    String::from_utf8(refresh_response.stdout),
+                    String::from_utf8(refresh_response.stderr),
+                    refresh_response.status
+                );
+            } else if let Ok(out) = String::from_utf8(refresh_response.stdout) {
+                println!("{}", out);
             }
         }
 
