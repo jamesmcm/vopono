@@ -251,14 +251,20 @@ $ vopono -v exec --custom ~/custom_wireguard.conf --protocol wireguard "firefox"
 ```bash
 $ vopono -v exec --custom ./custom_openvpn.ovpn --protocol openvpn "firefox"
 ```
-> To use a custom provider which requires a username and password, supply an authentication file with the username and password.
-> Reference the authentication file in the ovpn configuration file with `auth-user-pass auth.txt` appended to the top of the file.
+To use a custom provider which requires a username and password, supply an authentication file with the username and password.
+Reference the authentication file in the ovpn configuration file with `auth-user-pass auth.txt` appended to the top of the file.
 
 Note that in the OpenVPN case the vopono will execute OpenVPN from the same
 directory as the config file itself. So any accompanying files (CA certificates, authentication
 files, etc.) must be in the same directory with the file if using
 relative paths in the config file.
 
+For OpenVPN be careful to remove any DNS update scripts from the OpenVPN config file e.g. for ProtonVPN OpenVPN configs, remove the following lines:
+
+```
+up /etc/openvpn/update-resolv-conf
+down /etc/openvpn/update-resolv-conf
+```
 
 
 ### OpenFortiVPN
@@ -481,6 +487,15 @@ credentials to use them.
 Note that there may be multiple `AUTH-xxx=yyy` cookies - the specific one we need is where `xxx` is equal to the value of the `x-pm-uid` header in the same request.
 
 ![AUTH cookie example](protonvpn_header.png)
+
+If using a downloaded OpenVPN config file directly as a `--custom` custom config file in vopono, then be sure to remove the following lines:
+
+```
+up /etc/openvpn/update-resolv-conf
+down /etc/openvpn/update-resolv-conf
+```
+
+Also remember to append `+pmp` to the OpenVPN username if using port forwarding in this case too.
 
 #### Wireguard servers
 
