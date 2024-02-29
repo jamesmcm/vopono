@@ -50,6 +50,8 @@ impl OpenVpn {
             File::create(&log_file_str)?;
         }
 
+        // TODO: Check config file for up and down script entries and warn on their presence
+
         let config_file_path = config_file.canonicalize().context("Invalid path given")?;
         set_config_permissions()?;
         info!("Launching OpenVPN...");
