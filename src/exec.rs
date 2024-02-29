@@ -14,13 +14,13 @@ use vopono_core::config::providers::{UiClient, VpnProvider};
 use vopono_core::config::vpn::{verify_auth, Protocol};
 use vopono_core::network::application_wrapper::ApplicationWrapper;
 use vopono_core::network::firewall::Firewall;
-use vopono_core::network::natpmpc::Natpmpc;
 use vopono_core::network::netns::NetworkNamespace;
 use vopono_core::network::network_interface::{get_active_interfaces, NetworkInterface};
-use vopono_core::network::piapf::Piapf;
+use vopono_core::network::port_forwarding::natpmpc::Natpmpc;
+use vopono_core::network::port_forwarding::piapf::Piapf;
+use vopono_core::network::port_forwarding::Forwarder;
 use vopono_core::network::shadowsocks::uses_shadowsocks;
 use vopono_core::network::sysctl::SysCtl;
-use vopono_core::network::Forwarder;
 use vopono_core::util::vopono_dir;
 use vopono_core::util::{get_config_file_protocol, get_config_from_alias};
 use vopono_core::util::{get_existing_namespaces, get_target_subnet};
@@ -154,7 +154,6 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
     };
 
     // Custom port forwarding (implementation to use for --custom-config)
-    // TODO: Allow fully custom handling separate callback script?
     let custom_port_forwarding: Option<VpnProvider> = command
         .custom_port_forwarding
         .map(|x| x.to_variant())
@@ -165,7 +164,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                 .ok()
         });
     if custom_port_forwarding.is_some() && custom_config.is_none() {
-        warn!("Custom port forwarding implementation is set, but not using custom provider config file. custom-port-forwarding setting will be ignored");
+        error!("Custom port forwarding implementation is set, but not using custom provider config file. custom-port-forwarding setting will be ignored");
     }
 
     // Create netns only
@@ -622,17 +621,17 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             Some(VpnProvider::ProtonVPN) => {
                 vopono_core::util::open_hosts(
                     &ns,
-                    vec![vopono_core::network::natpmpc::PROTONVPN_GATEWAY],
+                    vec![vopono_core::network::port_forwarding::natpmpc::PROTONVPN_GATEWAY],
                     firewall,
                 )?;
                 Some(Box::new(Natpmpc::new(&ns, callback.as_ref())?))
             }
             Some(p) => {
-                warn!("Port forwarding not supported for the selected provider: {} - ignoring --port-forwarding", p);
+                error!("Port forwarding not supported for the selected provider: {} - ignoring --port-forwarding", p);
                 None
             }
             None => {
-                warn!("--port-forwarding set but --custom-port-forwarding provider not provided for --custom-config usage. Ignoring --port-forwarding");
+                error!("--port-forwarding set but --custom-port-forwarding provider not provided for --custom-config usage. Ignoring --port-forwarding");
                 None
             }
         }

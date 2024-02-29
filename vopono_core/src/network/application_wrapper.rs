@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use super::{netns::NetworkNamespace, Forwarder};
+use super::{netns::NetworkNamespace, port_forwarding::Forwarder};
 use crate::util::get_all_running_process_names;
 use log::warn;
 
