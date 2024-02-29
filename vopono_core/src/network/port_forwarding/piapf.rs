@@ -1,11 +1,11 @@
 use base64::prelude::*;
 use regex::Regex;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self};
 use std::{sync::mpsc::Sender, thread::JoinHandle};
 use which::which;
 
-use super::netns::NetworkNamespace;
-use super::Forwarder;
+use super::{Forwarder, ThreadLoopForwarder, ThreadParameters};
+use crate::network::netns::NetworkNamespace;
 
 use crate::config::providers::pia::PrivateInternetAccess;
 use crate::config::providers::OpenVpnProvider;
@@ -18,7 +18,7 @@ pub struct Piapf {
     send_channel: Sender<bool>,
 }
 
-struct ThreadParams {
+pub struct ThreadParamsImpl {
     pub port: u16,
     pub netns_name: String,
     pub signature: String,
@@ -27,6 +27,20 @@ struct ThreadParams {
     pub gateway: String,
     pub pia_cert_path: String,
     pub callback: Option<String>,
+}
+
+impl ThreadParameters for ThreadParamsImpl {
+    fn get_callback_command(&self) -> Option<String> {
+        self.callback.clone()
+    }
+
+    fn get_loop_delay(&self) -> u64 {
+        60 * 15
+    }
+
+    fn get_netns_name(&self) -> String {
+        self.netns_name.clone()
+    }
 }
 
 impl Piapf {
@@ -147,7 +161,7 @@ impl Piapf {
             .as_u16()
             .expect("getSignature response missing port");
 
-        let params = ThreadParams {
+        let params = ThreadParamsImpl {
             netns_name: ns.name.clone(),
             hostname: vpn_hostname,
             gateway: vpn_gateway,
@@ -157,7 +171,8 @@ impl Piapf {
             port,
             callback: callback.cloned(),
         };
-        Self::refresh_port(&params)?;
+        let port = Self::refresh_port(&params)?;
+        Self::callback_command(&params, port);
         let (send, recv) = mpsc::channel::<bool>();
         let handle = std::thread::spawn(move || Self::thread_loop(params, recv));
 
@@ -168,9 +183,12 @@ impl Piapf {
             send_channel: send,
         })
     }
+}
 
-    // TODO: Refactor methods below into Trait
-    fn refresh_port(params: &ThreadParams) -> anyhow::Result<u16> {
+impl ThreadLoopForwarder for Piapf {
+    type ThreadParams = ThreadParamsImpl;
+
+    fn refresh_port(params: &Self::ThreadParams) -> anyhow::Result<u16> {
         let bind_response = NetworkNamespace::exec_with_output(
             &params.netns_name,
             &[
@@ -221,28 +239,6 @@ impl Piapf {
         log::info!("Successfully updated claim to port {}", params.port);
 
         Ok(params.port)
-    }
-
-    // Spawn thread to repeat above every 15 minutes
-    fn thread_loop(params: ThreadParams, recv: Receiver<bool>) {
-        loop {
-            let resp = recv.recv_timeout(std::time::Duration::from_secs(60 * 15));
-            if resp.is_ok() {
-                log::debug!("Thread exiting...");
-                return;
-            } else {
-                let port = Self::refresh_port(&params);
-                match port {
-                    Err(e) => {
-                        log::error!("Thread failed to refresh port: {e:?}");
-                        return;
-                    }
-                    Ok(p) => log::debug!("Thread refreshed port: {p}"),
-                }
-
-                // TODO: Communicate port change via channel?
-            }
-        }
     }
 }
 

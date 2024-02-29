@@ -1,14 +1,14 @@
 use anyhow::Context;
 use regex::Regex;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc;
 use std::{
     net::{IpAddr, Ipv4Addr},
     sync::mpsc::Sender,
     thread::JoinHandle,
 };
 
-use super::netns::NetworkNamespace;
-use super::Forwarder;
+use super::{Forwarder, ThreadLoopForwarder, ThreadParameters};
+use crate::network::netns::NetworkNamespace;
 
 // TODO: Move this to ProtonVPN provider
 pub const PROTONVPN_GATEWAY: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 2, 0, 1));
@@ -20,9 +20,21 @@ pub struct Natpmpc {
     send_channel: Sender<bool>,
 }
 
-struct ThreadParams {
+pub struct ThreadParamsImpl {
     pub netns_name: String,
     pub callback: Option<String>,
+}
+
+impl ThreadParameters for ThreadParamsImpl {
+    fn get_callback_command(&self) -> Option<String> {
+        self.callback.clone()
+    }
+    fn get_loop_delay(&self) -> u64 {
+        45
+    }
+    fn get_netns_name(&self) -> String {
+        self.netns_name.clone()
+    }
 }
 
 impl Natpmpc {
@@ -49,11 +61,13 @@ impl Natpmpc {
             anyhow::bail!("natpmpc failed - likely that this server does not support port forwarding, please choose another server")
         }
 
-        let params = ThreadParams {
+        let params = ThreadParamsImpl {
             netns_name: ns.name.clone(),
             callback: callback.cloned(),
         };
+
         let port = Self::refresh_port(&params)?;
+        Self::callback_command(&params, port);
 
         let (send, recv) = mpsc::channel::<bool>();
 
@@ -66,9 +80,12 @@ impl Natpmpc {
             send_channel: send,
         })
     }
+}
 
-    // TODO: Refactor these two methods into Trait shared with piapf.rs
-    fn refresh_port(params: &ThreadParams) -> anyhow::Result<u16> {
+impl ThreadLoopForwarder for Natpmpc {
+    type ThreadParams = ThreadParamsImpl;
+
+    fn refresh_port(params: &Self::ThreadParams) -> anyhow::Result<u16> {
         let gateway_str = PROTONVPN_GATEWAY.to_string();
         // TODO: Cache regex
         let re = Regex::new(r"Mapped public port (?P<port>\d{1,5}) protocol").unwrap();
@@ -102,47 +119,7 @@ impl Natpmpc {
                 "natpmpc assigned UDP port: {udp_port} did not equal TCP port: {tcp_port}"
             )
         }
-
-        if let Some(cb) = &params.callback {
-            let refresh_response = NetworkNamespace::exec_with_output(
-                &params.netns_name,
-                &[cb, &udp_port.to_string()],
-            )?;
-            if !refresh_response.status.success() {
-                log::error!(
-                    "Port forwarding callback script was unsuccessful!: stdout: {:?}, stderr: {:?}, exit code: {}",
-                    String::from_utf8(refresh_response.stdout),
-                    String::from_utf8(refresh_response.stderr),
-                    refresh_response.status
-                );
-            } else if let Ok(out) = String::from_utf8(refresh_response.stdout) {
-                println!("{}", out);
-            }
-        }
-
         Ok(udp_port)
-    }
-
-    // Spawn thread to repeat above every 45 seconds
-    fn thread_loop(params: ThreadParams, recv: Receiver<bool>) {
-        loop {
-            let resp = recv.recv_timeout(std::time::Duration::from_secs(45));
-            if resp.is_ok() {
-                log::debug!("Thread exiting...");
-                return;
-            } else {
-                let port = Self::refresh_port(&params);
-                match port {
-                    Err(e) => {
-                        log::error!("Thread failed to refresh port: {e:?}");
-                        return;
-                    }
-                    Ok(p) => log::debug!("Thread refreshed port: {p}"),
-                }
-
-                // TODO: Communicate port change via channel?
-            }
-        }
     }
 }
 
