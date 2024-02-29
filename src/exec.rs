@@ -225,12 +225,14 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                     .get("provider")
                     .map_err(|_e| anyhow!("Failed to read config file"))
                     .ok()
-            })
-            .expect(
-                "Enter a VPN provider as a command-line argument or in the vopono config.toml file",
-            );
+            }).ok_or_else(|| {
+                let msg = "Enter a VPN provider as a command-line argument or in the vopono config.toml file";
+                error!("{}", msg); anyhow!(msg)})?;
+
         if provider == VpnProvider::Custom {
-            bail!("Must provide config file if using custom VPN Provider");
+            let msg = "Must provide config file if using custom VPN Provider";
+            error!("{}", msg);
+            bail!(msg);
         }
 
         server_name = command
@@ -243,10 +245,9 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                         anyhow!("Failed to read config file")
                     })
                     .ok()
-            })
-            .expect(
-                "Enter a VPN server prefix as a command-line argument or in the vopono config.toml file",
-            );
+            }).ok_or_else(|| {
+                let msg = "VPN server prefix must be provided as a command-line argument or in the vopono config.toml file";
+                error!("{}", msg); anyhow!(msg)})?;
 
         // Check protocol is valid for provider
         protocol = command
@@ -432,9 +433,11 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                 // TODO: DNS suffixes?
                 ns.dns_config(&dns, &[], command.hosts_entries.as_ref())?;
                 // Check if using Shadowsocks
-                if let Some((ss_host, ss_lport)) =
-                    uses_shadowsocks(config_file.as_ref().expect("No config file provided"))?
-                {
+                if let Some((ss_host, ss_lport)) = uses_shadowsocks(
+                    config_file
+                        .as_ref()
+                        .expect("No OpenVPN config file provided"),
+                )? {
                     if provider == VpnProvider::Custom {
                         warn!("Custom provider specifies socks-proxy, if this is local you must run it yourself (e.g. shadowsocks)");
                     } else {
@@ -442,7 +445,9 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                         let password = dyn_ss_provider.password();
                         let encrypt_method = dyn_ss_provider.encrypt_method();
                         ns.run_shadowsocks(
-                            config_file.as_ref().expect("No config file provided"),
+                            config_file
+                                .as_ref()
+                                .expect("No OpenVPN config file provided"),
                             ss_host,
                             ss_lport,
                             &password,
@@ -452,7 +457,9 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
                 }
 
                 ns.run_openvpn(
-                    config_file.clone().expect("No config file provided"),
+                    config_file
+                        .clone()
+                        .expect("No OpenVPN config file provided"),
                     auth_file,
                     &dns,
                     !command.no_killswitch,
@@ -487,7 +494,9 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
             }
             Protocol::Wireguard => {
                 ns.run_wireguard(
-                    config_file.clone().expect("No config file provided"),
+                    config_file
+                        .clone()
+                        .expect("No Wireguard config file provided"),
                     !command.no_killswitch,
                     command.open_ports.as_ref(),
                     command.forward_ports.as_ref(),
