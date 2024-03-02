@@ -44,6 +44,7 @@ pub struct NetworkNamespace {
     pub predown: Option<String>,
     pub predown_user: Option<String>,
     pub predown_group: Option<String>,
+    pub config_file: Option<PathBuf>, // Used to save config file path in lockfile
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -102,7 +103,12 @@ impl NetworkNamespace {
             predown,
             predown_user,
             predown_group,
+            config_file: None,
         })
+    }
+
+    pub fn set_config_file(&mut self, config_file: Option<PathBuf>) {
+        self.config_file = config_file;
     }
 
     #[allow(clippy::too_many_arguments)]

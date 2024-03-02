@@ -61,6 +61,9 @@ pub fn synch(
         Some(Protocol::Warp) => {
             error!("vopono sync not supported for Cloudflare Warp protocol");
         }
+        Some(Protocol::None) => {
+            error!("vopono sync not supported for None protocol");
+        }
         // TODO: Fix this asking for same credentials twice
         None => {
             if let Ok(p) = provider.get_dyn_wireguard_provider() {

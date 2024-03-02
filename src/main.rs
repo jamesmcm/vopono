@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 mod args;
+mod args_config;
 mod cli_client;
 mod exec;
 mod list;
@@ -23,7 +24,6 @@ use which::which;
 fn main() -> anyhow::Result<()> {
     // Get struct of args using structopt
     let app = args::App::parse();
-
     // Set up logging
     let mut builder = pretty_env_logger::formatted_timed_builder();
     let log_level = if app.verbose {

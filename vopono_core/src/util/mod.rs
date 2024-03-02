@@ -433,15 +433,20 @@ pub fn get_config_from_alias(list_path: &Path, alias: &str) -> anyhow::Result<Pa
     }
 }
 
-pub fn get_config_file_protocol(config_file: &Path) -> Protocol {
-    let content = fs::read_to_string(config_file)
-        .context(format!("Reading VPN config file: {config_file:?}"))
-        .unwrap();
+pub fn get_config_file_protocol(config_file: &Path) -> anyhow::Result<Protocol> {
+    let content = fs::read_to_string(config_file).map_err(|e| {
+        anyhow!(
+            "Failed to read VPN config file: {}, err: {}",
+            config_file.to_string_lossy(),
+            e
+        )
+    })?;
+
     if content.contains("[Interface]") {
-        Protocol::Wireguard
+        Ok(Protocol::Wireguard)
     } else {
         // TODO: Don't always assume OpenVPN
-        Protocol::OpenVpn
+        Ok(Protocol::OpenVpn)
     }
 }
 
