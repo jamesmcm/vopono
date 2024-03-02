@@ -75,6 +75,7 @@ pub enum Protocol {
     OpenConnect,
     OpenFortiVpn,
     Warp,
+    None,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -47,6 +47,7 @@ pub enum VpnProvider {
     HMA,
     Warp,
     Custom,
+    None, // Run no protocol inside netns
 }
 
 // Do this since we can't downcast from Provider to other trait objects
@@ -64,6 +65,7 @@ impl VpnProvider {
             Self::HMA => Box::new(hma::HMA {}),
             Self::Warp => Box::new(warp::Warp {}),
             Self::Custom => unimplemented!("Custom provider uses separate logic"),
+            Self::None => unimplemented!("None provider runs no protocol"),
         }
     }
 
@@ -80,6 +82,7 @@ impl VpnProvider {
             Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
             Self::MozillaVPN => Err(anyhow!("MozillaVPN only supports Wireguard!")),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
+            Self::None => unimplemented!("None provider runs no protocol"),
         }
     }
 
@@ -92,6 +95,7 @@ impl VpnProvider {
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
             Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
+            Self::None => unimplemented!("None provider runs no protocol"),
             _ => Err(anyhow!("Wireguard not implemented")),
         }
     }
@@ -101,6 +105,7 @@ impl VpnProvider {
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
             Self::Custom => Err(anyhow!("Start Shadowsocks manually for custom provider")),
             Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
+            Self::None => unimplemented!("None provider runs no protocol"),
             _ => Err(anyhow!("Shadowsocks not supported")),
         }
     }

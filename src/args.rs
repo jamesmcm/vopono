@@ -114,7 +114,7 @@ pub struct SynchCommand {
 pub struct ExecCommand {
     /// VPN Provider (must be given unless using custom config)
     #[clap(value_enum, long = "provider", short = 'p', ignore_case = true)]
-    pub vpn_provider: Option<WrappedArg<VpnProvider>>,
+    pub provider: Option<WrappedArg<VpnProvider>>,
 
     /// VPN Protocol (if not given will use default)
     #[clap(value_enum, long = "protocol", short = 'c', ignore_case = true)]
@@ -145,7 +145,7 @@ pub struct ExecCommand {
 
     /// Custom VPN Provider - OpenVPN or Wireguard config file (will override other settings)
     #[clap(long = "custom")]
-    pub custom_config: Option<PathBuf>,
+    pub custom: Option<PathBuf>,
 
     /// DNS Server (will override provider's DNS server)
     #[clap(long = "dns", short = 'd')]
@@ -153,7 +153,7 @@ pub struct ExecCommand {
 
     /// List of /etc/hosts entries for the network namespace (e.g. "10.0.1.10 webdav.server01.lan","10.0.1.10 vaultwarden.server01.lan"). For a local host you should also provide the open-hosts option.
     #[clap(long = "hosts", use_value_delimiter = true)]
-    pub hosts_entries: Option<Vec<String>>,
+    pub hosts: Option<Vec<String>>,
 
     /// List of host IP addresses to open on the network namespace (comma separated)
     #[clap(long = "open-hosts", use_value_delimiter = true)]
@@ -174,7 +174,7 @@ pub struct ExecCommand {
 
     /// List of ports to forward from network namespace to host - useful for running servers and daemons
     #[clap(long = "forward", short = 'f')]
-    pub forward_ports: Option<Vec<u16>>,
+    pub forward: Option<Vec<u16>>,
 
     /// Disable proxying to host machine when forwarding ports
     #[clap(long = "no-proxy")]
