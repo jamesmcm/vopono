@@ -25,7 +25,7 @@ use vopono_core::network::sysctl::SysCtl;
 use vopono_core::util::vopono_dir;
 use vopono_core::util::{get_config_from_alias, get_existing_namespaces, get_target_subnet};
 
-pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()> {
+pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> anyhow::Result<()> {
     // this captures all sigint signals
     // ignore for now, they are automatically passed on to the child
     let signals = Signals::new([SIGINT])?;
@@ -146,8 +146,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient) -> anyhow::Result<()>
         )?;
         _sysctl = SysCtl::enable_ipv4_forwarding();
 
-        // TODO: Skip this if netns config only
-        let config_file = run_protocol_in_netns(&parsed_command, &mut ns, uiclient)?;
+        let config_file = run_protocol_in_netns(&parsed_command, &mut ns, uiclient, verbose)?;
         ns.set_config_file(config_file);
 
         if let Some(ref hosts) = parsed_command.open_hosts {
@@ -279,6 +278,7 @@ fn run_protocol_in_netns(
     parsed_command: &ArgsConfig,
     ns: &mut NetworkNamespace,
     uiclient: &dyn UiClient,
+    verbose: bool,
 ) -> anyhow::Result<Option<PathBuf>> {
     if parsed_command.provider == VpnProvider::None {
         log::warn!(
@@ -386,6 +386,7 @@ fn run_protocol_in_netns(
                 parsed_command.forward.as_ref(),
                 parsed_command.firewall,
                 parsed_command.disable_ipv6,
+                verbose,
             )?;
             debug!(
                 "Checking that OpenVPN is running in namespace: {}",
