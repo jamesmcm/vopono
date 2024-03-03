@@ -324,6 +324,7 @@ impl NetworkNamespace {
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
         disable_ipv6: bool,
+        verbose: bool,
     ) -> anyhow::Result<()> {
         self.openvpn = Some(OpenVpn::run(
             self,
@@ -335,6 +336,7 @@ impl NetworkNamespace {
             forward_ports,
             firewall,
             disable_ipv6,
+            verbose,
         )?);
         Ok(())
     }

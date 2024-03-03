@@ -31,6 +31,7 @@ impl OpenVpn {
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
         disable_ipv6: bool,
+        verbose: bool,
     ) -> anyhow::Result<Self> {
         // TODO: Refactor this to separate functions
         // TODO: --status flag
@@ -50,10 +51,12 @@ impl OpenVpn {
             File::create(&log_file_str)?;
         }
 
-        // TODO: Check config file for up and down script entries and warn on their presence
-
         let config_file_path = config_file.canonicalize().context("Invalid path given")?;
         set_config_permissions()?;
+
+        // Check config file for up and down script entries and warn on their presence
+        warn_on_scripts_config(&config_file_path)?;
+
         info!("Launching OpenVPN...");
         let mut command_vec = ([
             "openvpn",
@@ -107,7 +110,7 @@ impl OpenVpn {
             &command_vec,
             None,
             None,
-            true,
+            !verbose,
             false,
             false,
             Some(working_dir),
@@ -574,6 +577,19 @@ pub fn killswitch(
         }
     }
     Ok(())
+}
+
+pub fn warn_on_scripts_config(path: &Path) -> anyhow::Result<bool> {
+    let mut out = false;
+    let file_string =
+        std::fs::read_to_string(path).context(format!("Reading OpenVPN config file: {path:?}"))?;
+    for line in file_string.lines() {
+        if line.trim().starts_with("up ") || line.trim().starts_with("down ") {
+            log::error!("up / down scripts detected in OpenVPN config file - remove these or OpenVPN will likely hang in the network namespace. Line: {}", line);
+            out = true;
+        }
+    }
+    Ok(out)
 }
 
 pub fn get_remotes_from_config(path: &Path) -> anyhow::Result<Vec<Remote>> {

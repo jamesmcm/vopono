@@ -31,7 +31,7 @@ reqwest = { default-features = false, version = "0.11", features = [
     "rustls-tls",
 ] } # TODO: Can we remove Tokio dependency?
 sysinfo = "0.30"
-base64 = "0.21"
+base64 = "0.22"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 strum = "0.26"
 strum_macros = "0.26"

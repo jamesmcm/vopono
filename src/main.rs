@@ -53,7 +53,7 @@ fn main() -> anyhow::Result<()> {
             }
             elevate_privileges(app.askpass)?;
             clean_dead_namespaces()?;
-            exec::exec(cmd, &uiclient)?
+            exec::exec(cmd, &uiclient, app.verbose)?
         }
         args::Command::List(listcmd) => {
             clean_dead_locks()?;
