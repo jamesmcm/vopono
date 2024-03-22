@@ -24,11 +24,15 @@ macro_rules! command_else_config_option {
             $config
                 .get(stringify!($field_id))
                 .or($config.get(&stringify!($field_id).replace('_', "-")))
-                .map_err(|_e| anyhow!("Failed to read config file"))
+                .map_err(|e| {
+                    log::debug!("{:?}", e);
+                    anyhow!("Failed to read config file")
+                })
                 .ok()
         })
     };
 }
+
 macro_rules! command_else_config_bool {
     // Get bool ident from command - command.expr
     // If None then read from Config .get("expr")
@@ -148,8 +152,17 @@ impl ArgsConfig {
         }
 
         // Assign network interface from args or vopono config file
-        // TODO: Does this work with string from config file?
-        let interface = command_else_config_option!(interface, command, config);
+        // Interface must be explicitly read as string
+        let interface = command.interface.or_else(|| {
+            config.get_string("interface").ok().and_then(|s| {
+                NetworkInterface::from_str(&s)
+                    .map_err(|e| {
+                        log::error!("Failed to parse interface from config file: {}", e);
+                        anyhow!("Failed to parse interface from config file: {}", e)
+                    })
+                    .ok()
+            })
+        });
 
         let interface: NetworkInterface = match interface {
             Some(x) => anyhow::Result::<NetworkInterface>::Ok(x),
