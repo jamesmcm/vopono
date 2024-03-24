@@ -332,6 +332,29 @@ Note for same daemons you may need to use the `-k` keep-alive option in
 case the process ID changes (you will then need to manually kill the
 daemon after finishing).
 
+If you need to allow multiple incoming connections to TCP ports inside the namespace, you can specify multiple `-f $PORT` arguments. For example if you wanted to allow ports 8080, 8081 and 8082:
+
+```bash
+$ vopono -v exec -k -f 8080 -f 8081 -f 8082 --provider azirevpn --server norway "program_a -flag"
+```
+
+Note that this will only work on the first call to create the network namespace in question.
+
+#### Starting further programs with vopono using an existing network namespace
+
+Let's say you've already ran
+
+```bash
+$ vopono -v exec -k -f 8080 -f 8081 --provider azirevpn --server norway "program_a -flag"
+```
+where `program_a` is accessible over port 8080. Now if you want to add another program `program_b` which will be accessible over port 8081, and ensure it uses the same VPN tunnel, you can simply specify the same server (or custom config):
+
+```bash
+$ vopono -v exec -k --provider azirevpn --server norway "program_b -flag"
+```
+
+This will bind `program_b` to the existing network namespace used for `program_a` which already has the necessary port for `program_b` specified at creation of the network namespace.
+
 #### transmission-daemon
 
 For example, to launch `transmission-daemon` that is externally
