@@ -32,6 +32,7 @@ basic_tcp_proxy = "0.3.2"
 strum = "0.26"
 strum_macros = "0.26"
 shellexpand = { version = "3", features = ["full"] }
+shell-words = "1"
 
 [package.metadata.rpm]
 package = "vopono"

@@ -4,6 +4,7 @@ pub mod open_ports;
 pub mod pulseaudio;
 pub mod wireguard;
 
+extern crate shell_words as shellwords;
 use crate::config::vpn::Protocol;
 use crate::network::firewall::Firewall;
 use crate::network::netns::Lockfile;
@@ -480,4 +481,14 @@ pub fn get_lock_namespaces() -> anyhow::Result<HashMap<String, Vec<Lockfile>>> {
             Ok(())
         })?;
     Ok(namespaces)
+}
+
+pub fn parse_command_str(command_str: &str) -> anyhow::Result<Vec<String>> {
+    shellwords::split(command_str).map_err(|e| {
+        anyhow::anyhow!(
+            "Failed to parse command string: {}, error: {:?}",
+            &command_str,
+            e
+        )
+    })
 }

@@ -18,6 +18,8 @@ impl DnsConfig {
         servers: &[IpAddr],
         suffixes: &[&str],
         hosts_entries: Option<&Vec<String>>,
+        host_ip: IpAddr, // IP address of host as seen inside from network namespace,
+        allow_host_access: bool,
     ) -> anyhow::Result<Self> {
         let dir_path = format!("/etc/netns/{ns_name}");
         std::fs::create_dir_all(&dir_path)
@@ -54,15 +56,35 @@ impl DnsConfig {
             })?;
         }
 
+        let mut effective_hosts_entries = if allow_host_access {
+            debug!(
+                "--allow-host-access is true so adding host IP {} to hosts file as vopono.host",
+                &host_ip.to_string()
+            );
+            vec![format!("{} vopono.host", host_ip.to_string())]
+        } else {
+            Vec::new()
+        };
+
         if let Some(my_hosts_entries) = hosts_entries {
+            effective_hosts_entries.extend(my_hosts_entries.iter().cloned())
+        };
+
+        let effective_hosts_entries = if effective_hosts_entries.is_empty() {
+            None
+        } else {
+            Some(effective_hosts_entries)
+        };
+
+        if let Some(my_hosts_entries) = effective_hosts_entries {
             let hosts_path = format!("/etc/netns/{ns_name}/hosts");
             let mut hosts = std::fs::File::create(&hosts_path)
                 .with_context(|| format!("Failed to open hosts: {}", &hosts_path))?;
             std::fs::set_permissions(&hosts_path, PermissionsExt::from_mode(0o644))
                 .with_context(|| format!("Failed to set file permissions for {}", &hosts_path))?;
 
-            for hosts_enty in my_hosts_entries {
-                writeln!(hosts, "{hosts_enty}").with_context(|| {
+            for hosts_entry in my_hosts_entries {
+                writeln!(hosts, "{hosts_entry}").with_context(|| {
                     format!("Failed to overwrite hosts: /etc/netns/{ns_name}/hosts")
                 })?;
             }

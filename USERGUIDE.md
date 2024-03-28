@@ -61,29 +61,55 @@ Note that the values are case-sensitive. If you use a custom config file
 then you should not set the provider or server (setting the protocol is
 also optional).
 
-The current network namespace name is provided to the PostUp and PreDown
-scripts in the environment variable `$VOPONO_NS`. It is temporarily set
-when running these scripts only.
+### PostUp and PreDown scripts - run on Host (outside network namespace)
 
-Similarly, the network namespace IP address is provided via `$VOPONO_NS_IP`,
-and is available to the PostUp and PreDown scripts, and the application to
-run itself. `$VOPONO_NS_IP` is useful if you'd like to configure a server
+vopono can run scripts on the host machine (outside the network namespace) with the `--postup` and `--predown` arguments (or set in the `~/.config/vopono/config.toml` file). The postup script will run right after the network namespace is set up (also after provider port forwarding if used), the postdown script will run when tearing down the network namespace after the target application has terminated.
+
+These scripts run outside of the network namespace so that they can be used to run proxies and DNS services which the network namespace can use. To run extra commands within the network namespace, you can just wrap the target command with your own script (see the Plex example below).
+
+These scripts run using the current working directory with the same user as the target application itself (which can be set
+with the `user` argument or config file entry).
+
+Arguments can be passed to the scripts from the command line (note the escaped spaces if the script path contains spaces), e.g.:
+
+```bash
+--postup "~/test\ postup.sh argy1 argy2"
+```
+
+e.g. with a script like:
+
+```bash
+#!/bin/bash
+echo "arg1: $1 arg2: $2"
+```
+
+Just like for the target application execution, the following environment variables are available (but recall that these scripts run *outside* the network namespace):
+
+- `$VOPONO_HOST_IP` the local IP address of the host machine as seen from inside the network namespace.
+- `$VOPONO_NS_IP` the local IP address of the network namespace as seen from the host.
+- `$VOPONO_NS` the name of the network namespace.
+- `$VOPONO_FORWARDED_PORT` the forwarded port for provider port forwarding (ProtonVPN or PIA) - only when using `--port-forwarding` or `--custom-port-forwarding`
+
+`$VOPONO_NS_IP` is useful if you'd like to configure a server
 running within the network namespace to listen on its local IP address only
-(see below, for more information on that).
+(see below for more information on that).
 
-The application to run within the namespace also has access to
-`$VOPONO_HOST_IP`, to get the IP address of the host.
+### Host access from within the network namespace
 
-Note: These environment variables are currently only available from within
-the application/script to run, not on the command line. So the following
-doesn't work:
+The host IP address (as seen from inside the network namespace) is provided as the
+`$VOPONO_HOST_IP` environment variable to the target application/script itself (and also the host scripts described above).
 
-`vopono exec {other Vopono options} 'echo "HOST IP: $VOPONO_HOST_IP"'`
+If `--allow-host-access` is set then the host machine IP (as seen from the network namespace) is also added to the hosts file as `vopono.host` so you can access services on the host machine from within the network namespace e.g. at `http://vopono.host:8080` etc.
 
-Output: `HOST IP: $VOPONO_HOST_IP` (the environ variable wasn't expanded).
+If provider port forwarding is enabled (e.g. `--port-forwarding` or `--custom-port-forwarding` with ProtonVPN or PIA) then the forwarded port is provided as `$VOPONO_FORWARDED_PORT`.
 
-A work around is to create a executable script, that executes the 
-application you'd like to run:
+### Running commands before and after execution within the network namespace
+
+To run extra commands inside the network namespace you can wrap your target application with a bash script and provide that script as the target to vopono.
+
+Note that the target user *must* have read and executable access to this script!
+
+For example with a simple script using the environment variables (also see the Plex section below):
 
 ```bash
 #!/bin/bash
@@ -101,24 +127,6 @@ Output:
 => HOST IP: 10.200.1.1
 ```
 
-### Host scripts
-
-Host scripts to run just after a network namespace is created and just before it is destroyed,
-can be provided with the `postup` and `predown` arguments (or in the `config.toml`).
-
-Note these scripts run on the host (outside the network namespace), using the current working directory,
-and with the same user as the final application itself (which can be set
-with the `user` argument or config file entry).
-
-Script arguments (e.g. `script.sh arg1 arg1`), are currently not possible, resulting in an error:
-
-```
-$ vopono exec {other Vopono options} --postup 'echo POSTUP' ls
-[...]
-sudo: echo POSTUP: command not found
-[...]
-```
-
 ### Wireguard
 
 Install vopono and use `vopono sync` to
@@ -126,7 +134,7 @@ create the Wireguard configuration files (and generate a keypair if
 necessary):
 
 ```bash
-$ yay -S vopono-git
+$ paru -S vopono-bin
 $ vopono sync
 ```
 
@@ -159,7 +167,7 @@ Install vopono and use `vopono sync` to
 create the OpenVPN configuration files and server lists.
 
 ```bash
-$ yay -S vopono-git
+$ paru -S vopono-bin
 $ vopono sync
 ```
 
@@ -385,6 +393,52 @@ $ vopono -v exec -u jackett "/usr/lib/jackett/jackett --NoRestart --NoUpdates --
 ```
 
 You can then access the web UI on the host machine at `http://127.0.0.1:9117/UI/Dashboard`, but all of Jackett's connections will go via the VPN.
+
+#### Plex - port forwarding
+
+Plex can be run and port forwarded (for Internet accessibility) with the following command and bash script.
+
+Note this assumes a standard Arch Linux plex-media-server installation (i.e. where Plex uses its own `plex` user).
+
+In `/home/plex/plex_launch.sh`:
+```bash
+#!/bin/bash
+# Plex config env vars
+export LD_LIBRARY_PATH=/usr/lib/plexmediaserver/lib
+export PLEX_MEDIA_SERVER_HOME=/usr/lib/plexmediaserver
+export PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR=/var/lib/plex
+export PLEX_MEDIA_SERVER_MAX_PLUGIN_PROCS=6
+export PLEX_MEDIA_SERVER_TMPDIR=/tmp
+export TMPDIR=/tmp
+
+PLEX_LOCAL_PORT=32400  # Seems this is hardcoded in Plex
+# local address will only be accesible if running vopono with -o 32400
+echo "local Plex address: http://$VOPONO_NS_IP:$PLEX_LOCAL_PORT"
+# This assume using --port-forwarding or --custom-port-forwarding for ProtonVPN or PIA
+echo "remote Plex address: http://$(curl -4s ifconfig.co):$VOPONO_FORWARDED_PORT"
+# Here we redirect incoming connections on the forwarded to the port to the local Plex one (since we cannot change it! unlike transmission-gtk etc.)
+# Run this in background as it would block
+socat tcp-l:"$VOPONO_FORWARDED_PORT",fork,reuseaddr tcp:"$VOPONO_NS_IP":"$PLEX_LOCAL_PORT" &
+
+/usr/lib/plexmediaserver/Plex\ Media\ Server
+# Kill socat background process on termination
+kill %1
+```
+
+The `plex` user must have access to the above script, e.g.:
+```bash
+sudo chown -R plex /home/plex/
+sudo chmod 777 /home/plex/plex_launch.sh
+```
+
+Launch vopono with the following command (e.g. here with a ProtonVPN custom Wireguard config):
+
+```bash
+$ vopono exec --user plex --custom ~/Downloads/protonvpn-RO-9.conf --protocol wireguard --provider custom --custom-port-forwarding protonvpn -o 32400 /home/plex/plex_launch.sh
+```
+
+Note the `-o 32400` is necessary to have local access to the Plex server from the host, which can be very useful for debugging.
+
 
 #### Proxy to host
 
