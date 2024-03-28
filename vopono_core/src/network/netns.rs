@@ -12,7 +12,7 @@ use super::wireguard::Wireguard;
 use crate::config::providers::{UiClient, VpnProvider};
 use crate::config::vpn::Protocol;
 use crate::network::host_masquerade::FirewallException;
-use crate::util::{config_dir, set_config_permissions, sudo_command};
+use crate::util::{config_dir, parse_command_str, set_config_permissions, sudo_command};
 use anyhow::{anyhow, Context};
 use log::{debug, info, warn};
 use nix::unistd;
@@ -303,12 +303,18 @@ impl NetworkNamespace {
         server: &[IpAddr],
         suffixes: &[&str],
         hosts_entries: Option<&Vec<String>>,
+        allow_host_access: bool,
     ) -> anyhow::Result<()> {
         self.dns_config = Some(DnsConfig::new(
             self.name.clone(),
             server,
             suffixes,
             hosts_entries,
+            self.veth_pair_ips
+                .as_ref()
+                .expect("Failed to get veth pair IPs")
+                .host_ip,
+            allow_host_access,
         )?);
         Ok(())
     }
@@ -369,6 +375,7 @@ impl NetworkNamespace {
         forward_ports: Option<&Vec<u16>>,
         hosts_entries: Option<&Vec<String>>,
         firewall: Firewall,
+        allow_host_access: bool,
     ) -> anyhow::Result<()> {
         self.openfortivpn = Some(OpenFortiVpn::run(
             self,
@@ -377,6 +384,7 @@ impl NetworkNamespace {
             forward_ports,
             hosts_entries,
             firewall,
+            allow_host_access,
         )?);
         Ok(())
     }
@@ -421,6 +429,7 @@ impl NetworkNamespace {
         disable_ipv6: bool,
         dns: Option<&Vec<IpAddr>>,
         hosts_entries: Option<&Vec<String>>,
+        allow_host_access: bool,
     ) -> anyhow::Result<()> {
         if let Ok(wgprov) = self.provider.get_dyn_wireguard_provider() {
             wgprov.wireguard_preup(config_file.as_path())?;
@@ -436,6 +445,7 @@ impl NetworkNamespace {
             disable_ipv6,
             dns,
             hosts_entries,
+            allow_host_access,
         )?);
         Ok(())
     }
@@ -541,38 +551,60 @@ impl Drop for NetworkNamespace {
             info!("Shutting down vopono namespace - as there are no processes left running inside");
             // Run PreDown script (if any)
             if let Some(pdcmd) = self.predown.as_ref() {
-                std::env::set_var("VOPONO_NS", &self.name);
-                std::env::set_var(
-                    "VOPONO_NS_IP",
-                    self.veth_pair_ips
-                        .as_ref()
-                        .unwrap()
-                        .namespace_ip
-                        .to_string(),
-                );
+                // Extra check so we don't panic on bad predown command
+                match parse_command_str(pdcmd) {
+                    Ok(parsed_pdcmd) => {
+                        let parsed_pdcmd_ptrs: Vec<&str> =
+                            parsed_pdcmd.iter().map(|s| s.as_str()).collect();
 
-                let mut sudo_args = Vec::new();
-                if let Some(ref predown_user) = self.predown_user {
-                    sudo_args.push("--user");
-                    sudo_args.push(predown_user);
+                        std::env::set_var("VOPONO_NS", &self.name);
+                        std::env::set_var(
+                            "VOPONO_NS_IP",
+                            self.veth_pair_ips
+                                .as_ref()
+                                .unwrap()
+                                .namespace_ip
+                                .to_string(),
+                        );
+                        std::env::set_var(
+                            "VOPONO_HOST_IP",
+                            self.veth_pair_ips.as_ref().unwrap().host_ip.to_string(),
+                        );
+
+                        let mut sudo_args = Vec::new();
+                        if let Some(ref predown_user) = self.predown_user {
+                            sudo_args.push("--user");
+                            sudo_args.push(predown_user);
+                        }
+                        if let Some(ref predown_group) = self.predown_group {
+                            sudo_args.push("--group");
+                            sudo_args.push(predown_group);
+                        }
+
+                        if !sudo_args.is_empty() {
+                            let mut args = vec!["--preserve-env"];
+                            args.append(&mut sudo_args);
+                            args.extend(parsed_pdcmd_ptrs);
+
+                            std::process::Command::new("sudo").args(args).spawn().ok();
+                        } else {
+                            std::process::Command::new(parsed_pdcmd_ptrs[0])
+                                .args(parsed_pdcmd_ptrs[1..].iter())
+                                .spawn()
+                                .ok();
+                        }
+
+                        std::env::remove_var("VOPONO_NS");
+                        std::env::remove_var("VOPONO_NS_IP");
+                        std::env::remove_var("VOPONO_HOST_IP");
+                    }
+                    Err(e) => {
+                        log::error!(
+                        "Failed to parse postdown command: {} in shutdown state - skipped postdown execution, error: {:?}",
+                        &pdcmd, e
+                    )
+                    }
                 }
-                if let Some(ref predown_group) = self.predown_group {
-                    sudo_args.push("--group");
-                    sudo_args.push(predown_group);
-                }
-
-                if !sudo_args.is_empty() {
-                    let mut args = vec!["--preserve-env"];
-                    args.append(&mut sudo_args);
-                    args.push(pdcmd);
-
-                    std::process::Command::new("sudo").args(args).spawn().ok();
-                } else {
-                    std::process::Command::new(pdcmd).spawn().ok();
-                }
-
-                std::env::remove_var("VOPONO_NS");
-                std::env::remove_var("VOPONO_NS_IP");
             }
 
             self.openvpn = None;

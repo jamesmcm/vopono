@@ -22,8 +22,8 @@ use vopono_core::network::port_forwarding::piapf::Piapf;
 use vopono_core::network::port_forwarding::Forwarder;
 use vopono_core::network::shadowsocks::uses_shadowsocks;
 use vopono_core::network::sysctl::SysCtl;
-use vopono_core::util::vopono_dir;
 use vopono_core::util::{get_config_from_alias, get_existing_namespaces, get_target_subnet};
+use vopono_core::util::{parse_command_str, vopono_dir};
 
 pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> anyhow::Result<()> {
     // this captures all sigint signals
@@ -89,8 +89,8 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> any
     let mut ns;
     let _sysctl;
 
-    // Better to check for lockfile exists?
-    let using_existing_netns;
+    let _using_existing_netns;
+    let forwarder;
     if get_existing_namespaces()?.contains(&ns_name) {
         // If namespace exists, read its lock config
         info!(
@@ -98,10 +98,16 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> any
             &ns_name
         );
         ns = NetworkNamespace::from_existing(ns_name)?;
-        using_existing_netns = true;
+        _using_existing_netns = true;
+
+        if parsed_command.port_forwarding || parsed_command.custom_port_forwarding.is_some() {
+            warn!("Re-using existing network namespace {} - will not run port forwarder, should be run when netns first created", &ns.name);
+        }
+
+        forwarder = None;
     } else {
         // Create new network namespace
-        using_existing_netns = false;
+        _using_existing_netns = false;
         ns = NetworkNamespace::new(
             ns_name.clone(),
             parsed_command.provider.clone(),
@@ -159,12 +165,21 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> any
             "VOPONO_NS_IP",
             ns.veth_pair_ips.as_ref().unwrap().namespace_ip.to_string(),
         );
+        // Set env var referring to the host IP for the application:
+        std::env::set_var(
+            "VOPONO_HOST_IP",
+            ns.veth_pair_ips.as_ref().unwrap().host_ip.to_string(),
+        );
+        std::env::set_var("VOPONO_NS", &ns.name);
+
+        forwarder = provider_port_forwarding(&parsed_command, &ns)?;
+        if let Some(f) = forwarder.as_ref() {
+            std::env::set_var("VOPONO_FORWARDED_PORT", f.forwarded_port().to_string());
+        }
 
         // Run PostUp script (if any)
         // Temporarily set env var referring to this network namespace name
         if let Some(pucmd) = parsed_command.postup.clone() {
-            std::env::set_var("VOPONO_NS", &ns.name);
-
             let mut sudo_args = Vec::new();
             if let Some(ref user) = parsed_command.user {
                 sudo_args.push("--user");
@@ -175,31 +190,27 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> any
                 sudo_args.push(group);
             }
 
+            let parsed_pucmd = parse_command_str(&pucmd)?;
+            let parsed_pucmd_ptrs: Vec<&str> = parsed_pucmd.iter().map(|s| s.as_str()).collect();
+
             if !sudo_args.is_empty() {
                 let mut args = vec!["--preserve-env"];
                 args.append(&mut sudo_args);
-                args.push(&pucmd);
+                args.extend(parsed_pucmd_ptrs);
 
                 std::process::Command::new("sudo").args(args).spawn()?;
             } else {
-                std::process::Command::new(&pucmd).spawn()?;
+                std::process::Command::new(parsed_pucmd_ptrs[0])
+                    .args(parsed_pucmd_ptrs[1..].iter())
+                    .spawn()?;
             };
-
-            std::env::remove_var("VOPONO_NS");
         }
     }
-
-    // Set env var referring to the host IP for the application:
-    std::env::set_var(
-        "VOPONO_HOST_IP",
-        ns.veth_pair_ips.as_ref().unwrap().host_ip.to_string(),
-    );
 
     let ns = ns.write_lockfile(&parsed_command.application)?;
 
     // Port forwarding for ProtonVPN and PIA which require loop to keep it active
     // Forwarder is returned so it isn't dropped
-    let forwarder = provider_port_forwarding(&parsed_command, using_existing_netns, &ns)?;
 
     // Launch TCP proxy server on other threads if forwarding ports
     // TODO: Fix when running as root
@@ -231,6 +242,8 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> any
         stay_alive(None, signals);
     }
 
+    std::env::remove_var("VOPONO_FORWARDED_PORT");
+    std::env::remove_var("VOPONO_NS");
     std::env::remove_var("VOPONO_NS_IP");
     std::env::remove_var("VOPONO_HOST_IP");
 
@@ -286,7 +299,12 @@ fn run_protocol_in_netns(
         );
         if let Some(dns) = &parsed_command.dns {
             // TODO: Separate hosts entries from DNS config?
-            ns.dns_config(dns, &[], parsed_command.hosts.as_ref())?;
+            ns.dns_config(
+                dns,
+                &[],
+                parsed_command.hosts.as_ref(),
+                parsed_command.allow_host_access,
+            )?;
         }
         return Ok(None);
     }
@@ -350,7 +368,12 @@ fn run_protocol_in_netns(
                 .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
             // TODO: DNS suffixes?
-            ns.dns_config(&dns, &[], parsed_command.hosts.as_ref())?;
+            ns.dns_config(
+                &dns,
+                &[],
+                parsed_command.hosts.as_ref(),
+                parsed_command.allow_host_access,
+            )?;
             // Check if using Shadowsocks
             if let Some((ss_host, ss_lport)) = uses_shadowsocks(
                 config_file
@@ -408,7 +431,12 @@ fn run_protocol_in_netns(
                     let old_dns = ns.dns_config.take();
                     std::mem::forget(old_dns);
                     // TODO: DNS suffixes?
-                    ns.dns_config(&[newdns], &[], parsed_command.hosts.as_ref())?;
+                    ns.dns_config(
+                        &[newdns],
+                        &[],
+                        parsed_command.hosts.as_ref(),
+                        parsed_command.allow_host_access,
+                    )?;
                 }
             }
         }
@@ -424,6 +452,7 @@ fn run_protocol_in_netns(
                 parsed_command.disable_ipv6,
                 parsed_command.dns.as_ref(),
                 parsed_command.hosts.as_ref(),
+                parsed_command.allow_host_access,
             )?;
         }
         Protocol::OpenConnect => {
@@ -432,7 +461,12 @@ fn run_protocol_in_netns(
                 .clone()
                 .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
             // TODO: DNS suffixes?
-            ns.dns_config(&dns, &[], parsed_command.hosts.as_ref())?;
+            ns.dns_config(
+                &dns,
+                &[],
+                parsed_command.hosts.as_ref(),
+                parsed_command.allow_host_access,
+            )?;
             ns.run_openconnect(
                 config_file
                     .clone()
@@ -454,6 +488,7 @@ fn run_protocol_in_netns(
                 parsed_command.forward.as_ref(),
                 parsed_command.hosts.as_ref(),
                 parsed_command.firewall,
+                parsed_command.allow_host_access,
             )?;
         }
     }
@@ -462,18 +497,11 @@ fn run_protocol_in_netns(
 
 fn provider_port_forwarding(
     parsed_command: &ArgsConfig,
-    using_existing_netns: bool,
     ns: &NetworkNamespace,
 ) -> anyhow::Result<Option<Box<dyn Forwarder>>> {
     //  Does not re-run if re-using existing namespace
-    if using_existing_netns
-        && (parsed_command.port_forwarding || parsed_command.custom_port_forwarding.is_some())
-    {
-        warn!("Re-using existing network namespace {} - will not run port forwarder, should be run when netns first created", &ns.name);
-    }
-    let forwarder: Option<Box<dyn Forwarder>> = if (parsed_command.port_forwarding
-        || parsed_command.custom_port_forwarding.is_some())
-        && !using_existing_netns
+    let forwarder: Option<Box<dyn Forwarder>> = if parsed_command.port_forwarding
+        || parsed_command.custom_port_forwarding.is_some()
     {
         let provider_or_custom = if parsed_command.custom.is_some() {
             parsed_command.custom_port_forwarding.clone()

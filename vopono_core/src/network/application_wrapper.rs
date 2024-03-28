@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use super::{netns::NetworkNamespace, port_forwarding::Forwarder};
-use crate::util::get_all_running_process_names;
+use crate::util::{get_all_running_process_names, parse_command_str};
 use log::warn;
 
 pub struct ApplicationWrapper {
@@ -19,7 +19,7 @@ impl ApplicationWrapper {
         port_forwarding: Option<Box<dyn Forwarder>>,
     ) -> anyhow::Result<Self> {
         let running_processes = get_all_running_process_names();
-        let app_vec = application.split_whitespace().collect::<Vec<_>>();
+        let app_vec = parse_command_str(application)?;
 
         for shared_process_app in [
             "google-chrome-stable",
@@ -32,16 +32,18 @@ impl ApplicationWrapper {
         .iter()
         {
             // TODO: Avoid String allocation here
-            if app_vec.contains(shared_process_app)
+            if app_vec.contains(&shared_process_app.to_string())
                 && running_processes.contains(&shared_process_app.to_string())
             {
                 warn!("{} is already running. You must force it to use a separate profile in order to launch a new process!", shared_process_app);
             }
         }
 
+        let app_vec_ptrs: Vec<&str> = app_vec.iter().map(|s| s.as_str()).collect();
+
         let handle = NetworkNamespace::exec_no_block(
             &netns.name,
-            app_vec.as_slice(),
+            app_vec_ptrs.as_slice(),
             user,
             group,
             false,

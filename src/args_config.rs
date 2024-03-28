@@ -113,14 +113,26 @@ impl ArgsConfig {
                     .ok()
                     .and_then(|s| PathBuf::from_str(s.as_ref()).ok())
             });
+
+        // Note application cannot be defined in config file
+        let application: String = shellexpand::full(&command.application)
+            .map_err(|e| {
+                anyhow!(
+                    "Shell expansion error for application: {:?}, error: {:?}",
+                    &command.application,
+                    e
+                )
+            })
+            .map(|c| c.to_string())?;
         let custom_netns_name = command_else_config_option!(custom_netns_name, command, config);
         let open_hosts = command_else_config_option!(open_hosts, command, config);
         let hosts = command_else_config_option!(hosts, command, config);
         let open_ports = command_else_config_option!(open_ports, command, config);
         let forward = command_else_config_option!(forward, command, config);
+        dbg!(&command.postup); // TODO
         let postup = command_else_config_option!(postup, command, config)
             .and_then(|p| shellexpand::full(&p).ok().map(|s| s.into_owned()));
-
+        dbg!(&postup);
         let predown = command_else_config_option!(predown, command, config)
             .and_then(|p| shellexpand::full(&p).ok().map(|s| s.into_owned()));
         let group = command_else_config_option!(group, command, config);
@@ -256,8 +268,7 @@ impl ArgsConfig {
             protocol,
             interface,
             server,
-            // TODO: Allow application to be saved in config file? - breaking change to CLI interface
-            application: command.application,
+            application,
             user,
             group,
             working_directory,

@@ -108,7 +108,7 @@ See the [vopono User Guide](USERGUIDE.md) for much more detailed usage instructi
 Install the `vopono-git` package with your favourite AUR helper.
 
 ```bash
-$ yay -S vopono-git
+$ paru -S vopono-git
 $ vopono sync
 ```
 
