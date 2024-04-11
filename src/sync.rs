@@ -11,7 +11,9 @@ use crate::args::WrappedArg;
 pub fn sync_menu(uiclient: &dyn UiClient) -> anyhow::Result<()> {
     let variants = WrappedArg::<VpnProvider>::value_variants()
         .iter()
-        .filter(|x| x.to_variant() != VpnProvider::Custom)
+        .filter(|x| {
+            ![VpnProvider::Custom, VpnProvider::None, VpnProvider::Warp].contains(&x.to_variant())
+        })
         .map(|x| x.to_variant().to_string())
         .collect::<Vec<String>>();
 
