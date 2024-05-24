@@ -36,6 +36,7 @@ lynx all running through different VPN connections:
 | HMA (HideMyAss)         | ✅              | ❌                |
 | AirVPN                  | ✅              | ❌                |
 | Cloudflare Warp\*\*\*\* | ❌              | ❌                |
+| Self host (--custom)    | ✅              | ✅                |
 
 \* Port forwarding supported with the `--port-forwarding` option and `--port-forwarding-callback` to run a command when the port is refreshed.
 
