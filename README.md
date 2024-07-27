@@ -215,5 +215,5 @@ Unless you explicitly state otherwise, any contribution intentionally submitted
 for inclusion in the work by you, will be licensed under the GPLv3 (or
 above), without any additional terms or conditions.
 
-Many thanks to NilIrl's [MozWire](https://github.com/NilsIrl/MozWire)
+Many thanks to NilsIrl's [MozWire](https://github.com/NilsIrl/MozWire)
 for the investigation of the MozillaVPN API.
