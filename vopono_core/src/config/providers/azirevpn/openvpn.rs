@@ -1,5 +1,6 @@
 use super::AzireVPN;
 use super::ConnectResponse;
+use super::LocationResponse;
 use super::OpenVpnProvider;
 use crate::config::providers::Input;
 use crate::config::providers::UiClient;
@@ -61,42 +62,49 @@ impl OpenVpnProvider for AzireVPN {
         delete_all_files_in_dir(&openvpn_dir)?;
         let locations_resp: ConnectResponse = client.get(self.locations_url()).send()?.json()?;
         let locations = locations_resp.locations;
+
         for location in locations {
             let location_name = &location.name;
-            let url = format!("https://manager.azirevpn.com/account/openvpn/generate?country={location_name}&os=linux-cli&port=random&protocol={protocol}");
-
-            let response = client.get(url).headers(headers.clone()).send()?;
-            let new_cookie = response.headers().get_all(COOKIE);
-            new_cookie.iter().for_each(|x| {
-                if x.to_str().unwrap().starts_with("az=") && auth_cookie != x.to_str().unwrap() {
-                    log::debug!("New az cookie: {}", x.to_str().unwrap());
-                    auth_cookie = Box::leak(x.to_str().unwrap().to_owned().into_boxed_str());
-                }
-            });
-            let file = response.bytes()?;
-
-            let file_contents = std::str::from_utf8(&file)?;
-            log::debug!("File contents: {}", &file_contents);
-            if !file_contents.contains("BEGIN CERTIFICATE") {
-                log::error!("Failed to get valid OpenVPN config for location: {} - check the az cookie is given correctly. Sleeping 10s to avoid rate limiting.", location_name);
-                std::thread::sleep(Duration::from_secs(10));
-                continue;
-            }
-            let file_contents = file_contents
-                .split('\n')
-                .filter(|&x| !(x.starts_with("up ") || x.starts_with("down ")))
-                .collect::<Vec<&str>>()
-                .join("\n");
-
             let country = country_map
                 .get(&location_name[0..2])
                 .expect("Could not map country to name");
             let filename = format!("{country}-{location_name}.ovpn");
+
+            let mut file_contents = get_openvpn_file(
+                &location,
+                &client,
+                &headers,
+                auth_cookie,
+                &protocol.to_string(),
+            );
+            if file_contents.is_err() {
+                log::info!("Sleeping 90 seconds to avoid rate limiting...");
+                std::thread::sleep(Duration::from_secs(90));
+                file_contents = get_openvpn_file(
+                    &location,
+                    &client,
+                    &headers,
+                    auth_cookie,
+                    &protocol.to_string(),
+                );
+            }
+            if file_contents.is_err() {
+                log::error!(
+                    "Failed to get valid OpenVPN config for location: {} - even after retry.",
+                    location_name
+                );
+                log::info!("Sleeping 60 seconds to avoid rate limiting...");
+                std::thread::sleep(Duration::from_secs(60));
+                continue;
+            }
+
+            let file_contents = file_contents.unwrap();
+
             debug!("Writing file: {}", filename);
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
             write!(outfile, "{file_contents}")?;
-            std::thread::sleep(Duration::from_millis(500));
+            std::thread::sleep(Duration::from_millis(200));
         }
 
         // Write OpenVPN credentials file
@@ -112,4 +120,39 @@ impl OpenVpnProvider for AzireVPN {
         }
         Ok(())
     }
+}
+
+fn get_openvpn_file(
+    location: &LocationResponse,
+    client: &reqwest::blocking::Client,
+    headers: &HeaderMap,
+    mut auth_cookie: &str,
+    protocol: &str,
+) -> anyhow::Result<String> {
+    let location_name = &location.name;
+    let url = format!("https://manager.azirevpn.com/account/openvpn/generate?country={location_name}&os=linux-cli&port=random&protocol={protocol}");
+
+    let response = client.get(url).headers(headers.clone()).send()?;
+    let new_cookie = response.headers().get_all(COOKIE);
+    new_cookie.iter().for_each(|x| {
+        if x.to_str().unwrap().starts_with("az=") && auth_cookie != x.to_str().unwrap() {
+            log::debug!("New az cookie: {}", x.to_str().unwrap());
+            auth_cookie = Box::leak(x.to_str().unwrap().to_owned().into_boxed_str());
+        }
+    });
+    let file = response.bytes()?;
+
+    let file_contents = std::str::from_utf8(&file)?;
+    log::debug!("File contents: {}", &file_contents);
+    if !file_contents.contains("BEGIN CERTIFICATE") {
+        log::error!("Failed to get valid OpenVPN config for location: {} - could be rate limiting or invalid az cookie.", location_name);
+        return Err(anyhow::anyhow!("Failed to get valid OpenVPN config for location: {} - check the az cookie is given correctly", location_name));
+    }
+    let file_contents = file_contents
+        .split('\n')
+        .filter(|&x| !(x.starts_with("up ") || x.starts_with("down ")))
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    Ok(file_contents)
 }
