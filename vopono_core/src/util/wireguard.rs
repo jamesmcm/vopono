@@ -10,10 +10,19 @@ use x25519_dalek::{PublicKey, StaticSecret};
 
 const B64_ENGINE: GeneralPurpose = general_purpose::STANDARD;
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Clone)]
 pub struct WgKey {
     pub public: String,
     pub private: String,
+}
+
+impl std::fmt::Debug for WgKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WgKey")
+            .field("public", &self.public)
+            .field("private", &"********".to_string())
+            .finish()
+    }
 }
 
 #[allow(dead_code)]

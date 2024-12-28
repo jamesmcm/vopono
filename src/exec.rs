@@ -63,7 +63,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> any
             );
             synch(
                 parsed_command.provider.clone(),
-                Some(parsed_command.protocol.clone()),
+                &Some(parsed_command.protocol.clone()),
                 uiclient,
             )?;
         }

@@ -653,6 +653,8 @@ I recommend using [MozWire](https://github.com/NilsIrl/MozWire) to manage this.
 iVPN Wireguard keypairs must be uploaded manually, as the Client Area is
 behind a captcha login.
 
+Note [iVPN no longer supports port forwarding](https://www.ivpn.net/blog/gradual-removal-of-port-forwarding). At the time of writing, ProtonVPN is the best provider with this service.
+
 ### NordVPN
 Starting 27 June 2023, the required user credentials are no longer your NordVPN login details but need to be generated in the user control panel, under Services → NordVPN. Scroll down and locate the Manual Setup tab, then click on Set up NordVPN manually and follow instructions. Copy your service credentials and re-sync NordVPN configuration inside Vopono.
 
@@ -662,11 +664,6 @@ Some providers allow port forwarding inside the tunnel, so you can open
 some ports inside the network namespace which can be accessed via the
 Wireguard/OpenVPN tunnel (this can be important for BitTorrent
 connectivity, etc.).
-
-For iVPN port forwarding also works the same way, however it is **only
-supported for OpenVPN** on iVPN's side. So remember to pass
-`--protocol openvpn -o PORTNUMBER` when trying it! Enable port
-forwarding in the [Port Forwarding page in the iVPN client area](https://www.ivpn.net/clientarea/vpn/273887).
 
 For AirVPN you must enable the port in [the client area webpage](https://airvpn.org/ports/),
 and then use `--protocol openvpn -o PORTNUMBER` as for iVPN.

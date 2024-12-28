@@ -548,7 +548,7 @@ impl Drop for Wireguard {
     }
 }
 
-#[derive(Deserialize, Debug, Serialize, Clone)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct WireguardInterface {
     #[serde(rename = "PrivateKey")]
     pub private_key: String,
@@ -556,6 +556,16 @@ pub struct WireguardInterface {
     pub address: Vec<IpNet>,
     #[serde(rename = "DNS", deserialize_with = "de_vec_ipaddr")]
     pub dns: Option<Vec<IpAddr>>,
+}
+
+impl std::fmt::Debug for WireguardInterface {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WireguardInterface")
+            .field("private_key", &"********".to_string())
+            .field("address", &self.address)
+            .field("dns", &self.dns)
+            .finish()
+    }
 }
 
 #[derive(Deserialize, Debug, Serialize)]

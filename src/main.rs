@@ -62,11 +62,11 @@ fn main() -> anyhow::Result<()> {
         args::Command::Synch(synchcmd) => {
             // If provider given then sync that, else prompt with menu
             if synchcmd.vpn_provider.is_none() {
-                sync_menu(&uiclient)?;
+                sync_menu(&uiclient, synchcmd.protocol.map(|x| x.to_variant()))?;
             } else {
                 synch(
                     synchcmd.vpn_provider.unwrap().to_variant(),
-                    synchcmd.protocol.map(|x| x.to_variant()),
+                    &synchcmd.protocol.map(|x| x.to_variant()),
                     &uiclient,
                 )?;
             }

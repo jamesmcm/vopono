@@ -25,7 +25,7 @@ impl<T: IntoEnumIterator + Clone + Display> ValueEnum for WrappedArg<T> {
         let use_input = input.trim().to_string();
 
         let found = if ignore_case {
-            T::iter().find(|x| x.to_string().to_ascii_lowercase() == use_input.to_ascii_lowercase())
+            T::iter().find(|x| x.to_string().eq_ignore_ascii_case(&use_input))
         } else {
             T::iter().find(|x| x.to_string() == use_input)
         };

@@ -77,6 +77,8 @@ impl OpenVpnProvider for PrivateInternetAccess {
             hostname_lookup: HashMap::new(),
         };
 
+        let re =
+            Regex::new(r"\n *remote +([^ ]+) +\d+ *\n").expect("Failed to compile hostname regex");
         for i in 0..zip.len() {
             // For each file, detect if ovpn, crl or crt
             // Modify auth line for config
@@ -112,8 +114,6 @@ impl OpenVpnProvider for PrivateInternetAccess {
                 file.name().to_string()
             };
 
-            let re = Regex::new(r"\n *remote +([^ ]+) +\d+ *\n")
-                .expect("Failed to compile hostname regex");
             if let Some(capture) = re.captures(&String::from_utf8_lossy(&file_contents)) {
                 let hostname = capture
                     .get(1)

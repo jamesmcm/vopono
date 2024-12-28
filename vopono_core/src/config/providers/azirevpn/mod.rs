@@ -3,21 +3,16 @@ mod wireguard;
 
 use super::{Input, OpenVpnProvider, Password, Provider, UiClient, WireguardProvider};
 use crate::config::vpn::Protocol;
-use crate::network::wireguard::{de_socketaddr, de_vec_ipaddr, de_vec_ipnet};
-use ipnet::IpNet;
 use serde::Deserialize;
 use std::net::IpAddr;
 
 // AzireVPN details: https://www.azirevpn.com/docs/servers
-
+// servers: https://www.azirevpn.com/service/servers#openvpn
 pub struct AzireVPN {}
 
 impl AzireVPN {
-    fn server_aliases(&self) -> &[&str] {
-        &[
-            "ca1", "dk1", "fr1", "de1", "it1", "es1", "nl1", "no1", "ro1", "se1", "se2", "ch1",
-            "th1", "us1", "us2", "uk1",
-        ]
+    fn locations_url(&self) -> &str {
+        "https://api.azirevpn.com/v2/locations"
     }
 }
 impl Provider for AzireVPN {
@@ -35,21 +30,57 @@ impl Provider for AzireVPN {
 
 #[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
-struct ConnectResponse {
+struct AccessTokenResponse {
     status: String,
-    data: WgResponse,
+    user: UserResponse,
+    token: String,
+    device_name: String,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
-struct WgResponse {
-    #[serde(alias = "DNS", deserialize_with = "de_vec_ipaddr")]
-    dns: Option<Vec<IpAddr>>,
-    #[serde(alias = "Address", deserialize_with = "de_vec_ipnet")]
-    address: Vec<IpNet>,
-    #[serde(alias = "PublicKey")]
-    public_key: String,
-    #[serde(alias = "Endpoint", deserialize_with = "de_socketaddr")]
-    endpoint: std::net::SocketAddr,
+struct UserResponse {
+    username: String,
+    email: String,
+    email_verified: bool,
+    active: bool,
+    expires_at: i64,
+    subscription: bool,
+    is_oldschool: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct DeviceResponse {
+    status: String,
+    ipv4: IpResponse,
+    ipv6: IpResponse,
+    dns: Vec<IpAddr>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct IpResponse {
+    address: String,
+    netmask: u8,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct ConnectResponse {
+    status: String,
+    locations: Vec<LocationResponse>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct LocationResponse {
+    name: String,
+    city: String,
+    country: String,
+    iso: String,
+    pool: String,
+    pubkey: String,
 }
 
 impl AzireVPN {
