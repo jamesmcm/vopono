@@ -67,6 +67,7 @@ pub fn synch(
             error!("vopono sync not supported for None protocol");
         }
         // TODO: Fix this asking for same credentials twice
+        // Move auth and auth caching to base part of provider then share it for both
         None => {
             if let Ok(p) = provider.get_dyn_wireguard_provider() {
                 info!("Starting Wireguard configuration...");

@@ -4,7 +4,7 @@ mod wireguard;
 use super::{Input, OpenVpnProvider, Password, Provider, UiClient, WireguardProvider};
 use crate::config::vpn::Protocol;
 use serde::Deserialize;
-use std::net::IpAddr;
+use std::{net::IpAddr, path::PathBuf};
 
 // AzireVPN details: https://www.azirevpn.com/docs/servers
 // servers: https://www.azirevpn.com/service/servers#openvpn
@@ -96,5 +96,9 @@ impl AzireVPN {
         })?;
         let password = password.trim();
         Ok((username.to_string(), password.to_string()))
+    }
+
+    fn token_file_path(&self) -> PathBuf {
+        self.provider_dir().unwrap().join("token.txt")
     }
 }

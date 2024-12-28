@@ -49,6 +49,13 @@ impl WireguardProvider for AzireVPN {
 
         debug!("auth_response: {:?}", &auth_response);
 
+        let mut outfile = std::fs::File::create(self.token_file_path())?;
+        write!(outfile, "{}", auth_response.token)?;
+        info!(
+            "AzireVPN Auth Token written to {}",
+            self.token_file_path().display()
+        );
+
         // This adds device for Token on VPN page and returns JSON network data - note max devices is limited to 10 registered, 5 concurrent connections
         let device_response: DeviceResponse = client
             .post("https://api.azirevpn.com/v2/ip/add")

@@ -52,7 +52,6 @@ impl OpenVpnProvider for AzireVPN {
             auth_cookie = Box::leak(format!("az={}", auth_cookie).into_boxed_str());
         }
 
-        // TODO: Allow port selection, TLS version selection
         let openvpn_dir = self.openvpn_dir()?;
         let country_map = crate::util::country_map::code_to_country_map();
         let client = reqwest::blocking::Client::new();
