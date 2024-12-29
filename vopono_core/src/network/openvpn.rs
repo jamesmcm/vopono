@@ -17,6 +17,7 @@ pub struct OpenVpn {
     pid: u32,
     pub openvpn_dns: Option<IpAddr>,
     pub logfile: PathBuf,
+    // pub distinct_remotes: Vec<String>, // Unique IP Addresses or hostnames
 }
 
 impl OpenVpn {

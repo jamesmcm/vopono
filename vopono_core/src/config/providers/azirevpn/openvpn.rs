@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 impl OpenVpnProvider for AzireVPN {
-    // AzireVPN details: https://www.azirevpn.com/docs/servers
+    // AzireVPN details: https://www.azirevpn.com/service/servers#dns
     // TODO: Add IPv6 DNS
     fn provider_dns(&self) -> Option<Vec<IpAddr>> {
         Some(vec![
@@ -142,8 +142,8 @@ fn get_openvpn_file(
     let file = response.bytes()?;
 
     let file_contents = std::str::from_utf8(&file)?;
-    log::debug!("File contents: {}", &file_contents);
     if !file_contents.contains("BEGIN CERTIFICATE") {
+        log::debug!("File contents: {}", &file_contents);
         log::error!("Failed to get valid OpenVPN config for location: {} - could be rate limiting or invalid az cookie.", location_name);
         return Err(anyhow::anyhow!("Failed to get valid OpenVPN config for location: {} - check the az cookie is given correctly", location_name));
     }

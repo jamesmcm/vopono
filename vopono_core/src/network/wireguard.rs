@@ -15,10 +15,11 @@ use std::str::FromStr;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Wireguard {
-    ns_name: String,
-    config_file: PathBuf,
-    firewall: Firewall,
-    if_name: String,
+    pub ns_name: String,
+    pub config_file: PathBuf,
+    pub firewall: Firewall,
+    pub if_name: String,
+    pub interface_addresses: Vec<IpAddr>,
 }
 
 impl Wireguard {
@@ -112,10 +113,12 @@ impl Wireguard {
         std::fs::remove_file("/tmp/vopono_nft.conf")
             .context("Deleting file: /tmp/vopono_nft.conf")
             .ok();
+        let mut interface_addresses: Vec<IpAddr> = Vec::new();
         // Extract addresses
         for address in config.interface.address.iter() {
             match address {
                 IpNet::V6(address) => {
+                    interface_addresses.push(IpAddr::V6(address.addr()));
                     NetworkNamespace::exec(
                         &namespace.name,
                         &[
@@ -130,6 +133,7 @@ impl Wireguard {
                     )?;
                 }
                 IpNet::V4(address) => {
+                    interface_addresses.push(IpAddr::V4(address.addr()));
                     NetworkNamespace::exec(
                         &namespace.name,
                         &[
@@ -404,6 +408,7 @@ impl Wireguard {
             ns_name: namespace.name.clone(),
             firewall,
             if_name,
+            interface_addresses,
         })
     }
 }

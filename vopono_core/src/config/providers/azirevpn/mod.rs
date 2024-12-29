@@ -3,7 +3,9 @@ mod wireguard;
 
 use super::{Input, OpenVpnProvider, Password, Provider, UiClient, WireguardProvider};
 use crate::config::vpn::Protocol;
+use anyhow::Context;
 use serde::Deserialize;
+use std::io::Write;
 use std::{net::IpAddr, path::PathBuf};
 
 // AzireVPN details: https://www.azirevpn.com/docs/servers
@@ -100,5 +102,57 @@ impl AzireVPN {
 
     fn token_file_path(&self) -> PathBuf {
         self.provider_dir().unwrap().join("token.txt")
+    }
+
+    pub fn get_access_token(&self, uiclient: &dyn UiClient) -> anyhow::Result<String> {
+        let token_file_path = self.token_file_path();
+        if token_file_path.exists() {
+            let token = std::fs::read_to_string(&token_file_path)?;
+            log::debug!(
+                "AzireVPN Auth Token read from {}",
+                self.token_file_path().display()
+            );
+            return Ok(token);
+        }
+        let (username, password) = self.request_userpass(uiclient)?;
+        let client = reqwest::blocking::Client::new();
+        let auth_response: AccessTokenResponse = client
+            .post("https://api.azirevpn.com/v2/auth/client")
+            .form(&[
+                ("username", &username),
+                ("password", &password),
+                ("comment", &"web generator".to_string()),
+            ])
+            .send()?
+            .json()
+            .with_context(|| {
+                "Authentication error: Ensure your AzireVPN credentials are correct"
+            })?;
+
+        // log::debug!("auth_response: {:?}", &auth_response);
+        let mut outfile = std::fs::File::create(self.token_file_path())?;
+        write!(outfile, "{}", auth_response.token)?;
+        log::debug!(
+            "AzireVPN Auth Token written to {}",
+            self.token_file_path().display()
+        );
+
+        Ok(auth_response.token)
+    }
+
+    pub fn read_access_token(&self) -> anyhow::Result<String> {
+        let token_file_path = self.token_file_path();
+        if token_file_path.exists() {
+            let token = std::fs::read_to_string(&token_file_path)?;
+            log::debug!(
+                "AzireVPN Auth Token read from {}",
+                self.token_file_path().display()
+            );
+            return Ok(token);
+        }
+        Err(anyhow::anyhow!(
+            "AzireVPN Auth Token not found at {}",
+            token_file_path.display()
+        ))
     }
 }

@@ -1,12 +1,11 @@
 use super::AzireVPN;
-use super::{AccessTokenResponse, ConnectResponse, DeviceResponse, WireguardProvider};
+use super::{ConnectResponse, DeviceResponse, WireguardProvider};
 use crate::config::providers::azirevpn::LocationResponse;
 use crate::config::providers::UiClient;
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::country_map::code_to_country_map;
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::{generate_keypair, WgKey};
-use anyhow::Context;
 use ipnet::IpNet;
 use log::{debug, info};
 use regex::Regex;
@@ -25,8 +24,6 @@ impl WireguardProvider for AzireVPN {
         let client = Client::new();
 
         let country_map = code_to_country_map();
-        let (username, password) = self.request_userpass(uiclient)?;
-
         // TODO: Allow user to specify existing device and provide private key
 
         // Start device and keypair generation
@@ -34,32 +31,12 @@ impl WireguardProvider for AzireVPN {
         debug!("Chosen keypair: {:?}", keypair);
 
         // This creates an API token for the user
-        let auth_response: AccessTokenResponse = client
-            .post("https://api.azirevpn.com/v2/auth/client")
-            .form(&[
-                ("username", &username),
-                ("password", &password),
-                ("comment", &"web generator".to_string()),
-            ])
-            .send()?
-            .json()
-            .with_context(|| {
-                "Authentication error: Ensure your AzireVPN credentials are correct"
-            })?;
-
-        debug!("auth_response: {:?}", &auth_response);
-
-        let mut outfile = std::fs::File::create(self.token_file_path())?;
-        write!(outfile, "{}", auth_response.token)?;
-        info!(
-            "AzireVPN Auth Token written to {}",
-            self.token_file_path().display()
-        );
+        let token = self.get_access_token(uiclient)?;
 
         // This adds device for Token on VPN page and returns JSON network data - note max devices is limited to 10 registered, 5 concurrent connections
         let device_response: DeviceResponse = client
             .post("https://api.azirevpn.com/v2/ip/add")
-            .form(&[("key", &keypair.public), ("token", &auth_response.token)])
+            .form(&[("key", &keypair.public), ("token", &token)])
             .send()?
             .json()?;
 
