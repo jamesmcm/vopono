@@ -135,7 +135,7 @@ necessary):
 
 ```bash
 $ paru -S vopono-bin
-$ vopono sync
+$ vopono sync --protocol wireguard
 ```
 
 Run vopono:
@@ -168,7 +168,7 @@ create the OpenVPN configuration files and server lists.
 
 ```bash
 $ paru -S vopono-bin
-$ vopono sync
+$ vopono sync --protocol openvpn
 ```
 
 Run vopono:
@@ -548,9 +548,11 @@ BitTorrent leaking for both the OpenVPN and Wireguard configurations.
 ### AzireVPN
 
 AzireVPN users can use [their security check page](https://www.azirevpn.com/check)
-for the same (note the instructions on disabling WebRTC). I noticed that
-when using IPv6 with OpenVPN it incorrectly states you are not connected
-via AzireVPN though (Wireguard works correctly).
+for the same (note the instructions on disabling WebRTC).
+
+#### OpenVPN Sync
+
+Since AzireVPN now puts the OpenVPN configurations behind authentication, it is necessary to copy the value of the `az` cookie in order to authenticate `vopono sync` when generating the OpenVPN configuration files.
 
 ### ProtonVPN
 
@@ -653,8 +655,21 @@ I recommend using [MozWire](https://github.com/NilsIrl/MozWire) to manage this.
 iVPN Wireguard keypairs must be uploaded manually, as the Client Area is
 behind a captcha login.
 
+Note [iVPN no longer supports port forwarding](https://www.ivpn.net/blog/gradual-removal-of-port-forwarding). At the time of writing, ProtonVPN is the best provider with this service.
+
 ### NordVPN
+
 Starting 27 June 2023, the required user credentials are no longer your NordVPN login details but need to be generated in the user control panel, under Services → NordVPN. Scroll down and locate the Manual Setup tab, then click on Set up NordVPN manually and follow instructions. Copy your service credentials and re-sync NordVPN configuration inside Vopono.
+
+### AzireVPN
+
+For AzireVPN port forwarding is only possible for Wireguard and can be enabled by using `--port-forwarding`. This will create a port forwarding mapping for the current Wireguard device for 30 days.
+
+After 30 days you will need to restart vopono to re-create the port forwarding mapping.
+
+Note vopono attempts to delete the created mapping when vopono is closed, but this may not always succeed. However, it will use an existing mapping for the chosen device and server pair, if one still exists on AzireVPN's side.
+
+Note AzireVPN sometimes has some issues with rate limiting when generating the OpenVPN config files.
 
 ## Tunnel Port Forwarding
 
@@ -663,13 +678,8 @@ some ports inside the network namespace which can be accessed via the
 Wireguard/OpenVPN tunnel (this can be important for BitTorrent
 connectivity, etc.).
 
-For iVPN port forwarding also works the same way, however it is **only
-supported for OpenVPN** on iVPN's side. So remember to pass
-`--protocol openvpn -o PORTNUMBER` when trying it! Enable port
-forwarding in the [Port Forwarding page in the iVPN client area](https://www.ivpn.net/clientarea/vpn/273887).
-
 For AirVPN you must enable the port in [the client area webpage](https://airvpn.org/ports/),
-and then use `--protocol openvpn -o PORTNUMBER` as for iVPN.
+and then use `--protocol openvpn -o PORTNUMBER`.
 
 ## Dependencies
 

@@ -2,6 +2,7 @@ use std::sync::mpsc::Receiver;
 
 use super::netns::NetworkNamespace;
 
+pub mod azirevpn;
 pub mod natpmpc;
 pub mod piapf;
 

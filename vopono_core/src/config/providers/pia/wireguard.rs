@@ -30,12 +30,17 @@ pub struct VpnInfo {
 #[derive(Debug, Deserialize)]
 pub struct Region {
     pub id: String,
+    #[allow(unused)]
     pub name: String,
+    #[allow(unused)]
     pub country: String,
+    #[allow(unused)]
     pub auto_region: bool,
     pub dns: String,
     pub port_forward: bool,
+    #[allow(unused)]
     pub geo: bool,
+    #[allow(unused)]
     pub offline: bool,
     pub servers: Servers,
 }
@@ -74,8 +79,10 @@ pub struct WireguardServerInfo {
     pub server_key: String,
     pub server_port: u16,
     pub server_ip: IpAddr,
+    #[allow(unused)]
     pub server_vip: IpAddr,
     pub peer_ip: IpAddr,
+    #[allow(unused)]
     pub peer_pubkey: String,
     pub dns_servers: Vec<String>,
 }

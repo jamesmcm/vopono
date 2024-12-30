@@ -208,23 +208,26 @@ pub fn get_pids_in_namespace(ns_name: &str) -> anyhow::Result<Vec<i32>> {
 }
 
 pub fn check_process_running(pid: u32) -> bool {
-    let s =
-        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
+    let s = System::new_with_specifics(
+        RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
+    );
     s.process(sysinfo::Pid::from_u32(pid)).is_some()
 }
 
 pub fn get_all_running_pids() -> Vec<u32> {
-    let s =
-        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
+    let s = System::new_with_specifics(
+        RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
+    );
     s.processes().keys().map(|x| x.as_u32()).collect()
 }
 
 pub fn get_all_running_process_names() -> Vec<String> {
-    let s =
-        System::new_with_specifics(RefreshKind::new().with_processes(ProcessRefreshKind::new()));
+    let s = System::new_with_specifics(
+        RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
+    );
     s.processes()
         .values()
-        .map(|x| x.name().to_string())
+        .map(|x| x.name().to_string_lossy().to_string())
         .collect()
 }
 
@@ -345,6 +348,7 @@ pub fn elevate_privileges(askpass: bool) -> anyhow::Result<()> {
         flag::register(SIGINT, Arc::clone(&terminated))?;
 
         let sudo_flags = if askpass { "-AE" } else { "-E" };
+        // TODO: This isn't passing RUST_LOG ?
 
         debug!("Args: {:?}", &args);
         // status blocks until the process has ended

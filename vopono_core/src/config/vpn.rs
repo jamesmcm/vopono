@@ -20,7 +20,9 @@ pub enum OpenVpnProtocol {
 
 impl OpenVpnProtocol {
     pub fn index_to_variant(index: usize) -> Self {
-        Self::iter().nth(index).expect("Invalid index")
+        Self::iter()
+            .nth(index)
+            .expect("Invalid index for OpenVPN Protocol enum")
     }
 }
 impl Default for OpenVpnProtocol {

@@ -8,7 +8,7 @@ use vopono_core::util::set_config_permissions;
 
 use crate::args::WrappedArg;
 
-pub fn sync_menu(uiclient: &dyn UiClient) -> anyhow::Result<()> {
+pub fn sync_menu(uiclient: &dyn UiClient, protocol: Option<Protocol>) -> anyhow::Result<()> {
     let variants = WrappedArg::<VpnProvider>::value_variants()
         .iter()
         .filter(|x| {
@@ -30,7 +30,7 @@ pub fn sync_menu(uiclient: &dyn UiClient) -> anyhow::Result<()> {
         .into_iter()
         .flat_map(|x| WrappedArg::<VpnProvider>::from_str(&variants[x], true))
     {
-        synch(provider.to_variant(), None, uiclient)?;
+        synch(provider.to_variant(), &protocol, uiclient)?;
     }
 
     Ok(())
@@ -38,7 +38,7 @@ pub fn sync_menu(uiclient: &dyn UiClient) -> anyhow::Result<()> {
 
 pub fn synch(
     provider: VpnProvider,
-    protocol: Option<Protocol>,
+    protocol: &Option<Protocol>,
     uiclient: &dyn UiClient,
 ) -> anyhow::Result<()> {
     // TODO: Separate availability from functionality, so we can filter disabled protocols from the UI
@@ -67,6 +67,7 @@ pub fn synch(
             error!("vopono sync not supported for None protocol");
         }
         // TODO: Fix this asking for same credentials twice
+        // Move auth and auth caching to base part of provider then share it for both
         None => {
             if let Ok(p) = provider.get_dyn_wireguard_provider() {
                 info!("Starting Wireguard configuration...");

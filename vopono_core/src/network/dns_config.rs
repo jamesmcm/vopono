@@ -102,15 +102,14 @@ impl DnsConfig {
                     format!("Failed to set file permissions for {}", &nsswitch_path)
                 })?;
 
+            let hosts_re = Regex::new(r"^hosts:.*$").expect("Failed to compile hosts regex");
             for line in std::io::BufReader::new(nsswitch_src).lines() {
                 writeln!(
                     nsswitch,
                     "{}",
-                    Regex::new(r"^hosts:.*$")
-                        .unwrap()
-                        .replace(&line?, |_caps: &Captures| {
-                            "hosts: files mymachines myhostname dns"
-                        })
+                    hosts_re.replace(&line?, |_caps: &Captures| {
+                        "hosts: files mymachines myhostname dns"
+                    })
                 )
                 .with_context(|| {
                     format!("Failed to overwrite nsswitch.conf: /etc/netns/{ns_name}/nsswitch.conf")

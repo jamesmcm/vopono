@@ -1,5 +1,5 @@
 mod airvpn;
-mod azirevpn;
+pub mod azirevpn;
 mod hma;
 mod ivpn;
 mod mozilla;

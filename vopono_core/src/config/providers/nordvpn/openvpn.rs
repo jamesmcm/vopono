@@ -73,10 +73,10 @@ impl OpenVpnProvider for NordVPN {
                 .extension()
                 .map(|x| x.to_str().expect("Could not convert OsStr"))
             {
-                let fname = file
-                    .enclosed_name()
-                    .and_then(|x| x.file_name())
-                    .and_then(|x| x.to_str());
+                let enclosed_name = file.enclosed_name();
+                let fname = enclosed_name
+                    .and_then(|x| x.file_name().map(|x| x.to_string_lossy().to_string()));
+
                 if fname.is_none() {
                     debug!("Could not parse filename: {}", file.name().to_string());
                     continue;

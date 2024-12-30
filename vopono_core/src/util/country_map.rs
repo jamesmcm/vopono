@@ -46,6 +46,7 @@ pub fn code_to_country_map() -> HashMap<&'static str, &'static str> {
         "ge" => "georgia",
         "gd" => "grenada",
         "uk" => "united_kingdom",
+        "gb" => "united_kingdom",
         "ga" => "gabon",
         "sv" => "el_salvador",
         "gn" => "guinea",

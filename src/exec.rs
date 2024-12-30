@@ -17,6 +17,7 @@ use vopono_core::config::vpn::{verify_auth, Protocol};
 use vopono_core::network::application_wrapper::ApplicationWrapper;
 use vopono_core::network::netns::NetworkNamespace;
 use vopono_core::network::network_interface::NetworkInterface;
+use vopono_core::network::port_forwarding::azirevpn::AzireVpnPortForwarding;
 use vopono_core::network::port_forwarding::natpmpc::Natpmpc;
 use vopono_core::network::port_forwarding::piapf::Piapf;
 use vopono_core::network::port_forwarding::Forwarder;
@@ -25,7 +26,12 @@ use vopono_core::network::sysctl::SysCtl;
 use vopono_core::util::{get_config_from_alias, get_existing_namespaces, get_target_subnet};
 use vopono_core::util::{parse_command_str, vopono_dir};
 
-pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> anyhow::Result<()> {
+pub fn exec(
+    command: ExecCommand,
+    uiclient: &dyn UiClient,
+    verbose: bool,
+    silent: bool,
+) -> anyhow::Result<()> {
     // this captures all sigint signals
     // ignore for now, they are automatically passed on to the child
     let signals = Signals::new([SIGINT])?;
@@ -63,7 +69,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> any
             );
             synch(
                 parsed_command.provider.clone(),
-                Some(parsed_command.protocol.clone()),
+                &Some(parsed_command.protocol.clone()),
                 uiclient,
             )?;
         }
@@ -233,7 +239,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> any
     }
 
     if !parsed_command.create_netns_only {
-        run_application(&parsed_command, forwarder, &ns, signals)?;
+        run_application(&parsed_command, forwarder, &ns, signals, silent)?;
     } else {
         info!(
             "Created netns {} - will leave network namespace alive until ctrl+C received",
@@ -543,6 +549,26 @@ fn provider_port_forwarding(
                     parsed_command.port_forwarding_callback.as_ref(),
                 )?))
             }
+            Some(VpnProvider::AzireVPN) => {
+                let azirevpn = vopono_core::config::providers::azirevpn::AzireVPN {};
+                let access_token = azirevpn.read_access_token()?;
+
+                if parsed_command.port_forwarding_callback.is_some() {
+                    warn!("Port forwarding callback not supported for AzireVPN - ignoring --port-forwarding-callback");
+                }
+                if ns.wireguard.is_none() {
+                    log::error!(
+                        "AzireVPN Port Forwarding in vopono is only supported for Wireguard"
+                    )
+                }
+                let endpoint_ip = ns.wireguard.as_ref().map(|wg| wg.interface_addresses[0]);
+                // TODO: Is OpenVPN possible? Could not get it to work manually
+
+                endpoint_ip
+                    .map(|ip| AzireVpnPortForwarding::new(ns, &access_token, ip))
+                    .transpose()?
+                    .map(|fwd| Box::new(fwd) as Box<dyn Forwarder>)
+            }
             Some(p) => {
                 error!("Port forwarding not supported for the selected provider: {} - ignoring --port-forwarding", p);
                 None
@@ -568,6 +594,7 @@ fn run_application(
     forwarder: Option<Box<dyn Forwarder>>,
     ns: &NetworkNamespace,
     signals: SignalsInfo,
+    silent: bool,
 ) -> anyhow::Result<()> {
     let application = ApplicationWrapper::new(
         ns,
@@ -576,6 +603,7 @@ fn run_application(
         parsed_command.group.clone(),
         parsed_command.working_directory.clone().map(PathBuf::from),
         forwarder,
+        silent,
     )?;
 
     let pid = application.handle.id();

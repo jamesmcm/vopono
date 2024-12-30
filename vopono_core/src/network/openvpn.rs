@@ -17,6 +17,7 @@ pub struct OpenVpn {
     pid: u32,
     pub openvpn_dns: Option<IpAddr>,
     pub logfile: PathBuf,
+    // pub distinct_remotes: Vec<String>, // Unique IP Addresses or hostnames
 }
 
 impl OpenVpn {
@@ -161,13 +162,14 @@ impl OpenVpn {
         if buffer.contains("AUTH_FAILED") {
             if auth_file.is_some() {
                 error!(
-                    "OpenVPN authentication failed, deleting {}",
+                    "OpenVPN authentication failed, modify your username and/or password in {}",
                     auth_file.as_ref().unwrap().display()
                 );
-                std::fs::remove_file(auth_file.unwrap())?;
+                // std::fs::remove_file(auth_file.unwrap())?;
             }
             return Err(anyhow!(
-                "OpenVPN authentication failed, use -v for full log output"
+                "OpenVPN authentication failed, use -v for full log output. Modify your username and/or password in {}",
+                 auth_file.as_ref().unwrap().display()
             ));
         }
         if buffer.contains("Options error") {

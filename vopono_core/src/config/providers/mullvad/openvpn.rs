@@ -147,7 +147,7 @@ impl OpenVpnProvider for Mullvad {
         };
 
         for (file_name, mut remote_vec) in file_set.into_iter() {
-            let mut file = File::create(&openvpn_dir.join(file_name))?;
+            let mut file = File::create(openvpn_dir.join(file_name))?;
             writeln!(file, "{}", settings.join("\n"))?;
 
             remote_vec.shuffle(&mut rand::thread_rng());

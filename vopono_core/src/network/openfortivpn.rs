@@ -104,7 +104,7 @@ impl OpenFortiVpn {
         )?;
 
         let dns = get_dns(&buffer)?;
-        let dns_ip: Vec<IpAddr> = (dns.0).into_iter().map(IpAddr::from).collect();
+        let dns_ip: Vec<IpAddr> = (dns.0).into_iter().collect();
         // TODO: Avoid this meaningless collect
         let suffixes: Vec<&str> = (dns.1).iter().map(|x| x.as_str()).collect();
         netns.dns_config(

@@ -1,23 +1,22 @@
 mod openvpn;
 mod wireguard;
 
-use super::{Input, OpenVpnProvider, Password, Provider, UiClient, WireguardProvider};
+use super::{
+    ConfigurationChoice, Input, OpenVpnProvider, Password, Provider, UiClient, WireguardProvider,
+};
 use crate::config::vpn::Protocol;
-use crate::network::wireguard::{de_socketaddr, de_vec_ipaddr, de_vec_ipnet};
-use ipnet::IpNet;
+use anyhow::Context;
 use serde::Deserialize;
-use std::net::IpAddr;
+use std::io::Write;
+use std::{net::IpAddr, path::PathBuf};
 
 // AzireVPN details: https://www.azirevpn.com/docs/servers
-
+// servers: https://www.azirevpn.com/service/servers#openvpn
 pub struct AzireVPN {}
 
 impl AzireVPN {
-    fn server_aliases(&self) -> &[&str] {
-        &[
-            "ca1", "dk1", "fr1", "de1", "it1", "es1", "nl1", "no1", "ro1", "se1", "se2", "ch1",
-            "th1", "us1", "us2", "uk1",
-        ]
+    fn locations_url(&self) -> &str {
+        "https://api.azirevpn.com/v2/locations"
     }
 }
 impl Provider for AzireVPN {
@@ -35,21 +34,169 @@ impl Provider for AzireVPN {
 
 #[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
-struct ConnectResponse {
+struct ReplaceKeyResponse {
     status: String,
-    data: WgResponse,
+    data: Vec<KeyResponse>,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
-struct WgResponse {
-    #[serde(alias = "DNS", deserialize_with = "de_vec_ipaddr")]
-    dns: Option<Vec<IpAddr>>,
-    #[serde(alias = "Address", deserialize_with = "de_vec_ipnet")]
-    address: Vec<IpNet>,
-    #[serde(alias = "PublicKey")]
-    public_key: String,
-    #[serde(alias = "Endpoint", deserialize_with = "de_socketaddr")]
-    endpoint: std::net::SocketAddr,
+struct KeyResponse {
+    key: String, // public key
+    created_at: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct ExistingDeviceResponse {
+    status: String,
+    data: ExistingDeviceResponseData,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct ExistingDevicesResponse {
+    status: String,
+    data: Vec<ExistingDeviceResponseData>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct ExistingDeviceResponseData {
+    id: String,
+    ipv4_address: String,
+    ipv4_netmask: u8,
+    ipv6_address: String,
+    ipv6_netmask: u8,
+    dns: Vec<IpAddr>,
+    device_name: String,
+    keys: Vec<KeyResponse>,
+}
+
+impl ConfigurationChoice for ExistingDevicesResponse {
+    fn prompt(&self) -> String {
+        "The following Wireguard devices exist on your account, which would you like to use (you will need to enter the private key or replace the existing keys)".to_string()
+    }
+
+    fn all_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.data.iter().map(|x| x.id.clone()).collect();
+        v.push("Create a new device".to_string());
+        v
+    }
+
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        let mut v: Vec<String> = self
+            .data
+            .iter()
+            .map(|x| format!("{}, {}", x.device_name, x.ipv4_address))
+            .collect();
+        v.push("generate a new keypair".to_string());
+        Some(v)
+    }
+    fn description(&self) -> Option<String> {
+        None
+    }
+}
+
+impl ConfigurationChoice for ExistingDeviceResponseData {
+    fn prompt(&self) -> String {
+        "The selected device has the following public keys assigned - select which one you wish to use (and enter the private key for)".to_string()
+    }
+
+    fn all_names(&self) -> Vec<String> {
+        self.keys.iter().map(|x| x.key.clone()).collect()
+    }
+
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        None
+    }
+    fn description(&self) -> Option<String> {
+        None
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct UserProfileResponse {
+    status: String,
+    data: UserProfileResponseData,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct UserProfileResponseData {
+    username: String,
+    email: String,
+    currency: String,
+    is_email_verified: bool,
+    is_active: bool,
+    is_oldschool: bool,
+    is_subscribed: bool,
+    ips: UserIpsData,
+    created_at: i64,
+    expires_at: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct UserIpsData {
+    allocated: u32,
+    available: u32,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct AccessTokenResponse {
+    status: String,
+    user: UserResponse,
+    token: String,
+    device_name: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct UserResponse {
+    username: String,
+    email: String,
+    email_verified: bool,
+    active: bool,
+    expires_at: i64,
+    subscription: bool,
+    is_oldschool: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct DeviceResponse {
+    status: String,
+    ipv4: IpResponse,
+    ipv6: IpResponse,
+    dns: Vec<IpAddr>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct IpResponse {
+    address: String,
+    netmask: u8,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct LocationsResponse {
+    status: String,
+    locations: Vec<LocationResponse>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct LocationResponse {
+    name: String,
+    city: String,
+    country: String,
+    iso: String,
+    pool: String,
+    pubkey: String,
 }
 
 impl AzireVPN {
@@ -65,5 +212,61 @@ impl AzireVPN {
         })?;
         let password = password.trim();
         Ok((username.to_string(), password.to_string()))
+    }
+
+    fn token_file_path(&self) -> PathBuf {
+        self.provider_dir().unwrap().join("token.txt")
+    }
+
+    pub fn get_access_token(&self, uiclient: &dyn UiClient) -> anyhow::Result<String> {
+        let token_file_path = self.token_file_path();
+        if token_file_path.exists() {
+            let token = std::fs::read_to_string(&token_file_path)?;
+            log::debug!(
+                "AzireVPN Auth Token read from {}",
+                self.token_file_path().display()
+            );
+            return Ok(token);
+        }
+        let (username, password) = self.request_userpass(uiclient)?;
+        let client = reqwest::blocking::Client::new();
+        let auth_response: AccessTokenResponse = client
+            .post("https://api.azirevpn.com/v2/auth/client")
+            .form(&[
+                ("username", &username),
+                ("password", &password),
+                ("comment", &"web generator".to_string()),
+            ])
+            .send()?
+            .json()
+            .with_context(|| {
+                "Authentication error: Ensure your AzireVPN credentials are correct"
+            })?;
+
+        // log::debug!("auth_response: {:?}", &auth_response);
+        let mut outfile = std::fs::File::create(self.token_file_path())?;
+        write!(outfile, "{}", auth_response.token)?;
+        log::debug!(
+            "AzireVPN Auth Token written to {}",
+            self.token_file_path().display()
+        );
+
+        Ok(auth_response.token)
+    }
+
+    pub fn read_access_token(&self) -> anyhow::Result<String> {
+        let token_file_path = self.token_file_path();
+        if token_file_path.exists() {
+            let token = std::fs::read_to_string(&token_file_path)?;
+            log::debug!(
+                "AzireVPN Auth Token read from {}",
+                self.token_file_path().display()
+            );
+            return Ok(token);
+        }
+        Err(anyhow::anyhow!(
+            "AzireVPN Auth Token not found at {}",
+            token_file_path.display()
+        ))
     }
 }
