@@ -13,7 +13,7 @@ jobs:
     outputs:
       version: ${{ steps.rustversion.outputs.rustversion }}
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - run: cargo check
     - run: cargo pkgid
     - run: 'echo "$(cargo pkgid | cut -d# -f2)"'
@@ -22,7 +22,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Install Clippy
       run: rustup component add clippy rustfmt
     - id: cargoversion
@@ -38,7 +38,7 @@ jobs:
     - name: Build
       run: cargo build --verbose --release
     - name: Upload Vopono Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: x86_64-gcc
         path: ./target/release/vopono
@@ -47,12 +47,12 @@ jobs:
     runs-on: ubuntu-latest
     name: FedoraRpm
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: BuildRpm
       id: buildrpm
       uses: jamesmcm/cargo-rpm-amd64-fedora@master
     - name: Upload RPM Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: fedorarpm
         path: ./target/release/rpmbuild/RPMS/x86_64/*
@@ -61,12 +61,12 @@ jobs:
     runs-on: ubuntu-latest
     name: OpensuseLeapRpm
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: BuildRpm
       id: buildrpm
       uses: jamesmcm/cargo-rpm-amd64-opensuseleap@master
     - name: Upload RPM Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: opensuserpm
         path: ./target/release/rpmbuild/RPMS/x86_64/*
@@ -75,12 +75,12 @@ jobs:
     runs-on: ubuntu-latest
     name: Amd64Deb
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: BuildDeb
       id: debbuild
       uses: jamesmcm/cargo-deb-amd64-ubuntu@master
     - name: Upload Deb Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: x86_64-musl-deb
         path: ./target/x86_64-unknown-linux-musl/debian/*
@@ -89,12 +89,12 @@ jobs:
     runs-on: ubuntu-latest
     name: Armv7Deb
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: BuildDeb
       id: debbuild
       uses: jamesmcm/cargo-deb-armv7-debian@master
     - name: Upload Deb Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: armv7-deb
         path: ./target/armv7-unknown-linux-musleabihf/debian/*
@@ -103,12 +103,12 @@ jobs:
     runs-on: ubuntu-latest
     name: Armv5Deb
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: BuildDeb
       id: debbuild
       uses: jamesmcm/cargo-deb-armv5-debian@master
     - name: Upload Deb Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: armv5-deb
         path: ./target/armv5te-unknown-linux-musleabi/debian/*
@@ -117,12 +117,12 @@ jobs:
     runs-on: ubuntu-latest
     name: Aarch64Deb
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: BuildDeb
       id: debbuild
       uses: jamesmcm/cargo-deb-aarch64-debian@master
     - name: Upload Deb Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: aarch64-deb
         path: ./target/aarch64-unknown-linux-musl/debian/*
@@ -131,14 +131,14 @@ jobs:
     runs-on: ubuntu-latest
     name: Amd64StaticBinaries
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: StaticBinaryBuild
       id: amd64staticbuild
       uses: jamesmcm/cargo-deb-amd64-ubuntu@master
       with:
         cmd: cargo build --release --target=x86_64-unknown-linux-musl
     - name: Upload Vopono Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: x86_64-musl
         path: ./target/x86_64-unknown-linux-musl/release/vopono
@@ -147,7 +147,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Armv7StaticBinaries
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - id: cargoversion
       run: cargo --version
     - id: rustcversion
@@ -158,7 +158,7 @@ jobs:
       with:
         cmd: cargo build --release --target=armv7-unknown-linux-musleabihf
     - name: Upload Vopono Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: armv7
         path: ./target/armv7-unknown-linux-musleabihf/release/vopono
@@ -167,7 +167,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Armv5StaticBinaries
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - id: cargoversion
       run: cargo --version
     - id: rustcversion
@@ -178,7 +178,7 @@ jobs:
       with:
         cmd: cargo build --release --target=armv5te-unknown-linux-musleabi
     - name: Upload Vopono Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: armv5
         path: ./target/armv5te-unknown-linux-musleabi/release/vopono
@@ -187,7 +187,7 @@ jobs:
     runs-on: ubuntu-latest
     name: Aarch64StaticBinaries
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - id: cargoversion
       run: cargo --version
     - id: rustcversion
@@ -198,7 +198,7 @@ jobs:
       with:
         cmd: cargo build --release --target=aarch64-unknown-linux-musl
     - name: Upload Vopono Artifact
-      uses: actions/upload-artifact@v2
+      uses: actions/upload-artifact@v4
       with:
         name: aarch64
         path: ./target/aarch64-unknown-linux-musl/release/vopono
@@ -206,7 +206,7 @@ jobs:
     needs: [quickcheck, build, arm7binaries, arm5binaries, aarch64binaries, amd64binaries, raspbianbuild, armv5deb, aarch64deb, debbuild, opensuseleaprpmbuild, fedorarpmbuild]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -218,7 +218,7 @@ jobs:
           body: 'Change Me'
           draft: true
           prerelease: false
-      - uses: actions/download-artifact@v2
+      - uses: actions/download-artifact@v4
       - run: ls -lha
       - run: ls -lha x86_64-musl-deb
       - run: ls -lha x86_64-musl
