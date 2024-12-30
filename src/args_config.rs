@@ -129,10 +129,8 @@ impl ArgsConfig {
         let hosts = command_else_config_option!(hosts, command, config);
         let open_ports = command_else_config_option!(open_ports, command, config);
         let forward = command_else_config_option!(forward, command, config);
-        dbg!(&command.postup); // TODO
         let postup = command_else_config_option!(postup, command, config)
             .and_then(|p| shellexpand::full(&p).ok().map(|s| s.into_owned()));
-        dbg!(&postup);
         let predown = command_else_config_option!(predown, command, config)
             .and_then(|p| shellexpand::full(&p).ok().map(|s| s.into_owned()));
         let group = command_else_config_option!(group, command, config);

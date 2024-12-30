@@ -26,12 +26,16 @@ fn main() -> anyhow::Result<()> {
     let app = args::App::parse();
     // Set up logging
     let mut builder = pretty_env_logger::formatted_timed_builder();
-    let log_level = if app.verbose {
-        LevelFilter::Debug
-    } else {
-        LevelFilter::Info
-    };
-    builder.filter_level(log_level);
+    builder.parse_default_env();
+    if app.verbose {
+        builder.filter_level(LevelFilter::Debug);
+    }
+    if app.silent {
+        if app.verbose {
+            warn!("Verbose and silent flags are mutually exclusive, ignoring verbose flag");
+        }
+        builder.filter_level(LevelFilter::Off);
+    }
     builder.init();
 
     let uiclient = CliClient {};
@@ -51,9 +55,10 @@ fn main() -> anyhow::Result<()> {
             } else {
                 debug!("pactl not found, will not set PULSE_SERVER");
             }
+            let verbose = app.verbose && !app.silent;
             elevate_privileges(app.askpass)?;
             clean_dead_namespaces()?;
-            exec::exec(cmd, &uiclient, app.verbose)?
+            exec::exec(cmd, &uiclient, verbose, app.silent)?
         }
         args::Command::List(listcmd) => {
             clean_dead_locks()?;

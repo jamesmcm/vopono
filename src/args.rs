@@ -67,6 +67,10 @@ pub struct App {
     #[clap(short = 'v', long = "verbose")]
     pub verbose: bool,
 
+    /// Suppress all output including application output. Note RUST_LOG=off can be used to suppress only vopono log/error output.
+    #[clap(long = "silent")]
+    pub silent: bool,
+
     /// read sudo password from program specified in SUDO_ASKPASS environment variable
     #[clap(short = 'A', long = "askpass")]
     pub askpass: bool,

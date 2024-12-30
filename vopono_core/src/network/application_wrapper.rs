@@ -17,6 +17,7 @@ impl ApplicationWrapper {
         group: Option<String>,
         working_directory: Option<PathBuf>,
         port_forwarding: Option<Box<dyn Forwarder>>,
+        silent: bool,
     ) -> anyhow::Result<Self> {
         let running_processes = get_all_running_process_names();
         let app_vec = parse_command_str(application)?;
@@ -46,7 +47,7 @@ impl ApplicationWrapper {
             app_vec_ptrs.as_slice(),
             user,
             group,
-            false,
+            silent,
             false,
             false,
             working_directory,

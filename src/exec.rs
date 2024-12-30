@@ -26,7 +26,12 @@ use vopono_core::network::sysctl::SysCtl;
 use vopono_core::util::{get_config_from_alias, get_existing_namespaces, get_target_subnet};
 use vopono_core::util::{parse_command_str, vopono_dir};
 
-pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> anyhow::Result<()> {
+pub fn exec(
+    command: ExecCommand,
+    uiclient: &dyn UiClient,
+    verbose: bool,
+    silent: bool,
+) -> anyhow::Result<()> {
     // this captures all sigint signals
     // ignore for now, they are automatically passed on to the child
     let signals = Signals::new([SIGINT])?;
@@ -234,7 +239,7 @@ pub fn exec(command: ExecCommand, uiclient: &dyn UiClient, verbose: bool) -> any
     }
 
     if !parsed_command.create_netns_only {
-        run_application(&parsed_command, forwarder, &ns, signals)?;
+        run_application(&parsed_command, forwarder, &ns, signals, silent)?;
     } else {
         info!(
             "Created netns {} - will leave network namespace alive until ctrl+C received",
@@ -589,6 +594,7 @@ fn run_application(
     forwarder: Option<Box<dyn Forwarder>>,
     ns: &NetworkNamespace,
     signals: SignalsInfo,
+    silent: bool,
 ) -> anyhow::Result<()> {
     let application = ApplicationWrapper::new(
         ns,
@@ -597,6 +603,7 @@ fn run_application(
         parsed_command.group.clone(),
         parsed_command.working_directory.clone().map(PathBuf::from),
         forwarder,
+        silent,
     )?;
 
     let pid = application.handle.id();
