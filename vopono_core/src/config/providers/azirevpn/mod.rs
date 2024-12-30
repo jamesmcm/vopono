@@ -1,7 +1,9 @@
 mod openvpn;
 mod wireguard;
 
-use super::{Input, OpenVpnProvider, Password, Provider, UiClient, WireguardProvider};
+use super::{
+    ConfigurationChoice, Input, OpenVpnProvider, Password, Provider, UiClient, WireguardProvider,
+};
 use crate::config::vpn::Protocol;
 use anyhow::Context;
 use serde::Deserialize;
@@ -28,6 +30,118 @@ impl Provider for AzireVPN {
     fn default_protocol(&self) -> Protocol {
         Protocol::Wireguard
     }
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct ReplaceKeyResponse {
+    status: String,
+    data: Vec<KeyResponse>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct KeyResponse {
+    key: String, // public key
+    created_at: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct ExistingDeviceResponse {
+    status: String,
+    data: ExistingDeviceResponseData,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct ExistingDevicesResponse {
+    status: String,
+    data: Vec<ExistingDeviceResponseData>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct ExistingDeviceResponseData {
+    id: String,
+    ipv4_address: String,
+    ipv4_netmask: u8,
+    ipv6_address: String,
+    ipv6_netmask: u8,
+    dns: Vec<IpAddr>,
+    device_name: String,
+    keys: Vec<KeyResponse>,
+}
+
+impl ConfigurationChoice for ExistingDevicesResponse {
+    fn prompt(&self) -> String {
+        "The following Wireguard devices exist on your account, which would you like to use (you will need to enter the private key or replace the existing keys)".to_string()
+    }
+
+    fn all_names(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.data.iter().map(|x| x.id.clone()).collect();
+        v.push("Create a new device".to_string());
+        v
+    }
+
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        let mut v: Vec<String> = self
+            .data
+            .iter()
+            .map(|x| format!("{}, {}", x.device_name, x.ipv4_address))
+            .collect();
+        v.push("generate a new keypair".to_string());
+        Some(v)
+    }
+    fn description(&self) -> Option<String> {
+        None
+    }
+}
+
+impl ConfigurationChoice for ExistingDeviceResponseData {
+    fn prompt(&self) -> String {
+        "The selected device has the following public keys assigned - select which one you wish to use (and enter the private key for)".to_string()
+    }
+
+    fn all_names(&self) -> Vec<String> {
+        self.keys.iter().map(|x| x.key.clone()).collect()
+    }
+
+    fn all_descriptions(&self) -> Option<Vec<String>> {
+        None
+    }
+    fn description(&self) -> Option<String> {
+        None
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct UserProfileResponse {
+    status: String,
+    data: UserProfileResponseData,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct UserProfileResponseData {
+    username: String,
+    email: String,
+    currency: String,
+    is_email_verified: bool,
+    is_active: bool,
+    is_oldschool: bool,
+    is_subscribed: bool,
+    ips: UserIpsData,
+    created_at: i64,
+    expires_at: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize, Debug, Clone)]
+struct UserIpsData {
+    allocated: u32,
+    available: u32,
 }
 
 #[allow(dead_code)]
@@ -69,7 +183,7 @@ struct IpResponse {
 
 #[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
-struct ConnectResponse {
+struct LocationsResponse {
     status: String,
     locations: Vec<LocationResponse>,
 }

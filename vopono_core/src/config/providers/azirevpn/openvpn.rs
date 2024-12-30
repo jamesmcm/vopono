@@ -1,5 +1,5 @@
 use super::AzireVPN;
-use super::ConnectResponse;
+use super::LocationsResponse;
 use super::LocationResponse;
 use super::OpenVpnProvider;
 use crate::config::providers::Input;
@@ -59,7 +59,7 @@ impl OpenVpnProvider for AzireVPN {
         headers.insert(COOKIE, HeaderValue::from_static(auth_cookie));
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
-        let locations_resp: ConnectResponse = client.get(self.locations_url()).send()?.json()?;
+        let locations_resp: LocationsResponse = client.get(self.locations_url()).send()?.json()?;
         let locations = locations_resp.locations;
 
         for location in locations {
