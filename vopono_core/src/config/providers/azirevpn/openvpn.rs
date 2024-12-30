@@ -1,6 +1,6 @@
 use super::AzireVPN;
-use super::LocationsResponse;
 use super::LocationResponse;
+use super::LocationsResponse;
 use super::OpenVpnProvider;
 use crate::config::providers::Input;
 use crate::config::providers::UiClient;
