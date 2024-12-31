@@ -11,14 +11,14 @@ jobs:
   quickcheck:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.rustversion.outputs.rustversion }}
+      version: ${{ steps.rustversion.outputs.version }}
     steps:
     - uses: actions/checkout@v4
     - run: cargo check
     - run: cargo pkgid
     - run: 'echo "$(cargo pkgid | cut -d# -f2)"'
     - id: rustversion
-      run: 'echo "name=rustversion::$(cargo pkgid | cut -d# -f2)" >> $GITHUB_OUTPUT'
+      run: 'echo "version=$(cargo pkgid | cut -d# -f2)" >> $GITHUB_OUTPUT'
   build:
     runs-on: ubuntu-latest
     steps:
