@@ -18,7 +18,7 @@ jobs:
     - run: cargo pkgid
     - run: 'echo "$(cargo pkgid | cut -d# -f2)"'
     - id: rustversion
-      run: 'echo "::set-output name=rustversion::$(cargo pkgid | cut -d# -f2)"'
+      run: 'echo "name=rustversion::$(cargo pkgid | cut -d# -f2)" >> $GITHUB_OUTPUT'
   build:
     runs-on: ubuntu-latest
     steps:
@@ -273,7 +273,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./fedorarpm/vopono-${{needs.quickcheck.outputs.version}}-1.fc39.x86_64.rpm
+          asset_path: ./fedorarpm/vopono-${{needs.quickcheck.outputs.version}}-1.fc34.x86_64.rpm
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_amd64_fedora.rpm'
           asset_content_type: application/octet-stream
       - name: Upload amd64 rpm opensuse Release Asset
