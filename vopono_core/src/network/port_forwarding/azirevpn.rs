@@ -97,6 +97,7 @@ impl AzireVpnPortForwarding {
         let output_string = String::from_utf8(output.stdout.clone())?;
         log::debug!("AzireVPN Port forwarding list response: {}", output_string);
 
+        // TODO: Distinguish error from no port forwarding existing vs. network error ?
         let output_data_result: anyhow::Result<ListResponse> = serde_json::from_str(&output_string)
             .with_context(|| "Failed to parse JSON response from listing AzireVPN Port Forwarding");
 
@@ -115,32 +116,52 @@ impl AzireVpnPortForwarding {
         }
 
         // If not, create a new port forwarding
-        let cmd = [
-            "curl",
-            "https://api.azirevpn.com/v3/portforwardings",
-            "-H",
-            Box::leak(format!("Authorization: Bearer {}", access_token).into_boxed_str()),
-            "--json",
-            Box::leak(
-                format!(
-                    "{{\"internal_ipv4\": \"{}\", \"hidden\": false, \"expires_in\": 30}}",
-                    local_ip
-                )
-                .into_boxed_str(),
-            ),
-        ];
+        // Retry up to 3 times
 
-        let output = NetworkNamespace::exec_with_output(&netns.name, &cmd)?;
-        let output_string = String::from_utf8(output.stdout.clone())?;
+        let mut i = 1;
+        let data = loop {
+            let cmd = [
+                "curl",
+                "https://api.azirevpn.com/v3/portforwardings",
+                "-H",
+                Box::leak(format!("Authorization: Bearer {}", access_token).into_boxed_str()),
+                "--json",
+                Box::leak(
+                    format!(
+                        "{{\"internal_ipv4\": \"{}\", \"hidden\": false, \"expires_in\": 30}}",
+                        local_ip
+                    )
+                    .into_boxed_str(),
+                ),
+            ];
 
-        log::debug!(
-            "AzireVPN Port forwarding creation response: {}",
-            output_string
-        );
-        let data: CreateResponse =
-            serde_json::from_str(output_string.as_str()).with_context(|| {
-                "Failed to parse JSON response from creating AzireVPN Port Forwarding"
-            })?;
+            let output = NetworkNamespace::exec_with_output(&netns.name, &cmd)?;
+            let output_string = String::from_utf8(output.stdout.clone())?;
+
+            log::debug!(
+                "AzireVPN Port forwarding creation response: {}",
+                output_string
+            );
+            let maybe_data: anyhow::Result<CreateResponse> =
+                serde_json::from_str(output_string.as_str()).with_context(|| {
+                    "Failed to parse JSON response from creating AzireVPN Port Forwarding"
+                });
+
+            if let Ok(data) = maybe_data {
+                break Ok(data);
+            }
+            if i >= 3 {
+                log::error!("Failed to create AzireVPN Port Forwarding after 3 attempts");
+                break Err(anyhow::anyhow!("Failed to create AzireVPN Port Forwarding"));
+            }
+            log::warn!(
+                "Failed to create AzireVPN Port Forwarding on attempt {}, sleeping 5 seconds and retrying",
+                i
+            );
+            std::thread::sleep(std::time::Duration::from_secs(5));
+
+            i += 1;
+        }?;
 
         log::info!(
             "AzireVPN Port forwarding enabled on port {}",
