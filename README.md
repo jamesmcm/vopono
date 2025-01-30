@@ -163,6 +163,14 @@ Install the deb package provided on the releases page.
 Install the rpm package provided on the release page (choose the correct
 version).
 
+### Gentoo Linux
+
+Install `vopono` from the main repository.
+
+```bash
+$ emerge -av net-vpn/vopono
+```
+
 ### Other Linux
 
 Either use the compiled binaries on the release page, or install from
