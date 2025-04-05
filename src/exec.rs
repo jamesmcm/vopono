@@ -8,23 +8,57 @@ use signal_hook::iterator::SignalsInfo;
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
+use std::process::Command;
 use std::{
     fs::create_dir_all,
     io::{self, Write},
 };
 use vopono_core::config::providers::{UiClient, VpnProvider};
-use vopono_core::config::vpn::{verify_auth, Protocol};
+use vopono_core::config::vpn::{Protocol, verify_auth};
 use vopono_core::network::application_wrapper::ApplicationWrapper;
 use vopono_core::network::netns::NetworkNamespace;
 use vopono_core::network::network_interface::NetworkInterface;
+use vopono_core::network::port_forwarding::Forwarder;
 use vopono_core::network::port_forwarding::azirevpn::AzireVpnPortForwarding;
 use vopono_core::network::port_forwarding::natpmpc::Natpmpc;
 use vopono_core::network::port_forwarding::piapf::Piapf;
-use vopono_core::network::port_forwarding::Forwarder;
 use vopono_core::network::shadowsocks::uses_shadowsocks;
 use vopono_core::network::sysctl::SysCtl;
 use vopono_core::util::{get_config_from_alias, get_existing_namespaces, get_target_subnet};
 use vopono_core::util::{parse_command_str, vopono_dir};
+
+pub fn set_env_vars(ns: &NetworkNamespace, forwarder: Option<&dyn Forwarder>, cmd: &mut Command) {
+    // Temporarily set env var referring to this network namespace IP
+    // for the PostUp script and the application:
+
+    if which::which("pactl").is_ok() {
+        let pa = vopono_core::util::pulseaudio::get_pulseaudio_server();
+        if let Ok(pa) = pa {
+            cmd.env("PULSE_SERVER", &pa);
+            debug!("Setting PULSE_SERVER to {}", &pa);
+        } else if let Err(e) = pa {
+            warn!("Could not get PULSE_SERVER: {:?}", e);
+        } else {
+            warn!(
+                "Could not parse PULSE_SERVER from pactl info output: {:?}",
+                pa
+            );
+        }
+    } else {
+        debug!("pactl not found, will not set PULSE_SERVER");
+    }
+
+    if let Some(ref ns_ip) = ns.veth_pair_ips {
+        cmd.env("VOPONO_NS_IP", ns_ip.namespace_ip.to_string());
+        cmd.env("VOPONO_HOST_IP", ns_ip.host_ip.to_string());
+    }
+
+    cmd.env("VOPONO_NS", &ns.name);
+
+    if let Some(f) = forwarder.as_ref() {
+        cmd.env("VOPONO_FORWARDED_PORT", f.forwarded_port().to_string());
+    }
+}
 
 pub fn exec(
     command: ExecCommand,
@@ -107,7 +141,10 @@ pub fn exec(
         _using_existing_netns = true;
 
         if parsed_command.port_forwarding || parsed_command.custom_port_forwarding.is_some() {
-            warn!("Re-using existing network namespace {} - will not run port forwarder, should be run when netns first created", &ns.name);
+            warn!(
+                "Re-using existing network namespace {} - will not run port forwarder, should be run when netns first created",
+                &ns.name
+            );
         }
 
         forwarder = None;
@@ -165,23 +202,7 @@ pub fn exec(
             vopono_core::util::open_hosts(&ns, hosts.to_vec(), parsed_command.firewall)?;
         }
 
-        // Temporarily set env var referring to this network namespace IP
-        // for the PostUp script and the application:
-        std::env::set_var(
-            "VOPONO_NS_IP",
-            ns.veth_pair_ips.as_ref().unwrap().namespace_ip.to_string(),
-        );
-        // Set env var referring to the host IP for the application:
-        std::env::set_var(
-            "VOPONO_HOST_IP",
-            ns.veth_pair_ips.as_ref().unwrap().host_ip.to_string(),
-        );
-        std::env::set_var("VOPONO_NS", &ns.name);
-
         forwarder = provider_port_forwarding(&parsed_command, &ns)?;
-        if let Some(f) = forwarder.as_ref() {
-            std::env::set_var("VOPONO_FORWARDED_PORT", f.forwarded_port().to_string());
-        }
 
         // Run PostUp script (if any)
         // Temporarily set env var referring to this network namespace name
@@ -204,11 +225,15 @@ pub fn exec(
                 args.append(&mut sudo_args);
                 args.extend(parsed_pucmd_ptrs);
 
-                std::process::Command::new("sudo").args(args).spawn()?;
+                let mut cmd = std::process::Command::new("sudo");
+                cmd.args(args);
+                set_env_vars(&ns, forwarder.as_deref(), &mut cmd);
+                cmd.spawn()?;
             } else {
-                std::process::Command::new(parsed_pucmd_ptrs[0])
-                    .args(parsed_pucmd_ptrs[1..].iter())
-                    .spawn()?;
+                let mut cmd = std::process::Command::new(parsed_pucmd_ptrs[0]);
+                cmd.args(parsed_pucmd_ptrs[1..].iter());
+                set_env_vars(&ns, forwarder.as_deref(), &mut cmd);
+                cmd.spawn()?;
             };
         }
     }
@@ -247,11 +272,6 @@ pub fn exec(
         );
         stay_alive(None, signals);
     }
-
-    std::env::remove_var("VOPONO_FORWARDED_PORT");
-    std::env::remove_var("VOPONO_NS");
-    std::env::remove_var("VOPONO_NS_IP");
-    std::env::remove_var("VOPONO_HOST_IP");
 
     Ok(())
 }
@@ -387,7 +407,9 @@ fn run_protocol_in_netns(
                     .expect("No OpenVPN config file provided"),
             )? {
                 if parsed_command.provider == VpnProvider::Custom {
-                    warn!("Custom provider specifies socks-proxy, if this is local you must run it yourself (e.g. shadowsocks)");
+                    warn!(
+                        "Custom provider specifies socks-proxy, if this is local you must run it yourself (e.g. shadowsocks)"
+                    );
                 } else {
                     let dyn_ss_provider = parsed_command.provider.get_dyn_shadowsocks_provider()?;
                     let password = dyn_ss_provider.password();
@@ -423,12 +445,12 @@ fn run_protocol_in_netns(
             );
             if !ns.check_openvpn_running() {
                 error!(
-                        "OpenVPN not running in network namespace {}, probable dead lock file or authentication error",
-                        &ns.name
-                    );
+                    "OpenVPN not running in network namespace {}, probable dead lock file or authentication error",
+                    &ns.name
+                );
                 return Err(anyhow!(
-            "OpenVPN not running in network namespace, probable dead lock file authentication error"
-        ));
+                    "OpenVPN not running in network namespace, probable dead lock file authentication error"
+                ));
             }
 
             // Set DNS with OpenVPN server response if present
@@ -554,7 +576,9 @@ fn provider_port_forwarding(
                 let access_token = azirevpn.read_access_token()?;
 
                 if parsed_command.port_forwarding_callback.is_some() {
-                    warn!("Port forwarding callback not supported for AzireVPN - ignoring --port-forwarding-callback");
+                    warn!(
+                        "Port forwarding callback not supported for AzireVPN - ignoring --port-forwarding-callback"
+                    );
                 }
                 if ns.wireguard.is_none() {
                     log::error!(
@@ -570,11 +594,16 @@ fn provider_port_forwarding(
                     .map(|fwd| Box::new(fwd) as Box<dyn Forwarder>)
             }
             Some(p) => {
-                error!("Port forwarding not supported for the selected provider: {} - ignoring --port-forwarding", p);
+                error!(
+                    "Port forwarding not supported for the selected provider: {} - ignoring --port-forwarding",
+                    p
+                );
                 None
             }
             None => {
-                error!("--port-forwarding set but --custom-port-forwarding provider not provided for --custom-config usage. Ignoring --port-forwarding");
+                error!(
+                    "--port-forwarding set but --custom-port-forwarding provider not provided for --custom-config usage. Ignoring --port-forwarding"
+                );
                 None
             }
         }

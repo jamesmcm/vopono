@@ -89,7 +89,10 @@ impl VethPair {
             if let Err(e) = sudo_command(&["nmcli", "connection", "reload"])
                 .context("Failed to reload NetworkManager configuration")
             {
-                warn!("Tried but failed to reload NetworkManager configuration - is NetworkManager running? : {}", e);
+                warn!(
+                    "Tried but failed to reload NetworkManager configuration - is NetworkManager running? : {}",
+                    e
+                );
             }
             Some(NetworkManagerUnmanaged { backup_file })
         } else {
@@ -122,11 +125,19 @@ impl VethPair {
             match std::process::Command::new("firewall-cmd")
                 .arg("--zone=trusted")
                 .arg(format!("--add-interface={dest}").as_str())
-                .status().map(|x| x.success()) {
-                    Err(e) => warn!("Failed to add veth device {} to firewalld trusted zone, error: {}", dest, e),
-                    Ok(false) => warn!("Possibly failed to add veth device {} to firewalld trusted zone (non-zero exit code)", dest),
-                    _ => {}
-                }
+                .status()
+                .map(|x| x.success())
+            {
+                Err(e) => warn!(
+                    "Failed to add veth device {} to firewalld trusted zone, error: {}",
+                    dest, e
+                ),
+                Ok(false) => warn!(
+                    "Possibly failed to add veth device {} to firewalld trusted zone (non-zero exit code)",
+                    dest
+                ),
+                _ => {}
+            }
         }
 
         sudo_command(&[

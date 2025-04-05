@@ -14,12 +14,11 @@ use clap::Parser;
 use cli_client::CliClient;
 use list::output_list;
 use list_configs::print_configs;
-use log::{debug, warn, LevelFilter};
+use log::{LevelFilter, warn};
 use sync::{sync_menu, synch};
 use vopono_core::util::clean_dead_locks;
 use vopono_core::util::clean_dead_namespaces;
 use vopono_core::util::elevate_privileges;
-use which::which;
 
 fn main() -> anyhow::Result<()> {
     // Get struct of args using structopt
@@ -42,19 +41,6 @@ fn main() -> anyhow::Result<()> {
     match app.cmd {
         args::Command::Exec(cmd) => {
             clean_dead_locks()?;
-            if which("pactl").is_ok() {
-                let pa = vopono_core::util::pulseaudio::get_pulseaudio_server();
-                if let Ok(pa) = pa {
-                    std::env::set_var("PULSE_SERVER", pa);
-                } else {
-                    warn!(
-                        "Could not parse PULSE_SERVER from pactl info output: {:?}",
-                        pa
-                    );
-                }
-            } else {
-                debug!("pactl not found, will not set PULSE_SERVER");
-            }
             let verbose = app.verbose && !app.silent;
             elevate_privileges(app.askpass)?;
             clean_dead_namespaces()?;

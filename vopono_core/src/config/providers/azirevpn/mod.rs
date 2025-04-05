@@ -239,9 +239,9 @@ impl AzireVPN {
             ])
             .send()?
             .json()
-            .with_context(|| {
-                "Authentication error: Ensure your AzireVPN credentials are correct"
-            })?;
+            .with_context(
+                || "Authentication error: Ensure your AzireVPN credentials are correct",
+            )?;
 
         // log::debug!("auth_response: {:?}", &auth_response);
         let mut outfile = std::fs::File::create(self.token_file_path())?;

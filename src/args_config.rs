@@ -8,7 +8,7 @@ use vopono_core::{
     config::{providers::VpnProvider, vpn::Protocol},
     network::{
         firewall::Firewall,
-        network_interface::{get_active_interfaces, NetworkInterface},
+        network_interface::{NetworkInterface, get_active_interfaces},
     },
     util::{get_config_file_protocol, vopono_dir},
 };
@@ -158,7 +158,9 @@ impl ArgsConfig {
             command_else_config_option_variant!(custom_port_forwarding, command, config);
 
         if custom_port_forwarding.is_some() && custom.is_none() {
-            log::error!("Custom port forwarding implementation is set, but not using custom provider config file. custom-port-forwarding setting will be ignored");
+            log::error!(
+                "Custom port forwarding implementation is set, but not using custom provider config file. custom-port-forwarding setting will be ignored"
+            );
         }
 
         // Assign network interface from args or vopono config file
@@ -179,7 +181,11 @@ impl ArgsConfig {
             None => {
                 let active_interfaces = get_active_interfaces()?;
                 if active_interfaces.len() > 1 {
-                    log::warn!("Multiple network interfaces are active: {:#?}, consider specifying the interface with the -i argument. Using {}", &active_interfaces, &active_interfaces[0]);
+                    log::warn!(
+                        "Multiple network interfaces are active: {:#?}, consider specifying the interface with the -i argument. Using {}",
+                        &active_interfaces,
+                        &active_interfaces[0]
+                    );
                 }
                 Ok(
             NetworkInterface::new(
@@ -258,7 +264,9 @@ impl ArgsConfig {
         if (provider == VpnProvider::None && protocol != Protocol::None)
             || (provider != VpnProvider::None && protocol == Protocol::None)
         {
-            error_and_bail!("None protocol must use None provider - will run not run any VPN service inside netns");
+            error_and_bail!(
+                "None protocol must use None provider - will run not run any VPN service inside netns"
+            );
         }
 
         Ok(Self {

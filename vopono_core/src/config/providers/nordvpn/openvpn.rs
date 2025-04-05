@@ -6,8 +6,8 @@ use crate::util::delete_all_files_in_dir;
 use log::debug;
 use regex::Regex;
 use std::fmt::Display;
-use std::fs::create_dir_all;
 use std::fs::File;
+use std::fs::create_dir_all;
 use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -78,7 +78,7 @@ impl OpenVpnProvider for NordVPN {
                     .and_then(|x| x.file_name().map(|x| x.to_string_lossy().to_string()));
 
                 if fname.is_none() {
-                    debug!("Could not parse filename: {}", file.name().to_string());
+                    debug!("Could not parse filename: {}", file.name());
                     continue;
                 }
                 let fname = fname.unwrap();
@@ -109,17 +109,11 @@ impl OpenVpnProvider for NordVPN {
                             format!("{}-{}.ovpn", country.unwrap(), server_name)
                         }
                     } else {
-                        debug!(
-                            "Filename did not match established pattern: {}",
-                            fname.to_string()
-                        );
+                        debug!("Filename did not match established pattern: {}", fname);
                         fname.to_string()
                     }
                 } else {
-                    debug!(
-                        "Filename did not match established pattern: {}",
-                        fname.to_string()
-                    );
+                    debug!("Filename did not match established pattern: {}", fname);
                     fname.to_string()
                 }
             } else {

@@ -1,6 +1,6 @@
 use super::providers::OpenVpnProvider;
 use super::providers::{ConfigurationChoice, UiClient};
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;

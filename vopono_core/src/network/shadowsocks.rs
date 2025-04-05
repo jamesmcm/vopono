@@ -10,8 +10,8 @@
 // -k and -m can be fixed for now (Mullvad)
 use super::netns::NetworkNamespace;
 use super::openvpn::get_remotes_from_config;
-use anyhow::anyhow;
 use anyhow::Context;
+use anyhow::anyhow;
 use log::{debug, error};
 use rand::seq::SliceRandom;
 use regex::Regex;

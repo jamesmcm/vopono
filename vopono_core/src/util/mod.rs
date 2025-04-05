@@ -8,7 +8,7 @@ extern crate shell_words as shellwords;
 use crate::config::vpn::Protocol;
 use crate::network::firewall::Firewall;
 use crate::network::netns::Lockfile;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use directories_next::BaseDirs;
 use ipnet::Ipv4Net;
 use log::{debug, info, warn};
@@ -336,8 +336,8 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
 
 pub fn elevate_privileges(askpass: bool) -> anyhow::Result<()> {
     use signal_hook::{consts::SIGINT, flag};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     // Check if already running as root
     if nix::unistd::getuid().as_raw() != 0 {

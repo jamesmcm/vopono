@@ -8,8 +8,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::env;
 use std::fmt::Display;
-use std::fs::create_dir_all;
 use std::fs::File;
+use std::fs::create_dir_all;
 use std::io::{Cursor, Read, Write};
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -104,9 +104,9 @@ impl OpenVpnProvider for AirVPN {
                 let country_code = fname_vec[1].split('-').next().unwrap().to_lowercase();
                 let city = fname_vec[1].split('-').collect::<Vec<&str>>()[1];
                 let server_name = fname_vec[2];
-                debug!("country_code: {}", country_code.to_string());
-                debug!("city: {}", city.to_string());
-                debug!("server_name: {}", server_name.to_string());
+                debug!("country_code: {}", country_code);
+                debug!("city: {}", city);
+                debug!("server_name: {}", server_name);
                 let country = country_map.get(country_code.as_str());
                 if country.is_none() || use_country_code {
                     format!("{country_code}-{server_name}.ovpn")
@@ -136,8 +136,12 @@ enum ConfigType {
 impl ConfigType {
     fn url(&self) -> anyhow::Result<String> {
         let s = match self {
-            Self::UDP443 => "https://airvpn.org/api/generator/?protocols=openvpn_1_udp_443&download=zip&system=linux&iplayer_exit=ipv4&servers={servers}",
-            Self::TCP443 => "https://airvpn.org/api/generator/?protocols=openvpn_1_tcp_443&download=zip&system=linux&iplayer_exit=ipv4&servers={servers}",
+            Self::UDP443 => {
+                "https://airvpn.org/api/generator/?protocols=openvpn_1_udp_443&download=zip&system=linux&iplayer_exit=ipv4&servers={servers}"
+            }
+            Self::TCP443 => {
+                "https://airvpn.org/api/generator/?protocols=openvpn_1_tcp_443&download=zip&system=linux&iplayer_exit=ipv4&servers={servers}"
+            }
         };
 
         Ok(s.parse()?)

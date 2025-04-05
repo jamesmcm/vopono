@@ -7,8 +7,8 @@ use which::which;
 use super::{Forwarder, ThreadLoopForwarder, ThreadParameters};
 use crate::network::netns::NetworkNamespace;
 
-use crate::config::providers::pia::PrivateInternetAccess;
 use crate::config::providers::OpenVpnProvider;
+use crate::config::providers::pia::PrivateInternetAccess;
 use crate::config::vpn::Protocol;
 
 /// Used to provide port forwarding for PrivateInternetAccess
@@ -53,8 +53,12 @@ impl Piapf {
         let pia = PrivateInternetAccess {};
 
         if which("traceroute").is_err() {
-            log::error!("The traceroute utility is necessary for PIA port forwarding. Please install traceroute.");
-            anyhow::bail!("The traceroute utility is necessary for PIA port forwarding. Please install traceroute.")
+            log::error!(
+                "The traceroute utility is necessary for PIA port forwarding. Please install traceroute."
+            );
+            anyhow::bail!(
+                "The traceroute utility is necessary for PIA port forwarding. Please install traceroute."
+            )
         }
 
         let traceroute_response = NetworkNamespace::exec_with_output(

@@ -1,13 +1,13 @@
-use super::OpenVpnProvider;
 use super::IVPN;
+use super::OpenVpnProvider;
 use crate::config::providers::Input;
 use crate::config::providers::UiClient;
 use crate::config::vpn::OpenVpnProtocol;
 use crate::util::delete_all_files_in_dir;
 use log::{debug, info};
 use reqwest::Url;
-use std::fs::create_dir_all;
 use std::fs::File;
+use std::fs::create_dir_all;
 use std::io::{Cursor, Read, Write};
 use std::net::IpAddr;
 use std::path::PathBuf;
