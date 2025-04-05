@@ -1,12 +1,12 @@
 use super::ConfigurationChoice;
-use super::WireguardProvider;
 use super::IVPN;
+use super::WireguardProvider;
 use crate::config::providers::Input;
 use crate::config::providers::InputNumericu16;
 use crate::config::providers::UiClient;
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
-use crate::util::wireguard::{generate_keypair, generate_public_key, WgKey};
+use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
 use ipnet::{IpNet, Ipv4Net};
 use log::info;
 use regex::Regex;
@@ -35,7 +35,9 @@ impl Display for WgKeyChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
             Self::NewKey => "Generate new Wireguard keypair",
-            Self::ExistingKey => "Enter existing Wireguard keypair (keys page: https://www.ivpn.net/clientarea/vpn/273887/wireguard/keys )",
+            Self::ExistingKey => {
+                "Enter existing Wireguard keypair (keys page: https://www.ivpn.net/clientarea/vpn/273887/wireguard/keys )"
+            }
         };
         write!(f, "{s}")
     }
@@ -145,7 +147,10 @@ impl WireguardProvider for IVPN {
         } else {
             let keypair = generate_keypair()?;
             info!("Generated Wireguard keypair (save this): {:?}", &keypair);
-            info!("Please upload public key {} to https://www.ivpn.net/clientarea/vpn/273887/wireguard/keys", &keypair.public);
+            info!(
+                "Please upload public key {} to https://www.ivpn.net/clientarea/vpn/273887/wireguard/keys",
+                &keypair.public
+            );
             keypair
         };
 

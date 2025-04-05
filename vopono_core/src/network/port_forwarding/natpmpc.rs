@@ -57,8 +57,12 @@ impl Natpmpc {
         let output =
             NetworkNamespace::exec_with_output(&ns.name, &["natpmpc", "-g", &gateway_str])?;
         if !output.status.success() {
-            log::error!("natpmpc failed - likely that this server does not support port forwarding, please choose another server");
-            anyhow::bail!("natpmpc failed - likely that this server does not support port forwarding, please choose another server")
+            log::error!(
+                "natpmpc failed - likely that this server does not support port forwarding, please choose another server"
+            );
+            anyhow::bail!(
+                "natpmpc failed - likely that this server does not support port forwarding, please choose another server"
+            )
         }
 
         let params = ThreadParamsImpl {

@@ -1,7 +1,7 @@
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use crate::util::sudo_command;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use ipnet::IpNet;
 use log::{debug, error, warn};
 use regex::Regex;

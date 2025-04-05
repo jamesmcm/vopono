@@ -13,7 +13,7 @@ use crate::config::providers::{UiClient, VpnProvider};
 use crate::config::vpn::Protocol;
 use crate::network::host_masquerade::FirewallException;
 use crate::util::{config_dir, parse_command_str, set_config_permissions, sudo_command};
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use log::{debug, info, warn};
 use nix::unistd;
 use serde::{Deserialize, Serialize};
@@ -484,6 +484,14 @@ impl NetworkNamespace {
         self.openvpn.as_ref().unwrap().check_if_running()
     }
 
+    pub fn add_env_vars_to_cmd(&self, cmd: &mut Command) {
+        cmd.env("VOPONO_NS", &self.name);
+        if let Some(ref veth_pair_ips) = self.veth_pair_ips {
+            cmd.env("VOPONO_NS_IP", veth_pair_ips.namespace_ip.to_string());
+            cmd.env("VOPONO_HOST_IP", veth_pair_ips.host_ip.to_string());
+        }
+    }
+
     pub fn write_lockfile(self, command: &str) -> anyhow::Result<Self> {
         let mut lockfile_path = config_dir()?;
         lockfile_path.push(format!("vopono/locks/{}", self.name));
@@ -557,20 +565,6 @@ impl Drop for NetworkNamespace {
                         let parsed_pdcmd_ptrs: Vec<&str> =
                             parsed_pdcmd.iter().map(|s| s.as_str()).collect();
 
-                        std::env::set_var("VOPONO_NS", &self.name);
-                        std::env::set_var(
-                            "VOPONO_NS_IP",
-                            self.veth_pair_ips
-                                .as_ref()
-                                .unwrap()
-                                .namespace_ip
-                                .to_string(),
-                        );
-                        std::env::set_var(
-                            "VOPONO_HOST_IP",
-                            self.veth_pair_ips.as_ref().unwrap().host_ip.to_string(),
-                        );
-
                         let mut sudo_args = Vec::new();
                         if let Some(ref predown_user) = self.predown_user {
                             sudo_args.push("--user");
@@ -586,23 +580,23 @@ impl Drop for NetworkNamespace {
                             args.append(&mut sudo_args);
                             args.extend(parsed_pdcmd_ptrs);
 
-                            std::process::Command::new("sudo").args(args).spawn().ok();
+                            let mut cmd = std::process::Command::new("sudo");
+                            cmd.args(args);
+                            self.add_env_vars_to_cmd(&mut cmd);
+                            cmd.spawn().ok();
                         } else {
-                            std::process::Command::new(parsed_pdcmd_ptrs[0])
-                                .args(parsed_pdcmd_ptrs[1..].iter())
-                                .spawn()
-                                .ok();
+                            let mut cmd = std::process::Command::new(parsed_pdcmd_ptrs[0]);
+                            cmd.args(parsed_pdcmd_ptrs[1..].iter());
+                            self.add_env_vars_to_cmd(&mut cmd);
+                            cmd.spawn().ok();
                         }
-
-                        std::env::remove_var("VOPONO_NS");
-                        std::env::remove_var("VOPONO_NS_IP");
-                        std::env::remove_var("VOPONO_HOST_IP");
                     }
                     Err(e) => {
                         log::error!(
-                        "Failed to parse postdown command: {} in shutdown state - skipped postdown execution, error: {:?}",
-                        &pdcmd, e
-                    )
+                            "Failed to parse postdown command: {} in shutdown state - skipped postdown execution, error: {:?}",
+                            &pdcmd,
+                            e
+                        )
                     }
                 }
             }

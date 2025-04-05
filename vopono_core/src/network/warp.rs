@@ -1,6 +1,6 @@
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 

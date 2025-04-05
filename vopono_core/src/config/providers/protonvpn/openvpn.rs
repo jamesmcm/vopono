@@ -6,11 +6,11 @@ use crate::util::delete_all_files_in_dir;
 use anyhow::anyhow;
 use log::{debug, info};
 use regex::Regex;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, COOKIE};
 use reqwest::Url;
+use reqwest::header::{COOKIE, HeaderMap, HeaderName, HeaderValue};
 use std::fmt::Display;
-use std::fs::create_dir_all;
 use std::fs::File;
+use std::fs::create_dir_all;
 use std::io::{Cursor, Read, Write};
 use std::net::IpAddr;
 use std::path::PathBuf;
@@ -30,7 +30,12 @@ impl ProtonVPN {
         } else {
             category.url_part()
         };
-        Ok(Url::parse(&format!("https://account.protonvpn.com/api/vpn/config?Category={}&Tier={}&Platform=Linux&Protocol={}", cat, tier.url_part(), protocol))?)
+        Ok(Url::parse(&format!(
+            "https://account.protonvpn.com/api/vpn/config?Category={}&Tier={}&Platform=Linux&Protocol={}",
+            cat,
+            tier.url_part(),
+            protocol
+        ))?)
     }
 }
 impl OpenVpnProvider for ProtonVPN {

@@ -7,7 +7,7 @@ use crate::config::providers::{BoolChoice, UiClient};
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::country_map::code_to_country_map;
 use crate::util::delete_all_files_in_dir;
-use crate::util::wireguard::{generate_keypair, generate_public_key, WgKey};
+use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
 use anyhow::Context;
 use ipnet::IpNet;
 use log::{debug, info};
@@ -141,7 +141,9 @@ impl WireguardProvider for AzireVPN {
                 if user_profile_response.data.ips.allocated
                     >= user_profile_response.data.ips.available
                 {
-                    log::error!("Maximum number of devices registered - please delete an existing device at https://manager.azirevpn.com/wireguard before creating a new one");
+                    log::error!(
+                        "Maximum number of devices registered - please delete an existing device at https://manager.azirevpn.com/wireguard before creating a new one"
+                    );
                     return Err(anyhow::anyhow!("Maximum number of devices registered"));
                 }
                 // Create new device

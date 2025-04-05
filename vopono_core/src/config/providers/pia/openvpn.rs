@@ -11,8 +11,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::fs::create_dir_all;
 use std::fs::File;
+use std::fs::create_dir_all;
 use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -124,7 +124,9 @@ impl OpenVpnProvider for PrivateInternetAccess {
                 info!("Associating {filename} with hostname {hostname}");
                 config.hostname_lookup.insert(filename.clone(), hostname);
             } else {
-                warn!("Configuration {filename} did not have a parseable hostname - port forwarding will not work!");
+                warn!(
+                    "Configuration {filename} did not have a parseable hostname - port forwarding will not work!"
+                );
             }
 
             debug!("Reading file: {}", file.name());

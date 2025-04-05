@@ -2,7 +2,7 @@ use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use crate::config::vpn::OpenVpnProtocol;
 use crate::util::{check_process_running, set_config_permissions, vopono_dir};
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use log::{debug, error, info};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -169,7 +169,7 @@ impl OpenVpn {
             }
             return Err(anyhow!(
                 "OpenVPN authentication failed, use -v for full log output. Modify your username and/or password in {}",
-                 auth_file.as_ref().unwrap().display()
+                auth_file.as_ref().unwrap().display()
             ));
         }
         if buffer.contains("Options error") {
@@ -587,7 +587,10 @@ pub fn warn_on_scripts_config(path: &Path) -> anyhow::Result<bool> {
         std::fs::read_to_string(path).context(format!("Reading OpenVPN config file: {path:?}"))?;
     for line in file_string.lines() {
         if line.trim().starts_with("up ") || line.trim().starts_with("down ") {
-            log::error!("up / down scripts detected in OpenVPN config file - remove these or OpenVPN will likely hang in the network namespace. Line: {}", line);
+            log::error!(
+                "up / down scripts detected in OpenVPN config file - remove these or OpenVPN will likely hang in the network namespace. Line: {}",
+                line
+            );
             out = true;
         }
     }

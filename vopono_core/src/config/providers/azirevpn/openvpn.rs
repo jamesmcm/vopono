@@ -7,11 +7,11 @@ use crate::config::providers::UiClient;
 use crate::config::vpn::OpenVpnProtocol;
 use crate::util::delete_all_files_in_dir;
 use log::{debug, info};
+use reqwest::header::COOKIE;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderValue;
-use reqwest::header::COOKIE;
-use std::fs::create_dir_all;
 use std::fs::File;
+use std::fs::create_dir_all;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
@@ -129,7 +129,9 @@ fn get_openvpn_file(
     protocol: &str,
 ) -> anyhow::Result<String> {
     let location_name = &location.name;
-    let url = format!("https://manager.azirevpn.com/account/openvpn/generate?country={location_name}&os=linux-cli&port=random&protocol={protocol}");
+    let url = format!(
+        "https://manager.azirevpn.com/account/openvpn/generate?country={location_name}&os=linux-cli&port=random&protocol={protocol}"
+    );
 
     let response = client.get(url).headers(headers.clone()).send()?;
     let new_cookie = response.headers().get_all(COOKIE);
@@ -144,8 +146,14 @@ fn get_openvpn_file(
     let file_contents = std::str::from_utf8(&file)?;
     if !file_contents.contains("BEGIN CERTIFICATE") {
         log::debug!("File contents: {}", &file_contents);
-        log::error!("Failed to get valid OpenVPN config for location: {} - could be rate limiting or invalid az cookie.", location_name);
-        return Err(anyhow::anyhow!("Failed to get valid OpenVPN config for location: {} - check the az cookie is given correctly", location_name));
+        log::error!(
+            "Failed to get valid OpenVPN config for location: {} - could be rate limiting or invalid az cookie.",
+            location_name
+        );
+        return Err(anyhow::anyhow!(
+            "Failed to get valid OpenVPN config for location: {} - check the az cookie is given correctly",
+            location_name
+        ));
     }
     let file_contents = file_contents
         .split('\n')

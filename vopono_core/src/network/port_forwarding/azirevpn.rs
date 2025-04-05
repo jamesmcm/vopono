@@ -143,9 +143,9 @@ impl AzireVpnPortForwarding {
                 output_string
             );
             let maybe_data: anyhow::Result<CreateResponse> =
-                serde_json::from_str(output_string.as_str()).with_context(|| {
-                    "Failed to parse JSON response from creating AzireVPN Port Forwarding"
-                });
+                serde_json::from_str(output_string.as_str()).with_context(
+                    || "Failed to parse JSON response from creating AzireVPN Port Forwarding",
+                );
 
             if let Ok(data) = maybe_data {
                 break Ok(data);

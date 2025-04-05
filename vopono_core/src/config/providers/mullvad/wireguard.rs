@@ -1,15 +1,15 @@
 use super::Mullvad;
 use super::WireguardProvider;
+use crate::config::providers::BoolChoice;
 use crate::config::providers::mullvad::AccessToken;
 use crate::config::providers::mullvad::Device;
 use crate::config::providers::mullvad::UserInfo;
-use crate::config::providers::BoolChoice;
 use crate::config::providers::{ConfigurationChoice, Input, InputNumericu16, UiClient};
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::generate_keypair;
-use crate::util::wireguard::{generate_public_key, WgKey};
-use anyhow::{anyhow, Context};
+use crate::util::wireguard::{WgKey, generate_public_key};
+use anyhow::{Context, anyhow};
 use chrono::DateTime;
 use chrono::Utc;
 use ipnet::IpNet;
@@ -62,7 +62,8 @@ impl Mullvad {
             .error_for_status()?
             .json()?;
         info!(
-            "Public key {} submitted to Mullvad. Private key will be saved in generated config files.", &keypair.public
+            "Public key {} submitted to Mullvad. Private key will be saved in generated config files.",
+            &keypair.public
         );
         Ok(device)
     }

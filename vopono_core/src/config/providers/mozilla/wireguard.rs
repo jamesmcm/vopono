@@ -1,6 +1,6 @@
-use super::validate_hostname;
 use super::Device;
 use super::MozillaVPN;
+use super::validate_hostname;
 use super::{Error, User};
 use super::{Login, WireguardProvider};
 use crate::config::providers::BoolChoice;
@@ -10,7 +10,7 @@ use crate::config::providers::InputNumericu16;
 use crate::config::providers::UiClient;
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
-use crate::util::wireguard::{generate_keypair, generate_public_key, WgKey};
+use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
 use anyhow::anyhow;
 use ipnet::IpNet;
 use log::{debug, info};

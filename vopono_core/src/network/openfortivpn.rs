@@ -1,6 +1,6 @@
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use log::{debug, error, info};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,9 @@ impl OpenFortiVpn {
         let stdout = handle.stdout.take().unwrap();
         let id = handle.id();
 
-        info!("Waiting for OpenFortiVPN to establish connection - you may be prompted on your 2FA device");
+        info!(
+            "Waiting for OpenFortiVPN to establish connection - you may be prompted on your 2FA device"
+        );
         info!("If your VPN password is not in the OpenFortiVPN config file then enter it here now");
         let mut bufreader = BufReader::with_capacity(16000, stdout);
         let mut buffer = String::with_capacity(16000);

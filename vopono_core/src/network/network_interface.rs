@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use std::process::Command;
@@ -58,6 +58,8 @@ pub fn get_active_interfaces() -> anyhow::Result<Vec<String>> {
     if !out.is_empty() {
         Ok(out)
     } else {
-        Err(anyhow!("Failed to get active network interface - consider using -i argument to override network interface"))
+        Err(anyhow!(
+            "Failed to get active network interface - consider using -i argument to override network interface"
+        ))
     }
 }
