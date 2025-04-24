@@ -71,7 +71,7 @@ impl Warp {
     }
 
     // Extremely hacky fix to redirect /etc/resolv.conf to /etc/netns/{netns.name}/resolv.conf
-    // So wrap-svc writes to the file we want
+    // So warp-svc writes to the file we want
     fn redirect_resolv_conf(netns_name: &str) -> anyhow::Result<()> {
         let res = unsafe { libc::unshare(libc::CLONE_NEWNS) };
         if res == -1 {
@@ -79,7 +79,7 @@ impl Warp {
         }
 
         // Mark the mount namespace as private to avoid affecting the parent namespace
-        let mount_proc = CString::new("/proc/self/ns/mnt")?;
+        let mount_proc = CString::new("/")?;
         unsafe {
             libc::mount(
                 ptr::null(),
@@ -119,6 +119,16 @@ impl Drop for Warp {
         ) {
             Ok(_) => debug!("Killed warp-svc (pid: {})", self.pid),
             Err(e) => error!("Failed to kill warp-svc (pid: {}): {:?}", self.pid, e),
+        }
+
+        let target = CString::new("/etc/resolv.conf").unwrap();
+        let result = unsafe { libc::umount2(target.as_ptr(), 0) };
+
+        if result == -1 {
+            error!(
+                "Failed to unmount private namespace mount /etc/resolv.conf: {:?}",
+                std::io::Error::last_os_error()
+            );
         }
     }
 }

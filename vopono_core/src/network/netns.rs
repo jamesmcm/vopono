@@ -60,15 +60,26 @@ impl NetworkNamespace {
 
         std::fs::create_dir_all(&lockfile_path)?;
         debug!("Trying to read lockfile: {}", lockfile_path.display());
-        let lockfile = std::fs::read_dir(lockfile_path)?
-            .next()
-            .expect("No lockfile")?;
+        let lockfile = std::fs::read_dir(lockfile_path)?.next();
 
-        let lockfile = File::open(lockfile.path())?;
-        let lock: Lockfile = ron::de::from_reader(lockfile)?;
-        let ns = lock.ns;
-        info!("Using existing network namespace: {}", &name);
-        Ok(ns)
+        if let Some(lf) = lockfile {
+            let lockfile = File::open(lf?.path())?;
+            let lock: Lockfile = ron::de::from_reader(lockfile)?;
+            let ns = lock.ns;
+            info!("Using existing network namespace: {}", &name);
+            Ok(ns)
+        } else {
+            log::error!(
+                "No lockfile found for namespace: {} - deleting namespace",
+                &name
+            );
+            sudo_command(&["ip", "netns", "delete", &name])
+                .with_context(|| format!("Failed to delete network namespace: {}", &name))?;
+            Err(anyhow!(
+                "No lockfile found for namespace: {} - deleting namespace",
+                &name
+            ))
+        }
     }
 
     pub fn new(
@@ -601,14 +612,30 @@ impl Drop for NetworkNamespace {
                 }
             }
 
+            self.shadowsocks = None;
             self.openvpn = None;
             self.veth_pair = None;
             self.dns_config = None;
+            self.warp = None;
             self.wireguard = None;
             self.host_masquerade = None;
             self.firewall_exception = None;
-            sudo_command(&["ip", "netns", "delete", &self.name])
-                .unwrap_or_else(|_| panic!("Failed to delete network namespace: {}", &self.name));
+            let delete_result = sudo_command(&["ip", "netns", "delete", &self.name]);
+            if delete_result.is_err() {
+                warn!(
+                    "Failed to delete network namespace: {} - will retry once",
+                    &self.name
+                );
+                std::thread::sleep(std::time::Duration::from_secs(4));
+
+                sudo_command(&["ip", "netns", "delete", &self.name]).unwrap_or_else(|e| {
+                    log::error!(
+                        "Failed to delete network namespace: {}: {:?}",
+                        &self.name,
+                        e
+                    )
+                });
+            }
         } else {
             debug!("Skipping destructors since other vopono instance using this namespace!");
             debug!(
@@ -616,6 +643,8 @@ impl Drop for NetworkNamespace {
                 lockfile_path.read_dir().unwrap().collect::<Vec<_>>()
             );
             std::mem::forget(self.openvpn.take());
+            std::mem::forget(self.warp.take());
+            std::mem::forget(self.shadowsocks.take());
             std::mem::forget(self.veth_pair.take());
             std::mem::forget(self.dns_config.take());
             std::mem::forget(self.wireguard.take());
