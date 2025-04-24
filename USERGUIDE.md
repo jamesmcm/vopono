@@ -619,20 +619,57 @@ Note the usual `-o` / `--open-ports` argument has no effect here as we only know
 
 ### Cloudflare Warp
 
+Note Cloudflare Warp does **not** anonymise you - it is solely for
+different routing and DNS servers. However, it does provide routing and
+encryption vs. your ISP.
+
 Cloudflare Warp users must first register with Warp via the CLI client:
 ```
-$ sudo warp-cli register
+$ sudo warp-svc
+$ sudo warp-cli registration new
 ```
+
 And then run Warp once to enable automatic connection on service
-availability:
+availability and disable the connection check:
 ```
 $ sudo warp-svc
 $ sudo warp-cli connect
+$ sudo warp-cli debug connectivity-check disable
 ```
+
 You can then kill `warp-svc` and run it via vopono:
 ```
 $ vopono -v exec --no-killswitch --provider warp --protocol warp firefox-developer-edition
 ```
+
+Note that disabling the connectivity check and killing all other warp-svc instances is necessary for it to work in vopono.
+
+#### Verifying the Warp connection
+
+You can test the connection at https://cloudflare.com/cdn-cgi/trace
+For example for a running vopono namespace:
+```
+$ sudo ip netns exec vo_wp_warp curl "https://cloudflare.com/cdn-cgi/trace"
+fl=xxx
+h=cloudflare.com
+ip=xxx
+ts=xxx
+visit_scheme=https
+uag=curl/8.13.0
+colo=MAD
+sliver=none
+http=http/2
+loc=XX
+tls=TLSv1.3
+sni=plaintext
+warp=on
+gateway=off
+rbi=off
+kex=xxx
+```
+Where warp=on means you are routing via Cloudflare Warp.
+
+You can also check for "Using DNS over WARP" at https://one.one.one.one/help/
 
 ## VPN Provider limitations
 
