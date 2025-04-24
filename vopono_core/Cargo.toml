@@ -25,8 +25,8 @@ walkdir = "2"
 # Stuck on rand 0.6 due to x25519-dalek:
 # https://github.com/dalek-cryptography/curve25519-dalek/issues/731
 # https://github.com/dalek-cryptography/curve25519-dalek/pull/729
-rand = "0.6"
-rand_core = { version = "0.6", features = ["getrandom"] }
+rand = "0.6.4"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 toml = "0.8"
 ipnet = { version = "2", features = ["serde"] }
 reqwest = { default-features = false, version = "0.12", features = [
@@ -37,7 +37,6 @@ reqwest = { default-features = false, version = "0.12", features = [
 sysinfo = "0.34"
 base64 = "0.22"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
-
 strum = "0.27"
 strum_macros = "0.27"
 zip = "2"
@@ -51,3 +50,4 @@ chrono = "0.4"
 json = "0.12"
 shell-words = "1"
 dns-lookup = "2"
+libc = "0.2"

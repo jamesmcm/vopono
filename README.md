@@ -55,9 +55,8 @@ argument.
 
 
 \*\*\*\* Cloudflare Warp uses its own protocol. Set both the provider and
-protocol to `warp`. Note you must first register with `sudo warp-cli register` and then run it once with `sudo warp-svc` and `sudo warp-cli connect` outside of vopono.
-Please verify this works first before trying it with vopono. Note there
-may also be issues with Warp overriding the DNS settings.
+protocol to `warp`. Note you must first register with `sudo warp-cli registration new` and then run it once with `sudo warp-svc` and `sudo warp-cli connect` and `sudo warp-cli debug connectivity-check disable` outside of vopono - then kill `sudo warp-svc` without running `sudo warp-cli disconnect` so it will auto-connect when run.
+Please verify this works first before trying it with vopono. 
 
 
 ## Usage
