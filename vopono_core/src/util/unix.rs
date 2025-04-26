@@ -110,9 +110,8 @@ pub fn run_program_in_netns_with_path_redirect(
             }
         }
         std::cmp::Ordering::Greater => {
-    // Parent process - return the child PID without blocking
+            // Parent process - return the child PID without blocking
             Ok(pid as u32)
         }
     }
-
 }

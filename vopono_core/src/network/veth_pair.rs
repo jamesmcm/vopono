@@ -116,9 +116,7 @@ impl VethPair {
         }
 
         if firewalld_running {
-            debug!(
-                "Detected firewalld running, adding {dest} veth device to trusted zone"
-            );
+            debug!("Detected firewalld running, adding {dest} veth device to trusted zone");
             // Permit new interface
             match std::process::Command::new("firewall-cmd")
                 .arg("--zone=trusted")
@@ -126,9 +124,9 @@ impl VethPair {
                 .status()
                 .map(|x| x.success())
             {
-                Err(e) => warn!(
-                    "Failed to add veth device {dest} to firewalld trusted zone, error: {e}"
-                ),
+                Err(e) => {
+                    warn!("Failed to add veth device {dest} to firewalld trusted zone, error: {e}")
+                }
                 Ok(false) => warn!(
                     "Possibly failed to add veth device {dest} to firewalld trusted zone (non-zero exit code)"
                 ),
