@@ -1,4 +1,4 @@
-![vopono logo](logos/vopono_basic.png)
+![vopono logo](logos/vopono_banner_transparent.png)
 
 vopono is a tool to run applications through VPN tunnels via temporary
 network namespaces. This allows you to run only a handful of
