@@ -1,4 +1,6 @@
-use std::{ffi::CString, path::Path, ptr};
+use std::path::Path;
+
+use crate::util::unix::run_program_in_netns_with_path_redirect;
 
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
@@ -39,24 +41,17 @@ impl Warp {
             std::fs::File::create(&resolv_conf_path)
                 .with_context(|| format!("Failed to create resolv.conf: {}", &resolv_conf_path))?;
         }
-        Self::redirect_resolv_conf(&netns.name).context("Failed to redirect /etc/resolv.conf")?;
 
         info!("Launching Warp...");
-
-        let handle = NetworkNamespace::exec_no_block(
+        let id = run_program_in_netns_with_path_redirect(
+            "warp-svc",
+            &[],
             &netns.name,
-            &["warp-svc"],
-            None,
-            None,
-            false,
-            false,
-            false,
-            None,
+            "/etc/resolv.conf",
+            &resolv_conf_path,
         )
-        .context("Failed to launch warp-svc - is waro-svc installed?")?;
-
-        let id = handle.id();
-
+        .context("Failed to launch warp-svc - is warp-svc installed?")?;
+        info!("Warp launched with PID: {}", id);
         // Allow input to and output from open ports (for port forwarding in tunnel)
         if let Some(opens) = open_ports {
             crate::util::open_ports(netns, opens.as_slice(), firewall)?;
@@ -69,46 +64,6 @@ impl Warp {
 
         Ok(Self { pid: id })
     }
-
-    // Extremely hacky fix to redirect /etc/resolv.conf to /etc/netns/{netns.name}/resolv.conf
-    // So warp-svc writes to the file we want
-    fn redirect_resolv_conf(netns_name: &str) -> anyhow::Result<()> {
-        let res = unsafe { libc::unshare(libc::CLONE_NEWNS) };
-        if res == -1 {
-            return Err(anyhow!(std::io::Error::last_os_error()));
-        }
-
-        // Mark the mount namespace as private to avoid affecting the parent namespace
-        let mount_proc = CString::new("/")?;
-        unsafe {
-            libc::mount(
-                ptr::null(),
-                mount_proc.as_ptr(),
-                ptr::null(),
-                libc::MS_PRIVATE | libc::MS_REC,
-                ptr::null(),
-            );
-        }
-
-        // Create mount binding
-        let source = CString::new(format!("/etc/netns/{}/resolv.conf", netns_name))?;
-        let target = CString::new("/etc/resolv.conf")?;
-
-        let result = unsafe {
-            libc::mount(
-                source.as_ptr(),
-                target.as_ptr(),
-                ptr::null(),
-                libc::MS_BIND,
-                ptr::null(),
-            )
-        };
-
-        if result == -1 {
-            return Err(anyhow!(std::io::Error::last_os_error()));
-        };
-        Ok(())
-    }
 }
 
 impl Drop for Warp {
@@ -119,16 +74,6 @@ impl Drop for Warp {
         ) {
             Ok(_) => debug!("Killed warp-svc (pid: {})", self.pid),
             Err(e) => error!("Failed to kill warp-svc (pid: {}): {:?}", self.pid, e),
-        }
-
-        let target = CString::new("/etc/resolv.conf").unwrap();
-        let result = unsafe { libc::umount2(target.as_ptr(), 0) };
-
-        if result == -1 {
-            error!(
-                "Failed to unmount private namespace mount /etc/resolv.conf: {:?}",
-                std::io::Error::last_os_error()
-            );
         }
     }
 }

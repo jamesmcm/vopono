@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use super::{netns::NetworkNamespace, port_forwarding::Forwarder};
 use crate::util::{get_all_running_process_names, parse_command_str};
-use log::warn;
 
 pub struct ApplicationWrapper {
     pub handle: std::process::Child,
@@ -36,7 +35,7 @@ impl ApplicationWrapper {
             if app_vec.contains(&shared_process_app.to_string())
                 && running_processes.contains(&shared_process_app.to_string())
             {
-                warn!(
+                log::error!(
                     "{} is already running. You must force it to use a separate profile in order to launch a new process!",
                     shared_process_app
                 );

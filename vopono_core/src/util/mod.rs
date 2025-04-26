@@ -2,6 +2,7 @@ pub mod country_map;
 pub mod open_hosts;
 pub mod open_ports;
 pub mod pulseaudio;
+pub mod unix;
 pub mod wireguard;
 
 extern crate shell_words as shellwords;
