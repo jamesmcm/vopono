@@ -107,10 +107,10 @@ impl Mullvad {
                         warn!("Mullvad account expired on {}", &user_info.expiry);
                     }
                 }
-                Err(e) => warn!("Could not parse Mullvad account expiry date: {}", e),
+                Err(e) => warn!("Could not parse Mullvad account expiry date: {e}"),
             }
 
-            debug!("Received user info: {:?}", user_info);
+            debug!("Received user info: {user_info:?}");
 
             let existing_devices: Vec<Device> = client
                 .get("https://api.mullvad.net/accounts/v1/devices")
@@ -244,7 +244,7 @@ impl WireguardProvider for Mullvad {
 
         let (keypair, ipv4_net, ipv6_net) = self.prompt_for_wg_key(uiclient)?;
 
-        debug!("Chosen keypair: {:?}", keypair);
+        debug!("Chosen keypair: {keypair:?}");
 
         // TODO: Hardcoded IP - can we scrape this anywhere?
         let dns = std::net::Ipv4Addr::new(193, 138, 218, 74);

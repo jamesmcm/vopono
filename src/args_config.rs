@@ -169,8 +169,8 @@ impl ArgsConfig {
             config.get_string("interface").ok().and_then(|s| {
                 NetworkInterface::from_str(&s)
                     .map_err(|e| {
-                        log::error!("Failed to parse interface from config file: {}", e);
-                        anyhow!("Failed to parse interface from config file: {}", e)
+                        log::error!("Failed to parse interface from config file: {e}");
+                        anyhow!("Failed to parse interface from config file: {e}")
                     })
                     .ok()
             })
@@ -229,7 +229,7 @@ impl ArgsConfig {
                 || {
                     let msg =
                 "Enter a VPN provider as a command-line argument or in the vopono config.toml file";
-                    log::error!("{}", msg);
+                    log::error!("{msg}");
                     anyhow!(msg)
                 },
             )?;
@@ -244,7 +244,7 @@ impl ArgsConfig {
          .or_else(|| if provider == VpnProvider::None {Some("none".to_owned())} else {None})
             .ok_or_else(|| {
                 let msg = "VPN server prefix must be provided as a command-line argument or in the vopono config.toml file";
-                log::error!("{}", msg); anyhow!(msg)})?;
+                log::error!("{msg}"); anyhow!(msg)})?;
 
             // Check protocol is valid for provider
             protocol = command_else_config_option_variant!(protocol, command, config)

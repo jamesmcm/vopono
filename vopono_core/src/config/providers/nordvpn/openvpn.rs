@@ -109,11 +109,11 @@ impl OpenVpnProvider for NordVPN {
                             format!("{}-{}.ovpn", country.unwrap(), server_name)
                         }
                     } else {
-                        debug!("Filename did not match established pattern: {}", fname);
+                        debug!("Filename did not match established pattern: {fname}");
                         fname.to_string()
                     }
                 } else {
-                    debug!("Filename did not match established pattern: {}", fname);
+                    debug!("Filename did not match established pattern: {fname}");
                     fname.to_string()
                 }
             } else {

@@ -101,7 +101,7 @@ impl OpenVpnProvider for IVPN {
 
                 let code = country_map.get(country);
                 if code.is_none() {
-                    debug!("Could not find country in country map: {}", country);
+                    debug!("Could not find country in country map: {country}");
                     fname.to_lowercase()
                 } else {
                     format!("{}-{}{}.ovpn", country, code.unwrap(), city)

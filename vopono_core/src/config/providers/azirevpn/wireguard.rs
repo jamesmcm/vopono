@@ -110,7 +110,7 @@ impl WireguardProvider for AzireVPN {
         // TODO: Check account is active and credentials okay
         let user_profile_response: UserProfileResponse = client
             .get("https://api.azirevpn.com/v3/users/me")
-            .header("Authorization", format!("Bearer {}", token))
+            .header("Authorization", format!("Bearer {token}"))
             .send()?
             .json().with_context(|| "Failed to parse AzireVPN user profile response - if this persists try deleting cached data at ~/.config/vopono/azire/ and/or manually deleting access tokens at https://manager.azirevpn.com/account/token")?;
 
@@ -130,7 +130,7 @@ impl WireguardProvider for AzireVPN {
             // Or replace existing keys with new keypair
             let existing_devices: ExistingDevicesResponse = client
                 .get("https://api.azirevpn.com/v3/ips")
-                .header("Authorization", format!("Bearer {}", token))
+                .header("Authorization", format!("Bearer {token}"))
                 .send()?
                 .json()
                 .with_context(|| "Failed to parse existing devices response")?;
@@ -148,7 +148,7 @@ impl WireguardProvider for AzireVPN {
                 }
                 // Create new device
                 let keypair: WgKey = generate_keypair()?;
-                debug!("Chosen keypair: {:?}", keypair);
+                debug!("Chosen keypair: {keypair:?}");
                 self.upload_wg_key(&keypair, &token, &client)?
             } else {
                 let existing_device = &existing_devices.data[selection];
@@ -161,7 +161,7 @@ impl WireguardProvider for AzireVPN {
                 if replace_keys {
                     // Replace existing keys
                     let keypair: WgKey = generate_keypair()?;
-                    debug!("Chosen keypair: {:?}", keypair);
+                    debug!("Chosen keypair: {keypair:?}");
                     self.replace_wg_key(existing_device, &keypair, &token, &client)?
                 } else {
                     // Use existing device
@@ -222,7 +222,7 @@ impl WireguardProvider for AzireVPN {
             // Note max devices is limited to 10 registered, 5 concurrent connections
             // Start device and keypair generation
             let keypair: WgKey = generate_keypair()?;
-            debug!("Chosen keypair: {:?}", keypair);
+            debug!("Chosen keypair: {keypair:?}");
             self.upload_wg_key(&keypair, &token, &client)?
         };
 
@@ -244,7 +244,7 @@ impl WireguardProvider for AzireVPN {
                 &path.to_string_lossy()
             );
         } else {
-            log::error!("Failed to save Wireguard keypair details: {:?}", details);
+            log::error!("Failed to save Wireguard keypair details: {details:?}");
         }
 
         // This gets locations data from token

@@ -27,8 +27,7 @@ impl FromStr for NetworkInterface {
             Ok(true) => {}
             _ => {
                 warn!(
-                    "{} may not be an active network interface, using anyway since manually set",
-                    s
+                    "{s} may not be an active network interface, using anyway since manually set"
                 );
             }
         }

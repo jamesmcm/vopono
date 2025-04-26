@@ -148,7 +148,7 @@ impl WireguardProvider for MozillaVPN {
 
         let (_device, keypair) = self.prompt_for_wg_key(&client, &login, uiclient)?;
 
-        debug!("Chosen keypair: {:?}", keypair);
+        debug!("Chosen keypair: {keypair:?}");
 
         // Get user info again in case we uploaded new key
         let user_info: User = client

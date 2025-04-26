@@ -298,10 +298,9 @@ impl NetworkNamespace {
         }
 
         info!(
-            "IP address of namespace as seen from host: {}",
-            veth_source_ip_nosub
+            "IP address of namespace as seen from host: {veth_source_ip_nosub}"
         );
-        info!("IP address of host as seen from namespace: {}", ip_nosub);
+        info!("IP address of host as seen from namespace: {ip_nosub}");
         self.veth_pair_ips = Some(VethPairIPs {
             host_ip: ip_nosub.parse()?,
             namespace_ip: veth_source_ip_nosub.parse()?,

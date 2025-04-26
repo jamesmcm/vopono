@@ -90,8 +90,7 @@ impl VethPair {
                 .context("Failed to reload NetworkManager configuration")
             {
                 warn!(
-                    "Tried but failed to reload NetworkManager configuration - is NetworkManager running? : {}",
-                    e
+                    "Tried but failed to reload NetworkManager configuration - is NetworkManager running? : {e}"
                 );
             }
             Some(NetworkManagerUnmanaged { backup_file })
@@ -118,8 +117,7 @@ impl VethPair {
 
         if firewalld_running {
             debug!(
-                "Detected firewalld running, adding {} veth device to trusted zone",
-                dest
+                "Detected firewalld running, adding {dest} veth device to trusted zone"
             );
             // Permit new interface
             match std::process::Command::new("firewall-cmd")
@@ -129,12 +127,10 @@ impl VethPair {
                 .map(|x| x.success())
             {
                 Err(e) => warn!(
-                    "Failed to add veth device {} to firewalld trusted zone, error: {}",
-                    dest, e
+                    "Failed to add veth device {dest} to firewalld trusted zone, error: {e}"
                 ),
                 Ok(false) => warn!(
-                    "Possibly failed to add veth device {} to firewalld trusted zone (non-zero exit code)",
-                    dest
+                    "Possibly failed to add veth device {dest} to firewalld trusted zone (non-zero exit code)"
                 ),
                 _ => {}
             }

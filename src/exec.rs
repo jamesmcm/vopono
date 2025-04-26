@@ -37,12 +37,9 @@ pub fn set_env_vars(ns: &NetworkNamespace, forwarder: Option<&dyn Forwarder>, cm
             cmd.env("PULSE_SERVER", &pa);
             debug!("Setting PULSE_SERVER to {}", &pa);
         } else if let Err(e) = pa {
-            warn!("Could not get PULSE_SERVER: {:?}", e);
+            warn!("Could not get PULSE_SERVER: {e:?}");
         } else {
-            warn!(
-                "Could not parse PULSE_SERVER from pactl info output: {:?}",
-                pa
-            );
+            warn!("Could not parse PULSE_SERVER from pactl info output: {pa:?}",);
         }
     } else {
         debug!("pactl not found, will not set PULSE_SERVER");
@@ -172,10 +169,7 @@ pub fn exec(
         // Add local host to open hosts if allow_host_access enabled
         if parsed_command.allow_host_access {
             let host_ip = ns.veth_pair_ips.as_ref().unwrap().host_ip;
-            warn!(
-                "Allowing host access from network namespace, host IP address is: {}",
-                host_ip
-            );
+            warn!("Allowing host access from network namespace, host IP address is: {host_ip}");
             if let Some(oh) = parsed_command.open_hosts.iter_mut().next() {
                 oh.push(host_ip);
             } else {
@@ -290,10 +284,7 @@ fn stay_alive(pid: Option<u32>, mut signals: Signals) {
     let thread = std::thread::spawn(move || {
         for _sig in signals.forever() {
             if let Some(pid) = pid {
-                info!(
-                    "SIGINT received, killing process {} and terminating...",
-                    pid
-                );
+                info!("SIGINT received, killing process {pid} and terminating...");
                 nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(pid as i32),
                     nix::sys::signal::Signal::SIGKILL,
@@ -595,8 +586,7 @@ fn provider_port_forwarding(
             }
             Some(p) => {
                 error!(
-                    "Port forwarding not supported for the selected provider: {} - ignoring --port-forwarding",
-                    p
+                    "Port forwarding not supported for the selected provider: {p} - ignoring --port-forwarding"
                 );
                 None
             }

@@ -49,7 +49,7 @@ impl OpenVpnProvider for AzireVPN {
 
         debug!("Using az cookie: {}", &auth_cookie);
         if !auth_cookie.starts_with("az=") {
-            auth_cookie = Box::leak(format!("az={}", auth_cookie).into_boxed_str());
+            auth_cookie = Box::leak(format!("az={auth_cookie}").into_boxed_str());
         }
 
         let openvpn_dir = self.openvpn_dir()?;
@@ -89,8 +89,7 @@ impl OpenVpnProvider for AzireVPN {
             }
             if file_contents.is_err() {
                 log::error!(
-                    "Failed to get valid OpenVPN config for location: {} - even after retry.",
-                    location_name
+                    "Failed to get valid OpenVPN config for location: {location_name} - even after retry."
                 );
                 log::info!("Sleeping 60 seconds to avoid rate limiting...");
                 std::thread::sleep(Duration::from_secs(60));
@@ -99,7 +98,7 @@ impl OpenVpnProvider for AzireVPN {
 
             let file_contents = file_contents.unwrap();
 
-            debug!("Writing file: {}", filename);
+            debug!("Writing file: {filename}");
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
             write!(outfile, "{file_contents}")?;
@@ -147,12 +146,10 @@ fn get_openvpn_file(
     if !file_contents.contains("BEGIN CERTIFICATE") {
         log::debug!("File contents: {}", &file_contents);
         log::error!(
-            "Failed to get valid OpenVPN config for location: {} - could be rate limiting or invalid az cookie.",
-            location_name
+            "Failed to get valid OpenVPN config for location: {location_name} - could be rate limiting or invalid az cookie."
         );
         return Err(anyhow::anyhow!(
-            "Failed to get valid OpenVPN config for location: {} - check the az cookie is given correctly",
-            location_name
+            "Failed to get valid OpenVPN config for location: {location_name} - check the az cookie is given correctly"
         ));
     }
     let file_contents = file_contents

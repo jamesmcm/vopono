@@ -51,7 +51,7 @@ impl Warp {
             &resolv_conf_path,
         )
         .context("Failed to launch warp-svc - is warp-svc installed?")?;
-        info!("Warp launched with PID: {}", id);
+        info!("Warp launched with PID: {id}");
         // Allow input to and output from open ports (for port forwarding in tunnel)
         if let Some(opens) = open_ports {
             crate::util::open_ports(netns, opens.as_slice(), firewall)?;

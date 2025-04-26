@@ -169,7 +169,7 @@ pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<Ipv4Net>> {
         .output()?
         .stdout;
     let output = std::str::from_utf8(&output)?;
-    debug!("Existing interfaces: {}", output);
+    debug!("Existing interfaces: {output}");
 
     let re = Regex::new(r"inet\s+(?P<ip>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d{1,2})").unwrap();
     let mut ips = Vec::new();
@@ -188,7 +188,7 @@ pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
         .filter(|x| x.is_some())
         .map(|x| String::from(x.unwrap()))
         .collect();
-    debug!("Existing namespaces: {:?}", output);
+    debug!("Existing namespaces: {output:?}");
 
     Ok(output)
 }
@@ -323,7 +323,7 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
             !lock_namespaces.contains_key(x) && get_pids_in_namespace(x).unwrap().is_empty()
         })
         .try_for_each(|x| {
-            debug!("Removing dead namespace: {}", x);
+            debug!("Removing dead namespace: {x}");
             let path = format!("/etc/netns/{x}");
             std::fs::remove_dir_all(path).ok();
 

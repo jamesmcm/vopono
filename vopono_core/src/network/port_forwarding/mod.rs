@@ -63,7 +63,7 @@ pub trait ThreadLoopForwarder: Forwarder {
                 );
             Err(anyhow::anyhow!("Port forwarding callback script failed"))
         } else if let Ok(out) = String::from_utf8(refresh_response.stdout) {
-            println!("{}", out);
+            println!("{out}");
             Ok(out)
         } else {
             Ok("Callback script succeeded but stdout was not valid UTF8".to_string())

@@ -91,7 +91,7 @@ impl OpenFortiVpn {
 
         let remote_peer = get_remote_peer(&pppd_log)?;
 
-        debug!("Found OpenFortiVPN route: {:?}", remote_peer);
+        debug!("Found OpenFortiVPN route: {remote_peer:?}");
         NetworkNamespace::exec(&netns.name, &["ip", "route", "del", "default"])?;
         NetworkNamespace::exec(
             &netns.name,

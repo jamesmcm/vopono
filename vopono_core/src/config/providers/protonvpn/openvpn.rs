@@ -166,7 +166,7 @@ impl OpenVpnProvider for ProtonVPN {
                     let start = iter_split.next().unwrap();
                     let end = iter_split.next().unwrap();
                     let number = iter_split.next().unwrap();
-                    hostname = Some(format!("{}_{}", start, number));
+                    hostname = Some(format!("{start}_{number}"));
                     code = end;
                 }
                 let country = code_map

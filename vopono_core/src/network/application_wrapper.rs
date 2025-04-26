@@ -36,8 +36,7 @@ impl ApplicationWrapper {
                 && running_processes.contains(&shared_process_app.to_string())
             {
                 log::error!(
-                    "{} is already running. You must force it to use a separate profile in order to launch a new process!",
-                    shared_process_app
+                    "{shared_process_app} is already running. You must force it to use a separate profile in order to launch a new process!"
                 );
             }
         }

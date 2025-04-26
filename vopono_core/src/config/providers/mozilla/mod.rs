@@ -100,7 +100,7 @@ impl MozillaVPN {
                 .port()
         );
 
-        eprint!("Please visit {}.", login_url);
+        eprint!("Please visit {login_url}");
 
         match webbrowser::open(&login_url) {
             Ok(_) => eprint!(" Link opened in browser."),

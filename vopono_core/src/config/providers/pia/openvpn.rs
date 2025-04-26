@@ -105,7 +105,7 @@ impl OpenVpnProvider for PrivateInternetAccess {
                 let country = country.split('.').next().unwrap();
                 let code = country_map.get(country);
                 if code.is_none() {
-                    debug!("Could not find country in country map: {}", country);
+                    debug!("Could not find country in country map: {country}");
                     file.name().to_string()
                 } else {
                     format!("{}-{}.ovpn", country, code.unwrap())

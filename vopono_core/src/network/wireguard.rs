@@ -93,7 +93,7 @@ impl Wireguard {
                     "Failed while converting Wireguard config to TOML. Result may be malformed:\n\n{config_string}"
                 )
             })?;
-        debug!("TOML config: {:?}", config);
+        debug!("TOML config: {config:?}");
         // TODO: Use bs58 here?
         let if_name = namespace.name
             [((namespace.name.len() as i32) - 13).max(0) as usize..namespace.name.len()]
@@ -655,11 +655,11 @@ where
         Ok(s) => s,
         Err(e) => {
             debug!("Missing optional DNS field in Wireguard config - serde");
-            debug!("serde: {:?}", e);
+            debug!("serde: {e:?}");
             return Ok(None);
         }
     };
-    debug!("Deserializing: {} to Vec<IpAddr>", raw);
+    debug!("Deserializing: {raw} to Vec<IpAddr>");
     let strings = raw.split(',');
     match strings
         .map(|x| x.trim().parse::<IpAddr>())

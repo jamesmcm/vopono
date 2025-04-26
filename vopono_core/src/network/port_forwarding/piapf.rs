@@ -84,7 +84,7 @@ impl Piapf {
             .as_str()
             .to_string();
 
-        log::info!("PIA gateway: {}", vpn_gateway);
+        log::info!("PIA gateway: {vpn_gateway}");
 
         let vpn_hostname = match protocol {
             Protocol::OpenVpn => pia.hostname_for_openvpn_conf(config_file)?,
@@ -95,7 +95,7 @@ impl Piapf {
             }
         };
 
-        log::info!("PIA hostname: {}", vpn_hostname);
+        log::info!("PIA hostname: {vpn_hostname}");
 
         let (pia_user, pia_pass) = match protocol {
             Protocol::OpenVpn => pia.load_openvpn_auth()?,
@@ -111,8 +111,8 @@ impl Piapf {
         let pia_token = PrivateInternetAccess::get_pia_token(&pia_user, &pia_pass)?;
         let pia_cert_path = pia.pia_cert_path()?.display().to_string();
 
-        log::info!("PIA pia_token: {}", pia_token);
-        log::info!("PIA pia_cert_path: {}", pia_cert_path);
+        log::info!("PIA pia_token: {pia_token}");
+        log::info!("PIA pia_cert_path: {pia_cert_path}");
 
         if which("curl").is_err() {
             log::error!(
@@ -131,13 +131,13 @@ impl Piapf {
                 "-m",
                 "5",
                 "--connect-to",
-                &format!("{}::{}:", vpn_hostname, vpn_gateway).to_string(),
+                &format!("{vpn_hostname}::{vpn_gateway}:").to_string(),
                 "--cacert",
                 &pia_cert_path,
                 "-G",
                 "--data-urlencode",
-                &format!("token={}", pia_token).to_string(),
-                &format!("https://{}:19999/getSignature", vpn_hostname).to_string(),
+                &format!("token={pia_token}").to_string(),
+                &format!("https://{vpn_hostname}:19999/getSignature").to_string(),
             ],
         )?;
         if !get_response.status.success() {
@@ -236,7 +236,7 @@ impl ThreadLoopForwarder for Piapf {
                     refresh_response.status
                 );
             } else if let Ok(out) = String::from_utf8(refresh_response.stdout) {
-                println!("{}", out);
+                println!("{out}");
             }
         }
 

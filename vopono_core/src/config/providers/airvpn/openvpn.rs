@@ -104,9 +104,9 @@ impl OpenVpnProvider for AirVPN {
                 let country_code = fname_vec[1].split('-').next().unwrap().to_lowercase();
                 let city = fname_vec[1].split('-').collect::<Vec<&str>>()[1];
                 let server_name = fname_vec[2];
-                debug!("country_code: {}", country_code);
-                debug!("city: {}", city);
-                debug!("server_name: {}", server_name);
+                debug!("country_code: {country_code}");
+                debug!("city: {city}");
+                debug!("server_name: {server_name}");
                 let country = country_map.get(country_code.as_str());
                 if country.is_none() || use_country_code {
                     format!("{country_code}-{server_name}.ovpn")

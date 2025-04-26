@@ -143,7 +143,7 @@ impl OpenVpn {
                         let ipaddr = IpAddr::from_str(ipstr.as_str());
                         if let Ok(ip) = ipaddr {
                             openvpn_dns = Some(ip);
-                            debug!("Set OpenVPN DNS to: {:?}", ip);
+                            debug!("Set OpenVPN DNS to: {ip:?}");
                         }
                     }
                 }
@@ -173,7 +173,7 @@ impl OpenVpn {
             ));
         }
         if buffer.contains("Options error") {
-            error!("OpenVPN options error: {}", buffer);
+            error!("OpenVPN options error: {buffer}");
             return Err(anyhow!("OpenVPN options error, use -v for full log output"));
         }
 
@@ -588,8 +588,7 @@ pub fn warn_on_scripts_config(path: &Path) -> anyhow::Result<bool> {
     for line in file_string.lines() {
         if line.trim().starts_with("up ") || line.trim().starts_with("down ") {
             log::error!(
-                "up / down scripts detected in OpenVPN config file - remove these or OpenVPN will likely hang in the network namespace. Line: {}",
-                line
+                "up / down scripts detected in OpenVPN config file - remove these or OpenVPN will likely hang in the network namespace. Line: {line}"
             );
             out = true;
         }

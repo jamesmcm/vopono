@@ -83,7 +83,7 @@ impl Drop for HostMasquerade {
     fn drop(&mut self) {
         // Only drop these settings if there are no other active namespaces
         let namespaces = crate::util::get_lock_namespaces();
-        debug!("Remaining namespaces: {:?}", namespaces);
+        debug!("Remaining namespaces: {namespaces:?}");
         if namespaces.is_ok() && namespaces.unwrap().is_empty() {
             match self.firewall {
                 Firewall::IpTables => {
@@ -239,7 +239,7 @@ impl Drop for FirewallException {
     fn drop(&mut self) {
         // Only drop these settings if there are no other active namespaces
         let namespaces = crate::util::get_lock_namespaces();
-        debug!("Remaining namespaces: {:?}", namespaces);
+        debug!("Remaining namespaces: {namespaces:?}");
         if namespaces.is_ok() && namespaces.unwrap().is_empty() {
             match self.firewall {
                 Firewall::IpTables => {
