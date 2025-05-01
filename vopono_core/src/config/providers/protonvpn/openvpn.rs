@@ -37,6 +37,50 @@ impl ProtonVPN {
             protocol
         ))?)
     }
+
+    pub fn parse_auth_cookie(
+        uiclient: &dyn UiClient,
+    ) -> anyhow::Result<(&'static str, &'static str)> {
+        let auth_pattern = Box::leak(Box::new(Regex::new(
+            r"^[;\s\t]*AUTH-([^=\t:;\s]+)[\s\t=: ]+([^\s\t;=]+)[;\s\t]*$",
+        )?));
+
+        let raw_auth_cookie  = Box::leak(uiclient.get_input(Input {
+            prompt: "Please log-in at https://account.protonvpn.com/dashboard and then visit https://account.protonvpn.com/account and copy the value of the cookie of the form \"AUTH-xxx=yyy\" where xxx is equal to the value of the \"x-pm-uid\" request header, in the request from your browser's network request inspector (check the request it makes to https://account.protonvpn.com/api/vpn for example). Note there may be multiple AUTH-xxx=yyy request headers, copy the one where xxx is equal to the value of the x-pm-uid header.".to_owned(),
+             validator: Some(Box::new(|s: &String| if auth_pattern.is_match(s) {
+                Ok(())
+            } else {
+                Err("The authorization code must be in the format AUTH-xxx=yyy, AUTH-xxx: yyy, or AUTH-xxx\tyyy, with an optional semicolon at the end".to_owned())
+            }
+                ))
+             })?.into_boxed_str());
+
+        debug!("Using AUTH cookie: {}", &raw_auth_cookie);
+
+        // Extract the key and value parts and standardize to AUTH-xxx=yyy format
+        let maybe_captures = auth_pattern.captures(raw_auth_cookie);
+        let uid = maybe_captures
+            .as_ref()
+            .and_then(|c| c.get(1))
+            .ok_or(anyhow!("Failed to parse uid from auth cookie"))?;
+
+        info!(
+            "x-pm-uid should be {} according to AUTH cookie: {}",
+            uid.as_str(),
+            raw_auth_cookie
+        );
+        let value = maybe_captures
+            .and_then(|c| c.get(2))
+            .ok_or(anyhow!("Failed to parse cookie value from auth cookie"))?;
+
+        let leaked_uid = Box::leak(uid.as_str().to_owned().into_boxed_str());
+
+        // Create the standardized form
+        let auth_cookie =
+            Box::leak(format!("AUTH-{}={}", uid.as_str(), value.as_str()).into_boxed_str());
+        debug!("Parsed AUTH cookie: {}", &auth_cookie);
+        Ok((auth_cookie, leaked_uid))
+    }
 }
 impl OpenVpnProvider for ProtonVPN {
     fn provider_dns(&self) -> Option<Vec<IpAddr>> {
@@ -98,22 +142,9 @@ impl OpenVpnProvider for ProtonVPN {
             uiclient.get_configuration_choice(&OpenVpnProtocol::default())?,
         );
 
-        let auth_cookie: &'static str = Box::leak(uiclient.get_input(Input {
-            prompt: "Please log-in at https://account.protonvpn.com/dashboard and then visit https://account.protonvpn.com/account and copy the value of the cookie of the form \"AUTH-xxx=yyy\" where xxx is equal to the value of the \"x-pm-uid\" request header, in the request from your browser's network request inspector (check the request it makes to https://account.protonvpn.com/api/vpn for example). Note there may be multiple AUTH-xxx=yyy request headers, copy the one where xxx is equal to the value of the x-pm-uid header.".to_owned(),
-             validator: Some(Box::new(|s: &String| if s.starts_with("AUTH-") {Ok(())} else {Err("AUTH cookie must start with AUTH-".to_owned())}))
-             })?.replace(';', "").trim().to_owned().into_boxed_str());
-        debug!("Using AUTH cookie: {}", &auth_cookie);
+        // Create the standardized form
+        let (auth_cookie, uid) = Self::parse_auth_cookie(uiclient)?;
 
-        let uid_re = Regex::new("AUTH-([^=]+)=").unwrap();
-        let uid = uid_re
-            .captures(auth_cookie)
-            .and_then(|c| c.get(1))
-            .ok_or(anyhow!("Failed to parse uid from auth cookie"))?;
-        info!(
-            "x-pm-uid should be {} according to AUTH cookie: {}",
-            uid.as_str(),
-            auth_cookie
-        );
         let url = self.build_url(&config_choice, &tier, &protocol)?;
 
         let mut headers = HeaderMap::new();
@@ -121,7 +152,7 @@ impl OpenVpnProvider for ProtonVPN {
 
         headers.insert(
             HeaderName::from_static("x-pm-uid"),
-            HeaderValue::from_static(uid.as_str()),
+            HeaderValue::from_static(uid),
         );
         let client = reqwest::blocking::Client::new();
 
@@ -327,5 +358,303 @@ impl ConfigurationChoice for ConfigType {
             }
             .to_string(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*; // Import items from parent module
+
+    #[derive(Debug)]
+    struct MockUiClient {
+        input_to_provide: String,
+        // We can add flags here to simulate errors from get_input if needed,
+        // but for these tests, we primarily care about the validation and parsing
+        // based on the input_to_provide.
+    }
+
+    impl UiClient for MockUiClient {
+        fn get_input(&self, input: Input) -> anyhow::Result<String> {
+            // Check if a validator is provided, as it is in parse_auth_cookie
+            if let Some(validator) = &input.validator {
+                // Run the validator provided by the function under test
+                match validator(&self.input_to_provide) {
+                    Ok(_) => Ok(self.input_to_provide.clone()),
+                    Err(msg) => Err(anyhow!("Input validation failed: {}", msg)),
+                }
+            } else {
+                // No validator provided, just return the input
+                Ok(self.input_to_provide.clone())
+            }
+        }
+
+        // Implement other methods as unimplemented! or return dummy values
+        // as they are not called by the function under test.
+        fn get_configuration_choice(
+            &self,
+            _conf_choice: &dyn ConfigurationChoice,
+        ) -> anyhow::Result<usize> {
+            unimplemented!("get_configuration_choice not needed for this test")
+        }
+
+        fn get_bool_choice(
+            &self,
+            _bool_choice: crate::config::providers::BoolChoice,
+        ) -> anyhow::Result<bool> {
+            unimplemented!("get_bool_choice not needed for this test")
+        }
+
+        fn get_input_numeric_u16(
+            &self,
+            _input: crate::config::providers::InputNumericu16,
+        ) -> anyhow::Result<u16> {
+            unimplemented!("get_input_numeric_u16 not needed for this test")
+        }
+
+        fn get_password(&self, _password: Password) -> anyhow::Result<String> {
+            unimplemented!("get_password not needed for this test")
+        }
+    }
+
+    // Helper function to run a test case
+    fn run_test(input: &str) -> anyhow::Result<(&'static str, &'static str)> {
+        let mock_client = MockUiClient {
+            input_to_provide: input.to_string(),
+        };
+        ProtonVPN::parse_auth_cookie(&mock_client)
+    }
+
+    // --- Positive Test Cases ---
+
+    #[test]
+    fn test_basic_equal_separator() {
+        let result = run_test("AUTH-abc=123");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-abc=123");
+        assert_eq!(uid, "abc");
+    }
+
+    #[test]
+    fn test_basic_tab_separator() {
+        let result = run_test("AUTH-abc\t123");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-abc=123");
+        assert_eq!(uid, "abc");
+    }
+
+    #[test]
+    fn test_basic_colon_separator() {
+        let result = run_test("AUTH-abc: 123");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-abc=123");
+        assert_eq!(uid, "abc");
+    }
+
+    #[test]
+    fn test_basic_equal_separator_semicolon() {
+        let result = run_test("AUTH-def=456;");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-def=456");
+        assert_eq!(uid, "def");
+    }
+
+    #[test]
+    fn test_basic_tab_separator_semicolon() {
+        let result = run_test("AUTH-def\t456;");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-def=456");
+        assert_eq!(uid, "def");
+    }
+
+    #[test]
+    fn test_basic_colon_separator_semicolon() {
+        let result = run_test("AUTH-def: 456;");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-def=456");
+        assert_eq!(uid, "def");
+    }
+
+    #[test]
+    fn test_no_space_after_colon() {
+        let result = run_test("AUTH-id:content");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-id=content");
+        assert_eq!(uid, "id");
+    }
+
+    #[test]
+    fn test_space_around_equal() {
+        let result = run_test("AUTH-name = data");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-name=data");
+        assert_eq!(uid, "name");
+    }
+
+    #[test]
+    fn test_multiple_spaces_as_separator() {
+        // The regex [\s\t=: ]+ allows multiple spaces/tabs/=/
+        let result = run_test("AUTH-token   secret");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-token=secret");
+        assert_eq!(uid, "token");
+    }
+
+    #[test]
+    fn test_multiple_spaces_around_equal() {
+        let result = run_test("AUTH-profile  =  info");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-profile=info");
+        assert_eq!(uid, "profile");
+    }
+
+    #[test]
+    fn test_multiple_spaces_after_colon() {
+        let result = run_test("AUTH-session:  data");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-session=data");
+        assert_eq!(uid, "session");
+    }
+
+    #[test]
+    fn test_uid_with_hyphens_and_underscores() {
+        let result = run_test("AUTH-user_id-123=some_value-with-hyphens");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-user_id-123=some_value-with-hyphens");
+        assert_eq!(uid, "user_id-123");
+    }
+
+    #[test]
+    fn test_value_with_special_chars_allowed() {
+        // Value can contain chars like :, +, etc. as long as not space, tab, semicolon
+        let result = run_test("AUTH-key=value:and:colons+plus");
+        assert!(result.is_ok());
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-key=value:and:colons+plus");
+        assert_eq!(uid, "key");
+    }
+
+    // --- Negative Test Cases (Should fail validation in MockUiClient) ---
+
+    #[test]
+    fn test_negative_missing_hyphen() {
+        let result = run_test("AUTHxyz=123");
+        assert!(result.is_err());
+        // Optionally check the error message if needed
+        // assert!(result.unwrap_err().to_string().contains("validation failed"));
+    }
+
+    #[test]
+    fn test_negative_incomplete_prefix() {
+        let result = run_test("AUTH-");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_negative_empty_uid() {
+        // Regex `([^=\t:;\s]+)` requires at least one char for UID
+        let result = run_test("AUTH- =123");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_negative_lowercase_auth() {
+        let result = run_test("auth-lower=123");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_negative_wrong_prefix() {
+        let result = run_test("PREFIX-abc=123");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_negative_missing_separator_and_value() {
+        let result = run_test("AUTH-abc");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_negative_empty_value_equal() {
+        // Regex `([^\s\t;]+)` requires at least one char for value
+        let result = run_test("AUTH-user=");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_negative_empty_value_colon() {
+        // Regex `([^\s\t;]+)` requires at least one char for value
+        let result = run_test("AUTH-access: "); // Note space after colon is part of separator
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_negative_newline_in_value() {
+        let result = run_test("AUTH-key=\n789");
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-key=789");
+        assert_eq!(uid, "key");
+    }
+
+    #[test]
+    fn test_crlf_in_value() {
+        let result = run_test("AUTH-account=\r\ndetails");
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-account=details");
+        assert_eq!(uid, "account");
+    }
+
+    #[test]
+    fn test_negative_space_in_uid() {
+        let result = run_test("AUTH-user id=value");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_negative_space_in_value() {
+        // Value group `([^\s\t;]+)` does not allow space
+        let result = run_test("AUTH-uid=value part");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_negative_tab_in_value() {
+        // Value group `([^\s\t;]+)` does not allow tab
+        let result = run_test("AUTH-uid=value\tpart");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_negative_semicolon_in_value() {
+        // Value group `([^\s\t;]+)` does not allow semicolon
+        let result = run_test("AUTH-uid=value;part");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trailing_space_after_semicolon() {
+        // Regex requires `$` immediately after optional `;`
+        let result = run_test("AUTH-uid=value; ");
+        let (cookie, uid) = result.unwrap();
+        assert_eq!(cookie, "AUTH-uid=value");
+        assert_eq!(uid, "uid");
+    }
+
+    #[test]
+    fn test_negative_no_separator() {
+        let result = run_test("AUTH-uidvalue");
+        assert!(result.is_err());
     }
 }
