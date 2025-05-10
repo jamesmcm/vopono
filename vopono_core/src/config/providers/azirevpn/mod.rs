@@ -1,12 +1,10 @@
-mod openvpn;
 mod wireguard;
 
-use super::{
-    ConfigurationChoice, Input, OpenVpnProvider, Password, Provider, UiClient, WireguardProvider,
-};
+use super::{ConfigurationChoice, Input, Password, Provider, UiClient, WireguardProvider};
 use crate::config::vpn::Protocol;
 use anyhow::Context;
 use serde::Deserialize;
+use serde_json::json;
 use std::io::Write;
 use std::{net::IpAddr, path::PathBuf};
 
@@ -16,7 +14,7 @@ pub struct AzireVPN {}
 
 impl AzireVPN {
     fn locations_url(&self) -> &str {
-        "https://api.azirevpn.com/v2/locations"
+        "https://api.azirevpn.com/v3/locations"
     }
 }
 impl Provider for AzireVPN {
@@ -148,21 +146,17 @@ struct UserIpsData {
 #[derive(Deserialize, Debug, Clone)]
 struct AccessTokenResponse {
     status: String,
-    user: UserResponse,
-    token: String,
-    device_name: String,
+    data: AccessTokenResponseData,
 }
 
 #[allow(dead_code)]
 #[derive(Deserialize, Debug, Clone)]
-struct UserResponse {
-    username: String,
-    email: String,
-    email_verified: bool,
-    active: bool,
-    expires_at: i64,
-    subscription: bool,
-    is_oldschool: bool,
+struct AccessTokenResponseData {
+    id: String,
+    device_name: Option<String>,
+    key: String,
+    comment: Option<String>,
+    created_at: i64,
 }
 
 #[allow(dead_code)]
@@ -231,27 +225,38 @@ impl AzireVPN {
         let (username, password) = self.request_userpass(uiclient)?;
         let client = reqwest::blocking::Client::new();
         let auth_response: AccessTokenResponse = client
-            .post("https://api.azirevpn.com/v2/auth/client")
-            .form(&[
-                ("username", &username),
-                ("password", &password),
-                ("comment", &"web generator".to_string()),
-            ])
+            .post("https://api.azirevpn.com/v3/tokens")
+            .json(&json!(
+                {
+                    "username": username,
+                    "password": password,
+                    "comment": "vopono sync"
+                }
+            ))
             .send()?
             .json()
             .with_context(
                 || "Authentication error: Ensure your AzireVPN credentials are correct",
             )?;
 
+        let auth_response_data = if auth_response.status == "success" {
+            Ok(auth_response.data)
+        } else {
+            Err(anyhow::anyhow!(
+                "Authentication error, ensure your AzireVPN credentials are correct. Response: {}",
+                auth_response.status
+            ))
+        }?;
+
         // log::debug!("auth_response: {:?}", &auth_response);
         let mut outfile = std::fs::File::create(self.token_file_path())?;
-        write!(outfile, "{}", auth_response.token)?;
+        write!(outfile, "{}", auth_response_data.key)?;
         log::debug!(
             "AzireVPN Auth Token written to {}",
             self.token_file_path().display()
         );
 
-        Ok(auth_response.token)
+        Ok(auth_response_data.key)
     }
 
     pub fn read_access_token(&self) -> anyhow::Result<String> {

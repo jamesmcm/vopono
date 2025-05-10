@@ -27,7 +27,7 @@ lynx all running through different VPN connections:
 | Provider                | OpenVPN support | Wireguard support |
 | ----------------------- | --------------- | ----------------- |
 | Mullvad                 | ✅              | ✅                |
-| AzireVPN                | ✅              | ✅                |
+| AzireVPN                | ❌              | ✅                |
 | iVPN                    | ✅              | ✅                |
 | PrivateInternetAccess   | ✅              | ✅\*              |
 | ProtonVPN               | ✅\*\*          | ✅\*\*\*          |

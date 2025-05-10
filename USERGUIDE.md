@@ -195,7 +195,7 @@ The sync process will save your credentials to a file in the
 config directory of the provider, so it can be passed to OpenVPN.
 If it is missing you will be prompted for your credentials.
 
-For PrivateInternetAccess, HMA (HideMyAss) and AzireVPN these should be the same as your account
+For PrivateInternetAccess and HMA (HideMyAss) these should be the same as your account
 credentials.
 
 For Mullvad your OpenVPN credentials are your account code as your username, and `m` as the password.
@@ -550,10 +550,6 @@ BitTorrent leaking for both the OpenVPN and Wireguard configurations.
 AzireVPN users can use [their security check page](https://www.azirevpn.com/check)
 for the same (note the instructions on disabling WebRTC).
 
-#### OpenVPN Sync
-
-Since AzireVPN now puts the OpenVPN configurations behind authentication, it is necessary to copy the value of the `az` cookie in order to authenticate `vopono sync` when generating the OpenVPN configuration files.
-
 ### ProtonVPN
 
 #### OpenVPN Sync and authentication
@@ -706,7 +702,7 @@ After 30 days you will need to restart vopono to re-create the port forwarding m
 
 Note vopono attempts to delete the created mapping when vopono is closed, but this may not always succeed. However, it will use an existing mapping for the chosen device and server pair, if one still exists on AzireVPN's side.
 
-Note AzireVPN sometimes has some issues with rate limiting when generating the OpenVPN config files.
+Note as of March 2025 [AzireVPN no longer offers an OpenVPN service](https://blog.azirevpn.com/openvpn-support-ending-on-march-15/).
 
 ## Tunnel Port Forwarding
 
