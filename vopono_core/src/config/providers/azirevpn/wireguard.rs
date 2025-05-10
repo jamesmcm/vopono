@@ -1,5 +1,5 @@
 use super::{AzireVPN, ExistingDeviceResponseData};
-use super::{DeviceResponse, LocationsResponse, WireguardProvider};
+use super::{LocationsResponse, WireguardProvider};
 use crate::config::providers::azirevpn::{
     ExistingDevicesResponse, LocationResponse, ReplaceKeyResponse, UserProfileResponse,
 };
@@ -14,6 +14,7 @@ use log::{debug, info};
 use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::fs::create_dir_all;
 use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -26,22 +27,46 @@ impl AzireVPN {
         token: &str,
         client: &Client,
     ) -> anyhow::Result<WireguardInterface> {
-        let device_response: DeviceResponse = client
-            .post("https://api.azirevpn.com/v2/ip/add")
-            .form(&[("key", keypair.public.as_str()), ("token", token)])
-            .send()?
-            .json()?;
+        // Weirdly this does not return status ? Just data directly
+        // https://www.azirevpn.com/docs/api/ips#create-ip
 
-        debug!("device_response: {:?}", &device_response);
+        let response = client
+            .post("https://api.azirevpn.com/v3/ips")
+            .bearer_auth(token)
+            .json(&json!({
+                "key": keypair.public,
+            }))
+            .send()?;
+
+        let response_text = response.text()?;
+        debug!("Raw response: {response_text}");
+
+        // Now try to parse it if needed (you'll need to create a new response from the text)
+        let device_response_result: Result<ExistingDeviceResponseData, _> =
+            serde_json::from_str(&response_text);
+        let device_response_data = match device_response_result {
+            Ok(data) => {
+                // Process successful parse
+                Ok(data)
+            }
+            Err(e) => {
+                // Handle parse error
+                log::error!("Failed to parse response: {response_text}");
+                Err(anyhow::anyhow!(
+                    "Failed to parse response: {response_text}, error: {e}"
+                ))
+            }
+        }?;
+        debug!("device_response_data: {:?}", &device_response_data);
 
         let v4_net = IpNet::new(
-            IpAddr::V4(Ipv4Addr::from_str(&device_response.ipv4.address)?),
-            device_response.ipv4.netmask,
+            IpAddr::V4(Ipv4Addr::from_str(&device_response_data.ipv4_address)?),
+            device_response_data.ipv4_netmask,
         )?;
         let interface = WireguardInterface {
             private_key: keypair.private.clone(),
             address: vec![v4_net],
-            dns: Some(device_response.dns),
+            dns: Some(device_response_data.dns),
         };
 
         Ok(interface)
@@ -68,18 +93,6 @@ impl AzireVPN {
 
         debug!("replace_key_response: {:?}", &replace_key_response);
 
-        // Look up new device details
-        // TODO: This fails with a 500 internal error - for now just use all devices list
-        // debug!("Getting details for device ID: {}", id);
-        // let existing_device_response: ExistingDeviceResponse = client
-        //     .get(format!("https://api.azirevpn.com/v3/ips/{}", id))
-        //     .bearer_auth(token)
-        //     .send()?
-        //     .json()
-        //     .with_context(|| "Deserialisation of ExistingDeviceResponse failed")?;
-
-        // debug!("existing_device_response: {:?}", &existing_device_response);
-
         let v4_net = IpNet::new(
             IpAddr::V4(Ipv4Addr::from_str(&device.ipv4_address)?),
             device.ipv4_netmask,
@@ -103,11 +116,9 @@ impl WireguardProvider for AzireVPN {
         let client = Client::new();
 
         let country_map = code_to_country_map();
-        // TODO: Allow user to specify existing device and provide private key
 
         // This creates an API token for the user if we do not have one cached
         let token = self.get_access_token(uiclient)?;
-        // TODO: Check account is active and credentials okay
         let user_profile_response: UserProfileResponse = client
             .get("https://api.azirevpn.com/v3/users/me")
             .header("Authorization", format!("Bearer {token}"))
@@ -130,14 +141,14 @@ impl WireguardProvider for AzireVPN {
             // Or replace existing keys with new keypair
             let existing_devices: ExistingDevicesResponse = client
                 .get("https://api.azirevpn.com/v3/ips")
-                .header("Authorization", format!("Bearer {token}"))
+                .bearer_auth(&token)
                 .send()?
                 .json()
                 .with_context(|| "Failed to parse existing devices response")?;
 
             let selection = uiclient.get_configuration_choice(&existing_devices)?;
 
-            if selection > existing_devices.data.len() {
+            if selection >= existing_devices.data.len() {
                 if user_profile_response.data.ips.allocated
                     >= user_profile_response.data.ips.available
                 {
