@@ -252,6 +252,7 @@ impl WireguardProvider for Mullvad {
             private_key: keypair.private.clone(),
             address: vec![ipv4_net, ipv6_net],
             dns: Some(vec![IpAddr::from(dns)]),
+            mtu: Some(1420.to_string()),
         };
 
         let port = request_port(uiclient)?;

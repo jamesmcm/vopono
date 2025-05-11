@@ -179,6 +179,7 @@ impl WireguardProvider for IVPN {
             private_key: keypair.private,
             address: vec![ipnet],
             dns: Some(vec![IpAddr::from(dns)]),
+            mtu: Some(1420.to_string()),
         };
 
         let port = request_port(uiclient)?;

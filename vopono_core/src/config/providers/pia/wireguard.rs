@@ -207,6 +207,7 @@ impl WireguardProvider for PrivateInternetAccess {
             private_key: keypair.private.clone(),
             address: vec![IpNet::new(Ipv4Addr::LOCALHOST.into(), 32)?],
             dns: Some(vec![Ipv4Addr::LOCALHOST.into()]),
+            mtu: Some(1420.to_string()),
         };
 
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?];

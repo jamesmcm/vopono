@@ -67,6 +67,7 @@ impl AzireVPN {
             private_key: keypair.private.clone(),
             address: vec![v4_net],
             dns: Some(device_response_data.dns),
+            mtu: Some(1420.to_string()),
         };
 
         Ok(interface)
@@ -101,6 +102,7 @@ impl AzireVPN {
             private_key: keypair.private.clone(),
             address: vec![v4_net],
             dns: Some(device.dns.clone()),
+            mtu: Some(1420.to_string()),
         };
 
         Ok(interface)
@@ -225,6 +227,7 @@ impl WireguardProvider for AzireVPN {
                         private_key,
                         address: vec![v4_net],
                         dns: Some(existing_device.dns.clone()),
+                        mtu: Some(1420.to_string()),
                     }
                 }
             }
