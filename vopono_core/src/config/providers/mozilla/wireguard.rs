@@ -172,6 +172,7 @@ impl WireguardProvider for MozillaVPN {
                 IpNet::from(wg_peer.ipv6_address),
             ],
             dns: Some(vec![IpAddr::from(dns)]),
+            mtu: Some(1420.to_string()),
         };
 
         let port = request_port(uiclient)?;

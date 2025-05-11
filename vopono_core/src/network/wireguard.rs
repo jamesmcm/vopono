@@ -150,10 +150,35 @@ impl Wireguard {
             }
         }
 
-        // TODO: Handle custom MTU
+        let mtu: u32 = config
+            .interface
+            .mtu
+            .and_then(|m| {
+                let v = m.parse().ok();
+                if v.is_none() {
+                    warn!("Invalid MTU value in Wireguard config: {m} - will use default 1420");
+                } else if v.is_some() {
+                    debug!("Using MTU set in Wireguard config: {m}");
+                }
+                v
+            })
+            .unwrap_or_else(|| {
+                warn!("No MTU set in Wireguard config, using default: 1420");
+                1420
+            });
+
         NetworkNamespace::exec(
             &namespace.name,
-            &["ip", "link", "set", "mtu", "1420", "up", "dev", &if_name],
+            &[
+                "ip",
+                "link",
+                "set",
+                "mtu",
+                &mtu.to_string(),
+                "up",
+                "dev",
+                &if_name,
+            ],
         )?;
 
         let dns: Vec<IpAddr> = dns
@@ -165,6 +190,7 @@ impl Wireguard {
             });
         // TODO: DNS suffixes?
         namespace.dns_config(&dns, &[], hosts_entries, allow_host_access)?;
+        // TODO: Here we hardcode default Wireguard port of 51820
         let fwmark = "51820";
         NetworkNamespace::exec(&namespace.name, &["wg", "set", &if_name, "fwmark", fwmark])?;
 
@@ -561,6 +587,8 @@ pub struct WireguardInterface {
     pub address: Vec<IpNet>,
     #[serde(rename = "DNS", deserialize_with = "de_vec_ipaddr")]
     pub dns: Option<Vec<IpAddr>>,
+    #[serde(rename = "MTU")]
+    pub mtu: Option<String>,
 }
 
 impl std::fmt::Debug for WireguardInterface {
