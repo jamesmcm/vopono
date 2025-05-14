@@ -8,7 +8,6 @@ use signal_hook::iterator::SignalsInfo;
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
-use std::process::Command;
 use std::{
     fs::create_dir_all,
     io::{self, Write},
@@ -24,38 +23,9 @@ use vopono_core::network::port_forwarding::natpmpc::Natpmpc;
 use vopono_core::network::port_forwarding::piapf::Piapf;
 use vopono_core::network::shadowsocks::uses_shadowsocks;
 use vopono_core::network::sysctl::SysCtl;
+use vopono_core::util::env_vars::set_env_vars;
 use vopono_core::util::{get_config_from_alias, get_existing_namespaces, get_target_subnet};
 use vopono_core::util::{parse_command_str, vopono_dir};
-
-pub fn set_env_vars(ns: &NetworkNamespace, forwarder: Option<&dyn Forwarder>, cmd: &mut Command) {
-    // Temporarily set env var referring to this network namespace IP
-    // for the PostUp script and the application:
-
-    if which::which("pactl").is_ok() {
-        let pa = vopono_core::util::pulseaudio::get_pulseaudio_server();
-        if let Ok(pa) = pa {
-            cmd.env("PULSE_SERVER", &pa);
-            debug!("Setting PULSE_SERVER to {}", &pa);
-        } else if let Err(e) = pa {
-            warn!("Could not get PULSE_SERVER: {e:?}");
-        } else {
-            warn!("Could not parse PULSE_SERVER from pactl info output: {pa:?}",);
-        }
-    } else {
-        debug!("pactl not found, will not set PULSE_SERVER");
-    }
-
-    if let Some(ref ns_ip) = ns.veth_pair_ips {
-        cmd.env("VOPONO_NS_IP", ns_ip.namespace_ip.to_string());
-        cmd.env("VOPONO_HOST_IP", ns_ip.host_ip.to_string());
-    }
-
-    cmd.env("VOPONO_NS", &ns.name);
-
-    if let Some(f) = forwarder.as_ref() {
-        cmd.env("VOPONO_FORWARDED_PORT", f.forwarded_port().to_string());
-    }
-}
 
 pub fn exec(
     command: ExecCommand,

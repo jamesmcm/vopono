@@ -1,4 +1,5 @@
 pub mod country_map;
+pub mod env_vars;
 pub mod open_hosts;
 pub mod open_ports;
 pub mod pulseaudio;
