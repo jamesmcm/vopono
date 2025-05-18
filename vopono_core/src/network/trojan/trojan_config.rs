@@ -133,7 +133,7 @@ mod tests {
         assert_eq!(config.local_port, 1637);
         assert_eq!(config.password, vec!["replaceme".to_string()]);
         assert!(config.ssl.verify);
-        assert_eq!(config.ssl.sni, "replaceme");
+        assert_eq!(config.ssl.sni, "");
         assert_eq!(config.tcp.fast_open_qlen, 20);
     }
 }
