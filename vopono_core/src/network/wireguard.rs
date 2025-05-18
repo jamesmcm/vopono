@@ -1,15 +1,18 @@
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
+use super::trojan::trojan_config::TrojanConfig;
 use crate::util::sudo_command;
 use anyhow::{Context, anyhow};
 use ipnet::IpNet;
 use log::{debug, error, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::net::{IpAddr, Ipv4Addr};
+use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -23,6 +26,13 @@ pub struct Wireguard {
 }
 
 impl Wireguard {
+    pub fn config_from_file(config_file: &Path) -> anyhow::Result<WireguardConfig> {
+        let config_string = std::fs::read_to_string(config_file)
+            .context(format!("Reading Wireguard config file: {:?}", &config_file))?;
+
+        WireguardConfig::from_str(&config_string)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn run(
         namespace: &mut NetworkNamespace,
@@ -35,6 +45,7 @@ impl Wireguard {
         dns: Option<&Vec<IpAddr>>,
         hosts_entries: Option<&Vec<String>>,
         allow_host_access: bool,
+        trojan_config: Option<TrojanConfig>,
     ) -> anyhow::Result<Self> {
         if let Err(x) = which::which("wg") {
             error!("wg binary not found. Is wireguard-tools installed and on PATH?");
@@ -44,8 +55,17 @@ impl Wireguard {
             ));
         }
 
-        let config_string = std::fs::read_to_string(&config_file)
+        let mut config_string = std::fs::read_to_string(&config_file)
             .context(format!("Reading Wireguard config file: {:?}", &config_file))?;
+
+        // Replace Endpoint with Trojan server for Wireguard forwarding
+        if let Some(tc) = trojan_config.as_ref() {
+            let re = Regex::new(r"Endpoint\s*=\s*(?:\[([^\]]+)\]|([^:\s]+)):(\d+)")?;
+            let new_endpoint = tc.get_local_socketaddr()?;
+            config_string = re
+                .replace_all(&config_string, format!("Endpoint = {new_endpoint}"))
+                .to_string();
+        }
         // Create temp conf file
         {
             // TODO: Maybe properly parse ini format
@@ -62,8 +82,8 @@ impl Wireguard {
                 "PersistentKeepalive",
             ];
 
-            let mut f = std::fs::File::create("/tmp/vopono_nft.conf")
-                .context("Creating file: /tmp/vopono_nft.conf")?;
+            let mut f = std::fs::File::create("/tmp/vopono_wg.conf")
+                .context("Creating file: /tmp/vopono_wg.conf")?;
             write!(
                 f,
                 "{}",
@@ -78,22 +98,8 @@ impl Wireguard {
                     .join("\n")
             )?;
         }
-        // TODO: Avoid hacky regex for valid toml
-        let re = Regex::new(
-            r"(?m)^[[:blank:]]*(?P<key>[^\s=#]+)[[:blank:]]*=[[:blank:]]*(?P<value>[^\r\n#]+?)[[:blank:]]*(?:#[^\r\n]*)?\r?$",
-        )?;
-        let mut config_string = re
-            .replace_all(&config_string, "$key = \"$value\"")
-            .to_string();
-        config_string.push('\n');
-        let config: WireguardConfig = toml::from_str(&config_string)
-            .map_err(anyhow::Error::from)
-            .with_context(|| {
-                format!(
-                    "Failed while converting Wireguard config to TOML. Result may be malformed:\n\n{config_string}"
-                )
-            })?;
-        debug!("TOML config: {config:?}");
+        let config = Self::config_from_file(&config_file)?;
+
         // TODO: Use bs58 here?
         let if_name = namespace.name
             [((namespace.name.len() as i32) - 13).max(0) as usize..namespace.name.len()]
@@ -107,11 +113,11 @@ impl Wireguard {
 
         NetworkNamespace::exec(
             &namespace.name,
-            &["wg", "setconf", &if_name, "/tmp/vopono_nft.conf"],
+            &["wg", "setconf", &if_name, "/tmp/vopono_wg.conf"],
         )
         .context("Failed to run wg setconf - is wireguard-tools installed?")?;
-        std::fs::remove_file("/tmp/vopono_nft.conf")
-            .context("Deleting file: /tmp/vopono_nft.conf")
+        std::fs::remove_file("/tmp/vopono_wg.conf")
+            .context("Deleting file: /tmp/vopono_wg.conf")
             .ok();
         let mut interface_addresses: Vec<IpAddr> = Vec::new();
         // Extract addresses
@@ -429,6 +435,7 @@ impl Wireguard {
         if use_killswitch {
             killswitch(&if_name, fwmark, namespace, firewall)?;
         }
+
         Ok(Self {
             config_file,
             ns_name: namespace.name.clone(),
@@ -601,14 +608,99 @@ impl std::fmt::Debug for WireguardInterface {
     }
 }
 
+#[derive(Debug)]
+pub enum WireguardEndpoint {
+    HostnameWithPort(String, u16),
+    IpWithPort(SocketAddr),
+}
+
+impl WireguardEndpoint {
+    pub fn ip_or_hostname(&self) -> String {
+        match self {
+            WireguardEndpoint::HostnameWithPort(host, _) => host.clone(),
+            WireguardEndpoint::IpWithPort(addr) => addr.ip().to_string(),
+        }
+    }
+    pub fn port(&self) -> u16 {
+        match self {
+            WireguardEndpoint::HostnameWithPort(_, port) => *port,
+            WireguardEndpoint::IpWithPort(addr) => addr.port(),
+        }
+    }
+    pub fn resolve_ip(&self) -> anyhow::Result<IpAddr> {
+        match self {
+            WireguardEndpoint::HostnameWithPort(host, _) => {
+                let addr = host
+                    .to_socket_addrs()
+                    .map_err(|_| anyhow!("Failed to resolve hostname"))?
+                    .next()
+                    .ok_or_else(|| anyhow!("No address found for hostname"))?;
+                Ok(addr.ip())
+            }
+            WireguardEndpoint::IpWithPort(addr) => Ok(addr.ip()),
+        }
+    }
+
+    pub fn is_ip(&self) -> bool {
+        match self {
+            WireguardEndpoint::HostnameWithPort(_, _) => false,
+            WireguardEndpoint::IpWithPort(_) => true,
+        }
+    }
+}
+
+impl FromStr for WireguardEndpoint {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Ok(addr) = s.parse::<SocketAddr>() {
+            Ok(WireguardEndpoint::IpWithPort(addr))
+        } else if let Some((host, port)) = s.split_once(':') {
+            let port = port.parse::<u16>().map_err(|_| anyhow!("Invalid port"))?;
+            Ok(WireguardEndpoint::HostnameWithPort(host.to_string(), port))
+        } else {
+            Err(anyhow!("Invalid Wireguard endpoint format"))
+        }
+    }
+}
+
+impl Display for WireguardEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WireguardEndpoint::HostnameWithPort(host, port) => write!(f, "{host}:{port}"),
+            WireguardEndpoint::IpWithPort(addr) => write!(f, "{addr}"),
+        }
+    }
+}
+
+impl Serialize for WireguardEndpoint {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WireguardEndpoint {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        s.parse::<WireguardEndpoint>()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Deserialize, Debug, Serialize)]
 pub struct WireguardPeer {
     #[serde(rename = "PublicKey")]
     pub public_key: String,
     #[serde(rename = "AllowedIPs", deserialize_with = "de_vec_ipnet")]
     pub allowed_ips: Vec<IpNet>,
-    #[serde(rename = "Endpoint", deserialize_with = "de_socketaddr")]
-    pub endpoint: SocketAddr,
+    #[serde(rename = "Endpoint")]
+    pub endpoint: WireguardEndpoint,
     #[serde(rename = "PersistentKeepalive")]
     pub keepalive: Option<String>,
 }
@@ -645,6 +737,7 @@ impl FromStr for WireguardConfig {
         let mut config_string = re
             .replace_all(config_string, "$key = \"$value\"")
             .to_string();
+        config_string = config_string.replace("\"\"", "\"");
         config_string.push('\n');
         toml::from_str(&config_string)
             .map_err(anyhow::Error::from)
@@ -712,5 +805,26 @@ where
             "Wireguard IpAddr deserialisation error: {:?}",
             x
         ))),
+    }
+}
+
+// Store the raw hostname of the endpoint if it is a hostname
+// For use with SSL e.g. in Trojan
+pub fn de_rawendpoint<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    let raw_host = raw
+        .split(':')
+        .next()
+        .ok_or(serde::de::Error::custom(anyhow!(
+            "Failed to split endpoint: {raw}",
+        )))?;
+
+    if raw_host.parse::<IpAddr>().is_ok() {
+        Ok(None)
+    } else {
+        Ok(Some(raw_host.to_string()))
     }
 }

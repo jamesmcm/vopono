@@ -5,6 +5,7 @@ use crate::config::providers::mullvad::AccessToken;
 use crate::config::providers::mullvad::Device;
 use crate::config::providers::mullvad::UserInfo;
 use crate::config::providers::{ConfigurationChoice, Input, InputNumericu16, UiClient};
+use crate::network::wireguard::WireguardEndpoint;
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::generate_keypair;
@@ -265,7 +266,10 @@ impl WireguardProvider for Mullvad {
             let wireguard_peer = WireguardPeer {
                 public_key: relay.pubkey.clone(),
                 allowed_ips: allowed_ips.clone(),
-                endpoint: SocketAddr::new(IpAddr::from(relay.ipv4_addr_in), port),
+                endpoint: WireguardEndpoint::IpWithPort(SocketAddr::new(
+                    IpAddr::from(relay.ipv4_addr_in),
+                    port,
+                )),
                 keepalive: None,
             };
 

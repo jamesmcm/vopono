@@ -10,6 +10,7 @@ pub mod openvpn;
 pub mod port_forwarding;
 pub mod shadowsocks;
 pub mod sysctl;
+pub mod trojan;
 pub mod veth_pair;
 pub mod warp;
 pub mod wireguard;

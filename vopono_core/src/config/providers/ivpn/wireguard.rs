@@ -4,6 +4,7 @@ use super::WireguardProvider;
 use crate::config::providers::Input;
 use crate::config::providers::InputNumericu16;
 use crate::config::providers::UiClient;
+use crate::network::wireguard::WireguardEndpoint;
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
@@ -162,10 +163,8 @@ impl WireguardProvider for IVPN {
                 if let Err(err) = ip_parse {
                     return Err(format!("Input: {} is not valid IPv4 address: {}", ipstr.trim(), err));
                 };
-                if let Ok(ip) = ip_parse {
-                    if ip.octets()[0] != 172 {
-                        return Err(format!("IP address: {} did not start with expected octet 172", ipstr.trim()));
-                    }
+                if let Ok(ip) = ip_parse && ip.octets()[0] != 172 {
+                    return Err(format!("IP address: {} did not start with expected octet 172", ipstr.trim()));
                 }
                 Ok(())
             }))})?;
@@ -194,7 +193,7 @@ impl WireguardProvider for IVPN {
             let wireguard_peer = WireguardPeer {
                 public_key: relay.pubkey.clone(),
                 allowed_ips: allowed_ips.clone(),
-                endpoint: SocketAddr::new(relay.ip, port),
+                endpoint: WireguardEndpoint::IpWithPort(SocketAddr::new(relay.ip, port)),
                 keepalive: None,
             };
 

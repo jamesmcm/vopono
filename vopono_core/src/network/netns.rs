@@ -6,9 +6,11 @@ use super::openconnect::OpenConnect;
 use super::openfortivpn::OpenFortiVpn;
 use super::openvpn::OpenVpn;
 use super::shadowsocks::Shadowsocks;
+use super::trojan::TrojanHost;
+use super::trojan::trojan_exec::Trojan;
 use super::veth_pair::VethPair;
 use super::warp::Warp;
-use super::wireguard::Wireguard;
+use super::wireguard::{Wireguard, WireguardPeer};
 use crate::config::providers::{UiClient, VpnProvider};
 use crate::config::vpn::Protocol;
 use crate::network::host_masquerade::FirewallException;
@@ -45,6 +47,7 @@ pub struct NetworkNamespace {
     pub predown_user: Option<String>,
     pub predown_group: Option<String>,
     pub config_file: Option<PathBuf>, // Used to save config file path in lockfile
+    pub trojan: Option<Trojan>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -115,6 +118,7 @@ impl NetworkNamespace {
             predown_user,
             predown_group,
             config_file: None,
+            trojan: None,
         })
     }
 
@@ -258,6 +262,9 @@ impl NetworkNamespace {
         )
         .with_context(|| format!("Failed to assign static IP to veth source: {veth_source}"))?;
 
+        // Here we add direct routes for open_hosts
+        // Note this is not done for all open_hosts calls as the ProtonVPN port forwarding
+        // traffic still needs to go through the VPN
         if let Some(my_hosts) = hosts {
             for host in my_hosts {
                 Self::exec(
@@ -323,6 +330,7 @@ impl NetworkNamespace {
                 .expect("Failed to get veth pair IPs")
                 .host_ip,
             allow_host_access,
+            self.firewall,
         )?);
         Ok(())
     }
@@ -454,6 +462,26 @@ impl NetworkNamespace {
             dns,
             hosts_entries,
             allow_host_access,
+            self.trojan.as_ref().map(|t| t.config.clone()),
+        )?);
+        Ok(())
+    }
+
+    pub fn run_trojan(
+        &mut self,
+        trojan_host: Option<TrojanHost>,
+        trojan_password: Option<&str>,
+        trojan_no_verify: bool,
+        trojan_config: Option<&Path>,
+        wg_peer: Option<WireguardPeer>,
+    ) -> anyhow::Result<()> {
+        self.trojan = Some(Trojan::run_in_netns(
+            self,
+            trojan_host,
+            trojan_password,
+            trojan_config,
+            trojan_no_verify,
+            wg_peer,
         )?);
         Ok(())
     }
@@ -609,6 +637,7 @@ impl Drop for NetworkNamespace {
                 }
             }
 
+            self.trojan = None;
             self.shadowsocks = None;
             self.openvpn = None;
             self.veth_pair = None;
@@ -649,6 +678,7 @@ impl Drop for NetworkNamespace {
             std::mem::forget(self.host_masquerade.take());
             std::mem::forget(self.openconnect.take());
             std::mem::forget(self.openfortivpn.take());
+            std::mem::forget(self.trojan.take());
         }
     }
 }

@@ -41,19 +41,6 @@ pub fn open_ports(
                 )?;
             }
             Firewall::NfTables => {
-                NetworkNamespace::exec(&netns.name, &["nft", "add", "table", "inet", &netns.name])?;
-                NetworkNamespace::exec(
-                    &netns.name,
-                    &[
-                        "nft",
-                        "add",
-                        "chain",
-                        "inet",
-                        &netns.name,
-                        "input",
-                        "{ type filter hook input priority 100 ; }",
-                    ],
-                )?;
                 NetworkNamespace::exec(
                     &netns.name,
                     &[
