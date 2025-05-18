@@ -99,17 +99,17 @@ impl AzireVpnPortForwarding {
             .with_context(|| "Failed to parse JSON response from listing AzireVPN Port Forwarding");
 
         // If so, return that port
-        if let Ok(output_data) = output_data_result
-            && !output_data.data.ports.is_empty()
-        {
-            let port = output_data.data.ports[0].port;
-            log::info!("Port forwarding already enabled on port {port}");
-            return Ok(Self {
-                port,
-                local_ip,
-                access_token: access_token.to_string(),
-                netns_name: netns.name.clone(),
-            });
+        if let Ok(output_data) = output_data_result {
+            if !output_data.data.ports.is_empty() {
+                let port = output_data.data.ports[0].port;
+                log::info!("Port forwarding already enabled on port {port}");
+                return Ok(Self {
+                    port,
+                    local_ip,
+                    access_token: access_token.to_string(),
+                    netns_name: netns.name.clone(),
+                });
+            }
         }
 
         // If not, create a new port forwarding

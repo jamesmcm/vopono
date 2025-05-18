@@ -230,20 +230,20 @@ pub fn exec(
     // Launch TCP proxy server on other threads if forwarding ports
     // TODO: Fix when running as root
     let mut proxy = Vec::new();
-    if let Some(f) = parsed_command.forward.clone()
-        && !(parsed_command.no_proxy || f.is_empty())
-    {
-        for p in f {
-            debug!(
-                "Forwarding port: {}, {:?}",
-                p,
-                ns.veth_pair_ips.as_ref().unwrap().namespace_ip
-            );
-            proxy.push(basic_tcp_proxy::TcpProxy::new(
-                p,
-                std::net::SocketAddr::new(ns.veth_pair_ips.as_ref().unwrap().namespace_ip, p),
-                false,
-            ));
+    if let Some(f) = parsed_command.forward.clone() {
+        if !(parsed_command.no_proxy || f.is_empty()) {
+            for p in f {
+                debug!(
+                    "Forwarding port: {}, {:?}",
+                    p,
+                    ns.veth_pair_ips.as_ref().unwrap().namespace_ip
+                );
+                proxy.push(basic_tcp_proxy::TcpProxy::new(
+                    p,
+                    std::net::SocketAddr::new(ns.veth_pair_ips.as_ref().unwrap().namespace_ip, p),
+                    false,
+                ));
+            }
         }
     }
 
@@ -435,18 +435,18 @@ fn run_protocol_in_netns(
             }
 
             // Set DNS with OpenVPN server response if present
-            if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns
-                && parsed_command.dns.is_none()
-            {
-                let old_dns = ns.dns_config.take();
-                std::mem::forget(old_dns);
-                // TODO: DNS suffixes?
-                ns.dns_config(
-                    &[newdns],
-                    &[],
-                    parsed_command.hosts.as_ref(),
-                    parsed_command.allow_host_access,
-                )?;
+            if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns {
+                if parsed_command.dns.is_none() {
+                    let old_dns = ns.dns_config.take();
+                    std::mem::forget(old_dns);
+                    // TODO: DNS suffixes?
+                    ns.dns_config(
+                        &[newdns],
+                        &[],
+                        parsed_command.hosts.as_ref(),
+                        parsed_command.allow_host_access,
+                    )?;
+                }
             }
         }
         Protocol::Wireguard => {
