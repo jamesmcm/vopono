@@ -3,11 +3,14 @@ use clap::ValueEnum;
 use std::fmt::Display;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use strum::IntoEnumIterator;
 use vopono_core::config::providers::VpnProvider;
 use vopono_core::config::vpn::Protocol;
 use vopono_core::network::firewall::Firewall;
 use vopono_core::network::network_interface::NetworkInterface;
+use vopono_core::network::trojan::TrojanHost;
+use vopono_core::util::hostname_to_ip;
 
 #[derive(Clone)]
 pub struct WrappedArg<T: IntoEnumIterator + Clone + Display> {
@@ -159,8 +162,13 @@ pub struct ExecCommand {
     #[clap(long = "hosts", use_value_delimiter = true)]
     pub hosts: Option<Vec<String>>,
 
-    /// List of host IP addresses to open on the network namespace (comma separated)
-    #[clap(long = "open-hosts", use_value_delimiter = true)]
+    /// List of hostnames or IP addresses to open on the network namespace (comma separated)
+    /// hostnames will be resolved locally to IP addresses
+    #[clap(
+        long = "open-hosts",
+        use_value_delimiter = true,
+        value_parser(parse_hosts_or_ips)
+    )]
     pub open_hosts: Option<Vec<IpAddr>>,
 
     /// Disable killswitch
@@ -232,6 +240,25 @@ pub struct ExecCommand {
     /// Only create network namespace (does not run application)
     #[clap(long = "create-netns-only")]
     pub create_netns_only: bool,
+
+    /// Trojan server address - hostname or IP, will not verify SSL if IP address is given.
+    /// Port is optional (default is 443).
+    #[clap(long = "trojan-host")]
+    pub trojan_host: Option<TrojanHost>,
+
+    /// Trojan server password
+    /// Set this in ~/.config/vopono/vopono.toml or use --trojan-config
+    /// to avoid setting this in the command line
+    #[clap(long = "trojan-password")]
+    pub trojan_password: Option<String>,
+
+    /// Disable SSL verification for Trojan server
+    #[clap(long = "trojan-no-verify")]
+    pub trojan_no_verify: bool,
+
+    /// Trojan config file (will override other settings)
+    #[clap(long = "trojan-config")]
+    pub trojan_config: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -254,4 +281,25 @@ pub struct ServersCommand {
     /// VPN Server prefix
     #[clap(long = "prefix", short = 's')]
     pub prefix: Option<String>,
+}
+
+// TODO: Handle multiple addresses
+fn parse_host_or_ip(arg: &str) -> anyhow::Result<IpAddr> {
+    // First try to parse as a direct IP address
+    if let Ok(ip) = IpAddr::from_str(arg) {
+        return Ok(ip);
+    }
+
+    Ok(hostname_to_ip(arg)?
+        .into_iter()
+        .next()
+        .expect("Failed to resolve hostname"))
+}
+
+/// Parse a list of hosts/IPs separated by comma
+fn parse_hosts_or_ips(arg: &str) -> anyhow::Result<IpAddr> {
+    Ok(
+        // TODO: Fix error handling here for error message
+        parse_host_or_ip(arg.trim()).expect("Failed to parse host or IP"),
+    )
 }

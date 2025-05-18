@@ -22,7 +22,7 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
@@ -497,4 +497,11 @@ pub fn parse_command_str(command_str: &str) -> anyhow::Result<Vec<String>> {
             e
         )
     })
+}
+
+pub fn hostname_to_ip(hostname: &str) -> anyhow::Result<Vec<IpAddr>> {
+    let socket_addrs = format!("{hostname}:80").to_socket_addrs()?;
+    let ip_addrs = socket_addrs.map(|addr| addr.ip()).collect();
+
+    Ok(ip_addrs)
 }

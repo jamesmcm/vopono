@@ -4,11 +4,13 @@ use std::{net::IpAddr, path::PathBuf, str::FromStr};
 
 use anyhow::anyhow;
 use config::Config;
+use log::warn;
 use vopono_core::{
     config::{providers::VpnProvider, vpn::Protocol},
     network::{
         firewall::Firewall,
         network_interface::{NetworkInterface, get_active_interfaces},
+        trojan::TrojanHost,
     },
     util::{get_config_file_protocol, vopono_dir},
 };
@@ -100,6 +102,10 @@ pub struct ArgsConfig {
     pub custom_port_forwarding: Option<VpnProvider>,
     pub port_forwarding_callback: Option<String>,
     pub create_netns_only: bool,
+    pub trojan_host: Option<TrojanHost>,
+    pub trojan_password: Option<String>,
+    pub trojan_no_verify: bool,
+    pub trojan_config: Option<PathBuf>,
 }
 
 impl ArgsConfig {
@@ -175,7 +181,6 @@ impl ArgsConfig {
                     .ok()
             })
         });
-
         let interface: NetworkInterface = match interface {
             Some(x) => anyhow::Result::<NetworkInterface>::Ok(x),
             None => {
@@ -251,6 +256,30 @@ impl ArgsConfig {
                 .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
         }
 
+        // TODO: Error handling
+        let trojan_host = command_else_config_option!(trojan_host, command, config);
+
+        let trojan_password = command_else_config_option!(trojan_password, command, config);
+        let trojan_no_verify = command_else_config_bool!(trojan_no_verify, command, config);
+        let trojan_config =
+            command_else_config_option!(trojan_config, command, config).and_then(|p| {
+                shellexpand::full(&p.to_string_lossy())
+                    .ok()
+                    .and_then(|s| PathBuf::from_str(s.as_ref()).ok())
+            });
+
+        if (trojan_host.is_some() || trojan_config.is_some()) && protocol != Protocol::Wireguard {
+            error_and_bail!("Trojan is currently only supported for Wireguard forwarding");
+        }
+        if (trojan_host.is_some() && trojan_password.is_none()) && trojan_config.is_none() {
+            error_and_bail!("Trojan host is set, but password is not provided");
+        }
+        if trojan_config.is_some()
+            && (trojan_host.is_some() || trojan_password.is_some() || trojan_no_verify)
+        {
+            warn!("Trojan config file provided - ignoring other trojan settings");
+        }
+
         if (provider == VpnProvider::Warp && protocol != Protocol::Warp)
             || (provider != VpnProvider::Warp && protocol == Protocol::Warp)
         {
@@ -269,6 +298,7 @@ impl ArgsConfig {
             );
         }
 
+        // TODO: Group some of these arguments into their own structs
         Ok(Self {
             provider,
             protocol,
@@ -297,6 +327,10 @@ impl ArgsConfig {
             custom_port_forwarding,
             port_forwarding_callback,
             create_netns_only,
+            trojan_host,
+            trojan_password,
+            trojan_no_verify,
+            trojan_config,
         })
     }
 

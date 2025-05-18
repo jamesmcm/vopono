@@ -2,16 +2,12 @@ use crate::network::firewall::Firewall;
 use crate::network::netns::NetworkNamespace;
 use std::net::IpAddr;
 
-pub fn open_hosts(
-    netns: &NetworkNamespace,
-    hosts: Vec<IpAddr>,
-    firewall: Firewall,
-) -> anyhow::Result<()> {
+pub fn open_hosts(netns_name: &str, hosts: &[IpAddr], firewall: Firewall) -> anyhow::Result<()> {
     for host in hosts {
         match firewall {
             Firewall::IpTables => {
                 NetworkNamespace::exec(
-                    &netns.name,
+                    netns_name,
                     &[
                         "iptables",
                         "-I",
@@ -26,13 +22,13 @@ pub fn open_hosts(
             }
             Firewall::NfTables => {
                 NetworkNamespace::exec(
-                    &netns.name,
+                    netns_name,
                     &[
                         "nft",
                         "insert",
                         "rule",
                         "inet",
-                        &netns.name,
+                        netns_name,
                         "output",
                         "ip",
                         "daddr",

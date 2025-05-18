@@ -7,6 +7,10 @@ use std::io::Write;
 use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 
+use crate::util::open_hosts;
+
+use super::firewall::Firewall;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DnsConfig {
     ns_name: String,
@@ -20,6 +24,7 @@ impl DnsConfig {
         hosts_entries: Option<&Vec<String>>,
         host_ip: IpAddr, // IP address of host as seen inside from network namespace,
         allow_host_access: bool,
+        firewall: Firewall,
     ) -> anyhow::Result<Self> {
         let dir_path = format!("/etc/netns/{ns_name}");
         std::fs::create_dir_all(&dir_path)
@@ -116,6 +121,9 @@ impl DnsConfig {
                 })?;
             }
         }
+
+        open_hosts(&ns_name, servers, firewall)
+            .with_context(|| format!("Failed to open hosts in network namespace: {}", &ns_name))?;
 
         Ok(Self { ns_name })
     }

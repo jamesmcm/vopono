@@ -136,8 +136,8 @@ impl OpenVpn {
 
             pos += x;
 
-            if openvpn_dns.is_none() {
-                if let Some(cap) = dns_regex.captures(&buffer) {
+            if let Some(cap) = dns_regex.captures(&buffer) {
+                if openvpn_dns.is_none() {
                     if let Some(ipstr) = cap.get(1) {
                         debug!("Found OpenVPN DNS response: {}", ipstr.as_str());
                         let ipaddr = IpAddr::from_str(ipstr.as_str());

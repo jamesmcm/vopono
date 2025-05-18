@@ -4,7 +4,9 @@ use crate::config::providers::azirevpn::{
     ExistingDevicesResponse, LocationResponse, ReplaceKeyResponse, UserProfileResponse,
 };
 use crate::config::providers::{BoolChoice, UiClient};
-use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
+use crate::network::wireguard::{
+    WireguardConfig, WireguardEndpoint, WireguardInterface, WireguardPeer,
+};
 use crate::util::country_map::code_to_country_map;
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
@@ -282,7 +284,7 @@ impl WireguardProvider for AzireVPN {
             let wireguard_peer = WireguardPeer {
                 public_key: location.pubkey.clone(),
                 allowed_ips: allowed_ips.clone(),
-                endpoint: SocketAddr::new(host_ip, 51820),
+                endpoint: WireguardEndpoint::IpWithPort(SocketAddr::new(host_ip, 51820)),
                 keepalive: None,
             };
 

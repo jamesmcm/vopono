@@ -23,6 +23,8 @@ use vopono_core::network::port_forwarding::natpmpc::Natpmpc;
 use vopono_core::network::port_forwarding::piapf::Piapf;
 use vopono_core::network::shadowsocks::uses_shadowsocks;
 use vopono_core::network::sysctl::SysCtl;
+use vopono_core::network::trojan::trojan_config::TrojanConfig;
+use vopono_core::network::wireguard::Wireguard;
 use vopono_core::util::env_vars::set_env_vars;
 use vopono_core::util::{get_config_from_alias, get_existing_namespaces, get_target_subnet};
 use vopono_core::util::{parse_command_str, vopono_dir};
@@ -130,6 +132,24 @@ pub fn exec(
         let target_subnet = get_target_subnet()?;
         ns.add_loopback()?;
         ns.add_veth_pair()?;
+
+        // Allow direct access to Trojan forwarding server if using Trojan
+        if parsed_command.trojan_host.is_some() || parsed_command.trojan_config.is_some() {
+            let mut c = TrojanConfig::new(parsed_command.trojan_config.as_deref())?;
+            if let Some(trojan_host) = parsed_command.trojan_host.as_ref() {
+                c.set_remote_fields(trojan_host);
+            }
+            let resolved_ip = c.get_remote_trojanhost()?.resolve_ip()?;
+            log::debug!("Resolved trojan host IP: {resolved_ip} - setting as open host");
+            if let Some(oh) = parsed_command.open_hosts.iter_mut().next() {
+                oh.push(resolved_ip);
+            } else {
+                parsed_command.open_hosts = Some(vec![resolved_ip]);
+            }
+        }
+
+        // Note here open_hosts is passed in so that direct routes are added
+        // Note this is not wanted when the traffic needs to be routed through the VPN
         ns.add_routing(
             target_subnet,
             parsed_command.open_hosts.as_ref(),
@@ -163,7 +183,7 @@ pub fn exec(
         ns.set_config_file(config_file);
 
         if let Some(ref hosts) = parsed_command.open_hosts {
-            vopono_core::util::open_hosts(&ns, hosts.to_vec(), parsed_command.firewall)?;
+            vopono_core::util::open_hosts(&ns.name, hosts, parsed_command.firewall)?;
         }
 
         forwarder = provider_port_forwarding(&parsed_command, &ns)?;
@@ -415,8 +435,8 @@ fn run_protocol_in_netns(
             }
 
             // Set DNS with OpenVPN server response if present
-            if parsed_command.dns.is_none() {
-                if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns {
+            if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns {
+                if parsed_command.dns.is_none() {
                     let old_dns = ns.dns_config.take();
                     std::mem::forget(old_dns);
                     // TODO: DNS suffixes?
@@ -430,6 +450,24 @@ fn run_protocol_in_netns(
             }
         }
         Protocol::Wireguard => {
+            if parsed_command.trojan_host.is_some() || parsed_command.trojan_config.is_some() {
+                let wg_conf = if parsed_command.trojan_config.is_none() {
+                    Some(Wireguard::config_from_file(
+                        config_file.as_ref().expect("No Wireguard config"),
+                    )?)
+                } else {
+                    None
+                };
+                let peer = wg_conf.map(|c| c.peer);
+                ns.run_trojan(
+                    parsed_command.trojan_host.clone(),
+                    parsed_command.trojan_password.as_deref(),
+                    parsed_command.trojan_no_verify,
+                    parsed_command.trojan_config.clone().as_deref(),
+                    peer,
+                )?;
+            }
+
             ns.run_wireguard(
                 config_file
                     .clone()
@@ -523,8 +561,8 @@ fn provider_port_forwarding(
             }
             Some(VpnProvider::ProtonVPN) => {
                 vopono_core::util::open_hosts(
-                    ns,
-                    vec![vopono_core::network::port_forwarding::natpmpc::PROTONVPN_GATEWAY],
+                    &ns.name,
+                    &[vopono_core::network::port_forwarding::natpmpc::PROTONVPN_GATEWAY],
                     parsed_command.firewall,
                 )?;
                 Some(Box::new(Natpmpc::new(

@@ -1,6 +1,8 @@
 use super::{PrivateInternetAccess, Provider, WireguardProvider};
 use crate::config::providers::{BoolChoice, UiClient};
-use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
+use crate::network::wireguard::{
+    WireguardConfig, WireguardEndpoint, WireguardInterface, WireguardPeer,
+};
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::generate_keypair;
 use anyhow::{Context, anyhow};
@@ -239,7 +241,10 @@ impl WireguardProvider for PrivateInternetAccess {
                 let wireguard_peer = WireguardPeer {
                     public_key: "".into(), // Empty, will be filled in on connect later
                     allowed_ips: allowed_ips.clone(),
-                    endpoint: SocketAddr::new(wg_server.ip, PrivateInternetAccess::PORT),
+                    endpoint: WireguardEndpoint::IpWithPort(SocketAddr::new(
+                        wg_server.ip,
+                        PrivateInternetAccess::PORT,
+                    )),
                     keepalive: Some(25.to_string()),
                 };
 
@@ -280,7 +285,7 @@ impl WireguardProvider for PrivateInternetAccess {
         let token = PrivateInternetAccess::get_pia_token(&pia_config.user, &pia_config.pass)?;
 
         let mut wg_config: WireguardConfig = std::fs::read_to_string(wg_config_file)?.parse()?;
-        let ip = &wg_config.peer.endpoint.ip();
+        let ip = &wg_config.peer.endpoint.resolve_ip()?;
         let cn = pia_config
             .cn_lookup
             .get(ip)

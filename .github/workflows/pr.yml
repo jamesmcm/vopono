@@ -29,3 +29,5 @@ jobs:
       run: cargo clippy -- -D warnings
     - name: Rustfmt
       run: cargo fmt --all -- --check
+    - name: Test
+      run: cargo test --workspace

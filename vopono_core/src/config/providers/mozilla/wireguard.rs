@@ -8,6 +8,7 @@ use crate::config::providers::ConfigurationChoice;
 use crate::config::providers::Input;
 use crate::config::providers::InputNumericu16;
 use crate::config::providers::UiClient;
+use crate::network::wireguard::WireguardEndpoint;
 use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
@@ -186,7 +187,10 @@ impl WireguardProvider for MozillaVPN {
             let wireguard_peer = WireguardPeer {
                 public_key: relay.pubkey.clone(),
                 allowed_ips: allowed_ips.clone(),
-                endpoint: SocketAddr::new(IpAddr::from(relay.ipv4_addr_in), port),
+                endpoint: WireguardEndpoint::IpWithPort(SocketAddr::new(
+                    IpAddr::from(relay.ipv4_addr_in),
+                    port,
+                )),
                 keepalive: None,
             };
 

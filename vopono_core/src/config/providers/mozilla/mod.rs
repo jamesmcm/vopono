@@ -111,8 +111,8 @@ impl MozillaVPN {
         let code;
         let code_url_regex = regex::Regex::new(r"\A/\?code=([0-9a-f]{80})\z").unwrap();
         for request in server.incoming_requests() {
-            if *request.method() == Method::Get {
-                if let Some(caps) = code_url_regex.captures(request.url()) {
+            if let Some(caps) = code_url_regex.captures(request.url()) {
+                if *request.method() == Method::Get {
                     code = caps.get(1).unwrap();
                     let response = client
                         .post(format!("{}/vpn/login/verify", Self::V2_URL))
