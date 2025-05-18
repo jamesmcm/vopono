@@ -807,24 +807,3 @@ where
         ))),
     }
 }
-
-// Store the raw hostname of the endpoint if it is a hostname
-// For use with SSL e.g. in Trojan
-pub fn de_rawendpoint<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = String::deserialize(deserializer)?;
-    let raw_host = raw
-        .split(':')
-        .next()
-        .ok_or(serde::de::Error::custom(anyhow!(
-            "Failed to split endpoint: {raw}",
-        )))?;
-
-    if raw_host.parse::<IpAddr>().is_ok() {
-        Ok(None)
-    } else {
-        Ok(Some(raw_host.to_string()))
-    }
-}
