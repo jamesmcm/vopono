@@ -51,5 +51,6 @@ json = "0.12"
 shell-words = "1"
 dns-lookup = "2"
 libc = "0.2"
-native-tls = "0.2"
 pem = "3"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-connector = "0.21"
