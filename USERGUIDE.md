@@ -535,6 +535,157 @@ Mullvad wireguard       usa-us52.conf
 ...
 ```
 
+## Censorship evasion
+
+Some countries / ISPs have heavier censorship using Deep Packet Inspection, etc. to block Wireguard connections - or even dropping all UDP traffic entirely, etc. - there are many tools to deal with this. vopono currently has built-in support for [Trojan](https://trojan-gfw.github.io/trojan/), while [udp2raw](https://github.com/wangyu-/udp2raw) is also easy to run with a custom script.
+
+### Trojan
+
+[Trojan](https://trojan-gfw.github.io/trojan/) can be used for Wireguard forwarding with the `--trojan*` options in vopono:
+
+```
+--trojan-host <TROJAN_HOST>
+    Trojan server address - hostname or IP, will not verify SSL if IP address is given. Port is optional (default is 443)
+--trojan-password <TROJAN_PASSWORD>
+    Trojan server password Set this in ~/.config/vopono/vopono.toml or use --trojan-config to avoid setting this in the command line
+--trojan-no-verify
+    Disable SSL verification for Trojan server
+--trojan-config <TROJAN_CONFIG>
+    Trojan config file (will override other settings)
+```
+
+Standard Wireguard forwarding example:
+
+```sh
+$ vopono -v exec --protocol wireguard --custom ~/AirVPN_Czech-Republic_UDP-1637-Entry3.conf --trojan-host your_trojan_domain.xyz --trojan-password your_trojan_password firefox-developer-edition
+```
+
+Note you can use the `~/.config/vopono/vopono.toml` file to store your password or provide a custom Trojan config JSON to avoid passing it on the command line.
+
+Custom Trojan JSON example:
+
+```sh
+$ vopono -v exec --protocol wireguard --custom ~/AirVPN_Czech-Republic_UDP-1637-Entry3.conf --trojan-config ~/forward.json firefox-developer-edition
+```
+
+Where `forward.json` is a valid Trojan configuration for your Trojan server:
+```json
+{
+    "run_type": "forward",
+    "local_addr": "127.0.0.1",
+    "local_port": 1637,
+    "remote_addr": "yourdomain.xyz",
+    "remote_port": 443,
+    "target_addr": "wireguard_endpoint",
+    "target_port": 1637,
+    "password": [
+        "password1"
+    ],
+    "udp_timeout": 60,
+    "log_level": 1,
+    "ssl": {
+        "verify": true,
+        "verify_hostname": true,
+        "cert": "/home/archie/trojancert.crt",
+        "cipher": "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES128-SHA:ECDHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA:DHE-RSA-AES256-SHA:AES128-SHA:AES256-SHA:DES-CBC3-SHA",
+        "cipher_tls13": "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384",
+        "sni": "yourdomain.xyz",
+        "alpn": [
+            "h2",
+            "http/1.1"
+        ],
+        "reuse_session": true,
+        "session_ticket": false,
+        "curves": ""
+    },
+    "tcp": {
+        "no_delay": true,
+        "keep_alive": true,
+        "reuse_port": false,
+        "fast_open": false,
+        "fast_open_qlen": 20
+    }
+}
+
+```
+
+Note you can get the certificate for your domain (for the JSON config) manually using Trojan's [getcert.py](https://github.com/trojan-gfw/trojan/blob/master/scripts/getcert.py). vopono will do this automatically if you don't use a custom Trojan config JSON.
+
+Only Wireguard forwarding is supported at the moment. Transparent proxying without a VPN service is not supported.
+
+See [issue #291](https://github.com/jamesmcm/vopono/issues/291) for discussion of Trojan support.
+
+### udp2raw
+
+udp2raw can also be used for Wireguard forwarding, however unlike Trojan, your server must be manually configured to set the desired target Wireguard endpoint (e.g. of your VPN provider). udp2raw cannot have this set by the client on connection like Trojan, it must be hard-coded in the server config.
+
+Client usage:
+```sh
+vopono -v exec --open-hosts $UDP2RAWHOST --protocol wireguard --custom ~/airvpn_udp2raw.conf "~/udp2rawtest.sh"
+```
+
+udp2rawtest.sh:
+```sh
+#!/bin/sh
+# Run this with:
+# vopono -v exec --open-hosts $REMOTE --protocol wireguard --custom ~/wg_conf_with_localhost.conf "~/udp2rawtest.sh appname"
+
+# Address for remote udp2raw server
+# Change this!
+REMOTE="UDP2RAWHOST"
+RPORT="58998"
+KEY="passwd"
+
+# Set this Wireguard peer in the Wireguard config
+# But remember to set the real destination
+# address and port on the udp2raw server
+WIREGUARD_PEER="127.0.0.1:1637"
+
+# sudo ip route add $REMOTE via $VOPONO_HOST
+
+# We must force a low MTU for udp2raw
+# Note setting it in the Wireguard config
+# is not enough - it must be set at the device level
+sudo ip link set dev $VOPONO_NS mtu 1300
+
+sudo udp2raw -c -a -l $WIREGUARD_PEER -r $REMOTE:$RPORT -k $KEY --raw-mode faketcp &
+$1
+```
+
+Your Wireguard config file must be edited to point to the socket where the `udp2raw` client will be listening, e.g. `127.0.0.1:1637` above.
+
+airvpn_udp2raw.conf:
+```conf
+[Interface]
+Address = ...
+PrivateKey = ...
+MTU = 1300
+DNS = 10.128.0.1, fd7d:76ee:e68f:a993::1
+
+[Peer]
+PublicKey = ...
+PresharedKey = ...
+# Endpoint = ...
+# See Endpoint here:
+Endpoint = 127.0.0.1:1637
+AllowedIPs = 0.0.0.0/0,::/0
+PersistentKeepalive = 15
+```
+
+Finally, on the server side it should be run to redirect the incoming traffic to the actual Wireguard endpoint:
+
+```sh
+#!/bin/sh
+KEY="passwd"
+OPEN_LISTEN_PORT="58998"
+# Update this:
+WIREGUARD_PEER="REMOTE_WG_PEER"
+
+sudo udp2raw -s -l0.0.0.0:$OPEN_LISTEN_PORT -r $WIREGUARD_PEER -k $KEY --raw-mode faketcp -a
+```
+
+See [issue #306](https://github.com/jamesmcm/vopono/issues/306) for discussion of udp2raw usage.
+
 ## VPN Provider specific details
 
 ### Mullvad
@@ -755,6 +906,8 @@ sudo ip netns exec ping 8.8.8.8
 ```
 
 See issues #40, #24, #2, and #1 for previous troubleshooting of issues.
+
+In general, also test with `--no-killswitch` to disable the killswitch drop rules, and with `--open-hosts` for the DNS server (which you can also override with `--dns`).
 
 ### DNS / name resolution issues
 
