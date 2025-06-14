@@ -51,6 +51,49 @@ impl Natpmpc {
             ));
         }
 
+        log::debug!("Opening firewall for NAT-PMP gateway: {gateway_str}");
+        match ns.firewall {
+            crate::network::firewall::Firewall::IpTables => {
+                NetworkNamespace::exec(
+                    &ns.name,
+                    &[
+                        "iptables",
+                        "-A",
+                        "OUTPUT",
+                        "-p",
+                        "udp",
+                        "-d",
+                        &gateway_str,
+                        "--dport",
+                        "5351",
+                        "-j",
+                        "ACCEPT",
+                    ],
+                )?;
+            }
+            crate::network::firewall::Firewall::NfTables => {
+                NetworkNamespace::exec(
+                    &ns.name,
+                    &[
+                        "nft",
+                        "add",
+                        "rule",
+                        "inet",
+                        &ns.name,
+                        "output",
+                        "ip",
+                        "daddr",
+                        &gateway_str,
+                        "udp",
+                        "dport",
+                        "5351",
+                        "counter",
+                        "accept",
+                    ],
+                )?;
+            }
+        }
+
         // Check output for readnatpmpresponseorretry returned 0 (OK)
         // If receive readnatpmpresponseorretry returned -7
         // Then prompt user to choose different gateway

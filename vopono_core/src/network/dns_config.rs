@@ -10,6 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use crate::util::open_hosts;
 
 use super::firewall::Firewall;
+use super::netns::NetworkNamespace;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DnsConfig {
@@ -125,8 +126,100 @@ impl DnsConfig {
         open_hosts(&ns_name, servers, firewall)
             .with_context(|| format!("Failed to open hosts in network namespace: {}", &ns_name))?;
 
+        if !servers.is_empty() {
+            log::debug!("Opening firewall for DNS servers: {servers:?}");
+            open_dns_ports(&ns_name, servers, firewall).with_context(|| {
+                format!(
+                    "Failed to open DNS ports in network namespace: {}",
+                    &ns_name
+                )
+            })?;
+        }
+
         Ok(Self { ns_name })
     }
+}
+
+fn open_dns_ports(netns_name: &str, hosts: &[IpAddr], firewall: Firewall) -> anyhow::Result<()> {
+    for host in hosts {
+        match firewall {
+            Firewall::IpTables => {
+                NetworkNamespace::exec(
+                    netns_name,
+                    &[
+                        "iptables",
+                        "-A",
+                        "OUTPUT",
+                        "-p",
+                        "udp",
+                        "-d",
+                        &host.to_string(),
+                        "--dport",
+                        "53",
+                        "-j",
+                        "ACCEPT",
+                    ],
+                )?;
+                NetworkNamespace::exec(
+                    netns_name,
+                    &[
+                        "iptables",
+                        "-A",
+                        "OUTPUT",
+                        "-p",
+                        "tcp",
+                        "-d",
+                        &host.to_string(),
+                        "--dport",
+                        "53",
+                        "-j",
+                        "ACCEPT",
+                    ],
+                )?;
+            }
+            Firewall::NfTables => {
+                NetworkNamespace::exec(
+                    netns_name,
+                    &[
+                        "nft",
+                        "add",
+                        "rule",
+                        "inet",
+                        netns_name,
+                        "output",
+                        "ip",
+                        "daddr",
+                        &host.to_string(),
+                        "udp",
+                        "dport",
+                        "53",
+                        "counter",
+                        "accept",
+                    ],
+                )?;
+                NetworkNamespace::exec(
+                    netns_name,
+                    &[
+                        "nft",
+                        "add",
+                        "rule",
+                        "inet",
+                        netns_name,
+                        "output",
+                        "ip",
+                        "daddr",
+                        &host.to_string(),
+                        "tcp",
+                        "dport",
+                        "53",
+                        "counter",
+                        "accept",
+                    ],
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 impl Drop for DnsConfig {

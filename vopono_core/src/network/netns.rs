@@ -550,6 +550,57 @@ impl NetworkNamespace {
         set_config_permissions()?;
         Ok(lock.ns)
     }
+
+    pub fn setup_nftables_firewall(&self) -> anyhow::Result<()> {
+        debug!("Setting up base nftables firewall for {}", &self.name);
+
+        // Use `nft -f` to apply a full, idempotent ruleset in one go.
+        // This is more robust than running many individual commands.
+        let ruleset = format!(
+            "
+        add table inet {ns_name}
+        flush table inet {ns_name}
+
+        add chain inet {ns_name} input {{ type filter hook input priority 0; policy accept; }}
+        add chain inet {ns_name} forward {{ type filter hook forward priority 0; policy accept; }}
+        add chain inet {ns_name} output {{ type filter hook output priority 0; policy accept; }}
+
+        # Allow loopback traffic
+        add rule inet {ns_name} input iifname \"lo\" accept
+        add rule inet {ns_name} output oifname \"lo\" accept
+
+        # Allow return traffic for established connections
+        add rule inet {ns_name} input ct state related,established accept
+        add rule inet {ns_name} output ct state related,established accept
+        ",
+            ns_name = self.name
+        );
+
+        // Write the ruleset to a temporary file
+        let temp_filename = format!("vopono-nft-base-{}.conf", self.name);
+        let temp_path = std::env::temp_dir().join(temp_filename);
+
+        std::fs::write(&temp_path, ruleset.as_bytes())
+            .with_context(|| format!("Failed to write nft ruleset to {:?}", &temp_path))?;
+
+        // Execute the ruleset file
+        let temp_path_str = temp_path.to_str().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to convert temporary file path to string: {:?}",
+                temp_path
+            )
+        })?;
+        let exec_result = Self::exec(&self.name, &["nft", "-f", temp_path_str]);
+
+        // Clean up the temporary file, logging any error
+        if let Err(e) = std::fs::remove_file(&temp_path) {
+            debug!("Failed to remove temporary file {:?}: {}", &temp_path, e);
+        }
+
+        exec_result.context("Failed to apply base nftables ruleset")?;
+
+        Ok(())
+    }
 }
 
 impl Drop for NetworkNamespace {

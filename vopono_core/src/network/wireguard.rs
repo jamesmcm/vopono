@@ -100,6 +100,72 @@ impl Wireguard {
         }
         let config = Self::config_from_file(&config_file)?;
 
+        if firewall == Firewall::NfTables {
+            let peer_endpoint_ip = config
+                .peer
+                .endpoint
+                .resolve_ip()
+                .context("Failed to resolve Wireguard peer hostname for firewall rule")?;
+
+            let peer_port = config.peer.endpoint.port().to_string();
+            let peer_ip_str = peer_endpoint_ip.to_string();
+            let ip_family = if peer_endpoint_ip.is_ipv4() {
+                "ip"
+            } else {
+                "ip6"
+            };
+
+            debug!(
+                "Opening firewall for Wireguard peer (out): {} dport {}",
+                peer_ip_str, peer_port
+            );
+            // Allow the initial OUTGOING connection packet.
+            NetworkNamespace::exec(
+                &namespace.name,
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &namespace.name,
+                    "output",
+                    ip_family,
+                    "daddr",
+                    &peer_ip_str,
+                    "udp",
+                    "dport",
+                    &peer_port,
+                    "counter",
+                    "accept",
+                ],
+            )?;
+
+            debug!(
+                "Opening firewall for Wireguard peer (in): {} sport {}",
+                peer_ip_str, peer_port
+            );
+            // Allow the server's INCOMING reply packet.
+            NetworkNamespace::exec(
+                &namespace.name,
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &namespace.name,
+                    "input",
+                    ip_family,
+                    "saddr",
+                    &peer_ip_str,
+                    "udp",
+                    "sport",
+                    &peer_port,
+                    "counter",
+                    "accept",
+                ],
+            )?;
+        }
+
         // TODO: Use bs58 here?
         let if_name = namespace.name
             [((namespace.name.len() as i32) - 13).max(0) as usize..namespace.name.len()]
@@ -505,20 +571,6 @@ pub fn killswitch(
             )?;
         }
         Firewall::NfTables => {
-            NetworkNamespace::exec(&netns.name, &["nft", "add", "table", "inet", &netns.name])
-                .context("Executing nft")?;
-            NetworkNamespace::exec(
-                &netns.name,
-                &[
-                    "nft",
-                    "add",
-                    "chain",
-                    "inet",
-                    &netns.name,
-                    "output",
-                    "{ type filter hook output priority -500 ; policy accept; }",
-                ],
-            )?;
             NetworkNamespace::exec(
                 &netns.name,
                 &[

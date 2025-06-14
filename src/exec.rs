@@ -43,6 +43,7 @@ pub fn exec(
     // Create empty config file if does not exist
     create_dir_all(vopono_dir()?)?;
     let vopono_config_settings = ArgsConfig::get_config_file(&command)?;
+    let host_env_vars = vopono_core::util::env_vars::get_host_env_vars();
 
     let mut parsed_command = ArgsConfig::get_cli_or_config_args(command, vopono_config_settings)?;
 
@@ -156,6 +157,10 @@ pub fn exec(
             parsed_command.allow_host_access,
         )?;
 
+        if parsed_command.firewall == vopono_core::network::firewall::Firewall::NfTables {
+            ns.setup_nftables_firewall()?;
+        }
+
         // Add local host to open hosts if allow_host_access enabled
         if parsed_command.allow_host_access {
             let host_ip = ns.veth_pair_ips.as_ref().unwrap().host_ip;
@@ -211,12 +216,12 @@ pub fn exec(
 
                 let mut cmd = std::process::Command::new("sudo");
                 cmd.args(args);
-                set_env_vars(&ns, forwarder.as_deref(), &mut cmd);
+                set_env_vars(&ns, forwarder.as_deref(), &mut cmd, &host_env_vars);
                 cmd.spawn()?;
             } else {
                 let mut cmd = std::process::Command::new(parsed_pucmd_ptrs[0]);
                 cmd.args(parsed_pucmd_ptrs[1..].iter());
-                set_env_vars(&ns, forwarder.as_deref(), &mut cmd);
+                set_env_vars(&ns, forwarder.as_deref(), &mut cmd, &host_env_vars);
                 cmd.spawn()?;
             };
         }
@@ -248,7 +253,14 @@ pub fn exec(
     }
 
     if !parsed_command.create_netns_only {
-        run_application(&parsed_command, forwarder, &ns, signals, silent)?;
+        run_application(
+            &parsed_command,
+            forwarder,
+            &ns,
+            signals,
+            silent,
+            &host_env_vars,
+        )?;
     } else {
         info!(
             "Created netns {} - will leave network namespace alive until ctrl+C received",
@@ -622,6 +634,7 @@ fn run_application(
     ns: &NetworkNamespace,
     signals: SignalsInfo,
     silent: bool,
+    host_env_vars: &std::collections::HashMap<String, String>,
 ) -> anyhow::Result<()> {
     let application = ApplicationWrapper::new(
         ns,
@@ -631,6 +644,7 @@ fn run_application(
         parsed_command.working_directory.clone().map(PathBuf::from),
         forwarder,
         silent,
+        host_env_vars,
     )?;
 
     let pid = application.handle.id();
