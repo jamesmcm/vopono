@@ -14,6 +14,7 @@ pub struct ApplicationWrapper {
 }
 
 impl ApplicationWrapper {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         netns: &NetworkNamespace,
         application: &str,
@@ -22,6 +23,7 @@ impl ApplicationWrapper {
         working_directory: Option<PathBuf>,
         port_forwarding: Option<Box<dyn Forwarder>>,
         silent: bool,
+        host_env_vars: &std::collections::HashMap<String, String>,
     ) -> anyhow::Result<Self> {
         let running_processes = get_all_running_process_names();
         let app_vec = parse_command_str(application)?;
@@ -58,6 +60,7 @@ impl ApplicationWrapper {
             false,
             working_directory,
             port_forwarding.as_deref(),
+            host_env_vars,
         )?;
         Ok(Self {
             handle,
@@ -81,9 +84,10 @@ impl ApplicationWrapper {
         capture_input: bool,
         set_dir: Option<PathBuf>,
         forwarder: Option<&dyn Forwarder>,
+        host_env_vars: &std::collections::HashMap<String, String>,
     ) -> anyhow::Result<std::process::Child> {
         let mut handle = Command::new("ip");
-        set_env_vars(netns, forwarder, &mut handle);
+        set_env_vars(netns, forwarder, &mut handle, host_env_vars);
         handle.args(["netns", "exec", netns.name.as_str()]);
         if let Some(cdir) = set_dir {
             handle.current_dir(cdir);
