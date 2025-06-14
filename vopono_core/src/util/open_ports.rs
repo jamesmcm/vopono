@@ -61,18 +61,6 @@ pub fn open_ports(
                     &netns.name,
                     &[
                         "nft",
-                        "add",
-                        "chain",
-                        "inet",
-                        &netns.name,
-                        "output",
-                        "{ type filter hook output priority 100 ; }",
-                    ],
-                )?;
-                NetworkNamespace::exec(
-                    &netns.name,
-                    &[
-                        "nft",
                         "insert",
                         "rule",
                         "inet",

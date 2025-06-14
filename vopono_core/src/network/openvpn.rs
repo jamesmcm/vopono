@@ -371,44 +371,7 @@ pub fn killswitch(
             if disable_ipv6 {
                 crate::network::firewall::disable_ipv6(netns, firewall)?;
             }
-            // TODO:
-            NetworkNamespace::exec(&netns.name, &["nft", "add", "table", "inet", &netns.name])?;
-            NetworkNamespace::exec(
-                &netns.name,
-                &[
-                    "nft",
-                    "add",
-                    "chain",
-                    "inet",
-                    &netns.name,
-                    "input",
-                    "{ type filter hook input priority 100 ; policy drop; }",
-                ],
-            )?;
-            NetworkNamespace::exec(
-                &netns.name,
-                &[
-                    "nft",
-                    "add",
-                    "chain",
-                    "inet",
-                    &netns.name,
-                    "forward",
-                    "{ type filter hook forward priority 100 ; policy drop; }",
-                ],
-            )?;
-            NetworkNamespace::exec(
-                &netns.name,
-                &[
-                    "nft",
-                    "add",
-                    "chain",
-                    "inet",
-                    &netns.name,
-                    "output",
-                    "{ type filter hook output priority 100 ; policy drop; }",
-                ],
-            )?;
+            // TODO: Test this with port forwarding
             NetworkNamespace::exec(
                 &netns.name,
                 &[
@@ -435,37 +398,7 @@ pub fn killswitch(
                     &netns.name,
                     "input",
                     "iifname",
-                    "\"lo\"",
-                    "counter",
-                    "accept",
-                ],
-            )?;
-            NetworkNamespace::exec(
-                &netns.name,
-                &[
-                    "nft",
-                    "add",
-                    "rule",
-                    "inet",
-                    &netns.name,
-                    "input",
-                    "iifname",
                     "\"tun*\"",
-                    "counter",
-                    "accept",
-                ],
-            )?;
-            NetworkNamespace::exec(
-                &netns.name,
-                &[
-                    "nft",
-                    "add",
-                    "rule",
-                    "inet",
-                    &netns.name,
-                    "output",
-                    "oifname",
-                    "\"lo\"",
                     "counter",
                     "accept",
                 ],
@@ -519,7 +452,9 @@ pub fn killswitch(
                         )?;
                     }
                     Host::Hostname(_name) => {
-                        // TODO: Does this work with nftables?
+                        // This rule allows traffic to the correct port/protocol regardless of destination IP.
+                        // This is necessary because the hostname is resolved to an IP by OpenVPN,
+                        // and we allow that IP via the DNS rules.
                         NetworkNamespace::exec(
                             &netns.name,
                             &[
@@ -529,9 +464,6 @@ pub fn killswitch(
                                 "inet",
                                 &netns.name,
                                 "output",
-                                // "ip",
-                                // "daddr",
-                                // &name.to_string(),
                                 &remote.protocol.to_string(),
                                 "dport",
                                 port_str.as_str(),

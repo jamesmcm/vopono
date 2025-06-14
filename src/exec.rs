@@ -156,6 +156,10 @@ pub fn exec(
             parsed_command.allow_host_access,
         )?;
 
+        if parsed_command.firewall == vopono_core::network::firewall::Firewall::NfTables {
+            ns.setup_nftables_firewall()?;
+        }
+
         // Add local host to open hosts if allow_host_access enabled
         if parsed_command.allow_host_access {
             let host_ip = ns.veth_pair_ips.as_ref().unwrap().host_ip;
