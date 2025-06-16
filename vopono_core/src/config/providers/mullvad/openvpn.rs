@@ -45,7 +45,8 @@ impl Mullvad {
 
 impl OpenVpnProvider for Mullvad {
     fn provider_dns(&self) -> Option<Vec<IpAddr>> {
-        // TODO: Fix this with endpoint-specific DNS - unfortunately this is not simply the first address in the IpNet
+        // This gets overridden by DNS from server at runtime anyway
+        // Used only for initial request
         Some(vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))])
     }
 

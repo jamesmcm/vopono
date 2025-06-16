@@ -247,8 +247,7 @@ impl WireguardProvider for Mullvad {
 
         debug!("Chosen keypair: {keypair:?}");
 
-        // TODO: Fix this with endpoint-specific DNS - unfortunately this is not simply the first address in the IpNet
-        let dns = std::net::Ipv4Addr::new(8, 8, 8, 8);
+        let dns = std::net::Ipv4Addr::new(10, 64, 0, 1);
 
         let interface = WireguardInterface {
             private_key: keypair.private.clone(),
