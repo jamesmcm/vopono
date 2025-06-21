@@ -37,6 +37,56 @@ $ vopono -v exec --provider protonvpn --server japan --protocol openvpn --create
 $ firejail --netns=vo_pr_japan firefox-developer-edition
 ```
 
+### Using vopono inside a Wireguard tunnel
+
+You can use the above to run vopono inside an existing Wireguard tunnel.
+
+e.g. first run the Wireguard client on the host (here the Wireguard
+interface will be `foo`):
+
+```sh
+$ sudo wg-quick up ./foo.conf
+```
+
+Then use vopono to create a network namespace, and run bash inside to
+execute your internal VPN command. Note the `-i foo` which tells vopono
+to use the Wireguard interface for connecting the network namespace!
+
+```sh
+$ vopono -v exec --create-netns-only --provider None --protocol None --server None -i foo bash
+$ sudo ip netns exec vo_none_None bash
+$ ./vpn.sh
+```
+
+Note you can set config files in `/etc/netns/vo_none_None/` to have them
+apply only in the network namespace e.g.:
+
+```sh
+$ bat -p /etc/netns/vo_none_None/resolv.conf
+search xxx
+nameserver a.b.c.d
+
+$ bat -p /etc/netns/vo_none_None/gai.conf
+# Prefer IPv4 over IPv6
+precedence ::ffff:0:0/96 100
+scopev4 ::ffff:169.254.0.0/112  2
+scopev4 ::ffff:127.0.0.0/104    2
+scopev4 ::ffff:0.0.0.0/96       14
+```
+
+But be careful in the order in which you set the DNS server e.g. if it
+is internal to your second VPN connection you will first want to
+connect, and then set it.
+
+Finally you can run an application inside the network namespace (or use
+vopono to do so - vopono will use the existing namespace).
+
+```sh
+$ sudo -E ip netns exec vo_none_None sudo --preserve-env --user archie google-chrome-stable
+# or equivalently with vopono:
+$ vopono -v exec --protocol None --provider None --server None google-chrome-stable
+```
+
 ### Configuration file
 
 You can save default configuration options in the config file
