@@ -277,7 +277,33 @@ impl NetworkNamespace {
             let ipv6_host_ip_cidr = format!("{ipv6_host_ip_str}/64");
             let ipv6_ns_ip_cidr = format!("{ipv6_ns_ip_str}/64");
 
-            // TODO: Do we want to do this here?
+            let ipv6_sysctl_path = format!("net.ipv6.conf.{}.disable_ipv6", veth_dest);
+            let sysctl_output = std::process::Command::new("sysctl")
+                .args(["-n", &ipv6_sysctl_path])
+                .output();
+            match sysctl_output {
+                Ok(output) if output.status.success() => {
+                    let value = String::from_utf8_lossy(&output.stdout);
+                    if value.trim() == "1" {
+                        log::warn!(
+                            "IPv6 is currently disabled for interface {}, enabling it now",
+                            veth_dest
+                        );
+                    }
+                }
+                Ok(output) => {
+                    let value = String::from_utf8_lossy(&output.stdout);
+                    log::warn!(
+                        "Failed to check IPv6 status for {}: sysctl returned non-zero exit code, output: {}",
+                        veth_dest,
+                        value
+                    );
+                }
+                Err(e) => {
+                    log::warn!("Failed to check IPv6 status for {}: {}", veth_dest, e);
+                }
+            }
+            log::debug!("Enabling IPv6 for {}", veth_dest);
             sudo_command(&[
                 "sysctl",
                 "-w",
