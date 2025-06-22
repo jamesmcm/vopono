@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use crate::util::open_hosts;
 
 use super::firewall::Firewall;
-use super::netns::NetworkNamespace;
+use super::netns::{NetworkNamespace, VethPairIPs};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DnsConfig {
@@ -23,14 +23,14 @@ impl DnsConfig {
         servers: &[IpAddr],
         suffixes: &[&str],
         hosts_entries: Option<&Vec<String>>,
-        host_ip: IpAddr, // IP address of host as seen inside from network namespace,
+        host_ips: &VethPairIPs,
         allow_host_access: bool,
         firewall: Firewall,
     ) -> anyhow::Result<Self> {
         let dir_path = format!("/etc/netns/{ns_name}");
         std::fs::create_dir_all(&dir_path)
             .with_context(|| format!("Failed to create directory: {}", &dir_path))?;
-        std::fs::set_permissions(&dir_path, PermissionsExt::from_mode(0o644))
+        std::fs::set_permissions(&dir_path, PermissionsExt::from_mode(0o755)) // Directories usually need execute permission
             .with_context(|| format!("Failed to set directory permissions for {dir_path}"))?;
 
         let resolv_conf_path = format!("/etc/netns/{ns_name}/resolv.conf");
@@ -51,62 +51,53 @@ impl DnsConfig {
 
         let suffix = suffixes.join(" ");
         if !suffix.is_empty() {
-            writeln!(resolv, "search {suffix}").with_context(|| {
-                format!("Failed to overwrite resolv.conf: /etc/netns/{ns_name}/resolv.conf")
-            })?;
+            writeln!(resolv, "search {suffix}")?;
         }
 
         for dns in servers {
-            writeln!(resolv, "nameserver {dns}").with_context(|| {
-                format!("Failed to overwrite resolv.conf: /etc/netns/{ns_name}/resolv.conf")
-            })?;
+            writeln!(resolv, "nameserver {dns}")?;
         }
 
-        let mut effective_hosts_entries = if allow_host_access {
-            debug!(
-                "--allow-host-access is true so adding host IP {} to hosts file as vopono.host",
-                &host_ip.to_string()
-            );
-            vec![format!("{} vopono.host", host_ip.to_string())]
-        } else {
-            Vec::new()
-        };
+        let mut effective_hosts_entries = Vec::new();
+        if allow_host_access {
+            debug!("--allow-host-access is true, adding host IPs to hosts file as vopono.host");
+            if let Some(ipv4_pair) = &host_ips.ipv4 {
+                let entry = format!("{} vopono.host", ipv4_pair.host_ip);
+                debug!("Adding host entry: '{}'", &entry);
+                effective_hosts_entries.push(entry);
+            }
+            if let Some(ipv6_pair) = &host_ips.ipv6 {
+                let entry = format!("{} vopono.host", ipv6_pair.host_ip);
+                debug!("Adding host entry: '{}'", &entry);
+                effective_hosts_entries.push(entry);
+            }
+        }
 
         if let Some(my_hosts_entries) = hosts_entries {
             effective_hosts_entries.extend(my_hosts_entries.iter().cloned())
         };
 
-        let effective_hosts_entries = if effective_hosts_entries.is_empty() {
-            None
-        } else {
-            Some(effective_hosts_entries)
-        };
-
-        if let Some(my_hosts_entries) = effective_hosts_entries {
+        if !effective_hosts_entries.is_empty() {
             let hosts_path = format!("/etc/netns/{ns_name}/hosts");
             let mut hosts = std::fs::File::create(&hosts_path)
                 .with_context(|| format!("Failed to open hosts: {}", &hosts_path))?;
             std::fs::set_permissions(&hosts_path, PermissionsExt::from_mode(0o644))
                 .with_context(|| format!("Failed to set file permissions for {}", &hosts_path))?;
 
-            for hosts_entry in my_hosts_entries {
-                writeln!(hosts, "{hosts_entry}").with_context(|| {
-                    format!("Failed to overwrite hosts: /etc/netns/{ns_name}/hosts")
-                })?;
+            // Add some default entries for completeness
+            writeln!(hosts, "127.0.0.1\tlocalhost")?;
+            writeln!(hosts, "::1\t\tlocalhost")?;
+
+            for hosts_entry in effective_hosts_entries {
+                writeln!(hosts, "{hosts_entry}")?;
             }
         }
 
         if std::path::Path::new("/etc/nsswitch.conf").exists() {
-            let nsswitch_src = std::fs::File::open("/etc/nsswitch.conf")
-                .with_context(|| "Failed to open nsswitch.conf: /etc/nsswitch.conf")?;
-
+            let nsswitch_src = std::fs::File::open("/etc/nsswitch.conf")?;
             let nsswitch_path = format!("/etc/netns/{ns_name}/nsswitch.conf");
-            let mut nsswitch = std::fs::File::create(&nsswitch_path)
-                .with_context(|| format!("Failed to open nsswitch.conf: {nsswitch_path}"))?;
-            std::fs::set_permissions(&nsswitch_path, PermissionsExt::from_mode(0o644))
-                .with_context(|| {
-                    format!("Failed to set file permissions for {}", &nsswitch_path)
-                })?;
+            let mut nsswitch = std::fs::File::create(&nsswitch_path)?;
+            std::fs::set_permissions(&nsswitch_path, PermissionsExt::from_mode(0o644))?;
 
             let hosts_re = Regex::new(r"^hosts:.*$").expect("Failed to compile hosts regex");
             for line in std::io::BufReader::new(nsswitch_src).lines() {
@@ -114,46 +105,46 @@ impl DnsConfig {
                     nsswitch,
                     "{}",
                     hosts_re.replace(&line?, |_caps: &Captures| {
-                        "hosts: files mymachines myhostname dns"
+                        "hosts: files dns" // Simplified for clarity in a container/netns
                     })
-                )
-                .with_context(|| {
-                    format!("Failed to overwrite nsswitch.conf: /etc/netns/{ns_name}/nsswitch.conf")
-                })?;
+                )?;
             }
         }
 
-        open_hosts(&ns_name, servers, firewall)
-            .with_context(|| format!("Failed to open hosts in network namespace: {}", &ns_name))?;
+        // Note: open_hosts will also need to be dual-stack aware, similar to open_dns_ports
+        open_hosts(&ns_name, servers, firewall)?;
 
         if !servers.is_empty() {
             log::debug!("Opening firewall for DNS servers: {servers:?}");
-            open_dns_ports(&ns_name, servers, firewall).with_context(|| {
-                format!(
-                    "Failed to open DNS ports in network namespace: {}",
-                    &ns_name
-                )
-            })?;
+            open_dns_ports(&ns_name, servers, firewall)?;
         }
 
         Ok(Self { ns_name })
     }
 }
 
+// TODO: Do we want to handle disable_ipv6 here? Warn if using ipv6 host with ipv6 disabled
 fn open_dns_ports(netns_name: &str, hosts: &[IpAddr], firewall: Firewall) -> anyhow::Result<()> {
     for host in hosts {
+        let host_str = &host.to_string();
         match firewall {
             Firewall::IpTables => {
+                let iptables_cmd = if host.is_ipv4() {
+                    "iptables"
+                } else {
+                    "ip6tables"
+                };
+
                 NetworkNamespace::exec(
                     netns_name,
                     &[
-                        "iptables",
+                        iptables_cmd,
                         "-A",
                         "OUTPUT",
                         "-p",
                         "udp",
                         "-d",
-                        &host.to_string(),
+                        host_str,
                         "--dport",
                         "53",
                         "-j",
@@ -163,13 +154,13 @@ fn open_dns_ports(netns_name: &str, hosts: &[IpAddr], firewall: Firewall) -> any
                 NetworkNamespace::exec(
                     netns_name,
                     &[
-                        "iptables",
+                        iptables_cmd,
                         "-A",
                         "OUTPUT",
                         "-p",
                         "tcp",
                         "-d",
-                        &host.to_string(),
+                        host_str,
                         "--dport",
                         "53",
                         "-j",
@@ -178,6 +169,8 @@ fn open_dns_ports(netns_name: &str, hosts: &[IpAddr], firewall: Firewall) -> any
                 )?;
             }
             Firewall::NfTables => {
+                let addr_family_keyword = if host.is_ipv4() { "ip" } else { "ip6" };
+
                 NetworkNamespace::exec(
                     netns_name,
                     &[
@@ -187,9 +180,9 @@ fn open_dns_ports(netns_name: &str, hosts: &[IpAddr], firewall: Firewall) -> any
                         "inet",
                         netns_name,
                         "output",
-                        "ip",
+                        addr_family_keyword,
                         "daddr",
-                        &host.to_string(),
+                        host_str,
                         "udp",
                         "dport",
                         "53",
@@ -206,9 +199,9 @@ fn open_dns_ports(netns_name: &str, hosts: &[IpAddr], firewall: Firewall) -> any
                         "inet",
                         netns_name,
                         "output",
-                        "ip",
+                        addr_family_keyword,
                         "daddr",
-                        &host.to_string(),
+                        host_str,
                         "tcp",
                         "dport",
                         "53",

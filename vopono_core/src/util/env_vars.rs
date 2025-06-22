@@ -39,9 +39,18 @@ pub fn set_env_vars(
         cmd.env(key, value);
     }
 
-    if let Some(ref ns_ip) = ns.veth_pair_ips {
-        cmd.env("VOPONO_NS_IP", ns_ip.namespace_ip.to_string());
-        cmd.env("VOPONO_HOST_IP", ns_ip.host_ip.to_string());
+    if let Some(ref veth_pair_ips) = ns.veth_pair_ips {
+        if let Some(ipv4pair) = veth_pair_ips.ipv4.clone() {
+            cmd.env("VOPONO_NS_IP", ipv4pair.namespace_ip.to_string());
+            cmd.env("VOPONO_HOST_IP", ipv4pair.host_ip.to_string());
+        } else {
+            log::error!("No IPv4 veth pair!")
+        };
+
+        if let Some(ipv6pair) = veth_pair_ips.ipv6.clone() {
+            cmd.env("VOPONO_NS_IPV6", ipv6pair.namespace_ip.to_string());
+            cmd.env("VOPONO_HOST_IPV6", ipv6pair.host_ip.to_string());
+        }
     }
 
     cmd.env("VOPONO_NS", &ns.name);

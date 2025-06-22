@@ -5,8 +5,9 @@ use crate::config::providers::mullvad::AccessToken;
 use crate::config::providers::mullvad::Device;
 use crate::config::providers::mullvad::UserInfo;
 use crate::config::providers::{ConfigurationChoice, Input, InputNumericu16, UiClient};
-use crate::network::wireguard::WireguardEndpoint;
-use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
+use crate::network::wireguard_config::{
+    WireguardConfig, WireguardEndpoint, WireguardInterface, WireguardPeer,
+};
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::generate_keypair;
 use crate::util::wireguard::{WgKey, generate_public_key};

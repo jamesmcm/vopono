@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct HostMasquerade {
-    ip_mask: String,
+    ipv4_mask: Option<String>,
+    ipv6_mask: Option<String>,
     interface: NetworkInterface,
     firewall: Firewall,
 }
@@ -15,64 +16,125 @@ pub struct HostMasquerade {
 impl HostMasquerade {
     /// Add masquerade rule to route traffic from network namespace to active network interface
     pub fn add_masquerade_rule(
-        ip_mask: String,
+        ipv4_mask: Option<String>,
+        ipv6_mask: Option<String>,
         interface: NetworkInterface,
         firewall: Firewall,
     ) -> anyhow::Result<Self> {
         match firewall {
             Firewall::IpTables => {
-                sudo_command(&[
-                    "iptables",
-                    "-t",
-                    "nat",
-                    "-A",
-                    "POSTROUTING",
-                    "-s",
-                    &ip_mask,
-                    "-o",
-                    &interface.name,
-                    "-j",
-                    "MASQUERADE",
-                ])
-                .with_context(|| {
-                    format!(
-                        "Failed to add iptables masquerade rule, ip_mask: {}, interface: {}",
-                        &ip_mask, &interface.name
-                    )
-                })?;
+                if let Some(ref mask) = ipv4_mask {
+                    sudo_command(&[
+                        "iptables",
+                        "-t",
+                        "nat",
+                        "-A",
+                        "POSTROUTING",
+                        "-s",
+                        mask,
+                        "-o",
+                        &interface.name,
+                        "-j",
+                        "MASQUERADE",
+                    ])
+                    .with_context(|| {
+                        format!(
+                            "Failed to add iptables masquerade rule, mask: {}, interface: {}",
+                            mask, &interface.name
+                        )
+                    })?;
+                } else {
+                    log::error!("IPv4 mask was None for masquerade rule!");
+                }
+
+                // Will be None if IPv6 disabled
+                if let Some(ref mask) = ipv6_mask {
+                    sudo_command(&[
+                        "ip6tables",
+                        "-t",
+                        "nat",
+                        "-A",
+                        "POSTROUTING",
+                        "-s",
+                        mask,
+                        "-o",
+                        &interface.name,
+                        "-j",
+                        "MASQUERADE",
+                    ])
+                    .with_context(|| {
+                        format!(
+                            "Failed to add ip6tables masquerade rule, mask: {}, interface: {}",
+                            mask, &interface.name
+                        )
+                    })?;
+                }
             }
             Firewall::NfTables => {
                 sudo_command(&["nft", "add", "table", "inet", "vopono_nat"])
                     .context("Failed to create nft table vopono_nat")?;
-
-                sudo_command(&["nft", "add chain inet vopono_nat postrouting { type nat hook postrouting priority 100 ; }"])
-                    .context("Failed to create nft postrouting chain in vopono_nat")?;
-
                 sudo_command(&[
                     "nft",
                     "add",
-                    "rule",
+                    "chain",
                     "inet",
                     "vopono_nat",
                     "postrouting",
-                    "oifname",
-                    &interface.name,
-                    "ip",
-                    "saddr",
-                    &ip_mask,
-                    "counter",
-                    "masquerade",
+                    "{ type nat hook postrouting priority 100 ; }",
                 ])
-                .with_context(|| {
-                    format!(
-                        "Failed to add nftables masquerade rule, ip_mask: {}, interface: {}",
-                        &ip_mask, &interface.name
-                    )
-                })?;
+                .context("Failed to create nft postrouting chain in vopono_nat")?;
+
+                if let Some(ref mask) = ipv4_mask {
+                    sudo_command(&[
+                        "nft",
+                        "add",
+                        "rule",
+                        "inet",
+                        "vopono_nat",
+                        "postrouting",
+                        "oifname",
+                        &interface.name,
+                        "ip",
+                        "saddr",
+                        mask,
+                        "counter",
+                        "masquerade",
+                    ])
+                    .with_context(|| {
+                        format!(
+                            "Failed to add nftables IPv4 masquerade rule, mask: {}, interface: {}",
+                            mask, &interface.name
+                        )
+                    })?;
+                }
+                if let Some(ref mask) = ipv6_mask {
+                    sudo_command(&[
+                        "nft",
+                        "add",
+                        "rule",
+                        "inet",
+                        "vopono_nat",
+                        "postrouting",
+                        "oifname",
+                        &interface.name,
+                        "ip6",
+                        "saddr",
+                        mask,
+                        "counter",
+                        "masquerade",
+                    ])
+                    .with_context(|| {
+                        format!(
+                            "Failed to add nftables IPv6 masquerade rule, mask: {}, interface: {}",
+                            mask, &interface.name
+                        )
+                    })?;
+                }
             }
         }
         Ok(HostMasquerade {
-            ip_mask,
+            ipv4_mask,
+            ipv6_mask,
             interface,
             firewall,
         })
@@ -81,40 +143,48 @@ impl HostMasquerade {
 
 impl Drop for HostMasquerade {
     fn drop(&mut self) {
-        // Only drop these settings if there are no other active namespaces
         let namespaces = crate::util::get_lock_namespaces();
         debug!("Remaining namespaces: {namespaces:?}");
         if namespaces.is_ok() && namespaces.unwrap().is_empty() {
             match self.firewall {
                 Firewall::IpTables => {
-                    sudo_command(&[
-                        "iptables",
-                        "-t",
-                        "nat",
-                        "-D",
-                        "POSTROUTING",
-                        "-s",
-                        &self.ip_mask,
-                        "-o",
-                        &self.interface.name,
-                        "-j",
-                        "MASQUERADE",
-                    ])
-                    .unwrap_or_else(|_| {
-                        panic!(
-                            "Failed to delete iptables masquerade rule, ip_mask: {}, interface: {}",
-                            &self.ip_mask, &self.interface.name
-                        )
-                    });
+                    if let Some(ref mask) = self.ipv4_mask {
+                        sudo_command(&[
+                            "iptables",
+                            "-t",
+                            "nat",
+                            "-D",
+                            "POSTROUTING",
+                            "-s",
+                            mask,
+                            "-o",
+                            &self.interface.name,
+                            "-j",
+                            "MASQUERADE",
+                        ])
+                        .unwrap_or_else(|e| log::warn!("Failed to delete iptables rule: {}", e));
+                    }
+                    if let Some(ref mask) = self.ipv6_mask {
+                        sudo_command(&[
+                            "ip6tables",
+                            "-t",
+                            "nat",
+                            "-D",
+                            "POSTROUTING",
+                            "-s",
+                            mask,
+                            "-o",
+                            &self.interface.name,
+                            "-j",
+                            "MASQUERADE",
+                        ])
+                        .unwrap_or_else(|e| log::warn!("Failed to delete ip6tables rule: {}", e));
+                    }
                 }
                 Firewall::NfTables => {
+                    // The entire table is deleted, removing all rules within it.
                     sudo_command(&["nft", "delete", "table", "inet", "vopono_nat"]).unwrap_or_else(
-                        |_| {
-                            panic!(
-                            "Failed to delete nftables masquerade rule, ip_mask: {}, interface: {}",
-                            &self.ip_mask, &self.interface.name
-                        )
-                        },
+                        |e| log::warn!("Failed to delete nftables table vopono_nat: {}", e),
                     );
                 }
             }
@@ -127,6 +197,7 @@ pub struct FirewallException {
     host_interface: NetworkInterface,
     ns_interface: NetworkInterface,
     firewall: Firewall,
+    disable_ipv6: bool,
 }
 
 impl FirewallException {
@@ -136,6 +207,7 @@ impl FirewallException {
         ns_interface: NetworkInterface,
         host_interface: NetworkInterface,
         firewall: Firewall,
+        disable_ipv6: bool,
     ) -> anyhow::Result<Self> {
         match firewall {
             Firewall::IpTables => {
@@ -173,6 +245,30 @@ impl FirewallException {
                         &host_interface.name, &ns_interface.name
                     )
                 })?;
+                if !disable_ipv6 {
+                    sudo_command(&[
+                        "ip6tables",
+                        "-I",
+                        "FORWARD",
+                        "-i",
+                        &host_interface.name,
+                        "-o",
+                        &ns_interface.name,
+                        "-j",
+                        "ACCEPT",
+                    ])?;
+                    sudo_command(&[
+                        "ip6tables",
+                        "-I",
+                        "FORWARD",
+                        "-o",
+                        &host_interface.name,
+                        "-i",
+                        &ns_interface.name,
+                        "-j",
+                        "ACCEPT",
+                    ])?;
+                }
             }
             Firewall::NfTables => {
                 sudo_command(&["nft", "add", "table", "inet", "vopono_bridge"])
@@ -231,6 +327,7 @@ impl FirewallException {
             host_interface,
             ns_interface,
             firewall,
+            disable_ipv6,
         })
     }
 }
@@ -255,7 +352,7 @@ impl Drop for FirewallException {
                     "ACCEPT",
                 ])
                 .unwrap_or_else(|_| {
-                    panic!(
+                    log::error!(
                         "Failed to delete iptables host output rule, host interface: {}, namespace interface: {}",
                         &self.host_interface.name, &self.ns_interface.name
                     )
@@ -273,11 +370,49 @@ impl Drop for FirewallException {
                     "ACCEPT",
                 ])
                 .unwrap_or_else(|_| {
-                    panic!(
+                    log::error!(
                         "Failed to delete iptables host input rule, host interface: {}, namespace interface: {}",
                         &self.host_interface.name, &self.ns_interface.name
                     )
                 });
+
+                    if !self.disable_ipv6 {
+                        sudo_command(&[
+                        "ip6tables",
+                        "-D",
+                        "FORWARD",
+                        "-o",
+                        &self.host_interface.name,
+                        "-i",
+                        &self.ns_interface.name,
+                        "-j",
+                        "ACCEPT",
+                    ])
+                .unwrap_or_else(|_| {
+                    log::error!(
+                        "Failed to delete ip6tables host output rule, host interface: {}, namespace interface: {}",
+                        &self.host_interface.name, &self.ns_interface.name
+                    )
+                });
+
+                        sudo_command(&[
+                        "ip6tables",
+                        "-D",
+                        "FORWARD",
+                        "-i",
+                        &self.host_interface.name,
+                        "-o",
+                        &self.ns_interface.name,
+                        "-j",
+                        "ACCEPT",
+                    ])
+                .unwrap_or_else(|_| {
+                    log::error!(
+                        "Failed to delete ip6tables host input rule, host interface: {}, namespace interface: {}",
+                        &self.host_interface.name, &self.ns_interface.name
+                    )
+                });
+                    }
                 }
                 Firewall::NfTables => {
                     sudo_command(&["nft", "delete", "table", "inet", "vopono_bridge"]).unwrap_or_else(

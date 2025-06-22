@@ -155,6 +155,7 @@ pub fn exec(
             target_subnet,
             parsed_command.open_hosts.as_ref(),
             parsed_command.allow_host_access,
+            parsed_command.disable_ipv6,
         )?;
 
         if parsed_command.firewall == vopono_core::network::firewall::Firewall::NfTables {
@@ -163,12 +164,31 @@ pub fn exec(
 
         // Add local host to open hosts if allow_host_access enabled
         if parsed_command.allow_host_access {
-            let host_ip = ns.veth_pair_ips.as_ref().unwrap().host_ip;
+            let host_ip = ns
+                .veth_pair_ips
+                .as_ref()
+                .expect("No veth pair")
+                .ipv4
+                .as_ref()
+                .expect("No IPv4 host address")
+                .host_ip;
             warn!("Allowing host access from network namespace, host IP address is: {host_ip}");
             if let Some(oh) = parsed_command.open_hosts.iter_mut().next() {
                 oh.push(host_ip);
             } else {
                 parsed_command.open_hosts = Some(vec![host_ip]);
+            }
+
+            // Add IPv6 host if it exists
+            if let Some(ref mut open_hosts) = parsed_command.open_hosts {
+                warn!(
+                    "Allowing host access from network namespace, host IPv6 address is: {host_ip}"
+                );
+                ns.veth_pair_ips
+                    .as_ref()
+                    .iter()
+                    .flat_map(|p| p.ipv6.as_ref())
+                    .for_each(|ipv6| open_hosts.push(ipv6.host_ip));
             }
         }
 
@@ -181,6 +201,7 @@ pub fn exec(
             parsed_command.interface.clone(),
             NetworkInterface::new(ns.veth_pair.as_ref().unwrap().dest.clone())?,
             parsed_command.firewall,
+            parsed_command.disable_ipv6,
         )?;
         _sysctl = SysCtl::enable_ipv4_forwarding();
 
@@ -233,7 +254,6 @@ pub fn exec(
     // Forwarder is returned so it isn't dropped
 
     // Launch TCP proxy server on other threads if forwarding ports
-    // TODO: Fix when running as root
     let mut proxy = Vec::new();
     if let Some(f) = parsed_command.forward.clone() {
         if !(parsed_command.no_proxy || f.is_empty()) {
@@ -241,11 +261,28 @@ pub fn exec(
                 debug!(
                     "Forwarding port: {}, {:?}",
                     p,
-                    ns.veth_pair_ips.as_ref().unwrap().namespace_ip
+                    ns.veth_pair_ips
+                        .as_ref()
+                        .unwrap()
+                        .ipv4
+                        .as_ref()
+                        .unwrap()
+                        .namespace_ip
                 );
+
+                // TODO: Do we want IPv6 forwarding?
                 proxy.push(basic_tcp_proxy::TcpProxy::new(
                     p,
-                    std::net::SocketAddr::new(ns.veth_pair_ips.as_ref().unwrap().namespace_ip, p),
+                    std::net::SocketAddr::new(
+                        ns.veth_pair_ips
+                            .as_ref()
+                            .unwrap()
+                            .ipv4
+                            .as_ref()
+                            .unwrap()
+                            .namespace_ip,
+                        p,
+                    ),
                     false,
                 ));
             }

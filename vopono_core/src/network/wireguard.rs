@@ -1,16 +1,14 @@
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use super::trojan::trojan_config::TrojanConfig;
+use crate::network::wireguard_config::WireguardConfig;
 use crate::util::sudo_command;
 use anyhow::{Context, anyhow};
 use ipnet::IpNet;
 use log::{debug, error, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::fmt::Display;
 use std::io::Write;
-use std::net::SocketAddr;
-use std::net::ToSocketAddrs;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::path::PathBuf;
@@ -546,6 +544,14 @@ pub fn killswitch(
             )
             .context("Executing ip6tables")?;
 
+            // TODO: Only use ipv6 if not disabled?
+
+            NetworkNamespace::exec(
+                &netns.name,
+                &["ip6tables", "-A", "OUTPUT", "-p", "icmpv6", "-j", "ACCEPT"],
+            )
+            .context("Allowing ICMPv6 for NDP")?;
+
             NetworkNamespace::exec(
                 &netns.name,
                 &[
@@ -571,6 +577,23 @@ pub fn killswitch(
             )?;
         }
         Firewall::NfTables => {
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "output",
+                    "meta",
+                    "l4proto",
+                    "icmpv6",
+                    "accept",
+                ],
+            )
+            .context("Allowing ICMPv6 for NDP in nftables")?;
+
             NetworkNamespace::exec(
                 &netns.name,
                 &[
@@ -635,227 +658,5 @@ impl Drop for Wireguard {
                 Err(e) => warn!("Failed to delete nft table: {}: {:?}", self.ns_name, e),
             };
         }
-    }
-}
-
-#[derive(Deserialize, Serialize, Clone)]
-pub struct WireguardInterface {
-    #[serde(rename = "PrivateKey")]
-    pub private_key: String,
-    #[serde(rename = "Address", deserialize_with = "de_vec_ipnet")]
-    pub address: Vec<IpNet>,
-    #[serde(rename = "DNS", deserialize_with = "de_vec_ipaddr")]
-    pub dns: Option<Vec<IpAddr>>,
-    #[serde(rename = "MTU")]
-    pub mtu: Option<String>,
-}
-
-impl std::fmt::Debug for WireguardInterface {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("WireguardInterface")
-            .field("private_key", &"********".to_string())
-            .field("address", &self.address)
-            .field("dns", &self.dns)
-            .finish()
-    }
-}
-
-#[derive(Debug)]
-pub enum WireguardEndpoint {
-    HostnameWithPort(String, u16),
-    IpWithPort(SocketAddr),
-}
-
-impl WireguardEndpoint {
-    pub fn ip_or_hostname(&self) -> String {
-        match self {
-            WireguardEndpoint::HostnameWithPort(host, _) => host.clone(),
-            WireguardEndpoint::IpWithPort(addr) => addr.ip().to_string(),
-        }
-    }
-    pub fn port(&self) -> u16 {
-        match self {
-            WireguardEndpoint::HostnameWithPort(_, port) => *port,
-            WireguardEndpoint::IpWithPort(addr) => addr.port(),
-        }
-    }
-    pub fn resolve_ip(&self) -> anyhow::Result<IpAddr> {
-        match self {
-            WireguardEndpoint::HostnameWithPort(host, _) => {
-                let addr = host
-                    .to_socket_addrs()
-                    .map_err(|_| anyhow!("Failed to resolve hostname"))?
-                    .next()
-                    .ok_or_else(|| anyhow!("No address found for hostname"))?;
-                Ok(addr.ip())
-            }
-            WireguardEndpoint::IpWithPort(addr) => Ok(addr.ip()),
-        }
-    }
-
-    pub fn is_ip(&self) -> bool {
-        match self {
-            WireguardEndpoint::HostnameWithPort(_, _) => false,
-            WireguardEndpoint::IpWithPort(_) => true,
-        }
-    }
-}
-
-impl FromStr for WireguardEndpoint {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Ok(addr) = s.parse::<SocketAddr>() {
-            Ok(WireguardEndpoint::IpWithPort(addr))
-        } else if let Some((host, port)) = s.split_once(':') {
-            let port = port.parse::<u16>().map_err(|_| anyhow!("Invalid port"))?;
-            Ok(WireguardEndpoint::HostnameWithPort(host.to_string(), port))
-        } else {
-            Err(anyhow!("Invalid Wireguard endpoint format"))
-        }
-    }
-}
-
-impl Display for WireguardEndpoint {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WireguardEndpoint::HostnameWithPort(host, port) => write!(f, "{host}:{port}"),
-            WireguardEndpoint::IpWithPort(addr) => write!(f, "{addr}"),
-        }
-    }
-}
-
-impl Serialize for WireguardEndpoint {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
-    }
-}
-
-impl<'de> Deserialize<'de> for WireguardEndpoint {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let s = String::deserialize(deserializer)?;
-        s.parse::<WireguardEndpoint>()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-#[derive(Deserialize, Debug, Serialize)]
-pub struct WireguardPeer {
-    #[serde(rename = "PublicKey")]
-    pub public_key: String,
-    #[serde(rename = "AllowedIPs", deserialize_with = "de_vec_ipnet")]
-    pub allowed_ips: Vec<IpNet>,
-    #[serde(rename = "Endpoint")]
-    pub endpoint: WireguardEndpoint,
-    #[serde(rename = "PersistentKeepalive")]
-    pub keepalive: Option<String>,
-}
-
-#[derive(Deserialize, Debug, Serialize)]
-pub struct WireguardConfig {
-    #[serde(rename = "Interface")]
-    pub interface: WireguardInterface,
-    #[serde(rename = "Peer")]
-    pub peer: WireguardPeer,
-}
-
-impl TryInto<String> for WireguardConfig {
-    type Error = anyhow::Error;
-
-    fn try_into(self) -> Result<String, Self::Error> {
-        // TODO: avoid hacky regex for TOML -> wireguard config conversion
-        let re = Regex::new(r"=\s\[(?P<value>[^\]]+)\]")?;
-        let mut toml = toml::to_string(&self)?;
-        toml.retain(|c| c != '"');
-        let toml = toml.replace(", ", ",");
-        Ok(re.replace_all(&toml, "= $value").to_string())
-    }
-}
-
-impl FromStr for WireguardConfig {
-    type Err = anyhow::Error;
-
-    fn from_str(config_string: &str) -> Result<Self, Self::Err> {
-        // TODO: Avoid hacky regex for valid toml
-        let re = Regex::new(
-            r"(?m)^[[:blank:]]*(?P<key>[^\s=#]+)[[:blank:]]*=[[:blank:]]*(?P<value>[^\r\n#]+?)[[:blank:]]*(?:#[^\r\n]*)?\r?$",
-        )?;
-        let mut config_string = re
-            .replace_all(config_string, "$key = \"$value\"")
-            .to_string();
-        config_string = config_string.replace("\"\"", "\"");
-        config_string.push('\n');
-        toml::from_str(&config_string)
-            .map_err(anyhow::Error::from)
-            .with_context(|| {
-                format!(
-                    "Failed while converting Wireguard config to TOML. Result may be malformed:\n\n{config_string}"
-                )
-            })
-    }
-}
-
-pub fn de_vec_ipnet<'de, D>(deserializer: D) -> Result<Vec<IpNet>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    // serde::de::value::StringDeserializer::deserialize_string(deserializer)?;
-    let raw = String::deserialize(deserializer)?;
-    let strings = raw.split(',');
-    match strings
-        .map(|x| x.trim().parse::<IpNet>())
-        .collect::<Result<Vec<IpNet>, ipnet::AddrParseError>>()
-    {
-        Ok(x) => Ok(x),
-        Err(x) => Err(serde::de::Error::custom(anyhow!(
-            "Wireguard IpNet deserialisation error: {:?}",
-            x
-        ))),
-    }
-}
-
-pub fn de_vec_ipaddr<'de, D>(deserializer: D) -> Result<Option<Vec<IpAddr>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = match String::deserialize(deserializer) {
-        Ok(s) => s,
-        Err(e) => {
-            debug!("Missing optional DNS field in Wireguard config - serde");
-            debug!("serde: {e:?}");
-            return Ok(None);
-        }
-    };
-    debug!("Deserializing: {raw} to Vec<IpAddr>");
-    let strings = raw.split(',');
-    match strings
-        .map(|x| x.trim().parse::<IpAddr>())
-        .collect::<Result<Vec<IpAddr>, _>>()
-    {
-        Ok(x) => Ok(Some(x)),
-        Err(x) => Err(serde::de::Error::custom(anyhow!(
-            "Wireguard IpAddr deserialisation error: {:?}",
-            x
-        ))),
-    }
-}
-
-pub fn de_socketaddr<'de, D>(deserializer: D) -> Result<std::net::SocketAddr, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = String::deserialize(deserializer)?;
-    match raw.trim().to_socket_addrs() {
-        Ok(mut x) => Ok(x.next().unwrap()),
-        Err(x) => Err(serde::de::Error::custom(anyhow!(
-            "Wireguard IpAddr deserialisation error: {:?}",
-            x
-        ))),
     }
 }

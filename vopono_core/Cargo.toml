@@ -1,7 +1,7 @@
 [package]
 name = "vopono_core"
 description = "Library code for running VPN connections in network namespaces"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2024"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 license = "GPL-3.0-or-later"
@@ -54,3 +54,4 @@ libc = "0.2"
 pem = "3"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 rustls-connector = { version = "0.21", default-features = false }
+nom = "8"

@@ -1,6 +1,6 @@
 use super::{PrivateInternetAccess, Provider, WireguardProvider};
 use crate::config::providers::{BoolChoice, UiClient};
-use crate::network::wireguard::{
+use crate::network::wireguard_config::{
     WireguardConfig, WireguardEndpoint, WireguardInterface, WireguardPeer,
 };
 use crate::util::delete_all_files_in_dir;
@@ -255,7 +255,7 @@ impl WireguardProvider for PrivateInternetAccess {
 
                 // Create file, write TOML
                 let path = wireguard_dir.join(format!("{id}.conf"));
-                let wireguard_conf: String = wireguard_conf.try_into()?;
+                let wireguard_conf: String = wireguard_conf.to_string();
                 let mut f = File::create(path)?;
                 f.write_all(wireguard_conf.as_bytes())?;
 
@@ -306,7 +306,7 @@ impl WireguardProvider for PrivateInternetAccess {
             format!("{}:{}", server_info.server_ip, server_info.server_port).parse()?;
 
         // Overwrite the existing invalid wg config with a new one that is now valid
-        let new_wg_config: String = wg_config.try_into()?;
+        let new_wg_config: String = wg_config.to_string();
         let mut f = File::create(wg_config_file)?;
         f.write_all(new_wg_config.as_bytes())?;
 

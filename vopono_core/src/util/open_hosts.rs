@@ -4,23 +4,33 @@ use std::net::IpAddr;
 
 pub fn open_hosts(netns_name: &str, hosts: &[IpAddr], firewall: Firewall) -> anyhow::Result<()> {
     for host in hosts {
+        let host_str = &host.to_string();
         match firewall {
             Firewall::IpTables => {
+                // Select the correct command based on IP version
+                let iptables_cmd = if host.is_ipv4() {
+                    "iptables"
+                } else {
+                    "ip6tables"
+                };
+
                 NetworkNamespace::exec(
                     netns_name,
                     &[
-                        "iptables",
+                        iptables_cmd,
                         "-I",
                         "OUTPUT",
                         "1",
                         "-d",
-                        &host.to_string(),
+                        host_str,
                         "-j",
                         "ACCEPT",
                     ],
                 )?;
             }
             Firewall::NfTables => {
+                let addr_family_keyword = if host.is_ipv4() { "ip" } else { "ip6" };
+
                 NetworkNamespace::exec(
                     netns_name,
                     &[
@@ -30,9 +40,9 @@ pub fn open_hosts(netns_name: &str, hosts: &[IpAddr], firewall: Firewall) -> any
                         "inet",
                         netns_name,
                         "output",
-                        "ip",
+                        addr_family_keyword, // Use 'ip' or 'ip6'
                         "daddr",
-                        &host.to_string(),
+                        host_str,
                         "counter",
                         "accept",
                     ],

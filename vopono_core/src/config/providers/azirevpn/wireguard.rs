@@ -4,7 +4,7 @@ use crate::config::providers::azirevpn::{
     ExistingDevicesResponse, LocationResponse, ReplaceKeyResponse, UserProfileResponse,
 };
 use crate::config::providers::{BoolChoice, UiClient};
-use crate::network::wireguard::{
+use crate::network::wireguard_config::{
     WireguardConfig, WireguardEndpoint, WireguardInterface, WireguardPeer,
 };
 use crate::util::country_map::code_to_country_map;
