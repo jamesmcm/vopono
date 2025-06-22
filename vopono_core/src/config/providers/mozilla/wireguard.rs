@@ -8,8 +8,9 @@ use crate::config::providers::ConfigurationChoice;
 use crate::config::providers::Input;
 use crate::config::providers::InputNumericu16;
 use crate::config::providers::UiClient;
-use crate::network::wireguard::WireguardEndpoint;
-use crate::network::wireguard::{WireguardConfig, WireguardInterface, WireguardPeer};
+use crate::network::wireguard_config::{
+    WireguardConfig, WireguardEndpoint, WireguardInterface, WireguardPeer,
+};
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
 use anyhow::anyhow;

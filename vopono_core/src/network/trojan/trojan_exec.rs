@@ -5,7 +5,7 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 use which::which;
 
-use crate::network::{netns::NetworkNamespace, wireguard::WireguardPeer};
+use crate::network::{netns::NetworkNamespace, wireguard_config::WireguardPeer};
 
 use super::{TrojanHost, get_cert, trojan_config::TrojanConfig};
 

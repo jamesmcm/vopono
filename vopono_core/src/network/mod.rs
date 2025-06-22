@@ -14,3 +14,4 @@ pub mod trojan;
 pub mod veth_pair;
 pub mod warp;
 pub mod wireguard;
+pub mod wireguard_config;

@@ -7,7 +7,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::network::wireguard::WireguardPeer;
+use crate::network::wireguard_config::WireguardPeer;
 
 use super::TrojanHost; // Required for IpAddr type
 

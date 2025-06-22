@@ -10,10 +10,11 @@ use super::trojan::TrojanHost;
 use super::trojan::trojan_exec::Trojan;
 use super::veth_pair::VethPair;
 use super::warp::Warp;
-use super::wireguard::{Wireguard, WireguardPeer};
+use super::wireguard::Wireguard;
 use crate::config::providers::{UiClient, VpnProvider};
 use crate::config::vpn::Protocol;
 use crate::network::host_masquerade::FirewallException;
+use crate::network::wireguard_config::WireguardPeer;
 use crate::util::{config_dir, parse_command_str, set_config_permissions, sudo_command};
 use anyhow::{Context, anyhow};
 use log::{debug, info, warn};
@@ -50,10 +51,17 @@ pub struct NetworkNamespace {
     pub trojan: Option<Trojan>,
 }
 
+/// Pair of IP addresses for veth tunnel
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct VethPairIPs {
+pub struct IpPair {
     pub host_ip: IpAddr,
     pub namespace_ip: IpAddr,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct VethPairIPs {
+    pub ipv4: Option<IpPair>,
+    pub ipv6: Option<IpPair>, // None if IPv6 disabled
 }
 
 impl NetworkNamespace {
@@ -219,34 +227,26 @@ impl NetworkNamespace {
         target_subnet: u8,
         hosts: Option<&Vec<IpAddr>>,
         allow_host_access: bool,
+        disable_ipv6: bool,
     ) -> anyhow::Result<()> {
-        // TODO: Handle case where IP address taken in better way i.e. don't just change subnet
-        let veth_dest = &self
-            .veth_pair
-            .as_ref()
-            .expect("Destination veth undefined")
-            .dest;
+        let veth_dest = &self.veth_pair.as_ref().expect("veth_pair is None").dest;
+        let veth_source = &self.veth_pair.as_ref().expect("veth_pair is None").source;
+        let mut veth_ips = VethPairIPs::default();
 
-        let veth_source = &self
-            .veth_pair
-            .as_ref()
-            .expect("Source veth undefined")
-            .source;
+        let ipv4_host_ip_str = format!("10.200.{target_subnet}.1");
+        let ipv4_ns_ip_str = format!("10.200.{target_subnet}.2");
+        let ipv4_host_ip_cidr = format!("{ipv4_host_ip_str}/24");
+        let ipv4_ns_ip_cidr = format!("{ipv4_ns_ip_str}/24");
 
-        let ip = format!("10.200.{target_subnet}.1/24");
-        let ip_nosub = format!("10.200.{target_subnet}.1");
-        let veth_source_ip = format!("10.200.{target_subnet}.2/24");
-        let veth_source_ip_nosub = format!("10.200.{target_subnet}.2");
-
-        sudo_command(&["ip", "addr", "add", &ip, "dev", veth_dest]).with_context(|| {
-            format!("Failed to assign static IP to veth destination: {veth_dest}")
-        })?;
+        sudo_command(&["ip", "addr", "add", &ipv4_host_ip_cidr, "dev", veth_dest])
+            .with_context(|| format!("Failed to assign IPv4 to veth destination: {veth_dest}"))?;
 
         Self::exec(
             &self.name,
-            &["ip", "addr", "add", &veth_source_ip, "dev", veth_source],
+            &["ip", "addr", "add", &ipv4_ns_ip_cidr, "dev", veth_source],
         )
-        .with_context(|| format!("Failed to assign static IP to veth source: {veth_source}"))?;
+        .with_context(|| format!("Failed to assign IPv4 to veth source: {veth_source}"))?;
+
         Self::exec(
             &self.name,
             &[
@@ -255,18 +255,94 @@ impl NetworkNamespace {
                 "add",
                 "default",
                 "via",
-                &ip_nosub,
+                &ipv4_host_ip_str,
                 "dev",
                 veth_source,
             ],
         )
-        .with_context(|| format!("Failed to assign static IP to veth source: {veth_source}"))?;
+        .with_context(|| "Failed to add IPv4 default route in netns")?;
 
-        // Here we add direct routes for open_hosts
-        // Note this is not done for all open_hosts calls as the ProtonVPN port forwarding
-        // traffic still needs to go through the VPN
+        info!("IPv4 address of namespace as seen from host: {ipv4_ns_ip_str}");
+        info!("IPv4 address of host as seen from namespace: {ipv4_host_ip_str}");
+
+        veth_ips.ipv4 = Some(IpPair {
+            host_ip: ipv4_host_ip_str.parse()?,
+            namespace_ip: ipv4_ns_ip_str.parse()?,
+        });
+
+        if !disable_ipv6 {
+            // Using Unique Local Addresses (ULA) fd42:4242:{subnet}::/64
+            let ipv6_host_ip_str = format!("fd42:4242:{:x}::1", target_subnet);
+            let ipv6_ns_ip_str = format!("fd42:4242:{:x}::2", target_subnet);
+            let ipv6_host_ip_cidr = format!("{ipv6_host_ip_str}/64");
+            let ipv6_ns_ip_cidr = format!("{ipv6_ns_ip_str}/64");
+
+            // TODO: Do we want to do this here?
+            sudo_command(&[
+                "sysctl",
+                "-w",
+                &format!("net.ipv6.conf.{}.disable_ipv6=0", veth_dest),
+            ])?;
+
+            sudo_command(&["ip", "addr", "add", &ipv6_host_ip_cidr, "dev", veth_dest])
+                .with_context(|| {
+                    format!("Failed to assign IPv6 to veth destination: {veth_dest}")
+                })?;
+
+            Self::exec(
+                &self.name,
+                &["ip", "addr", "add", &ipv6_ns_ip_cidr, "dev", veth_source],
+            )
+            .with_context(|| format!("Failed to assign IPv6 to veth source: {veth_source}"))?;
+
+            Self::exec(
+                &self.name,
+                &[
+                    "ip",
+                    "-6",
+                    "route",
+                    "add",
+                    "default",
+                    "via",
+                    &ipv6_host_ip_str,
+                    "dev",
+                    veth_source,
+                ],
+            )
+            .with_context(|| "Failed to add IPv6 default route in netns")?;
+
+            info!(
+                "IPv6 address of namespace as seen from host: {}",
+                ipv6_ns_ip_str
+            );
+            info!(
+                "IPv6 address of host as seen from namespace: {}",
+                ipv6_host_ip_str
+            );
+
+            veth_ips.ipv6 = Some(IpPair {
+                host_ip: ipv6_host_ip_str.parse()?,
+                namespace_ip: ipv6_ns_ip_str.parse()?,
+            });
+        }
+
         if let Some(my_hosts) = hosts {
             for host in my_hosts {
+                let via_ip = match host {
+                    IpAddr::V4(_) => &ipv4_host_ip_str,
+                    IpAddr::V6(_) => {
+                        if disable_ipv6 {
+                            continue; // Skip IPv6 hosts if IPv6 disabled
+                        } else {
+                            &veth_ips
+                                .ipv6
+                                .as_ref()
+                                .context("IPv6 not configured")?
+                                .host_ip
+                                .to_string()
+                        }
+                    }
+                };
                 Self::exec(
                     &self.name,
                     &[
@@ -275,7 +351,7 @@ impl NetworkNamespace {
                         "add",
                         &host.to_string(),
                         "via",
-                        &ip_nosub,
+                        via_ip,
                         "dev",
                         veth_source,
                     ],
@@ -287,29 +363,41 @@ impl NetworkNamespace {
         }
 
         if allow_host_access {
-            Self::exec(&self.name, &[
-                "ip",
-                "route",
-                "add",
-                &ip_nosub,
-                "via",
-                &ip_nosub,
-                "dev",
-                veth_source,
-            ])
-            .with_context(|| {
-                format!(
-                    "Failed to assign hosts route for local host {ip_nosub} to veth source: {veth_source}"
+            Self::exec(
+                &self.name,
+                &[
+                    "ip",
+                    "route",
+                    "add",
+                    &ipv4_host_ip_str,
+                    "via",
+                    &ipv4_host_ip_str,
+                    "dev",
+                    veth_source,
+                ],
+            )
+            .context("Failed to add IPv4 host access route")?;
+            if let Some(ipv6_pair) = &veth_ips.ipv6 {
+                let ipv6_host_ip_str = ipv6_pair.host_ip.to_string();
+                Self::exec(
+                    &self.name,
+                    &[
+                        "ip",
+                        "route",
+                        "add",
+                        &ipv6_host_ip_str,
+                        "via",
+                        &ipv6_host_ip_str,
+                        "dev",
+                        veth_source,
+                    ],
                 )
-            })?;
+                .context("Failed to add IPv6 host access route")?;
+            }
         }
 
-        info!("IP address of namespace as seen from host: {veth_source_ip_nosub}");
-        info!("IP address of host as seen from namespace: {ip_nosub}");
-        self.veth_pair_ips = Some(VethPairIPs {
-            host_ip: ip_nosub.parse()?,
-            namespace_ip: veth_source_ip_nosub.parse()?,
-        });
+        // Store the IPs
+        self.veth_pair_ips = Some(veth_ips);
         Ok(())
     }
 
@@ -327,8 +415,7 @@ impl NetworkNamespace {
             hosts_entries,
             self.veth_pair_ips
                 .as_ref()
-                .expect("Failed to get veth pair IPs")
-                .host_ip,
+                .expect("Failed to get veth pair IPs for DNS config"),
             allow_host_access,
             self.firewall,
         )?);
@@ -492,25 +579,36 @@ impl NetworkNamespace {
         interface: NetworkInterface,
         firewall: Firewall,
     ) -> anyhow::Result<()> {
+        let veth_ips = self.veth_pair_ips.as_ref().context("Veth IPs not set")?;
+
+        let ipv4_mask = veth_ips
+            .ipv4
+            .as_ref()
+            .map(|_| format!("10.200.{}.0/24", target_subnet));
+
+        let ipv6_mask = veth_ips
+            .ipv6
+            .as_ref()
+            .map(|_| format!("fd42:4242:{:x}::/64", target_subnet)); // Will be None if IPv6 disabled
+
         self.host_masquerade = Some(HostMasquerade::add_masquerade_rule(
-            format!("10.200.{target_subnet}.0/24"),
-            interface,
-            firewall,
+            ipv4_mask, ipv6_mask, interface, firewall,
         )?);
 
         Ok(())
     }
-
     pub fn add_firewall_exception(
         &mut self,
         host_interface: NetworkInterface,
         ns_interface: NetworkInterface,
         firewall: Firewall,
+        disable_ipv6: bool,
     ) -> anyhow::Result<()> {
         self.firewall_exception = Some(FirewallException::add_firewall_exception(
             host_interface,
             ns_interface,
             firewall,
+            disable_ipv6,
         )?);
 
         Ok(())
@@ -523,8 +621,17 @@ impl NetworkNamespace {
     pub fn add_env_vars_to_cmd(&self, cmd: &mut Command) {
         cmd.env("VOPONO_NS", &self.name);
         if let Some(ref veth_pair_ips) = self.veth_pair_ips {
-            cmd.env("VOPONO_NS_IP", veth_pair_ips.namespace_ip.to_string());
-            cmd.env("VOPONO_HOST_IP", veth_pair_ips.host_ip.to_string());
+            if let Some(ipv4pair) = veth_pair_ips.ipv4.clone() {
+                cmd.env("VOPONO_NS_IP", ipv4pair.namespace_ip.to_string());
+                cmd.env("VOPONO_HOST_IP", ipv4pair.host_ip.to_string());
+            } else {
+                log::error!("No IPv4 veth pair!")
+            };
+
+            if let Some(ipv6pair) = veth_pair_ips.ipv6.clone() {
+                cmd.env("VOPONO_NS_IPV6", ipv6pair.namespace_ip.to_string());
+                cmd.env("VOPONO_HOST_IPV6", ipv6pair.host_ip.to_string());
+            }
         }
     }
 

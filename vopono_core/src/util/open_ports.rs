@@ -1,26 +1,41 @@
 use crate::network::firewall::Firewall;
 use crate::network::netns::NetworkNamespace;
 
+// TODO: Should we accept disable_ipv6 here and not try ip6tables if disabled
 pub fn open_ports(
     netns: &NetworkNamespace,
     ports: &[u16],
     firewall: Firewall,
 ) -> anyhow::Result<()> {
-    // TODO: Allow UDP port forwarding?
-    // IPv6 forwarding?
+    // TODO: Allow UDP port opening?
     for port in ports {
+        let port_str = &port.to_string();
         match firewall {
             Firewall::IpTables => {
                 NetworkNamespace::exec(
                     &netns.name,
                     &[
-                        "iptables",
+                        "iptables", "-I", "INPUT", "-p", "tcp", "--dport", port_str, "-j", "ACCEPT",
+                    ],
+                )?;
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[
+                        "iptables", "-I", "OUTPUT", "-p", "tcp", "--sport", port_str, "-j",
+                        "ACCEPT",
+                    ],
+                )?;
+
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[
+                        "ip6tables",
                         "-I",
                         "INPUT",
                         "-p",
                         "tcp",
                         "--dport",
-                        &port.to_string(),
+                        port_str,
                         "-j",
                         "ACCEPT",
                     ],
@@ -28,13 +43,13 @@ pub fn open_ports(
                 NetworkNamespace::exec(
                     &netns.name,
                     &[
-                        "iptables",
+                        "ip6tables",
                         "-I",
                         "OUTPUT",
                         "-p",
                         "tcp",
                         "--sport",
-                        &port.to_string(),
+                        port_str,
                         "-j",
                         "ACCEPT",
                     ],
@@ -52,7 +67,7 @@ pub fn open_ports(
                         "input",
                         "tcp",
                         "dport",
-                        &port.to_string(),
+                        port_str,
                         "counter",
                         "accept",
                     ],
@@ -68,7 +83,7 @@ pub fn open_ports(
                         "output",
                         "tcp",
                         "sport",
-                        &port.to_string(),
+                        port_str,
                         "counter",
                         "accept",
                     ],
