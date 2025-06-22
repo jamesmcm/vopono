@@ -18,13 +18,13 @@ use std::net::ToSocketAddrs;
 use std::str::FromStr;
 
 // A key is alphanumeric, e.g., "Address"
-fn parse_key<'a>(input: &'a str) -> IResult<&'a str, &'a str> {
+fn parse_key(input: &str) -> IResult<&str, &str> {
     take_while1(|c: char| c.is_alphanumeric()).parse(input)
 }
 
 // A value is everything after '=' until the end of the line, trimmed.
 // It also handles and removes inline comments.
-fn parse_value<'a>(input: &'a str) -> IResult<&'a str, &'a str> {
+fn parse_value(input: &str) -> IResult<&str, &str> {
     map(is_not("\n\r"), |s: &str| {
         s.split('#').next().unwrap_or("").trim()
     })
@@ -32,7 +32,7 @@ fn parse_value<'a>(input: &'a str) -> IResult<&'a str, &'a str> {
 }
 
 // A key-value pair is `Key = Value`
-fn parse_key_value<'a>(input: &'a str) -> IResult<&'a str, (&'a str, &'a str)> {
+fn parse_key_value(input: &str) -> IResult<&str, (&str, &str)> {
     separated_pair(
         parse_key,
         delimited(multispace0, tag("="), multispace0),
@@ -42,7 +42,7 @@ fn parse_key_value<'a>(input: &'a str) -> IResult<&'a str, (&'a str, &'a str)> {
 }
 
 // A section header is `[Name]`
-fn parse_section_header<'a>(input: &'a str) -> IResult<&'a str, &'a str> {
+fn parse_section_header(input: &str) -> IResult<&str, &str> {
     delimited(
         char('['),
         take_while1(|c: char| c.is_alphanumeric()),
@@ -53,7 +53,7 @@ fn parse_section_header<'a>(input: &'a str) -> IResult<&'a str, &'a str> {
 
 // A line can be a comment, whitespace, or a key-value pair.
 // We only want to keep the key-value pairs.
-fn parse_line<'a>(input: &'a str) -> IResult<&'a str, Option<(&'a str, &'a str)>> {
+fn parse_line(input: &str) -> IResult<&str, Option<(&str, &str)>> {
     alt((
         map(parse_key_value, Some),
         // Comment or empty line
@@ -68,7 +68,8 @@ fn parse_line<'a>(input: &'a str) -> IResult<&'a str, Option<(&'a str, &'a str)>
 }
 
 // A section is a header followed by lines, until the next section or EOF.
-fn parse_section<'a>(input: &'a str) -> IResult<&'a str, (&'a str, Vec<(&'a str, &'a str)>)> {
+#[allow(clippy::type_complexity)]
+fn parse_section(input: &str) -> IResult<&str, (&str, Vec<(&str, &str)>)> {
     let (input, name) = terminated(parse_section_header, multispace0).parse(input)?;
 
     // It's followed by many lines until the next section header or end of file
@@ -86,7 +87,7 @@ fn parse_section<'a>(input: &'a str) -> IResult<&'a str, (&'a str, Vec<(&'a str,
 
 // A custom space/comment consumer.
 // This will consume any amount of whitespace (including newlines) and full-line comments.
-fn spc<'a>(input: &'a str) -> IResult<&'a str, ()> {
+fn spc(input: &str) -> IResult<&str, ()> {
     map(
         many0(alt((
             // Consume one or more whitespace characters (including newlines)
@@ -106,9 +107,9 @@ fn spc<'a>(input: &'a str) -> IResult<&'a str, ()> {
 }
 
 // The main parser for the whole config file.
-fn parse_config<'a>(input: &'a str) -> IResult<&'a str, Vec<(&'a str, Vec<(&'a str, &'a str)>)>> {
+#[allow(clippy::type_complexity)]
+fn parse_config(input: &str) -> IResult<&str, Vec<(&str, Vec<(&str, &str)>)>> {
     all_consuming(many0(preceded(spc, parse_section))).parse(input)
-    // all_consuming(many0(preceded(multispace0, parse_section))).parse(input)
 }
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
