@@ -276,7 +276,12 @@ impl FirewallException {
 
                 sudo_command(&[
                     "nft",
-                    "add chain inet vopono_bridge forward { type filter hook forward priority -10 ; }",
+                    "add",
+                    "chain",
+                    "inet",
+                    "vopono_bridge",
+                    "forward",
+                    "{ type filter hook forward priority filter - 10 ; }",
                 ])
                 .context("Failed to create nft forward chain in vopono_bridge")?;
 
@@ -417,7 +422,7 @@ impl Drop for FirewallException {
                 Firewall::NfTables => {
                     sudo_command(&["nft", "delete", "table", "inet", "vopono_bridge"]).unwrap_or_else(
                     |_| {
-                        panic!(
+                        log::error!(
                             "Failed to delete nftables namespace bridge firewall rule, host interface: {}, namespace interface: {}",
                             &self.host_interface.name, &self.ns_interface.name
                         )
