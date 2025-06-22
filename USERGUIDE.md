@@ -964,3 +964,42 @@ In general, also test with `--no-killswitch` to disable the killswitch drop rule
 When encountering issues in name resolution (e.g. with OpenVPN resolving remote host names), please
 first try generating the VPN provider config files with IP addresses instead to see whether the issue
 is connection/firewall related or solely a DNS / hostname resolution issue.
+
+### Docker issues with nftables
+
+Docker sets a load of its own iptables and ip6tables rules when the
+service is enabled or running.
+
+Due to this, iptables is the default firewall since nftables will be
+overridden by the Docker settings, whereas the vopono iptables rules
+will correctly take priority as required.
+
+Note you can stop Docker and flush the rules to use nftables as follows
+(they will be recreated when Docker restarts on reboot):
+
+```sh
+$ sudo systemctl stop docker
+$ sudo systemctl stop docker.socket
+$ sudo iptables -P INPUT ACCEPT
+$ sudo iptables -P FORWARD ACCEPT
+$ sudo iptables -P OUTPUT ACCEPT
+$ sudo iptables -F
+$ sudo iptables -X
+$ sudo iptables -t nat -F
+$ sudo iptables -t nat -X
+$ sudo iptables -t mangle -F
+$ sudo iptables -t mangle -X
+$ sudo ip6tables -P INPUT ACCEPT
+$ sudo ip6tables -P FORWARD ACCEPT
+$ sudo ip6tables -P OUTPUT ACCEPT
+$ sudo ip6tables -F
+$ sudo ip6tables -X
+$ sudo ip6tables -t nat -F
+$ sudo ip6tables -t nat -X
+$ sudo ip6tables -t mangle -F
+$ sudo ip6tables -t mangle -X
+```
+
+Alternatively you can disable Docker iptables rules management (but
+you will have to set up equivalent rules e.g. in nftables), or use
+rootless Docker or Podman.
