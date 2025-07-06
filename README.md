@@ -8,7 +8,7 @@ as normal.
 vopono includes built-in killswitches for both Wireguard and OpenVPN.
 
 Currently Mullvad, AzireVPN, MozillaVPN, ProtonVPN, iVPN,
-NordVPN, AirVPN, HMA (HideMyAss) and PrivateInternetAccess are supported directly, with custom
+NordVPN, AirVPN, and PrivateInternetAccess are supported directly, with custom
 configuration files also supported with the `--custom` argument.
 Cloudflare Warp is also supported.
 
@@ -24,19 +24,19 @@ lynx all running through different VPN connections:
 
 ## Supported Providers
 
-| Provider                | OpenVPN support | Wireguard support |
-| ----------------------- | --------------- | ----------------- |
-| Mullvad                 | ✅              | ✅                |
-| AzireVPN                | ❌              | ✅                |
-| iVPN                    | ✅              | ✅                |
-| PrivateInternetAccess   | ✅              | ✅\*              |
-| ProtonVPN               | ✅\*\*          | ✅\*\*\*          |
-| MozillaVPN              | ❌              | ✅                |
-| NordVPN                 | ✅              | ❌                |
-| HMA (HideMyAss)         | ✅              | ❌                |
-| AirVPN                  | ✅              | ❌                |
-| Cloudflare Warp\*\*\*\* | ❌              | ❌                |
-| Self host (--custom)    | ✅              | ✅                |
+| Provider                      | OpenVPN support | Wireguard support |
+| ----------------------------- | --------------- | ----------------- |
+| Mullvad                       | ✅              | ✅                |
+| AzireVPN                      | ❌              | ✅                |
+| iVPN                          | ✅              | ✅                |
+| PrivateInternetAccess         | ✅              | ✅\*              |
+| ProtonVPN                     | ✅\*\*          | ✅\*\*\*          |
+| MozillaVPN                    | ❌              | ✅                |
+| NordVPN                       | ✅              | ❌                |
+| AirVPN                        | ✅              | ❌                |
+| Cloudflare Warp\*\*\*\*       | ❌              | ❌                |
+| Self host (--custom)          | ✅              | ✅                |
+| ~~HMA (HideMyAss)~~\*\*\*\*\* | ❌              | ❌                |
 
 \* Port forwarding supported with the `--port-forwarding` option and `--port-forwarding-callback` to run a command when the port is refreshed.
 
@@ -53,11 +53,12 @@ The port can also be passed to a custom script that will be executed
 within the network namespace via the `--port-forwarding-callback`
 argument.
 
-
 \*\*\*\* Cloudflare Warp uses its own protocol. Set both the provider and
 protocol to `warp`. Note you must first register with `sudo warp-cli registration new` and then run it once with `sudo warp-svc` and `sudo warp-cli connect` and `sudo warp-cli debug connectivity-check disable` outside of vopono - then kill `sudo warp-svc` without running `sudo warp-cli disconnect` so it will auto-connect when run.
 Please verify this works first before trying it with vopono. 
 
+\*\*\*\*\* HideMyAss [no longer supports Linux](https://www.hidemyass.com/en-us/installation-files) nor usage outside of their
+proprietary applications. Switch to another VPN provider.
 
 ## Usage
 

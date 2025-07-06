@@ -1,6 +1,5 @@
 mod airvpn;
 pub mod azirevpn;
-mod hma;
 mod ivpn;
 mod mozilla;
 mod mullvad;
@@ -44,7 +43,6 @@ pub enum VpnProvider {
     AirVPN,
     IVPN,
     NordVPN,
-    HMA,
     Warp,
     Custom,
     None, // Run no protocol inside netns
@@ -62,7 +60,6 @@ impl VpnProvider {
             Self::AirVPN => Box::new(airvpn::AirVPN {}),
             Self::IVPN => Box::new(ivpn::IVPN {}),
             Self::NordVPN => Box::new(nordvpn::NordVPN {}),
-            Self::HMA => Box::new(hma::HMA {}),
             Self::Warp => Box::new(warp::Warp {}),
             Self::Custom => unimplemented!("Custom provider uses separate logic"),
             Self::None => unimplemented!("None provider runs no protocol"),
@@ -80,7 +77,6 @@ impl VpnProvider {
             Self::AirVPN => Ok(Box::new(airvpn::AirVPN {})),
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::NordVPN => Ok(Box::new(nordvpn::NordVPN {})),
-            Self::HMA => Ok(Box::new(hma::HMA {})),
             Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
             Self::MozillaVPN => Err(anyhow!("MozillaVPN only supports Wireguard!")),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),

@@ -245,7 +245,7 @@ The sync process will save your credentials to a file in the
 config directory of the provider, so it can be passed to OpenVPN.
 If it is missing you will be prompted for your credentials.
 
-For PrivateInternetAccess and HMA (HideMyAss) these should be the same as your account
+For PrivateInternetAccess these should be the same as your account
 credentials.
 
 For Mullvad your OpenVPN credentials are your account code as your username, and `m` as the password.
