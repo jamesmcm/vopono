@@ -5,7 +5,7 @@ use crate::config::vpn::OpenVpnProtocol;
 use crate::util::delete_all_files_in_dir;
 use anyhow::Context;
 use log::warn;
-use rand::seq::SliceRandom;
+use rand::prelude::{IndexedRandom, SliceRandom};
 use reqwest::blocking::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -152,7 +152,7 @@ impl OpenVpnProvider for Mullvad {
             let mut file = File::create(openvpn_dir.join(file_name))?;
             writeln!(file, "{}", settings.join("\n"))?;
 
-            remote_vec.shuffle(&mut rand::thread_rng());
+            remote_vec.shuffle(&mut rand::rng());
             writeln!(
                 file,
                 "{}",
@@ -211,7 +211,7 @@ impl ConfigType {
     fn generate_port(&self) -> u16 {
         match self {
             Self::DefaultUdp => *[1300, 1301, 1302, 1194, 1195, 1196, 1197]
-                .choose(&mut rand::thread_rng())
+                .choose(&mut rand::rng())
                 .expect("Could not choose default port"),
             Self::Udp53 => 53,
             Self::Tcp80 => 80,
