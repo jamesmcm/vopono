@@ -272,12 +272,12 @@ impl NetworkNamespace {
 
         if !disable_ipv6 {
             // Using Unique Local Addresses (ULA) fd42:4242:{subnet}::/64
-            let ipv6_host_ip_str = format!("fd42:4242:{:x}::1", target_subnet);
-            let ipv6_ns_ip_str = format!("fd42:4242:{:x}::2", target_subnet);
+            let ipv6_host_ip_str = format!("fd42:4242:{target_subnet:x}::1");
+            let ipv6_ns_ip_str = format!("fd42:4242:{target_subnet:x}::2");
             let ipv6_host_ip_cidr = format!("{ipv6_host_ip_str}/64");
             let ipv6_ns_ip_cidr = format!("{ipv6_ns_ip_str}/64");
 
-            let ipv6_sysctl_path = format!("net.ipv6.conf.{}.disable_ipv6", veth_dest);
+            let ipv6_sysctl_path = format!("net.ipv6.conf.{veth_dest}.disable_ipv6");
             let sysctl_output = std::process::Command::new("sysctl")
                 .args(["-n", &ipv6_sysctl_path])
                 .output();
@@ -286,28 +286,25 @@ impl NetworkNamespace {
                     let value = String::from_utf8_lossy(&output.stdout);
                     if value.trim() == "1" {
                         log::warn!(
-                            "IPv6 is currently disabled for interface {}, enabling it now",
-                            veth_dest
+                            "IPv6 is currently disabled for interface {veth_dest}, enabling it now"
                         );
                     }
                 }
                 Ok(output) => {
                     let value = String::from_utf8_lossy(&output.stdout);
                     log::warn!(
-                        "Failed to check IPv6 status for {}: sysctl returned non-zero exit code, output: {}",
-                        veth_dest,
-                        value
+                        "Failed to check IPv6 status for {veth_dest}: sysctl returned non-zero exit code, output: {value}"
                     );
                 }
                 Err(e) => {
-                    log::warn!("Failed to check IPv6 status for {}: {}", veth_dest, e);
+                    log::warn!("Failed to check IPv6 status for {veth_dest}: {e}");
                 }
             }
-            log::debug!("Enabling IPv6 for {}", veth_dest);
+            log::debug!("Enabling IPv6 for {veth_dest}");
             sudo_command(&[
                 "sysctl",
                 "-w",
-                &format!("net.ipv6.conf.{}.disable_ipv6=0", veth_dest),
+                &format!("net.ipv6.conf.{veth_dest}.disable_ipv6=0"),
             ])?;
 
             sudo_command(&["ip", "addr", "add", &ipv6_host_ip_cidr, "dev", veth_dest])
@@ -337,14 +334,8 @@ impl NetworkNamespace {
             )
             .with_context(|| "Failed to add IPv6 default route in netns")?;
 
-            info!(
-                "IPv6 address of namespace as seen from host: {}",
-                ipv6_ns_ip_str
-            );
-            info!(
-                "IPv6 address of host as seen from namespace: {}",
-                ipv6_host_ip_str
-            );
+            info!("IPv6 address of namespace as seen from host: {ipv6_ns_ip_str}");
+            info!("IPv6 address of host as seen from namespace: {ipv6_host_ip_str}");
 
             veth_ips.ipv6 = Some(IpPair {
                 host_ip: ipv6_host_ip_str.parse()?,
@@ -610,12 +601,12 @@ impl NetworkNamespace {
         let ipv4_mask = veth_ips
             .ipv4
             .as_ref()
-            .map(|_| format!("10.200.{}.0/24", target_subnet));
+            .map(|_| format!("10.200.{target_subnet}.0/24"));
 
         let ipv6_mask = veth_ips
             .ipv6
             .as_ref()
-            .map(|_| format!("fd42:4242:{:x}::/64", target_subnet)); // Will be None if IPv6 disabled
+            .map(|_| format!("fd42:4242:{target_subnet:x}::/64")); // Will be None if IPv6 disabled
 
         self.host_masquerade = Some(HostMasquerade::add_masquerade_rule(
             ipv4_mask, ipv6_mask, interface, firewall,

@@ -148,16 +148,16 @@ impl Display for WireguardConfig {
             .map(|a| a.to_string())
             .collect::<Vec<String>>()
             .join(", ");
-        writeln!(f, "Address = {}", addresses)?;
+        writeln!(f, "Address = {addresses}")?;
 
         if let Some(mtu) = &self.interface.mtu {
-            writeln!(f, "MTU = {}", mtu)?;
+            writeln!(f, "MTU = {mtu}")?;
         }
 
         // Write each DNS server on a new line, which is idiomatic
         if let Some(dns_servers) = &self.interface.dns {
             for dns in dns_servers {
-                writeln!(f, "DNS = {}", dns)?;
+                writeln!(f, "DNS = {dns}")?;
             }
         }
 
@@ -172,12 +172,12 @@ impl Display for WireguardConfig {
             .map(|a| a.to_string())
             .collect::<Vec<String>>()
             .join(", ");
-        writeln!(f, "AllowedIPs = {}", allowed_ips)?;
+        writeln!(f, "AllowedIPs = {allowed_ips}")?;
 
         writeln!(f, "Endpoint = {}", self.peer.endpoint)?;
 
         if let Some(keepalive) = &self.peer.keepalive {
-            writeln!(f, "PersistentKeepalive = {}", keepalive)?;
+            writeln!(f, "PersistentKeepalive = {keepalive}")?;
         }
 
         Ok(())
@@ -323,7 +323,7 @@ impl FromStr for WireguardConfig {
                                 dns_servers.extend(value.split(',').map(|s| s.trim().to_string()))
                             }
                             "MTU" => mtu = Some(value.to_string()),
-                            _ => warn!("Unknown key in [Interface] section: {}", key),
+                            _ => warn!("Unknown key in [Interface] section: {key}"),
                         }
                     }
 
@@ -365,7 +365,7 @@ impl FromStr for WireguardConfig {
                             }
                             "Endpoint" => endpoint = Some(value.to_string()),
                             "PersistentKeepalive" => keepalive = Some(value.to_string()),
-                            _ => warn!("Unknown key in [Peer] section: {}", key),
+                            _ => warn!("Unknown key in [Peer] section: {key}"),
                         }
                     }
 
@@ -387,7 +387,7 @@ impl FromStr for WireguardConfig {
                         keepalive,
                     });
                 }
-                _ => warn!("Unknown section in config: {}", section_name),
+                _ => warn!("Unknown section in config: {section_name}"),
             }
         }
 
