@@ -114,8 +114,7 @@ impl Wireguard {
             };
 
             debug!(
-                "Opening firewall for Wireguard peer (out): {} dport {}",
-                peer_ip_str, peer_port
+                "Opening firewall for Wireguard peer (out): {peer_ip_str} dport {peer_port}"
             );
             // Allow the initial OUTGOING connection packet.
             NetworkNamespace::exec(
@@ -139,8 +138,7 @@ impl Wireguard {
             )?;
 
             debug!(
-                "Opening firewall for Wireguard peer (in): {} sport {}",
-                peer_ip_str, peer_port
+                "Opening firewall for Wireguard peer (in): {peer_ip_str} sport {peer_port}"
             );
             // Allow the server's INCOMING reply packet.
             NetworkNamespace::exec(

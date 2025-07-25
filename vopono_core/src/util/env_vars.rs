@@ -15,7 +15,7 @@ pub fn get_host_env_vars() -> HashMap<String, String> {
                 env_vars.insert("PULSE_SERVER".to_string(), pa);
             }
             Err(e) => {
-                warn!("Could not get PULSE_SERVER from host: {:?}", e);
+                warn!("Could not get PULSE_SERVER from host: {e:?}");
             }
         }
     } else {

@@ -162,7 +162,7 @@ impl Drop for HostMasquerade {
                             "-j",
                             "MASQUERADE",
                         ])
-                        .unwrap_or_else(|e| log::warn!("Failed to delete iptables rule: {}", e));
+                        .unwrap_or_else(|e| log::warn!("Failed to delete iptables rule: {e}"));
                     }
                     if let Some(ref mask) = self.ipv6_mask {
                         sudo_command(&[
@@ -178,13 +178,13 @@ impl Drop for HostMasquerade {
                             "-j",
                             "MASQUERADE",
                         ])
-                        .unwrap_or_else(|e| log::warn!("Failed to delete ip6tables rule: {}", e));
+                        .unwrap_or_else(|e| log::warn!("Failed to delete ip6tables rule: {e}"));
                     }
                 }
                 Firewall::NfTables => {
                     // The entire table is deleted, removing all rules within it.
                     sudo_command(&["nft", "delete", "table", "inet", "vopono_nat"]).unwrap_or_else(
-                        |e| log::warn!("Failed to delete nftables table vopono_nat: {}", e),
+                        |e| log::warn!("Failed to delete nftables table vopono_nat: {e}"),
                     );
                 }
             }
