@@ -1,7 +1,8 @@
 use super::{AzireVPN, ExistingDeviceResponseData};
 use super::{LocationsResponse, WireguardProvider};
 use crate::config::providers::azirevpn::{
-    ExistingDevicesResponse, LocationResponse, ReplaceKeyResponse, UserProfileResponse,
+    ExistingDeviceResponse, ExistingDevicesResponse, LocationResponse, ReplaceKeyResponse,
+    UserProfileResponse,
 };
 use crate::config::providers::{BoolChoice, UiClient};
 use crate::network::wireguard_config::{
@@ -43,13 +44,13 @@ impl AzireVPN {
         let response_text = response.text()?;
         debug!("Raw response: {response_text}");
 
-        // Now try to parse it if needed (you'll need to create a new response from the text)
-        let device_response_result: Result<ExistingDeviceResponseData, _> =
+        // Parse the response as ExistingDeviceResponse which has status and data fields
+        let device_response_result: Result<ExistingDeviceResponse, _> =
             serde_json::from_str(&response_text);
         let device_response_data = match device_response_result {
-            Ok(data) => {
+            Ok(response) => {
                 // Process successful parse
-                Ok(data)
+                Ok(response.data)
             }
             Err(e) => {
                 // Handle parse error
@@ -170,7 +171,7 @@ impl WireguardProvider for AzireVPN {
                     >= user_profile_response.data.ips.available
                 {
                     log::error!(
-                        "Maximum number of devices registered - please delete an existing device at https://manager.azirevpn.com/wireguard before creating a new one"
+                        "Maximum number of devices registered - please delete an existing device at https://manager.azirevpn.com/wireguard before creating a new one."
                     );
                     return Err(anyhow::anyhow!("Maximum number of devices registered"));
                 }
@@ -207,7 +208,11 @@ impl WireguardProvider for AzireVPN {
                     let private_key = uiclient.get_input(crate::config::providers::Input {
                         prompt: format!(
                             "Private key for {} - {}",
-                            existing_device.device_name.as_ref().expect("Null device name selected!"), pubkey
+                            existing_device
+                                .device_name
+                                .as_ref()
+                                .expect("Null device name selected!"),
+                            pubkey
                         ),
                         validator: Some(Box::new(
                             move |private_key: &String| -> Result<(), String> {
