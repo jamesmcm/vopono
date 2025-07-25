@@ -13,7 +13,7 @@ use super::openvpn::get_remotes_from_config;
 use anyhow::Context;
 use anyhow::anyhow;
 use log::{debug, error};
-use rand::seq::SliceRandom;
+use rand::prelude::IndexedRandom;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs::read_to_string;
@@ -44,7 +44,7 @@ impl Shadowsocks {
             ));
         }
         let route = get_routes_from_config(config_file)?;
-        let route = route.choose(&mut rand::thread_rng()).unwrap();
+        let route = route.choose(&mut rand::rng()).unwrap();
         let port = get_remotes_from_config(config_file)?[0].port;
 
         let route_str = route.to_string();

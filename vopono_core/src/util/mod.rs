@@ -17,7 +17,7 @@ use log::{debug, info, warn};
 use nix::unistd::{Group, User};
 pub use open_hosts::open_hosts;
 pub use open_ports::open_ports;
-use rand::seq::SliceRandom;
+use rand::prelude::IndexedRandom;
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
@@ -432,7 +432,7 @@ pub fn get_config_from_alias(list_path: &Path, alias: &str) -> anyhow::Result<Pa
         Err(anyhow!("Could not find config file for alias {}", &alias))
     } else {
         let config = paths
-            .choose(&mut rand::thread_rng())
+            .choose(&mut rand::rng())
             .expect("Could not find config");
 
         info!("Chosen config: {}", config.display());

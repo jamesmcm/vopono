@@ -77,8 +77,8 @@ impl MozillaVPN {
         use rand::RngCore;
         use sha2::Digest;
         let mut code_verifier_random = [0u8; 32];
-        let mut os_rng = rand::rngs::OsRng::new().unwrap();
-        os_rng.fill_bytes(&mut code_verifier_random);
+        let mut rng = rand::rng();
+        rng.fill_bytes(&mut code_verifier_random);
         let mut code_verifier = [0u8; 43];
         BASE64_URL_SAFE_NO_PAD.encode_slice(code_verifier_random, &mut code_verifier)?;
         let mut code_challenge = String::with_capacity(43);

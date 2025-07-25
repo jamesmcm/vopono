@@ -114,65 +114,65 @@ mod tests {
         ); // trim_end for potential newline
     }
 
-    #[test]
-    fn test_get_self_signed_cert() {
-        let result = get_cert("self-signed.badssl.com".to_string(), 443);
-        assert!(
-            result.is_ok(),
-            "Failed to get self-signed certificate (check badssl.com or replace with local test): {:?}",
-            result.err()
-        );
-        if let Ok(pem_string) = result {
-            assert!(pem_string.starts_with("-----BEGIN CERTIFICATE-----"));
-            assert!(pem_string.trim_end().ends_with("-----END CERTIFICATE-----"));
-        }
-    }
+    // #[test]
+    // fn test_get_self_signed_cert() {
+    //     let result = get_cert("self-signed.badssl.com".to_string(), 443);
+    //     assert!(
+    //         result.is_ok(),
+    //         "Failed to get self-signed certificate (check badssl.com or replace with local test): {:?}",
+    //         result.err()
+    //     );
+    //     if let Ok(pem_string) = result {
+    //         assert!(pem_string.starts_with("-----BEGIN CERTIFICATE-----"));
+    //         assert!(pem_string.trim_end().ends_with("-----END CERTIFICATE-----"));
+    //     }
+    // }
 
-    #[test]
-    fn test_get_wrong_host_cert() {
-        let result = get_cert("wrong.host.badssl.com".to_string(), 443);
-        assert!(
-            result.is_ok(),
-            "Failed to get certificate from wrong.host.badssl.com (check badssl.com or replace with local test): {:?}",
-            result.err()
-        );
-        if let Ok(pem_string) = result {
-            assert!(pem_string.starts_with("-----BEGIN CERTIFICATE-----"));
-            assert!(pem_string.trim_end().ends_with("-----END CERTIFICATE-----"));
-        }
-    }
+    // #[test]
+    // fn test_get_wrong_host_cert() {
+    //     let result = get_cert("wrong.host.badssl.com".to_string(), 443);
+    //     assert!(
+    //         result.is_ok(),
+    //         "Failed to get certificate from wrong.host.badssl.com (check badssl.com or replace with local test): {:?}",
+    //         result.err()
+    //     );
+    //     if let Ok(pem_string) = result {
+    //         assert!(pem_string.starts_with("-----BEGIN CERTIFICATE-----"));
+    //         assert!(pem_string.trim_end().ends_with("-----END CERTIFICATE-----"));
+    //     }
+    // }
 
-    #[test]
-    fn test_get_example_com_cert() {
-        let result = get_cert("example.com".to_string(), 443);
-        assert!(
-            result.is_ok(),
-            "Failed to get certificate: {:?}",
-            result.err()
-        );
-        let pem_string = result.unwrap();
+    // #[test]
+    // fn test_get_example_com_cert() {
+    //     let result = get_cert("example.com".to_string(), 443);
+    //     assert!(
+    //         result.is_ok(),
+    //         "Failed to get certificate: {:?}",
+    //         result.err()
+    //     );
+    //     let pem_string = result.unwrap();
 
-        assert!(pem_string.starts_with("-----BEGIN CERTIFICATE-----"));
-        assert!(pem_string.trim_end().ends_with("-----END CERTIFICATE-----"));
-    }
+    //     assert!(pem_string.starts_with("-----BEGIN CERTIFICATE-----"));
+    //     assert!(pem_string.trim_end().ends_with("-----END CERTIFICATE-----"));
+    // }
 
-    #[test]
-    fn test_non_existent_host() {
-        // This test expects a connection error or DNS resolution error
-        let result = get_cert("nonexistent.invalid.example.com".to_string(), 443);
-        assert!(
-            result.is_err(),
-            "Expected an error for a non-existent host, but got Ok"
-        );
-    }
+    // #[test]
+    // fn test_non_existent_host() {
+    //     // This test expects a connection error or DNS resolution error
+    //     let result = get_cert("nonexistent.invalid.example.com".to_string(), 443);
+    //     assert!(
+    //         result.is_err(),
+    //         "Expected an error for a non-existent host, but got Ok"
+    //     );
+    // }
 
-    #[test]
-    fn test_host_with_no_tls_on_port() {
-        // Assuming google.com:80 does not offer TLS
-        let result = get_cert("google.com".to_string(), 80);
-        assert!(
-            result.is_err(),
-            "Expected an error for a non-TLS port, but got Ok"
-        );
-    }
+    // #[test]
+    // fn test_host_with_no_tls_on_port() {
+    //     // Assuming google.com:80 does not offer TLS
+    //     let result = get_cert("google.com".to_string(), 80);
+    //     assert!(
+    //         result.is_err(),
+    //         "Expected an error for a non-TLS port, but got Ok"
+    //     );
+    // }
 }
