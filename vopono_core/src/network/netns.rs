@@ -334,12 +334,8 @@ impl NetworkNamespace {
             )
             .with_context(|| "Failed to add IPv6 default route in netns")?;
 
-            info!(
-                "IPv6 address of namespace as seen from host: {ipv6_ns_ip_str}"
-            );
-            info!(
-                "IPv6 address of host as seen from namespace: {ipv6_host_ip_str}"
-            );
+            info!("IPv6 address of namespace as seen from host: {ipv6_ns_ip_str}");
+            info!("IPv6 address of host as seen from namespace: {ipv6_host_ip_str}");
 
             veth_ips.ipv6 = Some(IpPair {
                 host_ip: ipv6_host_ip_str.parse()?,

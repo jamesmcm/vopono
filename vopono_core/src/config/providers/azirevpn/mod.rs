@@ -88,7 +88,9 @@ impl ConfigurationChoice for ExistingDevicesResponse {
             .iter()
             .filter_map(|x| {
                 // Filter out entries with null names
-                x.device_name.as_ref().map(|name| format!("{}, {}", name, x.ipv4_address))
+                x.device_name
+                    .as_ref()
+                    .map(|name| format!("{}, {}", name, x.ipv4_address))
             })
             .collect();
         v.push("generate a new keypair".to_string());
