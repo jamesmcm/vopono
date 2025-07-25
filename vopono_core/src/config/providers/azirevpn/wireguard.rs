@@ -143,12 +143,25 @@ impl WireguardProvider for AzireVPN {
         let interface: WireguardInterface = if user_profile_response.data.ips.allocated > 0 {
             // Existing Wireguard devices registered - ask to select and enter private key
             // Or replace existing keys with new keypair
-            let existing_devices: ExistingDevicesResponse = client
+
+            let existing_devices_response = client
                 .get("https://api.azirevpn.com/v3/ips")
                 .bearer_auth(&token)
-                .send()?
-                .json()
-                .with_context(|| "Failed to parse existing devices response")?;
+                .send()?;
+            let response_text = existing_devices_response.text()?;
+            let existing_devices_result: Result<ExistingDevicesResponse, _> =
+                serde_json::from_str(&response_text);
+
+            let mut existing_devices = match existing_devices_result {
+                Ok(devices) => devices,
+                Err(e) => {
+                    log::error!("Failed to get existing devices: {e}, response: {response_text}");
+                    return Err(e.into());
+                }
+            };
+
+            // Filter out null device names
+            existing_devices.data.retain(|x| x.device_name.is_some());
 
             let selection = uiclient.get_configuration_choice(&existing_devices)?;
 
@@ -194,7 +207,7 @@ impl WireguardProvider for AzireVPN {
                     let private_key = uiclient.get_input(crate::config::providers::Input {
                         prompt: format!(
                             "Private key for {} - {}",
-                            existing_device.device_name, pubkey
+                            existing_device.device_name.as_ref().expect("Null device name selected!"), pubkey
                         ),
                         validator: Some(Box::new(
                             move |private_key: &String| -> Result<(), String> {

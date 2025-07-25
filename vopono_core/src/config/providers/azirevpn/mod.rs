@@ -67,7 +67,7 @@ struct ExistingDeviceResponseData {
     ipv6_address: String,
     ipv6_netmask: u8,
     dns: Vec<IpAddr>,
-    device_name: String,
+    device_name: Option<String>,
     keys: Vec<KeyResponse>,
 }
 
@@ -86,7 +86,10 @@ impl ConfigurationChoice for ExistingDevicesResponse {
         let mut v: Vec<String> = self
             .data
             .iter()
-            .map(|x| format!("{}, {}", x.device_name, x.ipv4_address))
+            .filter_map(|x| {
+                // Filter out entries with null names
+                x.device_name.as_ref().map(|name| format!("{}, {}", name, x.ipv4_address))
+            })
             .collect();
         v.push("generate a new keypair".to_string());
         Some(v)
