@@ -296,7 +296,11 @@ impl WireguardProvider for AzireVPN {
                 log::error!("Could not resolve hostname: {}, skipping...", location.pool);
                 continue;
             }
-            let host_ip = host_lookup.unwrap().first().cloned().unwrap();
+
+            let host_ip = host_lookup?.next().context(format!(
+                "DNS lookup for host '{}' returned no IP addresses",
+                location.pool
+            ))?;
             log::debug!("Resolved hostname: {} to IP: {}", &location.pool, &host_ip);
             // TODO: avoid hacky regex for TOML -> wireguard config conversion
             let wireguard_peer = WireguardPeer {
