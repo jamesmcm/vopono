@@ -44,7 +44,8 @@ fn main() -> anyhow::Result<()> {
             let verbose = app.verbose && !app.silent;
             elevate_privileges(app.askpass)?;
             clean_dead_namespaces()?;
-            exec::exec(cmd, &uiclient, verbose, app.silent)?
+            let exit_code = exec::exec(cmd, &uiclient, verbose, app.silent)?;
+            std::process::exit(exit_code);
         }
         args::Command::List(listcmd) => {
             clean_dead_locks()?;
