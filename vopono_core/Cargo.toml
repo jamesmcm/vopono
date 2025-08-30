@@ -1,7 +1,7 @@
 [package]
 name = "vopono_core"
 description = "Library code for running VPN connections in network namespaces"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 license = "GPL-3.0-or-later"
@@ -20,7 +20,7 @@ nix = { version = "0.30", features = ["user", "signal", "fs", "process"] }
 serde = { version = "1", features = ["derive", "std"] }
 csv = "1"
 regex = "1"
-ron = "0.10"
+ron = "0.11"
 walkdir = "2"
 # Stuck on rand 0.6 due to x25519-dalek:
 # https://github.com/dalek-cryptography/curve25519-dalek/issues/731
@@ -34,7 +34,7 @@ reqwest = { default-features = false, version = "0.12", features = [
     "json",
     "rustls-tls",
 ] } # TODO: Can we remove Tokio dependency?
-sysinfo = "0.36"
+sysinfo = "0.37"
 base64 = "0.22"
 x25519-dalek = { version = "3.0.0-pre.0", features = ["static_secrets"] }
 strum = "0.27"
@@ -49,9 +49,9 @@ tiny_http = "0.12"
 chrono = "0.4"
 json = "0.12"
 shell-words = "1"
-dns-lookup = "2"
+dns-lookup = "3"
 libc = "0.2"
 pem = "3"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-rustls-connector = { version = "0.21", default-features = false }
+rustls-connector = { version = "0.22", default-features = false }
 nom = "8"

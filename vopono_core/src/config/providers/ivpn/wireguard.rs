@@ -164,11 +164,10 @@ impl WireguardProvider for IVPN {
                 if let Err(err) = ip_parse {
                     return Err(format!("Input: {} is not valid IPv4 address: {}", ipstr.trim(), err));
                 };
-                if let Ok(ip) = ip_parse  {
-                if  ip.octets()[0] != 172 {
+                if let Ok(ip) = ip_parse
+                &&  ip.octets()[0] != 172 {
                     return Err(format!("IP address: {} did not start with expected octet 172", ipstr.trim()));
                 }
-            }
                 Ok(())
             }))})?;
 

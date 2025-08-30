@@ -111,20 +111,20 @@ impl MozillaVPN {
         let code;
         let code_url_regex = regex::Regex::new(r"\A/\?code=([0-9a-f]{80})\z").unwrap();
         for request in server.incoming_requests() {
-            if let Some(caps) = code_url_regex.captures(request.url()) {
-                if *request.method() == Method::Get {
-                    code = caps.get(1).unwrap();
-                    let response = client
-                        .post(format!("{}/vpn/login/verify", Self::V2_URL))
-                        .header("User-Agent", "Why do you need a user agent???")
-                        .json(&AccessTokenRequest {
-                            code: code.as_str(),
-                            code_verifier: std::str::from_utf8(&code_verifier).unwrap(),
-                        })
-                        .send()
-                        .unwrap();
-                    return Ok(response.json::<Login>().unwrap());
-                }
+            if let Some(caps) = code_url_regex.captures(request.url())
+                && *request.method() == Method::Get
+            {
+                code = caps.get(1).unwrap();
+                let response = client
+                    .post(format!("{}/vpn/login/verify", Self::V2_URL))
+                    .header("User-Agent", "Why do you need a user agent???")
+                    .json(&AccessTokenRequest {
+                        code: code.as_str(),
+                        code_verifier: std::str::from_utf8(&code_verifier).unwrap(),
+                    })
+                    .send()
+                    .unwrap();
+                return Ok(response.json::<Login>().unwrap());
             }
         }
         unreachable!("Server closed without receiving code")

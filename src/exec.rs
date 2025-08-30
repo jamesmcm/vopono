@@ -34,7 +34,7 @@ pub fn exec(
     uiclient: &dyn UiClient,
     verbose: bool,
     silent: bool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<i32> {
     // this captures all sigint signals
     // ignore for now, they are automatically passed on to the child
     let signals = Signals::new([SIGINT])?;
@@ -255,49 +255,49 @@ pub fn exec(
 
     // Launch TCP proxy server on other threads if forwarding ports
     let mut proxy = Vec::new();
-    if let Some(f) = parsed_command.forward.clone() {
-        if !(parsed_command.no_proxy || f.is_empty()) {
-            for p in f {
-                debug!(
-                    "Forwarding port: {}, {:?}",
-                    p,
+    if let Some(f) = parsed_command.forward.clone()
+        && !(parsed_command.no_proxy || f.is_empty())
+    {
+        for p in f {
+            debug!(
+                "Forwarding port: {}, {:?}",
+                p,
+                ns.veth_pair_ips
+                    .as_ref()
+                    .unwrap()
+                    .ipv4
+                    .as_ref()
+                    .unwrap()
+                    .namespace_ip
+            );
+
+            // TODO: Do we want IPv6 forwarding?
+            proxy.push(basic_tcp_proxy::TcpProxy::new(
+                p,
+                std::net::SocketAddr::new(
                     ns.veth_pair_ips
                         .as_ref()
                         .unwrap()
                         .ipv4
                         .as_ref()
                         .unwrap()
-                        .namespace_ip
-                );
-
-                // TODO: Do we want IPv6 forwarding?
-                proxy.push(basic_tcp_proxy::TcpProxy::new(
+                        .namespace_ip,
                     p,
-                    std::net::SocketAddr::new(
-                        ns.veth_pair_ips
-                            .as_ref()
-                            .unwrap()
-                            .ipv4
-                            .as_ref()
-                            .unwrap()
-                            .namespace_ip,
-                        p,
-                    ),
-                    false,
-                ));
-            }
+                ),
+                false,
+            ));
         }
     }
 
     if !parsed_command.create_netns_only {
-        run_application(
+        return run_application(
             &parsed_command,
             forwarder,
             &ns,
             signals,
             silent,
             &host_env_vars,
-        )?;
+        );
     } else {
         info!(
             "Created netns {} - will leave network namespace alive until ctrl+C received",
@@ -306,7 +306,7 @@ pub fn exec(
         stay_alive(None, signals);
     }
 
-    Ok(())
+    Ok(0)
 }
 
 // Block waiting for SIGINT
@@ -484,18 +484,18 @@ fn run_protocol_in_netns(
             }
 
             // Set DNS with OpenVPN server response if present
-            if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns {
-                if parsed_command.dns.is_none() {
-                    let old_dns = ns.dns_config.take();
-                    std::mem::forget(old_dns);
-                    // TODO: DNS suffixes?
-                    ns.dns_config(
-                        &[newdns],
-                        &[],
-                        parsed_command.hosts.as_ref(),
-                        parsed_command.allow_host_access,
-                    )?;
-                }
+            if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns
+                && parsed_command.dns.is_none()
+            {
+                let old_dns = ns.dns_config.take();
+                std::mem::forget(old_dns);
+                // TODO: DNS suffixes?
+                ns.dns_config(
+                    &[newdns],
+                    &[],
+                    parsed_command.hosts.as_ref(),
+                    parsed_command.allow_host_access,
+                )?;
             }
         }
         Protocol::Wireguard => {
@@ -672,7 +672,7 @@ fn run_application(
     signals: SignalsInfo,
     silent: bool,
     host_env_vars: &std::collections::HashMap<String, String>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<i32> {
     let application = ApplicationWrapper::new(
         ns,
         &parsed_command.application,
@@ -703,12 +703,15 @@ fn run_application(
             pid, &ns.name
         );
         stay_alive(Some(pid), signals);
+        Ok(0)
     } else if parsed_command.keep_alive {
         info!(
             "Keep-alive flag active - will leave network namespace {} alive until ctrl+C received",
             &ns.name
         );
         stay_alive(None, signals);
+        Ok(0)
+    } else {
+        Ok(output.status.code().unwrap_or(1))
     }
-    Ok(())
 }

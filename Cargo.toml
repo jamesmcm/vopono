@@ -1,7 +1,7 @@
 [package]
 name = "vopono"
 description = "Launch applications via VPN tunnels using temporary network namespaces"
-version = "0.10.14"
+version = "0.10.15"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2024"
 license = "GPL-3.0-or-later"
@@ -20,7 +20,7 @@ log = "0.4"
 pretty_env_logger = "0.5"
 clap = { version = "4", features = ["derive"] }
 which = "8"
-dialoguer = "0.11"
+dialoguer = "0.12"
 compound_duration = "1"
 signal-hook = "0.3"
 walkdir = "2"

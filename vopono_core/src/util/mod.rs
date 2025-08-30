@@ -354,7 +354,7 @@ pub fn elevate_privileges(askpass: bool) -> anyhow::Result<()> {
 
         debug!("Args: {:?}", &args);
         // status blocks until the process has ended
-        let _status = Command::new("sudo")
+        let status = Command::new("sudo")
             .arg(sudo_flags)
             .args(args.clone())
             .status()
@@ -369,7 +369,7 @@ pub fn elevate_privileges(askpass: bool) -> anyhow::Result<()> {
                 .expect("failed to send SIGINT");
         }
 
-        std::process::exit(0);
+        std::process::exit(status.code().unwrap_or(1));
     } else if std::env::var("SUDO_USER").is_err() {
         warn!("Running vopono as root user directly!");
     }
