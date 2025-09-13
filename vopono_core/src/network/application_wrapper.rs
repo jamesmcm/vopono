@@ -263,8 +263,8 @@ impl ApplicationWrapper {
                         let fd0: i32 = 0;
                         let is_tty = libc::isatty(fd0) == 1;
                         if is_tty {
-                            let tiocsctty: libc::c_ulong = libc::TIOCSCTTY as _;
-                            let _ = libc::ioctl(fd0, tiocsctty, 1);
+                            // Let the compiler infer the proper ioctl request type per target
+                            let _ = libc::ioctl(fd0, libc::TIOCSCTTY as _, 1);
                             // Set foreground process group to our own pgrp
                             let pgrp = libc::getpgrp();
                             let _ = libc::tcsetpgrp(fd0, pgrp);
