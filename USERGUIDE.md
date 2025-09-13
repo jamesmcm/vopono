@@ -58,6 +58,10 @@ sudo systemctl status vopono-daemon
 sudo journalctl -u vopono-daemon -e
 ```
 
+Note there is a known issue that when using tmux, etc. - sometimes the
+original shell will not recover correctly upon terminating the
+application run with daemon mode.
+
 ### Creating only Network Namespace
 
 You can run vopono to create only the network namespace using the
