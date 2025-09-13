@@ -1,6 +1,7 @@
 use clap::Parser;
 use clap::ValueEnum;
-use std::fmt::Display;
+use serde::{Deserialize, Serialize}; // Import serde traits
+use std::fmt::{Debug, Display}; // Import Debug
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -12,9 +13,34 @@ use vopono_core::network::network_interface::NetworkInterface;
 use vopono_core::network::trojan::TrojanHost;
 use vopono_core::util::hostname_to_ip;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct WrappedArg<T: IntoEnumIterator + Clone + Display> {
     variant: T,
+}
+
+// Manual implementation of Serialize/Deserialize to act as a transparent wrapper.
+impl<T> Serialize for WrappedArg<T>
+where
+    T: IntoEnumIterator + Clone + Display + Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.variant.serialize(serializer)
+    }
+}
+
+impl<'de, T> Deserialize<'de> for WrappedArg<T>
+where
+    T: IntoEnumIterator + Clone + Display + Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        T::deserialize(deserializer).map(|variant| WrappedArg { variant })
+    }
 }
 
 impl<T: IntoEnumIterator + Clone + Display> WrappedArg<T> {
@@ -26,30 +52,24 @@ impl<T: IntoEnumIterator + Clone + Display> WrappedArg<T> {
 impl<T: IntoEnumIterator + Clone + Display> ValueEnum for WrappedArg<T> {
     fn from_str(input: &str, ignore_case: bool) -> core::result::Result<Self, String> {
         let use_input = input.trim().to_string();
-
         let found = if ignore_case {
             T::iter().find(|x| x.to_string().eq_ignore_ascii_case(&use_input))
         } else {
             T::iter().find(|x| x.to_string() == use_input)
         };
-
         if let Some(f) = found {
             Ok(WrappedArg { variant: f })
         } else {
-            // TODO - better error messages
             Err(format!("Invalid argument: {input}"))
         }
     }
 
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
-        // TODO: Leak necessary?
         let name: &'static str = Box::leak(self.variant.to_string().into_boxed_str());
-
         Some(clap::builder::PossibleValue::new(name))
     }
 
     fn value_variants<'a>() -> &'a [Self] {
-        // TODO: Leak necessary?
         Box::leak(Box::new(
             T::iter()
                 .map(|x| WrappedArg { variant: x })
@@ -58,7 +78,7 @@ impl<T: IntoEnumIterator + Clone + Display> ValueEnum for WrappedArg<T> {
     }
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 #[clap(
     name = "vopono",
     about = "Launch applications in a temporary VPN network namespace",
@@ -67,23 +87,25 @@ impl<T: IntoEnumIterator + Clone + Display> ValueEnum for WrappedArg<T> {
 )]
 pub struct App {
     /// Verbose output
-    #[clap(short = 'v', long = "verbose")]
+    #[clap(short = 'v', long = "verbose", global = true)]
     pub verbose: bool,
 
-    /// Suppress all output including application output. Note RUST_LOG=off can be used to suppress only vopono log/error output.
-    #[clap(long = "silent")]
+    /// Suppress all output including application output.
+    #[clap(long = "silent", global = true)]
     pub silent: bool,
 
     /// read sudo password from program specified in SUDO_ASKPASS environment variable
-    #[clap(short = 'A', long = "askpass")]
+    #[clap(short = 'A', long = "askpass", global = true)]
     pub askpass: bool,
 
     #[clap(subcommand)]
-    pub cmd: Command,
+    pub cmd: Option<Command>,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub enum Command {
+    #[clap(name = "daemon", about = "Run the vopono daemon (requires root)")]
+    Daemon,
     #[clap(
         name = "exec",
         about = "Execute an application with the given VPN connection"
@@ -106,7 +128,7 @@ pub enum Command {
     Servers(ServersCommand),
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct SynchCommand {
     /// VPN Provider - will launch interactive menu if not provided
     #[clap(value_enum, ignore_case = true)]
@@ -117,7 +139,7 @@ pub struct SynchCommand {
     pub protocol: Option<WrappedArg<Protocol>>,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Clone, Serialize, Deserialize, Debug)]
 pub struct ExecCommand {
     /// VPN Provider (must be given unless using custom config)
     #[clap(value_enum, long = "provider", short = 'p', ignore_case = true)]
@@ -192,7 +214,7 @@ pub struct ExecCommand {
     #[clap(long = "no-proxy")]
     pub no_proxy: bool,
 
-    /// VPN Protocol (if not given will use default)
+    /// Firewall to use
     #[clap(value_enum, long = "firewall", ignore_case = true)]
     pub firewall: Option<WrappedArg<Firewall>>,
 
@@ -261,14 +283,14 @@ pub struct ExecCommand {
     pub trojan_config: Option<PathBuf>,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct ListCommand {
     /// VPN Provider
     #[clap(value_parser(clap::builder::PossibleValuesParser::from(&["namespaces", "applications"])))]
     pub list_type: Option<String>,
 }
 
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 pub struct ServersCommand {
     /// VPN Provider
     #[clap(value_enum, ignore_case = true)]
@@ -283,9 +305,7 @@ pub struct ServersCommand {
     pub prefix: Option<String>,
 }
 
-// TODO: Handle multiple addresses
 fn parse_host_or_ip(arg: &str) -> anyhow::Result<IpAddr> {
-    // First try to parse as a direct IP address
     if let Ok(ip) = IpAddr::from_str(arg) {
         return Ok(ip);
     }
@@ -298,8 +318,5 @@ fn parse_host_or_ip(arg: &str) -> anyhow::Result<IpAddr> {
 
 /// Parse a list of hosts/IPs separated by comma
 fn parse_hosts_or_ips(arg: &str) -> anyhow::Result<IpAddr> {
-    Ok(
-        // TODO: Fix error handling here for error message
-        parse_host_or_ip(arg.trim()).expect("Failed to parse host or IP"),
-    )
+    parse_host_or_ip(arg.trim()).map_err(|e| anyhow::anyhow!("Failed to parse host or IP: {}", e))
 }

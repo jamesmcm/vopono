@@ -21,6 +21,43 @@ entire shell sessions inside vopono.
 Note that the order of command-line arguments matters, as the `--dns`
 argument can take a list of DNS servers for example.
 
+### Daemon mode (recommended)
+
+vopono now supports a persistent root daemon that handles all privileged work. Run the daemon as root, and keep using `vopono` as your normal user. The CLI forwards `exec` requests to the daemon automatically when it’s available; if not, it falls back to `sudo`.
+
+- Start once at boot (systemd): `sudo systemctl enable --now vopono-daemon`
+- Or run manually: `sudo vopono daemon`
+- Then run apps as your user: `vopono exec --provider mullvad --server sweden firefox`
+
+Signals (e.g., Ctrl+C, Ctrl+Z) and interactive TTY behavior work cleanly via the daemon. The daemon listens on `/run/vopono.sock` and cleans it up on exit.
+
+Example systemd unit for the root daemon (`/etc/systemd/system/vopono-daemon.service`):
+
+```
+[Unit]
+Description=Vopono root daemon
+After=network.target
+Requires=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/vopono daemon
+Restart=on-failure
+RestartSec=2s
+# Optional: enable structured logs
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Check status and logs:
+
+```
+sudo systemctl status vopono-daemon
+sudo journalctl -u vopono-daemon -e
+```
+
 ### Creating only Network Namespace
 
 You can run vopono to create only the network namespace using the
@@ -501,8 +538,7 @@ terminal, or use `$VOPONO_NS_IP` to get it (e.g. to use it in a script).
 
 #### systemd service
 
-For the above you may want to run vopono as a systemd service. If your
-user has passwordless sudo access you can use a user service, such as:
+If you want to keep a single daemon or server app running under vopono without using the root daemon above, you can still use a user service (requires passwordless sudo for the commands vopono escalates). For example:
 
 `/etc/systemd/user/vopono.service`:
 ```
@@ -515,10 +551,7 @@ And then start it with (no sudo):
 systemctl start --user vopono
 ```
 
-If you do not have passwordless sudo access (i.e. privilege escalation
-requires entering the password) then you could use a root service and
-set up vopono on the root account. But note [this issue](https://github.com/jamesmcm/vopono/issues/84) currently
-makes this problematic for forwarding ports.
+If you do not have passwordless sudo access, prefer the root daemon approach above (`vopono-daemon`) and keep using `vopono exec` as your user.
 
 #### Privoxy
 

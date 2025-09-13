@@ -278,7 +278,7 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
 
     if lockfile_path.exists() && lockfile_path.read_dir()?.next().is_some() {
         debug!("Cleaning dead lock files...");
-        // Delete files if their PIDs are no longer running
+        // Delete primary lock files if their PIDs are no longer running (numeric file names)
         std::fs::create_dir_all(&lockfile_path)?;
         WalkDir::new(&lockfile_path)
             .into_iter()
@@ -300,6 +300,26 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
             .try_for_each(|x| {
                 debug!("Removing lockfile: {}", x.0.path().display());
                 std::fs::remove_file(x.0.path())
+            })?;
+
+        // Delete auxiliary client-* lock files if their PIDs are no longer running
+        WalkDir::new(&lockfile_path)
+            .into_iter()
+            .filter_map(|x| x.ok())
+            .filter(|x| x.path().is_file())
+            .filter_map(|x| {
+                let fname = x.file_name().to_str().unwrap_or("").to_string();
+                if let Some(rest) = fname.strip_prefix("client-")
+                    && let Ok(pid) = rest.parse::<u32>()
+                {
+                    return Some((x, pid));
+                }
+                None
+            })
+            .filter(|(_, pid)| !running_processes.contains(pid))
+            .try_for_each(|(entry, _)| {
+                debug!("Removing client lockfile: {}", entry.path().display());
+                std::fs::remove_file(entry.path())
             })?;
 
         // Delete subdirectories if they contain no locks (ignore errors)

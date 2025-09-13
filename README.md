@@ -82,6 +82,16 @@ You should run vopono as your own user (not using sudo) as it will
 handle privilege escalation where necessary. For more details around
 running as a systemd service, etc. see the [User Guide](USERGUIDE.md).
 
+### Daemon Mode
+
+For a smoother experience, run the privileged root daemon and keep using `vopono` as your normal user. The CLI automatically forwards `exec` requests to the daemon if it’s running.
+
+- Start once at boot via systemd: `sudo systemctl enable --now vopono-daemon`
+- Or run manually as root: `sudo vopono daemon`
+- Then use vopono normally as your user: `vopono exec --provider mullvad --server se firefox`
+
+See USERGUIDE.md for a ready‑to‑copy systemd unit.
+
 vopono can handle up to 255 separate network namespaces (i.e. different VPN server
 connections - if your VPN provider allows it). Commands launched with
 the same server prefix and VPN provider will share the same network
