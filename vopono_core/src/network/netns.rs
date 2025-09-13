@@ -71,12 +71,41 @@ impl NetworkNamespace {
 
         std::fs::create_dir_all(&lockfile_path)?;
         debug!("Trying to read lockfile: {}", lockfile_path.display());
-        let lockfile = std::fs::read_dir(lockfile_path)?.next();
+        // Find a real RON lockfile (numeric filename = creator PID). Skip auxiliary client-* locks.
+        let mut parsed_ns: Option<NetworkNamespace> = None;
+        for entry in std::fs::read_dir(&lockfile_path)? {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let fname = entry.file_name().to_string_lossy().to_string();
+            // Use only numeric filenames (primary lockfiles created by write_lockfile)
+            if !fname.chars().all(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            match File::open(&path)
+                .ok()
+                .and_then(|f| ron::de::from_reader::<_, Lockfile>(f).ok())
+            {
+                Some(lock) => {
+                    parsed_ns = Some(lock.ns);
+                    break;
+                }
+                None => {
+                    debug!(
+                        "Skipping non-RON or unreadable lockfile: {}",
+                        path.display()
+                    );
+                    continue;
+                }
+            }
+        }
 
-        if let Some(lf) = lockfile {
-            let lockfile = File::open(lf?.path())?;
-            let lock: Lockfile = ron::de::from_reader(lockfile)?;
-            let ns = lock.ns;
+        if let Some(ns) = parsed_ns {
             info!("Using existing network namespace: {}", &name);
             Ok(ns)
         } else {
@@ -211,6 +240,21 @@ impl NetworkNamespace {
         .with_context(|| format!("Failed to add loopback adapter in netns: {}", &self.name))?;
         Self::exec(&self.name, &["ip", "link", "set", "lo", "up"])
             .with_context(|| format!("Failed to start networking in netns: {}", &self.name))?;
+        Ok(())
+    }
+
+    pub fn enable_unprivileged_ping(&self) -> anyhow::Result<()> {
+        // Allow non-root ping in this netns
+        Self::exec(
+            &self.name,
+            &["sysctl", "-q", "net.ipv4.ping_group_range=0 2147483647"],
+        )
+        .with_context(|| {
+            format!(
+                "Failed to enable unprivileged ping in netns: {}",
+                &self.name
+            )
+        })?;
         Ok(())
     }
 

@@ -26,13 +26,16 @@ signal-hook = "0.3"
 walkdir = "2"
 chrono = "0.4"
 bs58 = "0.5"
-nix = { version = "0.30", features = ["signal", "process"] }
+nix = { version = "0.30", features = ["signal", "process", "socket", "uio", "mount", "term"] }
 config = "0.15"
-basic_tcp_proxy = "0.3.2"
+basic_tcp_proxy = "0.3"
+serde = { version = "1", features = ["derive", "std"] }
 strum = "0.27"
 strum_macros = "0.27"
 shellexpand = { version = "3", features = ["full"] }
 shell-words = "1"
+interprocess = "2"
+bincode = { version = "2", features = ["serde"] }
 
 [package.metadata.rpm]
 package = "vopono"

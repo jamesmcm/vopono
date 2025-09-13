@@ -1,4 +1,5 @@
 use crate::args_config::ArgsConfig;
+use crate::cli_client::CliClient;
 
 use super::args::ExecCommand;
 use super::sync::synch;
@@ -7,6 +8,7 @@ use log::{debug, error, info, warn};
 use signal_hook::iterator::SignalsInfo;
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use std::net::{IpAddr, Ipv4Addr};
+use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::{
     fs::create_dir_all,
@@ -29,18 +31,118 @@ use vopono_core::util::env_vars::set_env_vars;
 use vopono_core::util::{get_config_from_alias, get_existing_namespaces, get_target_subnet};
 use vopono_core::util::{parse_command_str, vopono_dir};
 
+/// Configuration struct for namespace setup results
+pub struct NamespaceConfig {
+    pub ns: NetworkNamespace,
+    pub parsed_command: ArgsConfig,
+    pub forwarder: Option<Box<dyn Forwarder>>,
+    pub host_env_vars: std::collections::HashMap<String, String>,
+}
+
+/// Special entry point for the daemon. It sets up the namespace and returns the
+/// child process handle and the namespace object itself to keep it alive.
+pub fn execute_as_daemon(
+    command: ExecCommand,
+) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace)> {
+    let uiclient = CliClient {};
+    let NamespaceConfig {
+        ns,
+        parsed_command,
+        forwarder,
+        host_env_vars,
+    } = setup_namespace(command, &uiclient, true)?;
+
+    let ns = ns.write_lockfile(&parsed_command.application)?;
+
+    let application = ApplicationWrapper::new(
+        &ns,
+        &parsed_command.application,
+        parsed_command.user.clone(),
+        parsed_command.group.clone(),
+        parsed_command.working_directory.clone().map(PathBuf::from),
+        forwarder,
+        true, // Always silent on daemon side
+        &host_env_vars,
+        true, // Pipe IO for legacy daemon path
+        None,
+        false,
+    )?;
+    Ok((application, ns))
+}
+
+/// Daemon entry that allows selecting pipe mode and passing explicit stdio FDs.
+pub fn execute_as_daemon_with_stdio(
+    command: ExecCommand,
+    pipe_io: bool,
+    stdio_fds: Option<(RawFd, RawFd, RawFd)>,
+    take_controlling_tty: bool,
+) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace)> {
+    let uiclient = CliClient {};
+    let NamespaceConfig {
+        ns,
+        parsed_command,
+        forwarder,
+        host_env_vars,
+    } = setup_namespace(command, &uiclient, true)?;
+
+    // In daemon mode, ensure PULSE_SERVER points to the connecting user's runtime
+    // so apps can talk to the host Pulse/pipewire server.
+    let mut host_env_vars = host_env_vars;
+    if let Some(ref user_name) = parsed_command.user
+        && let Some(user) = nix::unistd::User::from_name(user_name)?
+    {
+        let pulse = format!("unix:/run/user/{}/pulse/native", user.uid.as_raw());
+        host_env_vars.insert("PULSE_SERVER".to_string(), pulse);
+    }
+
+    let ns = ns.write_lockfile(&parsed_command.application)?;
+    let application = ApplicationWrapper::new(
+        &ns,
+        &parsed_command.application,
+        parsed_command.user.clone(),
+        parsed_command.group.clone(),
+        parsed_command.working_directory.clone().map(PathBuf::from),
+        forwarder,
+        true, // Always silent on daemon side
+        &host_env_vars,
+        pipe_io,
+        stdio_fds,
+        take_controlling_tty,
+    )?;
+    Ok((application, ns))
+}
+
+/// The main entry point for the non-daemon (sudo-based fallback) execution path.
 pub fn exec(
     command: ExecCommand,
     uiclient: &dyn UiClient,
     verbose: bool,
     silent: bool,
 ) -> anyhow::Result<i32> {
-    // this captures all sigint signals
-    // ignore for now, they are automatically passed on to the child
     let signals = Signals::new([SIGINT])?;
+    let NamespaceConfig {
+        ns,
+        parsed_command,
+        forwarder,
+        host_env_vars,
+    } = setup_namespace(command, uiclient, verbose)?;
+    let ns = ns.write_lockfile(&parsed_command.application)?;
+    run_application_and_wait(
+        &parsed_command,
+        forwarder,
+        &ns,
+        signals,
+        silent,
+        &host_env_vars,
+    )
+}
 
-    // Check if we have config file path passed on command line
-    // Create empty config file if does not exist
+/// Shared logic to set up a new or existing network namespace.
+fn setup_namespace(
+    command: ExecCommand,
+    uiclient: &dyn UiClient,
+    verbose: bool,
+) -> anyhow::Result<NamespaceConfig> {
     create_dir_all(vopono_dir()?)?;
     let vopono_config_settings = ArgsConfig::get_config_file(&command)?;
     let host_env_vars = vopono_core::util::env_vars::get_host_env_vars();
@@ -51,7 +153,6 @@ pub fn exec(
         && parsed_command.provider != VpnProvider::None
         && parsed_command.protocol != Protocol::Warp
     {
-        // Check config files exist for provider
         let cdir = match parsed_command.protocol {
             Protocol::OpenVpn => parsed_command
                 .provider
@@ -61,10 +162,7 @@ pub fn exec(
                 .provider
                 .get_dyn_wireguard_provider()?
                 .wireguard_dir(),
-            Protocol::Warp => unreachable!("Unreachable, Warp must use Warp provider"),
-            Protocol::OpenConnect => bail!("OpenConnect must use Custom provider"),
-            Protocol::OpenFortiVpn => bail!("OpenFortiVpn must use Custom provider"),
-            Protocol::None => bail!("None protocol must use None provider"),
+            _ => unreachable!(),
         }?;
         if !cdir.exists() || cdir.read_dir()?.next().is_none() {
             info!(
@@ -98,29 +196,22 @@ pub fn exec(
 
     let mut ns;
     let _sysctl;
-
-    let _using_existing_netns;
     let forwarder;
+
     if get_existing_namespaces()?.contains(&ns_name) {
-        // If namespace exists, read its lock config
         info!(
             "Using existing namespace: {}, will not modify firewall rules",
             &ns_name
         );
         ns = NetworkNamespace::from_existing(ns_name)?;
-        _using_existing_netns = true;
-
         if parsed_command.port_forwarding || parsed_command.custom_port_forwarding.is_some() {
             warn!(
                 "Re-using existing network namespace {} - will not run port forwarder, should be run when netns first created",
                 &ns.name
             );
         }
-
         forwarder = None;
     } else {
-        // Create new network namespace
-        _using_existing_netns = false;
         ns = NetworkNamespace::new(
             ns_name.clone(),
             parsed_command.provider.clone(),
@@ -134,7 +225,6 @@ pub fn exec(
         ns.add_loopback()?;
         ns.add_veth_pair()?;
 
-        // Allow direct access to Trojan forwarding server if using Trojan
         if parsed_command.trojan_host.is_some() || parsed_command.trojan_config.is_some() {
             let mut c = TrojanConfig::new(parsed_command.trojan_config.as_deref())?;
             if let Some(trojan_host) = parsed_command.trojan_host.as_ref() {
@@ -142,27 +232,25 @@ pub fn exec(
             }
             let resolved_ip = c.get_remote_trojanhost()?.resolve_ip()?;
             log::debug!("Resolved trojan host IP: {resolved_ip} - setting as open host");
-            if let Some(oh) = parsed_command.open_hosts.iter_mut().next() {
+            if let Some(oh) = parsed_command.open_hosts.as_mut() {
                 oh.push(resolved_ip);
             } else {
                 parsed_command.open_hosts = Some(vec![resolved_ip]);
             }
         }
 
-        // Note here open_hosts is passed in so that direct routes are added
-        // Note this is not wanted when the traffic needs to be routed through the VPN
         ns.add_routing(
             target_subnet,
             parsed_command.open_hosts.as_ref(),
             parsed_command.allow_host_access,
             parsed_command.disable_ipv6,
         )?;
+        ns.enable_unprivileged_ping()?;
 
         if parsed_command.firewall == vopono_core::network::firewall::Firewall::NfTables {
             ns.setup_nftables_firewall()?;
         }
 
-        // Add local host to open hosts if allow_host_access enabled
         if parsed_command.allow_host_access {
             let host_ip = ns
                 .veth_pair_ips
@@ -173,13 +261,12 @@ pub fn exec(
                 .expect("No IPv4 host address")
                 .host_ip;
             warn!("Allowing host access from network namespace, host IP address is: {host_ip}");
-            if let Some(oh) = parsed_command.open_hosts.iter_mut().next() {
+            if let Some(oh) = parsed_command.open_hosts.as_mut() {
                 oh.push(host_ip);
             } else {
                 parsed_command.open_hosts = Some(vec![host_ip]);
             }
 
-            // Add IPv6 host if it exists
             if let Some(ref mut open_hosts) = parsed_command.open_hosts {
                 warn!(
                     "Allowing host access from network namespace, host IPv6 address is: {host_ip}"
@@ -214,8 +301,6 @@ pub fn exec(
 
         forwarder = provider_port_forwarding(&parsed_command, &ns)?;
 
-        // Run PostUp script (if any)
-        // Temporarily set env var referring to this network namespace name
         if let Some(pucmd) = parsed_command.postup.clone() {
             let mut sudo_args = Vec::new();
             if let Some(ref user) = parsed_command.user {
@@ -230,32 +315,41 @@ pub fn exec(
             let parsed_pucmd = parse_command_str(&pucmd)?;
             let parsed_pucmd_ptrs: Vec<&str> = parsed_pucmd.iter().map(|s| s.as_str()).collect();
 
-            if !sudo_args.is_empty() {
-                let mut args = vec!["--preserve-env"];
+            let mut cmd = if !sudo_args.is_empty() {
+                let mut args = vec!["sudo", "--preserve-env"];
                 args.append(&mut sudo_args);
                 args.extend(parsed_pucmd_ptrs);
-
-                let mut cmd = std::process::Command::new("sudo");
-                cmd.args(args);
-                set_env_vars(&ns, forwarder.as_deref(), &mut cmd, &host_env_vars);
-                cmd.spawn()?;
+                let mut cmd = std::process::Command::new(args[0]);
+                cmd.args(&args[1..]);
+                cmd
             } else {
                 let mut cmd = std::process::Command::new(parsed_pucmd_ptrs[0]);
-                cmd.args(parsed_pucmd_ptrs[1..].iter());
-                set_env_vars(&ns, forwarder.as_deref(), &mut cmd, &host_env_vars);
-                cmd.spawn()?;
+                cmd.args(&parsed_pucmd_ptrs[1..]);
+                cmd
             };
+            set_env_vars(&ns, forwarder.as_deref(), &mut cmd, &host_env_vars);
+            cmd.spawn()?;
         }
     }
 
-    let ns = ns.write_lockfile(&parsed_command.application)?;
+    Ok(NamespaceConfig {
+        ns,
+        parsed_command,
+        forwarder,
+        host_env_vars,
+    })
+}
 
-    // Port forwarding for ProtonVPN and PIA which require loop to keep it active
-    // Forwarder is returned so it isn't dropped
-
-    // Launch TCP proxy server on other threads if forwarding ports
+fn run_application_and_wait(
+    parsed_command: &ArgsConfig,
+    forwarder: Option<Box<dyn Forwarder>>,
+    ns: &NetworkNamespace,
+    signals: SignalsInfo,
+    silent: bool,
+    host_env_vars: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<i32> {
     let mut proxy = Vec::new();
-    if let Some(f) = parsed_command.forward.clone()
+    if let Some(f) = &parsed_command.forward
         && !(parsed_command.no_proxy || f.is_empty())
     {
         for p in f {
@@ -270,10 +364,8 @@ pub fn exec(
                     .unwrap()
                     .namespace_ip
             );
-
-            // TODO: Do we want IPv6 forwarding?
             proxy.push(basic_tcp_proxy::TcpProxy::new(
-                p,
+                *p,
                 std::net::SocketAddr::new(
                     ns.veth_pair_ips
                         .as_ref()
@@ -282,7 +374,7 @@ pub fn exec(
                         .as_ref()
                         .unwrap()
                         .namespace_ip,
-                    p,
+                    *p,
                 ),
                 false,
             ));
@@ -290,36 +382,65 @@ pub fn exec(
     }
 
     if !parsed_command.create_netns_only {
-        return run_application(
-            &parsed_command,
+        let application = ApplicationWrapper::new(
+            ns,
+            &parsed_command.application,
+            parsed_command.user.clone(),
+            parsed_command.group.clone(),
+            parsed_command.working_directory.clone().map(PathBuf::from),
             forwarder,
-            &ns,
-            signals,
             silent,
-            &host_env_vars,
+            host_env_vars,
+            false, // Do not pipe IO for normal execution
+            None,
+            false,
+        )?;
+
+        let pid = application.handle.id();
+        info!(
+            "Application {} launched in network namespace {} with pid {}",
+            &parsed_command.application, &ns.name, pid
         );
+
+        if let Some(fwd) = application.port_forwarding.as_ref() {
+            info!("Port Forwarding on port {}", fwd.forwarded_port())
+        }
+        let output = application.wait_with_output()?;
+        io::stdout().write_all(output.stdout.as_slice())?;
+
+        if vopono_core::util::check_process_running(pid) {
+            info!(
+                "Process {} still running, assumed to be daemon - will leave network namespace {} alive until ctrl+C received",
+                pid, &ns.name
+            );
+            stay_alive(Some(pid), signals);
+            Ok(0)
+        } else if parsed_command.keep_alive {
+            info!(
+                "Keep-alive flag active - will leave network namespace {} alive until ctrl+C received",
+                &ns.name
+            );
+            stay_alive(None, signals);
+            Ok(0)
+        } else {
+            Ok(output.status.code().unwrap_or(1))
+        }
     } else {
         info!(
             "Created netns {} - will leave network namespace alive until ctrl+C received",
             &ns.name
         );
         stay_alive(None, signals);
+        Ok(0)
     }
-
-    Ok(0)
 }
 
 // Block waiting for SIGINT
 fn stay_alive(pid: Option<u32>, mut signals: Signals) {
     let (sender, receiver) = std::sync::mpsc::channel();
-
-    // discard old signals
-    for _old in signals.pending() {
-        // pass, just empty the iterator
-    }
+    for _old in signals.pending() {}
 
     let handle = signals.handle();
-
     let thread = std::thread::spawn(move || {
         for _sig in signals.forever() {
             if let Some(pid) = pid {
@@ -336,9 +457,7 @@ fn stay_alive(pid: Option<u32>, mut signals: Signals) {
         }
     });
 
-    // this blocks until sender sends, so until sigint is received
     receiver.recv().unwrap();
-
     handle.close();
     thread.join().unwrap();
 }
@@ -354,7 +473,6 @@ fn run_protocol_in_netns(
             "Provider set to None, will not run any VPN protocol inside the network namespace"
         );
         if let Some(dns) = &parsed_command.dns {
-            // TODO: Separate hosts entries from DNS config?
             ns.dns_config(
                 dns,
                 &[],
@@ -377,14 +495,10 @@ fn run_protocol_in_netns(
                 .provider
                 .get_dyn_wireguard_provider()?
                 .wireguard_dir(),
-            Protocol::OpenConnect => bail!("OpenConnect must use Custom provider"),
-            Protocol::OpenFortiVpn => bail!("OpenFortiVpn must use Custom provider"),
-            Protocol::Warp => unreachable!(),
-            Protocol::None => unreachable!(),
+            _ => bail!("This protocol must use a custom provider"),
         }?;
         Some(get_config_from_alias(&cdir, &parsed_command.server)?)
     } else {
-        // TODO: Improve error here
         Some(
             parsed_command
                 .custom
@@ -401,7 +515,6 @@ fn run_protocol_in_netns(
             parsed_command.firewall,
         )?,
         Protocol::OpenVpn => {
-            // Handle authentication check
             let auth_file = if parsed_command.provider != VpnProvider::Custom {
                 verify_auth(
                     parsed_command.provider.get_dyn_openvpn_provider()?,
@@ -423,19 +536,16 @@ fn run_protocol_in_netns(
                 })
                 .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
-            // TODO: DNS suffixes?
             ns.dns_config(
                 &dns,
                 &[],
                 parsed_command.hosts.as_ref(),
                 parsed_command.allow_host_access,
             )?;
-            // Check if using Shadowsocks
-            if let Some((ss_host, ss_lport)) = uses_shadowsocks(
-                config_file
-                    .as_ref()
-                    .expect("No OpenVPN config file provided"),
-            )? {
+            let config_path = config_file
+                .as_ref()
+                .expect("No OpenVPN config file provided");
+            if let Some((ss_host, ss_lport)) = uses_shadowsocks(config_path)? {
                 if parsed_command.provider == VpnProvider::Custom {
                     warn!(
                         "Custom provider specifies socks-proxy, if this is local you must run it yourself (e.g. shadowsocks)"
@@ -444,22 +554,12 @@ fn run_protocol_in_netns(
                     let dyn_ss_provider = parsed_command.provider.get_dyn_shadowsocks_provider()?;
                     let password = dyn_ss_provider.password();
                     let encrypt_method = dyn_ss_provider.encrypt_method();
-                    ns.run_shadowsocks(
-                        config_file
-                            .as_ref()
-                            .expect("No OpenVPN config file provided"),
-                        ss_host,
-                        ss_lport,
-                        &password,
-                        &encrypt_method,
-                    )?;
+                    ns.run_shadowsocks(config_path, ss_host, ss_lport, &password, &encrypt_method)?;
                 }
             }
 
             ns.run_openvpn(
-                config_file
-                    .clone()
-                    .expect("No OpenVPN config file provided"),
+                config_path.clone(),
                 auth_file,
                 &dns,
                 !parsed_command.no_killswitch,
@@ -474,22 +574,16 @@ fn run_protocol_in_netns(
                 &ns.name
             );
             if !ns.check_openvpn_running() {
-                error!(
-                    "OpenVPN not running in network namespace {}, probable dead lock file or authentication error",
-                    &ns.name
-                );
                 return Err(anyhow!(
                     "OpenVPN not running in network namespace, probable dead lock file authentication error"
                 ));
             }
 
-            // Set DNS with OpenVPN server response if present
             if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns
                 && parsed_command.dns.is_none()
             {
                 let old_dns = ns.dns_config.take();
                 std::mem::forget(old_dns);
-                // TODO: DNS suffixes?
                 ns.dns_config(
                     &[newdns],
                     &[],
@@ -536,7 +630,6 @@ fn run_protocol_in_netns(
                 .dns
                 .clone()
                 .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
-            // TODO: DNS suffixes?
             ns.dns_config(
                 &dns,
                 &[],
@@ -555,7 +648,6 @@ fn run_protocol_in_netns(
             )?;
         }
         Protocol::OpenFortiVpn => {
-            // TODO: DNS handled by OpenFortiVpn directly?
             ns.run_openfortivpn(
                 config_file
                     .clone()
@@ -575,7 +667,6 @@ fn provider_port_forwarding(
     parsed_command: &ArgsConfig,
     ns: &NetworkNamespace,
 ) -> anyhow::Result<Option<Box<dyn Forwarder>>> {
-    //  Does not re-run if re-using existing namespace
     let forwarder: Option<Box<dyn Forwarder>> = if parsed_command.port_forwarding
         || parsed_command.custom_port_forwarding.is_some()
     {
@@ -585,11 +676,8 @@ fn provider_port_forwarding(
             Some(parsed_command.provider.clone())
         };
 
-        if provider_or_custom.is_some() {
-            debug!(
-                "Will use {:?} as provider for port forwarding",
-                &provider_or_custom
-            );
+        if let Some(provider) = &provider_or_custom {
+            debug!("Will use {:?} as provider for port forwarding", provider);
         }
 
         match provider_or_custom {
@@ -634,7 +722,6 @@ fn provider_port_forwarding(
                     )
                 }
                 let endpoint_ip = ns.wireguard.as_ref().map(|wg| wg.interface_addresses[0]);
-                // TODO: Is OpenVPN possible? Could not get it to work manually
 
                 endpoint_ip
                     .map(|ip| AzireVpnPortForwarding::new(ns, &access_token, ip))
@@ -658,60 +745,8 @@ fn provider_port_forwarding(
         None
     };
 
-    // TODO: The forwarder should probably be able to do this (pass firewall?)
     if let Some(fwd) = forwarder.as_ref() {
         vopono_core::util::open_ports(ns, &[fwd.forwarded_port()], parsed_command.firewall)?;
     }
     Ok(forwarder)
-}
-
-fn run_application(
-    parsed_command: &ArgsConfig,
-    forwarder: Option<Box<dyn Forwarder>>,
-    ns: &NetworkNamespace,
-    signals: SignalsInfo,
-    silent: bool,
-    host_env_vars: &std::collections::HashMap<String, String>,
-) -> anyhow::Result<i32> {
-    let application = ApplicationWrapper::new(
-        ns,
-        &parsed_command.application,
-        parsed_command.user.clone(),
-        parsed_command.group.clone(),
-        parsed_command.working_directory.clone().map(PathBuf::from),
-        forwarder,
-        silent,
-        host_env_vars,
-    )?;
-
-    let pid = application.handle.id();
-    info!(
-        "Application {} launched in network namespace {} with pid {}",
-        &parsed_command.application, &ns.name, pid
-    );
-
-    if let Some(fwd) = application.port_forwarding.as_ref() {
-        info!("Port Forwarding on port {}", fwd.forwarded_port())
-    }
-    let output = application.wait_with_output()?;
-    io::stdout().write_all(output.stdout.as_slice())?;
-
-    // Allow daemons to leave namespace open
-    if vopono_core::util::check_process_running(pid) {
-        info!(
-            "Process {} still running, assumed to be daemon - will leave network namespace {} alive until ctrl+C received",
-            pid, &ns.name
-        );
-        stay_alive(Some(pid), signals);
-        Ok(0)
-    } else if parsed_command.keep_alive {
-        info!(
-            "Keep-alive flag active - will leave network namespace {} alive until ctrl+C received",
-            &ns.name
-        );
-        stay_alive(None, signals);
-        Ok(0)
-    } else {
-        Ok(output.status.code().unwrap_or(1))
-    }
 }
