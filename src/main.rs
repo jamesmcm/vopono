@@ -61,6 +61,8 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("Error: The daemon command requires root privileges.");
                 std::process::exit(1);
             }
+            // Mark process context so libraries can adjust behavior (e.g., logging verbosity)
+            vopono_core::util::set_daemon_mode(true);
             info!("Starting vopono in daemon mode.");
             return daemon::start();
         }
@@ -116,7 +118,34 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<i32> {
     };
 
     debug!("Connected to daemon, forwarding command.");
-    let request = daemon::DaemonRequest::Execute(cmd.clone());
+    // Collect a small set of environment variables from the client session
+    // that are relevant for GUI/desktop integration.
+    let mut fwd_env: std::collections::HashMap<String, String> = Default::default();
+    for key in [
+        // X/Wayland basics
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        // Runtime/config roots for per-user sockets and configs
+        "XDG_RUNTIME_DIR",
+        "XDG_CONFIG_HOME",
+        // Toolkit/session hints (safe to forward)
+        "XDG_SESSION_TYPE",
+        "MOZ_ENABLE_WAYLAND",
+        "QT_QPA_PLATFORM",
+        "GTK_MODULES",
+        "GTK3_MODULES",
+        // Window manager IPC socket
+        "I3SOCK",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            fwd_env.insert(key.to_string(), val);
+        }
+    }
+    let request = daemon::DaemonRequest::Execute {
+        cmd: cmd.clone(),
+        env: fwd_env,
+    };
     let bytes = bincode::serde::encode_to_vec(&request, bincode::config::standard())?;
     conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
     conn.write_all(&bytes)?;
