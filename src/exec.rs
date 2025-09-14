@@ -50,7 +50,7 @@ pub fn execute_as_daemon(
         parsed_command,
         forwarder,
         host_env_vars,
-    } = setup_namespace(command, &uiclient, true)?;
+    } = setup_namespace(command, &uiclient, true, false)?; // daemon: do not auto-sync
 
     let ns = ns.write_lockfile(&parsed_command.application)?;
 
@@ -76,6 +76,7 @@ pub fn execute_as_daemon_with_stdio(
     pipe_io: bool,
     stdio_fds: Option<(RawFd, RawFd, RawFd)>,
     take_controlling_tty: bool,
+    forwarded_env: Option<std::collections::HashMap<String, String>>,
 ) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace)> {
     let uiclient = CliClient {};
     let NamespaceConfig {
@@ -83,7 +84,7 @@ pub fn execute_as_daemon_with_stdio(
         parsed_command,
         forwarder,
         host_env_vars,
-    } = setup_namespace(command, &uiclient, true)?;
+    } = setup_namespace(command, &uiclient, true, false)?; // daemon: do not auto-sync
 
     // In daemon mode, ensure PULSE_SERVER points to the connecting user's runtime
     // so apps can talk to the host Pulse/pipewire server.
@@ -93,6 +94,18 @@ pub fn execute_as_daemon_with_stdio(
     {
         let pulse = format!("unix:/run/user/{}/pulse/native", user.uid.as_raw());
         host_env_vars.insert("PULSE_SERVER".to_string(), pulse);
+        // Ensure XDG_RUNTIME_DIR points at the connecting user's runtime dir
+        host_env_vars
+            .entry("XDG_RUNTIME_DIR".to_string())
+            .or_insert_with(|| format!("/run/user/{}", user.uid.as_raw()));
+    }
+
+    // Merge all client-forwarded environment variables. Client side already whitelists
+    // which keys are forwarded; here we simply apply them.
+    if let Some(fwd) = forwarded_env.as_ref() {
+        for (k, v) in fwd {
+            host_env_vars.insert(k.clone(), v.clone());
+        }
     }
 
     let ns = ns.write_lockfile(&parsed_command.application)?;
@@ -125,7 +138,7 @@ pub fn exec(
         parsed_command,
         forwarder,
         host_env_vars,
-    } = setup_namespace(command, uiclient, verbose)?;
+    } = setup_namespace(command, uiclient, verbose, true)?; // CLI path: allow auto-sync if missing
     let ns = ns.write_lockfile(&parsed_command.application)?;
     run_application_and_wait(
         &parsed_command,
@@ -142,6 +155,7 @@ fn setup_namespace(
     command: ExecCommand,
     uiclient: &dyn UiClient,
     verbose: bool,
+    auto_sync_if_missing: bool,
 ) -> anyhow::Result<NamespaceConfig> {
     create_dir_all(vopono_dir()?)?;
     let vopono_config_settings = ArgsConfig::get_config_file(&command)?;
@@ -164,16 +178,28 @@ fn setup_namespace(
                 .wireguard_dir(),
             _ => unreachable!(),
         }?;
-        if !cdir.exists() || cdir.read_dir()?.next().is_none() {
-            info!(
-                "Config files for {} {} do not exist, running vopono sync",
-                parsed_command.provider, parsed_command.protocol
-            );
-            synch(
-                parsed_command.provider.clone(),
-                &Some(parsed_command.protocol.clone()),
-                uiclient,
-            )?;
+        let missing_configs = !cdir.exists() || cdir.read_dir()?.next().is_none();
+        if missing_configs {
+            if auto_sync_if_missing {
+                info!(
+                    "Config files for {} {} do not exist, running vopono sync",
+                    parsed_command.provider, parsed_command.protocol
+                );
+                synch(
+                    parsed_command.provider.clone(),
+                    &Some(parsed_command.protocol.clone()),
+                    uiclient,
+                )?;
+            } else {
+                // In daemon mode, avoid interactive sync and return a clear error.
+                anyhow::bail!(
+                    "Missing configuration for {} {}. Run 'vopono sync --provider {} --protocol {}' as your user to initialize.",
+                    parsed_command.provider,
+                    parsed_command.protocol,
+                    parsed_command.provider,
+                    parsed_command.protocol
+                );
+            }
         }
     }
 

@@ -33,7 +33,10 @@ use std::thread;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum DaemonRequest {
-    Execute(ExecCommand),
+    Execute {
+        cmd: ExecCommand,
+        env: std::collections::HashMap<String, String>,
+    },
     Control(DaemonControl),
 }
 
@@ -118,6 +121,8 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
         user.name, uid, group.name, gid
     );
 
+    // Note: Do not set config override yet; we may adopt client's XDG_CONFIG_HOME.
+
     // Read a framed request (length-prefixed u32 then payload)
     let mut len_bytes = [0u8; 4];
     conn.read_exact(&mut len_bytes)?;
@@ -132,7 +137,19 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
         recv_fds_over_unix_socket(&conn, 3)?;
 
     match request {
-        DaemonRequest::Execute(mut exec_command) => {
+        DaemonRequest::Execute {
+            cmd: mut exec_command,
+            env: forwarded_env,
+        } => {
+            // Set config override from client's XDG_CONFIG_HOME if present, falling back to ~/.config
+            let override_base = forwarded_env
+                .get("XDG_CONFIG_HOME")
+                .and_then(|p| {
+                    let pb = std::path::PathBuf::from(p);
+                    if pb.exists() { Some(pb) } else { None }
+                })
+                .unwrap_or_else(|| user.dir.join(".config"));
+            vopono_core::util::set_config_dir_override(Some(override_base));
             exec_command.user = Some(user.name);
             exec_command.group = Some(group.name);
 
@@ -158,6 +175,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                     false,
                     Some((slave, slave, slave)),
                     true,
+                    Some(forwarded_env.clone()),
                 )?;
                 // Do not close the slave here: it's owned by the spawned child via Stdio::from_raw_fd
                 // and will be closed by the child/OS when appropriate.
@@ -168,6 +186,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                     false,
                     Some((client_stdin_fd, client_stdout_fd, client_stderr_fd)),
                     false,
+                    Some(forwarded_env.clone()),
                 )?;
             }
 
@@ -356,6 +375,8 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             // Ignore unexpected control frame sent as the first message
         }
     }
+    // Clear any thread-local override before exiting the handler
+    vopono_core::util::set_config_dir_override(None);
     Ok(())
 }
 

@@ -90,7 +90,7 @@ For a smoother experience, run the privileged root daemon and keep using `vopono
 - Or run manually as root: `sudo vopono daemon`
 - Then use vopono normally as your user: `vopono exec --provider mullvad --server se firefox`
 
-See USERGUIDE.md for a ready‑to‑copy systemd unit.
+See [USERGUIDE.md](USERGUIDE.md) for a ready‑to‑copy systemd unit.
 
 vopono can handle up to 255 separate network namespaces (i.e. different VPN server
 connections - if your VPN provider allows it). Commands launched with

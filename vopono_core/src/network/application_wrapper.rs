@@ -261,13 +261,14 @@ impl ApplicationWrapper {
                         // If stdin is a TTY, take it as controlling terminal
                         // Use TIOCSCTTY with arg 1 to forcibly acquire if already in use
                         let fd0: i32 = 0;
-                        let is_tty = libc::isatty(fd0) == 1;
-                        if is_tty {
-                            // Let the compiler infer the proper ioctl request type per target
-                            let _ = libc::ioctl(fd0, libc::TIOCSCTTY as _, 1);
-                            // Set foreground process group to our own pgrp
-                            let pgrp = libc::getpgrp();
-                            let _ = libc::tcsetpgrp(fd0, pgrp);
+                        if libc::isatty(fd0) == 1 {
+                            // Attempt to acquire the TTY as controlling terminal. Only set
+                            // the foreground process group if that succeeded.
+                            let acquire_res = libc::ioctl(fd0, libc::TIOCSCTTY as _, 1);
+                            if acquire_res == 0 {
+                                let pgrp = libc::getpgrp();
+                                let _ = libc::tcsetpgrp(fd0, pgrp);
+                            }
                         }
                     }
 

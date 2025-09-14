@@ -31,7 +31,7 @@ vopono now supports a persistent root daemon that handles all privileged work. R
 
 Signals (e.g., Ctrl+C, Ctrl+Z) and interactive TTY behavior work cleanly via the daemon. The daemon listens on `/run/vopono.sock` and cleans it up on exit.
 
-Example systemd unit for the root daemon (`/etc/systemd/system/vopono-daemon.service`):
+Example systemd unit for the root daemon (`/etc/systemd/system/vopono.service`):
 
 ```
 [Unit]
@@ -54,8 +54,8 @@ WantedBy=multi-user.target
 Check status and logs:
 
 ```
-sudo systemctl status vopono-daemon
-sudo journalctl -u vopono-daemon -e
+sudo systemctl status vopono
+sudo journalctl -u vopono -e
 ```
 
 Note there is a known issue that when using tmux, etc. - sometimes the

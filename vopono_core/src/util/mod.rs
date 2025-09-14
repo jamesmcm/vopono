@@ -31,7 +31,39 @@ use users::{get_current_uid, get_user_by_uid};
 use walkdir::WalkDir;
 use which::which;
 
+thread_local! {
+    static CONFIG_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+static DAEMON_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_daemon_mode(v: bool) {
+    DAEMON_MODE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn is_daemon_mode() -> bool {
+    DAEMON_MODE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set a thread-local override for the base config directory (i.e., the parent of `vopono/`).
+/// When set, `config_dir()` will return this path instead of detecting from env/XDG.
+/// Use `None` to clear. This is safe for the daemon where each client runs on its own thread.
+pub fn set_config_dir_override(path: Option<PathBuf>) {
+    CONFIG_DIR_OVERRIDE.with(|ov| *ov.borrow_mut() = path);
+}
+
 pub fn config_dir() -> anyhow::Result<PathBuf> {
+    // Respect thread-local override first (used by daemon to select the connecting user's config).
+    if let Some(override_path) = CONFIG_DIR_OVERRIDE.with(|ov| ov.borrow().clone())
+        && override_path.exists()
+    {
+        debug!(
+            "Using config dir from override: {}",
+            override_path.to_string_lossy()
+        );
+        return Ok(override_path);
+    }
+
     let path: Option<PathBuf> = None
         .or_else(|| {
             if let Ok(home) = std::env::var("HOME") {

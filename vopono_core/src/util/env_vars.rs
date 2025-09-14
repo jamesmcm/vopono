@@ -8,6 +8,8 @@ use crate::network::{netns::NetworkNamespace, port_forwarding::Forwarder};
 pub fn get_host_env_vars() -> HashMap<String, String> {
     let mut env_vars = HashMap::new();
 
+    // Best-effort: try to detect Pulse/pipewire server when available.
+    // Avoid noisy warnings in non-interactive contexts (e.g., systemd daemon) by logging at debug level.
     if which::which("pactl").is_ok() {
         match crate::util::pulseaudio::get_pulseaudio_server() {
             Ok(pa) => {
@@ -15,7 +17,12 @@ pub fn get_host_env_vars() -> HashMap<String, String> {
                 env_vars.insert("PULSE_SERVER".to_string(), pa);
             }
             Err(e) => {
-                warn!("Could not get PULSE_SERVER from host: {e:?}");
+                // Only warn in non-daemon contexts; daemon sets PULSE_SERVER explicitly per user.
+                if crate::util::is_daemon_mode() {
+                    debug!("Could not get PULSE_SERVER from host: {e:?}");
+                } else {
+                    warn!("Could not get PULSE_SERVER from host: {e:?}");
+                }
             }
         }
     } else {
