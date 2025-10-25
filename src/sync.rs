@@ -54,6 +54,9 @@ pub fn synch(
             let provider = provider.get_dyn_wireguard_provider()?;
             provider.create_wireguard_config(uiclient)?;
         }
+        Some(Protocol::AmneziaWG) => {
+            error!("vopono sync not supported for AmneziaWG protocol");
+        }
         Some(Protocol::OpenConnect) => {
             error!("vopono sync not supported for OpenConnect protocol");
         }

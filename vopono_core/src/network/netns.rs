@@ -586,6 +586,8 @@ impl NetworkNamespace {
     pub fn run_wireguard(
         &mut self,
         config_file: PathBuf,
+        executable_wg: Option<&str>,
+        ip_link_type: Option<&str>,
         use_killswitch: bool,
         open_ports: Option<&Vec<u16>>,
         forward_ports: Option<&Vec<u16>>,
@@ -602,6 +604,8 @@ impl NetworkNamespace {
         self.wireguard = Some(Wireguard::run(
             self,
             config_file,
+            executable_wg,
+            ip_link_type,
             use_killswitch,
             open_ports,
             forward_ports,

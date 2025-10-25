@@ -16,6 +16,8 @@ use std::str::FromStr;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Wireguard {
+    pub executable_wg: String,
+    pub ip_link_type: String,
     pub ns_name: String,
     pub config_file: PathBuf,
     pub firewall: Firewall,
@@ -35,6 +37,8 @@ impl Wireguard {
     pub fn run(
         namespace: &mut NetworkNamespace,
         config_file: PathBuf,
+        executable_wg: Option<&str>,
+        ip_link_type: Option<&str>,
         use_killswitch: bool,
         open_ports: Option<&Vec<u16>>,
         forward_ports: Option<&Vec<u16>>,
@@ -45,10 +49,13 @@ impl Wireguard {
         allow_host_access: bool,
         trojan_config: Option<TrojanConfig>,
     ) -> anyhow::Result<Self> {
-        if let Err(x) = which::which("wg") {
-            error!("wg binary not found. Is wireguard-tools installed and on PATH?");
+        let executable_wg = executable_wg.unwrap_or("wg").to_string();
+        let ip_link_type = ip_link_type.unwrap_or("wireguard").to_string();
+
+        if let Err(x) = which::which(&executable_wg) {
+            error!("{executable_wg} binary not found. Is wireguard-tools installed and on PATH?");
             return Err(anyhow!(
-                "wg binary not found. Is wireguard-tools installed and on PATH?: {:?}",
+                "{executable_wg} binary not found. Is wireguard-tools installed and on PATH?: {:?}",
                 x
             ));
         }
@@ -78,6 +85,17 @@ impl Wireguard {
                 "AllowedIPs",
                 "Endpoint",
                 "PersistentKeepalive",
+
+                // AmneziaWG extended parameters
+                "Jc",
+                "Jmin",
+                "Jmax",
+                "S1",
+                "S2",
+                "H1",
+                "H2",
+                "H3",
+                "H4",
             ];
 
             let mut f = std::fs::File::create("/tmp/vopono_wg.conf")
@@ -166,14 +184,14 @@ impl Wireguard {
 
         NetworkNamespace::exec(
             &namespace.name,
-            &["ip", "link", "add", &if_name, "type", "wireguard"],
+            &["ip", "link", "add", &if_name, "type", &ip_link_type],
         )?;
 
         NetworkNamespace::exec(
             &namespace.name,
-            &["wg", "setconf", &if_name, "/tmp/vopono_wg.conf"],
+            &[&executable_wg, "setconf", &if_name, "/tmp/vopono_wg.conf"],
         )
-        .context("Failed to run wg setconf - is wireguard-tools installed?")?;
+        .context(format!("Failed to run {executable_wg} setconf - is wireguard-tools installed?"))?;
         std::fs::remove_file("/tmp/vopono_wg.conf")
             .context("Deleting file: /tmp/vopono_wg.conf")
             .ok();
@@ -256,7 +274,7 @@ impl Wireguard {
         namespace.dns_config(&dns, &[], hosts_entries, allow_host_access)?;
         // TODO: Here we hardcode default Wireguard port of 51820
         let fwmark = "51820";
-        NetworkNamespace::exec(&namespace.name, &["wg", "set", &if_name, "fwmark", fwmark])?;
+        NetworkNamespace::exec(&namespace.name, &[&executable_wg, "set", &if_name, "fwmark", fwmark])?;
 
         // IPv4 routes
         NetworkNamespace::exec(
@@ -495,6 +513,8 @@ impl Wireguard {
         }
 
         Ok(Self {
+            executable_wg,
+            ip_link_type,
             config_file,
             ns_name: namespace.name.clone(),
             firewall,
