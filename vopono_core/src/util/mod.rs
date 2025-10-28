@@ -14,7 +14,7 @@ use anyhow::{Context, anyhow};
 use directories_next::BaseDirs;
 use ipnet::Ipv4Net;
 use log::{debug, info, warn};
-use nix::unistd::{Group, User};
+use nix::unistd::{Gid, Group, Uid, User};
 pub use open_hosts::open_hosts;
 pub use open_ports::open_ports;
 use rand::prelude::IndexedRandom;
@@ -33,6 +33,8 @@ use which::which;
 
 thread_local! {
     static CONFIG_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    static CONFIG_OWNER_OVERRIDE: std::cell::RefCell<Option<(Uid, Gid)>> =
+        const {std::cell::RefCell::new(None) };
 }
 
 static DAEMON_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -50,6 +52,10 @@ pub fn is_daemon_mode() -> bool {
 /// Use `None` to clear. This is safe for the daemon where each client runs on its own thread.
 pub fn set_config_dir_override(path: Option<PathBuf>) {
     CONFIG_DIR_OVERRIDE.with(|ov| *ov.borrow_mut() = path);
+}
+
+pub fn set_config_owner_override(owner: Option<(Uid, Gid)>) {
+    CONFIG_OWNER_OVERRIDE.with(|ov| *ov.borrow_mut() = owner);
 }
 
 pub fn config_dir() -> anyhow::Result<PathBuf> {
@@ -176,14 +182,24 @@ pub fn set_config_permissions() -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let check_dir = vopono_dir()?;
-    let username = get_username()?;
-    let group = get_group(&username)?;
+    let (user, group) = CONFIG_OWNER_OVERRIDE.with(|ov| *ov.borrow()).map_or_else(
+        || -> anyhow::Result<(Option<Uid>, Option<Gid>)> {
+            let username = get_username()?;
+            let group_name = get_group(&username)?;
+            let user = User::from_name(&username)?
+                .map(|x| x.uid)
+                .ok_or_else(|| anyhow!("Failed to resolve uid for user '{username}'"))?;
+            let group = Group::from_name(&group_name)?
+                .map(|x| x.gid)
+                .ok_or_else(|| anyhow!("Failed to resolve gid for group '{group_name}'"))?;
+            Ok((Some(user), Some(group)))
+        },
+        |(uid, gid)| Ok((Some(uid), Some(gid))),
+    )?;
 
     let file_permissions = Permissions::from_mode(0o640);
     let dir_permissions = Permissions::from_mode(0o750);
 
-    let group = nix::unistd::Group::from_name(&group)?.map(|x| x.gid);
-    let user = nix::unistd::User::from_name(&username)?.map(|x| x.uid);
     for entry in WalkDir::new(check_dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         nix::unistd::chown(path, user, group)?;

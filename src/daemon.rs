@@ -150,6 +150,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 })
                 .unwrap_or_else(|| user.dir.join(".config"));
             vopono_core::util::set_config_dir_override(Some(override_base));
+            vopono_core::util::set_config_owner_override(Some((uid, gid)));
             exec_command.user = Some(user.name);
             exec_command.group = Some(group.name);
 
@@ -377,6 +378,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
     }
     // Clear any thread-local override before exiting the handler
     vopono_core::util::set_config_dir_override(None);
+    vopono_core::util::set_config_owner_override(None);
     Ok(())
 }
 
