@@ -46,7 +46,7 @@ base64 = "0.22"
 x25519-dalek = { version = "3.0.0-pre.0", features = ["static_secrets"] }
 strum = "0.27"
 strum_macros = "0.27"
-zip = "5"
+zip = "6"
 maplit = "1"
 webbrowser = "1"
 serde_json = "1"
