@@ -209,8 +209,7 @@ impl ArgsConfig {
 
         // Assign protocol and server from args or vopono config file or custom config if used
         if let Some(path) = &custom {
-            protocol = command
-                .protocol
+            protocol = command_else_config_option!(protocol, command, config)
                 .map(|x| x.to_variant())
                 .ok_or_else(|| anyhow!("."))
                 .or_else(|_| get_config_file_protocol(path))?;
