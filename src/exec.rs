@@ -639,7 +639,7 @@ fn run_protocol_in_netns(
 
             let (executable_wg, ip_link_type) = match parsed_command.protocol {
                 Protocol::AmneziaWG => (Some("awg"), Some("amneziawg")),
-                _ => (None, None)
+                _ => (Some("wg"), Some("wireguard")),
             };
 
             ns.run_wireguard(
