@@ -145,7 +145,7 @@ postup = "/home/archie/postup.sh"
 predown = "/home/archie/predown.sh"
 user = "archie"
 dns = "8.8.8.8"
-# custom_config = "/home/user/vpn/mycustomconfig.ovpn"
+# custom = "/home/user/vpn/mycustomconfig.ovpn"
 ```
 
 Note that the values are case-sensitive. If you use a custom config file
