@@ -350,11 +350,9 @@ impl ArgsConfig {
         }
 
         vopono_config_settings_builder.build().map_err(|e| {
-            anyhow!(
-                "Failed to parse config from: {} , err: {}",
-                config_path.to_string_lossy(),
-                e
-            )
+            let msg = format!("Failed to parse config from: {}, err: {}", config_path.to_string_lossy(), e);
+            log::error!("{msg}");
+            anyhow!(msg)
         })
     }
 }
