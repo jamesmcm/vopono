@@ -1,6 +1,6 @@
 // Handles using the args from either the CLI or config file
 
-use std::{net::IpAddr, path::PathBuf, str::FromStr};
+use std::{fs, net::IpAddr, path::PathBuf, str::FromStr};
 
 use anyhow::anyhow;
 use config::Config;
@@ -340,16 +340,15 @@ impl ArgsConfig {
             .clone()
             .ok_or_else(|| anyhow!("No config file passed"))
             .or_else::<anyhow::Error, _>(|_| Ok(vopono_dir()?.join("config.toml")))?;
-        {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .open(&config_path)?;
+
+        let mut vopono_config_settings_builder =
+            config::Config::builder();
+
+        if let Ok(true) = fs::exists(&config_path) {
+            vopono_config_settings_builder =
+                vopono_config_settings_builder.add_source(config::File::from(config_path.clone()));
         }
-        let vopono_config_settings_builder =
-            config::Config::builder().add_source(config::File::from(config_path.clone()));
+
         vopono_config_settings_builder.build().map_err(|e| {
             anyhow!(
                 "Failed to parse config from: {} , err: {}",
