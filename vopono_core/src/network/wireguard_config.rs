@@ -323,7 +323,7 @@ impl FromStr for WireguardConfig {
                                 dns_servers.extend(value.split(',').map(|s| s.trim().to_string()))
                             }
                             "MTU" => mtu = Some(value.to_string()),
-                            _ => warn!("Unknown key in [Interface] section: {key}"),
+                            _ => debug!("Unknown key in [Interface] section: {key}"),
                         }
                     }
 
@@ -365,7 +365,7 @@ impl FromStr for WireguardConfig {
                             }
                             "Endpoint" => endpoint = Some(value.to_string()),
                             "PersistentKeepalive" => keepalive = Some(value.to_string()),
-                            _ => warn!("Unknown key in [Peer] section: {key}"),
+                            _ => debug!("Unknown key in [Peer] section: {key}"),
                         }
                     }
 

@@ -85,7 +85,6 @@ impl Wireguard {
                 "AllowedIPs",
                 "Endpoint",
                 "PersistentKeepalive",
-
                 // AmneziaWG extended parameters
                 "Jc",
                 "Jmin",
@@ -191,7 +190,9 @@ impl Wireguard {
             &namespace.name,
             &[&executable_wg, "setconf", &if_name, "/tmp/vopono_wg.conf"],
         )
-        .context(format!("Failed to run {executable_wg} setconf - is wireguard-tools installed?"))?;
+        .context(format!(
+            "Failed to run {executable_wg} setconf - is wireguard-tools installed?"
+        ))?;
         std::fs::remove_file("/tmp/vopono_wg.conf")
             .context("Deleting file: /tmp/vopono_wg.conf")
             .ok();
@@ -274,7 +275,10 @@ impl Wireguard {
         namespace.dns_config(&dns, &[], hosts_entries, allow_host_access)?;
         // TODO: Here we hardcode default Wireguard port of 51820
         let fwmark = "51820";
-        NetworkNamespace::exec(&namespace.name, &[&executable_wg, "set", &if_name, "fwmark", fwmark])?;
+        NetworkNamespace::exec(
+            &namespace.name,
+            &[&executable_wg, "set", &if_name, "fwmark", fwmark],
+        )?;
 
         // IPv4 routes
         NetworkNamespace::exec(
