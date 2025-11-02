@@ -618,7 +618,7 @@ fn run_protocol_in_netns(
                 )?;
             }
         }
-        Protocol::Wireguard => {
+        Protocol::Wireguard | Protocol::AmneziaWG => {
             if parsed_command.trojan_host.is_some() || parsed_command.trojan_config.is_some() {
                 let wg_conf = if parsed_command.trojan_config.is_none() {
                     Some(Wireguard::config_from_file(
@@ -637,10 +637,17 @@ fn run_protocol_in_netns(
                 )?;
             }
 
+            let (executable_wg, ip_link_type) = match parsed_command.protocol {
+                Protocol::AmneziaWG => (Some("awg"), Some("amneziawg")),
+                _ => (Some("wg"), Some("wireguard")),
+            };
+
             ns.run_wireguard(
                 config_file
                     .clone()
                     .expect("No Wireguard config file provided"),
+                executable_wg,
+                ip_link_type,
                 !parsed_command.no_killswitch,
                 parsed_command.open_ports.as_ref(),
                 parsed_command.forward.as_ref(),

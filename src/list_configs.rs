@@ -21,6 +21,7 @@ pub fn print_configs(cmd: ServersCommand) -> anyhow::Result<()> {
     let cdir = match protocol {
         Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir(),
         Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir(),
+        Protocol::AmneziaWG => bail!("Config listing not implemented for AmneziaWG"),
         Protocol::Warp => bail!("Config listing not implemented for Cloudflare Warp"),
         Protocol::OpenConnect => bail!("Config listing not implemented for OpenConnect"),
         Protocol::OpenFortiVpn => bail!("Config listing not implemented for OpenFortiVPN"),

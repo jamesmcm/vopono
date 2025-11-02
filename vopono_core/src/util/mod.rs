@@ -518,6 +518,19 @@ pub fn get_config_file_protocol(config_file: &Path) -> anyhow::Result<Protocol> 
     })?;
 
     if content.contains("[Interface]") {
+        if content.contains("Jc =")
+            | content.contains("Jmin =")
+            | content.contains("Jmax =")
+            | content.contains("S1 =")
+            | content.contains("S2 =")
+            | content.contains("H1 =")
+            | content.contains("H2 =")
+            | content.contains("H3 =")
+            | content.contains("H4 =")
+        {
+            return Ok(Protocol::AmneziaWG);
+        }
+
         Ok(Protocol::Wireguard)
     } else {
         // TODO: Don't always assume OpenVPN

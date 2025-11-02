@@ -74,6 +74,7 @@ impl Display for OpenVpnProtocol {
 pub enum Protocol {
     OpenVpn,
     Wireguard,
+    AmneziaWG,
     OpenConnect,
     OpenFortiVpn,
     Warp,
