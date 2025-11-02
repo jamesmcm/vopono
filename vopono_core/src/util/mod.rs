@@ -197,6 +197,13 @@ pub fn set_config_permissions() -> anyhow::Result<()> {
         |(uid, gid)| Ok((Some(uid), Some(gid))),
     )?;
 
+    debug!(
+        "Setting config permissions in {} to user: {:?}, group: {:?}",
+        check_dir.display(),
+        user,
+        group
+    );
+
     let file_permissions = Permissions::from_mode(0o640);
     let dir_permissions = Permissions::from_mode(0o750);
 
