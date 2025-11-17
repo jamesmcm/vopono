@@ -173,6 +173,7 @@ impl ApplicationWrapper {
 
             let netns_path_cstr = CString::new(format!("/var/run/netns/{}", netns.name))?;
             let want_controlling_tty = take_controlling_tty;
+            let root_c = CString::new("/").unwrap();
             // Prepare bind-mount sources for /etc overlay
             let etc_ns_dir = format!("/etc/netns/{}", netns.name);
             let resolv_src = CString::new(format!("{}/resolv.conf", &etc_ns_dir)).ok();
@@ -181,6 +182,7 @@ impl ApplicationWrapper {
             let resolv_dst = CString::new("/etc/resolv.conf").unwrap();
             let hosts_dst = CString::new("/etc/hosts").unwrap();
             let nsswitch_dst = CString::new("/etc/nsswitch.conf").unwrap();
+            let ping_path = CString::new("/proc/sys/net/ipv4/ping_group_range").unwrap();
 
             unsafe {
                 handle.pre_exec(move || {
@@ -189,26 +191,19 @@ impl ApplicationWrapper {
                     setns(
                         ns_fd.try_clone().expect("Clone failed"),
                         CloneFlags::CLONE_NEWNET,
-                    )
-                    .map_err(|e| std::io::Error::other(format!("pre_exec: setns failed: {e}")))?;
+                    )?;
                     close(ns_fd)?;
 
                     // Create a private mount namespace for the child to safely overlay /etc files
-                    unshare(CloneFlags::CLONE_NEWNS).map_err(|e| {
-                        std::io::Error::other(format!("pre_exec: unshare(CLONE_NEWNS) failed: {e}"))
-                    })?;
+                    unshare(CloneFlags::CLONE_NEWNS)?;
                     // Make mounts private to avoid propagating to the host
-                    let root_c = CString::new("/").unwrap();
                     mount::<std::ffi::CStr, std::ffi::CStr, std::ffi::CStr, std::ffi::CStr>(
                         None,
                         root_c.as_c_str(),
                         None,
                         MsFlags::MS_REC | MsFlags::MS_PRIVATE,
                         None,
-                    )
-                    .map_err(|e| {
-                        std::io::Error::other(format!("pre_exec: mount MS_PRIVATE failed: {e}"))
-                    })?;
+                    )?;
 
                     // Helper to bind a file if the source exists
                     let bind_if_exists =
@@ -227,12 +222,7 @@ impl ApplicationWrapper {
                                     None,
                                     MsFlags::MS_BIND,
                                     None,
-                                )
-                                .map_err(|e| {
-                                    std::io::Error::other(format!(
-                                        "pre_exec: bind mount failed: {e}"
-                                    ))
-                                })?;
+                                )?;
                             }
                             Ok(())
                         };
@@ -244,7 +234,6 @@ impl ApplicationWrapper {
 
                     // Enable unprivileged ping inside the netns by widening ping_group_range
                     // Write "0 2147483647" to /proc/sys/net/ipv4/ping_group_range via raw syscalls
-                    let ping_path = CString::new("/proc/sys/net/ipv4/ping_group_range").unwrap();
                     let fd = libc::open(ping_path.as_ptr(), libc::O_WRONLY);
                     if fd >= 0 {
                         let data = b"0 2147483647\n";
