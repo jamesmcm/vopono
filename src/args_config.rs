@@ -1,6 +1,6 @@
 // Handles using the args from either the CLI or config file
 
-use std::{net::IpAddr, path::PathBuf, str::FromStr};
+use std::{fs, net::IpAddr, path::PathBuf, str::FromStr};
 
 use anyhow::anyhow;
 use config::Config;
@@ -209,8 +209,7 @@ impl ArgsConfig {
 
         // Assign protocol and server from args or vopono config file or custom config if used
         if let Some(path) = &custom {
-            protocol = command
-                .protocol
+            protocol = command_else_config_option!(protocol, command, config)
                 .map(|x| x.to_variant())
                 .ok_or_else(|| anyhow!("."))
                 .or_else(|_| get_config_file_protocol(path))?;
@@ -336,27 +335,31 @@ impl ArgsConfig {
 
     /// Read vopono config file to Config struct
     pub fn get_config_file(command: &ExecCommand) -> anyhow::Result<Config> {
-        let config_path = command
-            .vopono_config
-            .clone()
-            .ok_or_else(|| anyhow!("No config file passed"))
-            .or_else::<anyhow::Error, _>(|_| Ok(vopono_dir()?.join("config.toml")))?;
-        {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .open(&config_path)?;
+        let default_config_path = vopono_dir()
+            .map(|p| { p.join("config.toml") })
+            .ok()
+            .and_then(|v| {
+                if let Ok(file_state) = fs::exists(&v) && file_state == true {
+                    Some(v)
+                } else {
+                    None
+                }});
+
+        let config_path = command.vopono_config.clone()
+            .or(default_config_path);
+
+        let mut vopono_config_settings_builder
+            = config::Config::builder();
+
+        if let Some(path) = config_path.clone() {
+             vopono_config_settings_builder =
+                 vopono_config_settings_builder.add_source(config::File::from(path));
         }
-        let vopono_config_settings_builder =
-            config::Config::builder().add_source(config::File::from(config_path.clone()));
+
         vopono_config_settings_builder.build().map_err(|e| {
-            anyhow!(
-                "Failed to parse config from: {} , err: {}",
-                config_path.to_string_lossy(),
-                e
-            )
+            let msg = format!("Failed to parse config from: {}, err: {}", config_path.unwrap().to_string_lossy(), e);
+            log::error!("{msg}");
+            anyhow!(msg)
         })
     }
 }
