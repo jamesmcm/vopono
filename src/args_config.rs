@@ -335,22 +335,29 @@ impl ArgsConfig {
 
     /// Read vopono config file to Config struct
     pub fn get_config_file(command: &ExecCommand) -> anyhow::Result<Config> {
-        let config_path = command
-            .vopono_config
-            .clone()
-            .ok_or_else(|| anyhow!("No config file passed"))
-            .or_else::<anyhow::Error, _>(|_| Ok(vopono_dir()?.join("config.toml")))?;
+        let default_config_path = vopono_dir()
+            .map(|p| { p.join("config.toml") })
+            .ok()
+            .and_then(|v| {
+                if let Ok(file_state) = fs::exists(&v) && file_state == true {
+                    Some(v)
+                } else {
+                    None
+                }});
 
-        let mut vopono_config_settings_builder =
-            config::Config::builder();
+        let config_path = command.vopono_config.clone()
+            .or(default_config_path);
 
-        if let Ok(true) = fs::exists(&config_path) {
-            vopono_config_settings_builder =
-                vopono_config_settings_builder.add_source(config::File::from(config_path.clone()));
+        let mut vopono_config_settings_builder
+            = config::Config::builder();
+
+        if let Some(path) = config_path.clone() {
+             vopono_config_settings_builder =
+                 vopono_config_settings_builder.add_source(config::File::from(path));
         }
 
         vopono_config_settings_builder.build().map_err(|e| {
-            let msg = format!("Failed to parse config from: {}, err: {}", config_path.to_string_lossy(), e);
+            let msg = format!("Failed to parse config from: {}, err: {}", config_path.unwrap().to_string_lossy(), e);
             log::error!("{msg}");
             anyhow!(msg)
         })
