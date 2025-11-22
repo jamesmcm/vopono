@@ -206,26 +206,22 @@ impl ApplicationWrapper {
                     )?;
 
                     // Helper to bind a file if the source exists
-                    let bind_if_exists =
-                        |src_opt: &Option<CString>, dst: &CString| -> Result<(), std::io::Error> {
-                            if let Some(src) = src_opt
-                                && libc::access(src.as_ptr(), libc::R_OK) == 0
-                            {
-                                mount::<
-                                    std::ffi::CStr,
-                                    std::ffi::CStr,
-                                    std::ffi::CStr,
-                                    std::ffi::CStr,
-                                >(
-                                    Some(src.as_c_str()),
-                                    dst.as_c_str(),
-                                    None,
-                                    MsFlags::MS_BIND,
-                                    None,
-                                )?;
-                            }
-                            Ok(())
-                        };
+                    let bind_if_exists = |src_opt: &Option<CString>,
+                                          dst: &CString|
+                     -> Result<(), std::io::Error> {
+                        if let Some(src) = src_opt
+                            && libc::access(src.as_ptr(), libc::R_OK) == 0
+                        {
+                            mount::<std::ffi::CStr, std::ffi::CStr, std::ffi::CStr, std::ffi::CStr>(
+                                Some(src.as_c_str()),
+                                dst.as_c_str(),
+                                None,
+                                MsFlags::MS_BIND,
+                                None,
+                            )?;
+                        }
+                        Ok(())
+                    };
 
                     // Overlay resolv.conf, hosts, nsswitch.conf for proper name resolution within netns
                     bind_if_exists(&resolv_src, &resolv_dst)?;

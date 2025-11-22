@@ -187,8 +187,9 @@ impl OpenVpnProvider for Mullvad {
     }
 }
 
-#[derive(EnumIter, PartialEq)]
+#[derive(EnumIter, PartialEq, Default)]
 enum ConfigType {
+    #[default]
     DefaultUdp,
     Udp53,
     Tcp80,
@@ -229,12 +230,6 @@ impl Display for ConfigType {
             Self::Tcp443 => "TCP (Port 443)",
         };
         write!(f, "{s}")
-    }
-}
-
-impl Default for ConfigType {
-    fn default() -> Self {
-        Self::DefaultUdp
     }
 }
 

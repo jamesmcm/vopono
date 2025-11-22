@@ -244,9 +244,10 @@ impl OpenVpnProvider for ProtonVPN {
     }
 }
 
-#[derive(EnumIter, PartialEq)]
+#[derive(EnumIter, PartialEq, Default)]
 enum Tier {
     Plus,
+    #[default]
     Free,
 }
 
@@ -269,12 +270,6 @@ impl Display for Tier {
             Self::Free => "Free",
         };
         write!(f, "{s}")
-    }
-}
-
-impl Default for Tier {
-    fn default() -> Self {
-        Self::Free
     }
 }
 
@@ -301,9 +296,10 @@ impl ConfigurationChoice for Tier {
     }
 }
 
-#[derive(EnumIter, PartialEq)]
+#[derive(EnumIter, PartialEq, Default)]
 enum ConfigType {
     SecureCore,
+    #[default]
     Standard,
 }
 
@@ -326,12 +322,6 @@ impl Display for ConfigType {
             Self::Standard => "Standard",
         };
         write!(f, "{s}")
-    }
-}
-
-impl Default for ConfigType {
-    fn default() -> Self {
-        Self::Standard
     }
 }
 

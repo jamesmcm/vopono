@@ -127,8 +127,9 @@ impl OpenVpnProvider for AirVPN {
     }
 }
 
-#[derive(EnumIter, PartialEq)]
+#[derive(EnumIter, PartialEq, Default)]
 enum ConfigType {
+    #[default]
     UDP443,
     TCP443,
 }
@@ -155,12 +156,6 @@ impl Display for ConfigType {
             Self::TCP443 => "TCP",
         };
         write!(f, "{s}")
-    }
-}
-
-impl Default for ConfigType {
-    fn default() -> Self {
-        Self::UDP443
     }
 }
 

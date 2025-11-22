@@ -21,8 +21,9 @@ use std::str::FromStr;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
-#[derive(EnumIter, PartialEq)]
+#[derive(EnumIter, PartialEq, Default)]
 enum WgKeyChoice {
+    #[default]
     NewKey,
     ExistingKey,
 }
@@ -42,11 +43,6 @@ impl Display for WgKeyChoice {
             }
         };
         write!(f, "{s}")
-    }
-}
-impl Default for WgKeyChoice {
-    fn default() -> Self {
-        Self::NewKey
     }
 }
 
@@ -70,8 +66,9 @@ impl ConfigurationChoice for WgKeyChoice {
 // The IP address of the standard DNS server is 172.16.0.1.
 // The AntiTracker DNS address is 10.0.254.2.
 // The AntiTracker's Hardcore Mode DNS address is 10.0.254.3.
-#[derive(EnumIter, PartialEq)]
+#[derive(EnumIter, PartialEq, Default)]
 enum DNSChoice {
+    #[default]
     Standard,
     AntiTracker,
     AntiTrackerHardcore,
@@ -93,11 +90,6 @@ impl Display for DNSChoice {
             }
         };
         write!(f, "{s}")
-    }
-}
-impl Default for DNSChoice {
-    fn default() -> Self {
-        Self::Standard
     }
 }
 

@@ -12,8 +12,9 @@ use strum::IntoEnumIterator;
 use strum_macros::Display;
 use strum_macros::EnumIter;
 
-#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize, EnumIter)]
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize, EnumIter, Default)]
 pub enum OpenVpnProtocol {
+    #[default]
     UDP,
     TCP,
 }
@@ -23,11 +24,6 @@ impl OpenVpnProtocol {
         Self::iter()
             .nth(index)
             .expect("Invalid index for OpenVPN Protocol enum")
-    }
-}
-impl Default for OpenVpnProtocol {
-    fn default() -> Self {
-        Self::UDP
     }
 }
 

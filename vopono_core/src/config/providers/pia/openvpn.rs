@@ -154,8 +154,9 @@ impl OpenVpnProvider for PrivateInternetAccess {
     }
 }
 
-#[derive(EnumIter, PartialEq)]
+#[derive(EnumIter, PartialEq, Default)]
 enum ConfigType {
+    #[default]
     DefaultConf,
     Ip,
     Strong,
@@ -198,12 +199,6 @@ impl Display for ConfigType {
             Self::LegacyTcpIp => "Legacy TCP IP",
         };
         write!(f, "{s}")
-    }
-}
-
-impl Default for ConfigType {
-    fn default() -> Self {
-        Self::DefaultConf
     }
 }
 
