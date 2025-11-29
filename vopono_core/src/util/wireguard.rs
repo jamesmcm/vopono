@@ -5,6 +5,7 @@ use base64::{
 
 use serde::Deserialize;
 use std::fmt::Display;
+use rand::thread_rng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 const B64_ENGINE: GeneralPurpose = general_purpose::STANDARD;
@@ -42,7 +43,8 @@ impl Display for WgPeer {
 
 pub fn generate_keypair() -> anyhow::Result<WgKey> {
     // Generate new keypair
-    let private = StaticSecret::random_from_rng(&mut rand::rng());
+    let mut rng = thread_rng(); 
+    let private = StaticSecret::random_from_rng(&mut rng);
     let public = PublicKey::from(&private);
     let public_key = B64_ENGINE.encode(public.as_bytes());
     let private_key = B64_ENGINE.encode(private.to_bytes());
