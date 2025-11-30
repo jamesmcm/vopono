@@ -1,6 +1,6 @@
     # Maintainer: Your Name <your_email@example.com>
     pkgname=voponotest
-    pkgver=0.10.15
+    pkgver=0.10.15.1
     pkgrel=1
     pkgdesc='Run applications through VPN connections in network namespaces'
     arch=('any')
@@ -13,11 +13,6 @@ source=("git+${url}.git")
 provides=('voponotest')
 conflicts=('voponotest')
     sha256sums=('SKIP')
-
-    pkgver() {
-      cd "${srcdir}/${pkgname%-git}"
-      git describe --long --tags | sed 's/\([^-]*-\)g/\1r/;s/\([^-]*\)-\([^-]*\)/\1.\2/'
-    }
 
  build() {
   cd "$pkgname-$pkgver"
