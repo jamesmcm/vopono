@@ -45,7 +45,7 @@ impl Display for WgPeer {
 pub fn generate_keypair() -> anyhow::Result<WgKey> {
     // Generate new keypair
     let mut csprng = OsRng;
-    let private = StaticSecret::random_from_rng(&mut csprng);
+    let private = StaticSecret::random_from_rng(csprng);
     let public = PublicKey::from(&private);
     let public_key = B64_ENGINE.encode(public.as_bytes());
     let private_key = B64_ENGINE.encode(private.to_bytes());
