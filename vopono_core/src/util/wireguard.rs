@@ -5,9 +5,7 @@ use base64::{
 
 use serde::Deserialize;
 use std::fmt::Display;
-
-use rand_core::{CryptoRng, RngCore};
-use rand_core::OsRng;
+use rand::rngs::OsRng;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 const B64_ENGINE: GeneralPurpose = general_purpose::STANDARD;
