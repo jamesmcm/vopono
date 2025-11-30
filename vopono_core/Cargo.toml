@@ -32,8 +32,8 @@ walkdir = "2"
 # Stuck on rand 0.6 due to x25519-dalek:
 # https://github.com/dalek-cryptography/curve25519-dalek/issues/731
 # https://github.com/dalek-cryptography/curve25519-dalek/pull/729
-rand = "0.9"
-rand_core = { version = "0.9" }
+rand = "0.10.0-rc.2"
+rand_core = { version = "0.10.0-rc.2" }
 toml = "0.9"
 ipnet = { version = "2", features = ["serde"] }
 reqwest = { default-features = false, version = "0.12", features = [
