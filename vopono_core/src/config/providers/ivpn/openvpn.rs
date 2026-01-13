@@ -74,20 +74,17 @@ impl OpenVpnProvider for IVPN {
                 .collect::<Vec<&str>>()
                 .join("\n");
 
-            // TODO: sanitized_name is now deprecated but there is not a simple alternative
-            #[allow(deprecated)]
-            let fname = file
-                .sanitized_name()
-                .file_name()
-                .unwrap()
-                .to_str()
-                .unwrap()
+            let enclosed = file.enclosed_name();
+            let fname = enclosed
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
                 .to_string();
-            #[allow(deprecated)]
-            let filename = if let Some("ovpn") = file
-                .sanitized_name()
-                .extension()
-                .map(|x| x.to_str().expect("Could not convert OsStr"))
+            let filename = if let Some("ovpn") = enclosed
+                .as_ref()
+                .and_then(|p| p.extension())
+                .and_then(|x| x.to_str())
             {
                 let country = fname.to_lowercase().replace(' ', "_");
                 let filename = country.split('.').next().unwrap();
@@ -99,12 +96,11 @@ impl OpenVpnProvider for IVPN {
                     Some(x) => format!("-{x}"),
                 };
 
-                let code = country_map.get(country);
-                if code.is_none() {
+                if let Some(code) = country_map.get(country) {
+                    format!("{}-{}{}.ovpn", country, code, city)
+                } else {
                     debug!("Could not find country in country map: {country}");
                     fname.to_lowercase()
-                } else {
-                    format!("{}-{}{}.ovpn", country, code.unwrap(), city)
                 }
             } else {
                 fname.to_lowercase()
@@ -118,9 +114,8 @@ impl OpenVpnProvider for IVPN {
 
         // Write OpenVPN credentials file
         let (user, pass) = self.prompt_for_auth(uiclient)?;
-        let auth_file = self.auth_file_path()?;
-        if auth_file.is_some() {
-            let mut outfile = File::create(auth_file.unwrap())?;
+        if let Some(auth_file) = self.auth_file_path()? {
+            let mut outfile = File::create(auth_file)?;
             write!(outfile, "{user}\n{pass}")?;
             info!("IVPN OpenVPN config written to {}", openvpn_dir.display());
         }

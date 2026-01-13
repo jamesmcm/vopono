@@ -93,22 +93,20 @@ impl OpenVpnProvider for PrivateInternetAccess {
             // uk_london.ovpn
             // uae.ovpn
 
-            // TODO: sanitized_name is now deprecated but there is not a simple alternative
-            #[allow(deprecated)]
-            let filename = if let Some("ovpn") = file
-                .sanitized_name()
-                .extension()
-                .map(|x| x.to_str().expect("Could not convert OsStr"))
+            let enclosed = file.enclosed_name();
+            let filename = if let Some("ovpn") = enclosed
+                .as_ref()
+                .and_then(|p| p.extension())
+                .and_then(|x| x.to_str())
             {
                 let fname = file.name();
                 let country = fname.to_lowercase().replace(' ', "_");
                 let country = country.split('.').next().unwrap();
-                let code = country_map.get(country);
-                if code.is_none() {
+                if let Some(code) = country_map.get(country) {
+                    format!("{}-{}.ovpn", country, code)
+                } else {
                     debug!("Could not find country in country map: {country}");
                     file.name().to_string()
-                } else {
-                    format!("{}-{}.ovpn", country, code.unwrap())
                 }
             } else {
                 file.name().to_string()

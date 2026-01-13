@@ -92,12 +92,11 @@ impl OpenVpnProvider for AirVPN {
             let mut file = zip.by_index(i).unwrap();
             file.read_to_end(&mut file_contents)?;
 
-            //TODO: sanitized_name is now deprecated but there is not a simple alternative
-            #[allow(deprecated)]
-            let filename = if let Some("ovpn") = file
-                .sanitized_name()
-                .extension()
-                .map(|x| x.to_str().expect("Could not convert OsStr"))
+            let enclosed = file.enclosed_name();
+            let filename = if let Some("ovpn") = enclosed
+                .as_ref()
+                .and_then(|p| p.extension())
+                .and_then(|x| x.to_str())
             {
                 let fname = file.name();
                 let fname_vec: Vec<&str> = fname.split('_').collect();
@@ -107,11 +106,13 @@ impl OpenVpnProvider for AirVPN {
                 debug!("country_code: {country_code}");
                 debug!("city: {city}");
                 debug!("server_name: {server_name}");
-                let country = country_map.get(country_code.as_str());
-                if country.is_none() || use_country_code {
-                    format!("{country_code}-{server_name}.ovpn")
+                if let Some(country) = country_map
+                    .get(country_code.as_str())
+                    .filter(|_| !use_country_code)
+                {
+                    format!("{country}-{server_name}.ovpn")
                 } else {
-                    format!("{}-{}.ovpn", country.unwrap(), server_name)
+                    format!("{country_code}-{server_name}.ovpn")
                 }
             } else {
                 file.name().to_string()

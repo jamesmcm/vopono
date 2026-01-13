@@ -305,7 +305,10 @@ pub fn get_target_subnet() -> anyhow::Result<u8> {
     ))
 }
 
-// TODO: Fix deprecated name
+/// Run a command that requires elevated privileges.
+/// Note: This function doesn't invoke sudo itself; it expects to be called
+/// from a context that already has root privileges (e.g., the vopono daemon
+/// or when vopono is run with sudo).
 pub fn sudo_command(command: &[&str]) -> anyhow::Result<()> {
     debug!("{}", command.join(" "));
 

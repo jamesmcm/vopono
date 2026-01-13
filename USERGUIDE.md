@@ -25,7 +25,7 @@ argument can take a list of DNS servers for example.
 
 vopono now supports a persistent root daemon that handles all privileged work. Run the daemon as root, and keep using `vopono` as your normal user. The CLI forwards `exec` requests to the daemon automatically when it’s available; if not, it falls back to `sudo`.
 
-- Start once at boot (systemd): `sudo systemctl enable --now vopono-daemon`
+- Start once at boot (systemd): `sudo systemctl enable --now vopono`
 - Or run manually: `sudo vopono daemon`
 - Then run apps as your user: `vopono exec --provider mullvad --server sweden firefox`
 
@@ -555,7 +555,7 @@ And then start it with (no sudo):
 systemctl start --user vopono
 ```
 
-If you do not have passwordless sudo access, prefer the root daemon approach above (`vopono-daemon`) and keep using `vopono exec` as your user.
+If you do not have passwordless sudo access, prefer the root daemon approach above (`vopono.service`) and keep using `vopono exec` as your user.
 
 #### Privoxy
 

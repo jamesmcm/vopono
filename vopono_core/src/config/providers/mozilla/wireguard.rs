@@ -17,7 +17,7 @@ use anyhow::anyhow;
 use ipnet::IpNet;
 use log::{debug, info};
 use regex::Regex;
-use reqwest::blocking::Client; // TODO: Can we use a smaller dependency?
+use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::fs::create_dir_all;
 use std::io::Write;
@@ -47,7 +47,6 @@ impl ConfigurationChoice for Devices {
     }
 }
 
-// TODO: Update API calls for new API
 impl MozillaVPN {
     fn upload_new_device(
         &self,
@@ -109,7 +108,6 @@ impl MozillaVPN {
                 }
                 Err(_) => Err("Failed to generate public key".to_string())
         }}))})?;
-            // TODO: Fix clones here
             let device = devices[selection].clone();
             Ok((NewDevice { name: device.name.clone(), pubkey: device.pubkey.clone()},
             WgKey {public: device.pubkey, private: private_key  } ))
@@ -140,6 +138,10 @@ impl WireguardProvider for MozillaVPN {
             .build()
             .expect("Failed to build reqwest client for MozillaVPN");
 
+        // Mozilla VPN uses Mullvad's server infrastructure.
+        // Server list API: https://api.mullvad.net/www/relays/wireguard/
+        // Alternative (nested format): https://api.mullvad.net/public/relays/wireguard/v1/
+        // Source: https://github.com/mozilla-mobile/mozilla-vpn-client/issues/1923
         let relays: Vec<WireguardRelay> = client
             .get("https://api.mullvad.net/www/relays/wireguard/")
             .send()?
@@ -165,7 +167,9 @@ impl WireguardProvider for MozillaVPN {
             .find(|x| x.pubkey == keypair.public)
             .ok_or_else(|| anyhow!("Did not find key: {} in MozillaVPN account", keypair.public))?;
 
-        // TODO: Hardcoded IP - can we scrape this anywhere?
+        // Mullvad DNS server used by Mozilla VPN
+        // This is the standard Mullvad DNS resolver for WireGuard connections
+        // Source: https://mullvad.net/en/help/dns-over-https-and-dns-over-tls
         let dns = std::net::Ipv4Addr::new(10, 64, 0, 1);
         let interface = WireguardInterface {
             private_key: keypair.private.clone(),
@@ -182,7 +186,8 @@ impl WireguardProvider for MozillaVPN {
         // Note we tunnel both IPv4 and IPv6
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?, IpNet::from_str("::0/0")?];
 
-        // TODO: avoid hacky regex for TOML -> wireguard config conversion
+        // Regex to convert TOML array syntax to WireGuard config format
+        // TOML: key = [val1, val2] -> WireGuard: key = val1,val2
         let re = Regex::new(r"=\s\[(?P<value>[^\]]+)\]")?;
         for relay in relays.iter().filter(|x| x.active) {
             let wireguard_peer = WireguardPeer {

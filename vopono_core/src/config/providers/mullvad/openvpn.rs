@@ -178,9 +178,8 @@ impl OpenVpnProvider for Mullvad {
 
         // Write OpenVPN credentials file
         let (user, pass) = self.prompt_for_auth(uiclient)?;
-        let auth_file = self.auth_file_path()?;
-        if auth_file.is_some() {
-            let mut outfile = File::create(auth_file.unwrap())?;
+        if let Some(auth_file) = self.auth_file_path()? {
+            let mut outfile = File::create(auth_file)?;
             write!(outfile, "{user}\n{pass}")?;
         }
         Ok(())

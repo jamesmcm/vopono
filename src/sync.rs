@@ -69,16 +69,15 @@ pub fn synch(
         Some(Protocol::None) => {
             error!("vopono sync not supported for None protocol");
         }
-        // TODO: Fix this asking for same credentials twice
-        // Move auth and auth caching to base part of provider then share it for both
+        // Sync OpenVPN first so credentials are cached for Wireguard to reuse
         None => {
-            if let Ok(p) = provider.get_dyn_wireguard_provider() {
-                info!("Starting Wireguard configuration...");
-                p.create_wireguard_config(uiclient)?;
-            }
             if let Ok(p) = provider.get_dyn_openvpn_provider() {
                 info!("Starting OpenVPN configuration...");
                 p.create_openvpn_config(uiclient)?;
+            }
+            if let Ok(p) = provider.get_dyn_wireguard_provider() {
+                info!("Starting Wireguard configuration...");
+                p.create_wireguard_config(uiclient)?;
             }
         }
     }

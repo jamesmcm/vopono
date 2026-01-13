@@ -60,18 +60,19 @@ impl OpenVpnProvider for NordVPN {
             let mut file_contents: Vec<u8> = Vec::with_capacity(2048);
             let mut file = zip.by_index(i).unwrap();
 
-            // TODO: sanitized_name is now deprecated but there is not a simple alternative
-            #[allow(deprecated)]
-            if !file.sanitized_name().starts_with(protocol_dir) {
+            let enclosed = file.enclosed_name();
+            if !enclosed
+                .as_ref()
+                .is_some_and(|p| p.starts_with(protocol_dir))
+            {
                 continue;
             }
             file.read_to_end(&mut file_contents)?;
 
-            #[allow(deprecated)]
-            let filename = if let Some("ovpn") = file
-                .sanitized_name()
-                .extension()
-                .map(|x| x.to_str().expect("Could not convert OsStr"))
+            let filename = if let Some("ovpn") = enclosed
+                .as_ref()
+                .and_then(|p| p.extension())
+                .and_then(|x| x.to_str())
             {
                 let enclosed_name = file.enclosed_name();
                 let fname = enclosed_name
@@ -100,13 +101,12 @@ impl OpenVpnProvider for NordVPN {
                     }
 
                     if let Some(code) = cap.get(1) {
-                        let country = country_map.get(code.as_str());
-                        if country.is_none() {
+                        if let Some(country) = country_map.get(code.as_str()) {
+                            let server_name = server_name.replace('-', "_");
+                            format!("{}-{}.ovpn", country, server_name)
+                        } else {
                             debug!("Could not map country code to name: {}", code.as_str());
                             fname.to_string()
-                        } else {
-                            let server_name = server_name.replace('-', "_");
-                            format!("{}-{}.ovpn", country.unwrap(), server_name)
                         }
                     } else {
                         debug!("Filename did not match established pattern: {fname}");
@@ -128,9 +128,8 @@ impl OpenVpnProvider for NordVPN {
 
         // Write OpenVPN credentials file
         let (user, pass) = self.prompt_for_auth(uiclient)?;
-        let auth_file = self.auth_file_path()?;
-        if auth_file.is_some() {
-            let mut outfile = File::create(auth_file.unwrap())?;
+        if let Some(auth_file) = self.auth_file_path()? {
+            let mut outfile = File::create(auth_file)?;
             write!(outfile, "{user}\n{pass}")?;
         }
         Ok(())

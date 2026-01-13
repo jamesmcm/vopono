@@ -36,7 +36,6 @@ lynx all running through different VPN connections:
 | AirVPN                        | ✅              | ❌                |
 | Cloudflare Warp\*\*\*\*       | ❌              | ❌                |
 | Self host (--custom)          | ✅              | ✅                |
-| ~~HMA (HideMyAss)~~\*\*\*\*\* | ❌              | ❌                |
 
 \* Port forwarding supported with the `--port-forwarding` option and `--port-forwarding-callback` to run a command when the port is refreshed.
 
@@ -57,8 +56,6 @@ argument.
 protocol to `warp`. Note you must first register with `sudo warp-cli registration new` and then run it once with `sudo warp-svc` and `sudo warp-cli connect` and `sudo warp-cli debug connectivity-check disable` outside of vopono - then kill `sudo warp-svc` without running `sudo warp-cli disconnect` so it will auto-connect when run.
 Please verify this works first before trying it with vopono. 
 
-\*\*\*\*\* HideMyAss [no longer supports Linux](https://www.hidemyass.com/en-us/installation-files) nor usage outside of their
-proprietary applications. Switch to another VPN provider.
 
 ## Usage
 
@@ -86,7 +83,7 @@ running as a systemd service, etc. see the [User Guide](USERGUIDE.md).
 
 For a smoother experience, run the privileged root daemon and keep using `vopono` as your normal user. The CLI automatically forwards `exec` requests to the daemon if it’s running.
 
-- Start once at boot via systemd: `sudo systemctl enable --now vopono-daemon`
+- Start once at boot via systemd: `sudo systemctl enable --now vopono`
 - Or run manually as root: `sudo vopono daemon`
 - Then use vopono normally as your user: `vopono exec --provider mullvad --server se firefox`
 
@@ -191,8 +188,8 @@ source with Cargo as documented below.
 Run the install script provided: `install.sh` - this will `cargo install` the repository and copy over the configuration files to
 `~/.config/vopono/`
 
-Note the minimum supported Rust version is 1.43. You can check your
-version with:
+Note the minimum supported Rust version is 1.85 (required for edition 2024).
+You can check your version with:
 
 ```bash
 $ rustc --version

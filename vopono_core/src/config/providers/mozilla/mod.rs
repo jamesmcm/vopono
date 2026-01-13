@@ -44,8 +44,21 @@ impl std::fmt::Display for Device {
     }
 }
 
-/// MozillaVPN is a wrapper for Wireguard using OAuth authentication with Mozilla services
-/// Supports Wireguard only
+/// MozillaVPN is a wrapper for Wireguard using OAuth authentication with Mozilla services.
+/// Supports Wireguard only.
+///
+/// Mozilla VPN uses Mullvad's infrastructure for VPN servers.
+/// See: https://support.mozilla.org/en-US/kb/what-mozilla-vpn-and-how-does-it-work
+///
+/// API authentication is based on the MozWire project:
+/// https://github.com/NilsIrl/MozWire
+///
+/// API Endpoints:
+/// - Login: POST /api/v2/vpn/login/linux (with code_challenge)
+/// - Verify: POST /api/v2/vpn/login/verify
+/// - Account: GET /api/v1/vpn/account
+/// - Devices: POST/DELETE /api/v1/vpn/device
+/// - Server list: https://api.mullvad.net/www/relays/wireguard/ (Mullvad infrastructure)
 pub struct MozillaVPN {}
 
 impl Provider for MozillaVPN {
@@ -69,8 +82,9 @@ impl MozillaVPN {
         "https://vpn.mozilla.org/api/v1"
     }
 
-    // TODO: Make this work with GUI - i.e. if terminal is not accessible
-    /// Login with OAuth login (adapted from MozWire crate: https://github.com/NilsIrl/MozWire/blob/trunk/src/main.rs )
+    /// Login with OAuth login flow.
+    /// Opens a browser for authentication and listens for the callback.
+    /// Adapted from MozWire: https://github.com/NilsIrl/MozWire
     fn get_login(&self, client: &Client) -> anyhow::Result<Login> {
         // no token given
         use base64::prelude::BASE64_URL_SAFE_NO_PAD;
@@ -135,4 +149,46 @@ fn validate_hostname(hostname: &str) -> bool {
     hostname
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_hostname_valid() {
+        assert!(validate_hostname("my-device"));
+        assert!(validate_hostname("device123"));
+        assert!(validate_hostname("MyDevice"));
+        assert!(validate_hostname("a"));
+        assert!(validate_hostname("device-name-123"));
+    }
+
+    #[test]
+    fn test_validate_hostname_invalid() {
+        assert!(!validate_hostname("my_device")); // underscore not allowed
+        assert!(!validate_hostname("my device")); // space not allowed
+        assert!(!validate_hostname("device@home")); // @ not allowed
+        assert!(!validate_hostname("device.local")); // dot not allowed
+        assert!(!validate_hostname("déjà")); // non-ASCII not allowed
+    }
+
+    #[test]
+    fn test_validate_hostname_empty() {
+        // Empty string technically passes (all zero chars match the predicate)
+        assert!(validate_hostname(""));
+    }
+
+    #[test]
+    fn test_provider_alias() {
+        let mozilla = MozillaVPN {};
+        assert_eq!(mozilla.alias(), "mozilla");
+        assert_eq!(mozilla.alias_2char(), "mz");
+    }
+
+    #[test]
+    fn test_default_protocol() {
+        let mozilla = MozillaVPN {};
+        assert_eq!(mozilla.default_protocol(), Protocol::Wireguard);
+    }
 }

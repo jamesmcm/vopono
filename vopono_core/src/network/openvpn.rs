@@ -159,16 +159,17 @@ impl OpenVpn {
         }
 
         if buffer.contains("AUTH_FAILED") {
-            if auth_file.is_some() {
-                error!(
-                    "OpenVPN authentication failed, modify your username and/or password in {}",
-                    auth_file.as_ref().unwrap().display()
-                );
-                // std::fs::remove_file(auth_file.unwrap())?;
-            }
+            let auth_path_display = auth_file
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "the auth file".to_string());
+            error!(
+                "OpenVPN authentication failed, modify your username and/or password in {}",
+                auth_path_display
+            );
             return Err(anyhow!(
                 "OpenVPN authentication failed, use -v for full log output. Modify your username and/or password in {}",
-                auth_file.as_ref().unwrap().display()
+                auth_path_display
             ));
         }
         if buffer.contains("Options error") {

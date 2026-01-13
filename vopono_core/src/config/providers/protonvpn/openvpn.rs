@@ -175,12 +175,11 @@ impl OpenVpnProvider for ProtonVPN {
                 .collect::<Vec<&str>>()
                 .join("\n");
 
-            // TODO: sanitized_name is now deprecated but there is not a simple alternative
-            #[allow(deprecated)]
-            let filename = if let Some("ovpn") = file
-                .sanitized_name()
-                .extension()
-                .map(|x| x.to_str().expect("Could not convert OsStr"))
+            let enclosed = file.enclosed_name();
+            let filename = if let Some("ovpn") = enclosed
+                .as_ref()
+                .and_then(|p| p.extension())
+                .and_then(|x| x.to_str())
             {
                 // Also handle server case from free servers
                 let mut hostname: Option<String> = None;
@@ -231,9 +230,8 @@ impl OpenVpnProvider for ProtonVPN {
 
         // Write OpenVPN credentials file
         let (user, pass) = self.prompt_for_auth(uiclient)?;
-        let auth_file = self.auth_file_path()?;
-        if auth_file.is_some() {
-            let mut outfile = File::create(auth_file.unwrap())?;
+        if let Some(auth_file) = self.auth_file_path()? {
+            let mut outfile = File::create(auth_file)?;
             write!(outfile, "{user}\n{pass}")?;
             info!(
                 "ProtonVPN OpenVPN config written to {}",
