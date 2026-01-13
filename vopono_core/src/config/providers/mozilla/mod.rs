@@ -146,9 +146,10 @@ impl MozillaVPN {
 }
 
 fn validate_hostname(hostname: &str) -> bool {
-    hostname
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    !hostname.is_empty()
+        && hostname
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
 #[cfg(test)]
@@ -175,8 +176,7 @@ mod tests {
 
     #[test]
     fn test_validate_hostname_empty() {
-        // Empty string technically passes (all zero chars match the predicate)
-        assert!(validate_hostname(""));
+        assert!(!validate_hostname(""));
     }
 
     #[test]

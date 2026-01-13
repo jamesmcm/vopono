@@ -47,6 +47,28 @@ impl Display for Device {
 
 pub struct Mullvad {}
 
+/// Parse and validate a Mullvad account number from a raw string.
+/// Strips whitespace and non-digit characters, then validates it's exactly 16 digits.
+/// Returns the cleaned 16-digit account number if valid, None otherwise.
+fn parse_mullvad_username(raw: &str) -> Option<String> {
+    let mut username = raw.trim().to_string();
+    username.retain(|c| !c.is_whitespace() && c.is_ascii_digit());
+    if username.len() == 16 {
+        Some(username)
+    } else {
+        None
+    }
+}
+
+/// Validate a Mullvad account number string for use with Dialoguer input.
+/// Returns Ok(()) if valid, Err with error message if invalid.
+#[allow(clippy::ptr_arg)] // Dialoguer validator requires &String
+fn validate_mullvad_username(username: &String) -> Result<(), String> {
+    parse_mullvad_username(username)
+        .map(|_| ())
+        .ok_or_else(|| "Mullvad account number should be 16 digits!".to_string())
+}
+
 impl Provider for Mullvad {
     fn alias(&self) -> String {
         "mv".to_string()
@@ -72,13 +94,7 @@ impl Mullvad {
         let file = File::open(auth_path).ok()?;
         let reader = BufReader::new(file);
         let first_line = reader.lines().next()?.ok()?;
-        let mut username = first_line.trim().to_string();
-        username.retain(|c| !c.is_whitespace() && c.is_ascii_digit());
-        if username.len() == 16 {
-            Some(username)
-        } else {
-            None
-        }
+        parse_mullvad_username(&first_line)
     }
 
     fn request_mullvad_username(&self, uiclient: &dyn UiClient) -> anyhow::Result<String> {
@@ -92,26 +108,17 @@ impl Mullvad {
             return Ok(cached_username);
         }
 
-        let mut username = uiclient.get_input(Input {
+        let username = uiclient.get_input(Input {
             prompt: "Mullvad account number".to_string(),
-            validator: Some(Box::new(|username: &String| -> Result<(), String> {
-                let mut username = username.to_string();
-                username.retain(|c| !c.is_whitespace() && c.is_ascii_digit());
-                if username.len() != 16 {
-                    return Err("Mullvad account number should be 16 digits!".to_string());
-                }
-                Ok(())
-            })),
+            validator: Some(Box::new(validate_mullvad_username)),
         })?;
 
-        username.retain(|c| !c.is_whitespace() && c.is_ascii_digit());
-        if username.len() != 16 {
-            return Err(anyhow!(
+        parse_mullvad_username(&username).ok_or_else(|| {
+            anyhow!(
                 "Mullvad account number should be 16 digits!, parsed: {}",
                 username
-            ));
-        }
-        Ok(username)
+            )
+        })
     }
 }
 
@@ -130,32 +137,8 @@ impl ShadowsocksProvider for Mullvad {
 mod tests {
     use super::*;
 
-    /// Parse and validate a Mullvad account number from a raw string.
-    /// Returns the cleaned 16-digit account number if valid, None otherwise.
-    fn parse_mullvad_username(raw: &str) -> Option<String> {
-        let mut username = raw.trim().to_string();
-        username.retain(|c| !c.is_whitespace() && c.is_ascii_digit());
-        if username.len() == 16 {
-            Some(username)
-        } else {
-            None
-        }
-    }
-
-    /// Validate a Mullvad account number string.
-    /// Returns Ok(()) if valid, Err with message if invalid.
-    fn validate_mullvad_username(username: &str) -> Result<(), String> {
-        let mut cleaned = username.to_string();
-        cleaned.retain(|c| !c.is_whitespace() && c.is_ascii_digit());
-        if cleaned.len() != 16 {
-            return Err("Mullvad account number should be 16 digits!".to_string());
-        }
-        Ok(())
-    }
-
     #[test]
     fn test_parse_mullvad_username_valid() {
-        // Valid 16-digit account number
         assert_eq!(
             parse_mullvad_username("1234567890123456"),
             Some("1234567890123456".to_string())
@@ -203,15 +186,42 @@ mod tests {
 
     #[test]
     fn test_validate_mullvad_username_valid() {
-        assert!(validate_mullvad_username("1234567890123456").is_ok());
-        assert!(validate_mullvad_username("1234 5678 9012 3456").is_ok());
+        assert!(validate_mullvad_username(&"1234567890123456".to_string()).is_ok());
     }
 
     #[test]
-    fn test_validate_mullvad_username_invalid() {
-        assert!(validate_mullvad_username("123456789012345").is_err());
-        assert!(validate_mullvad_username("").is_err());
-        assert!(validate_mullvad_username("abcdefghijklmnop").is_err());
+    fn test_validate_mullvad_username_with_spaces() {
+        // Account number with spaces should be accepted
+        assert!(validate_mullvad_username(&"1234 5678 9012 3456".to_string()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_mullvad_username_too_short() {
+        let result = validate_mullvad_username(&"123456789012345".to_string());
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "Mullvad account number should be 16 digits!"
+        );
+    }
+
+    #[test]
+    fn test_validate_mullvad_username_too_long() {
+        let result = validate_mullvad_username(&"12345678901234567".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_mullvad_username_empty() {
+        let result = validate_mullvad_username(&"".to_string());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_mullvad_username_non_digits() {
+        // Letters get stripped, resulting in too few digits
+        let result = validate_mullvad_username(&"abcdefghijklmnop".to_string());
+        assert!(result.is_err());
     }
 
     #[test]
