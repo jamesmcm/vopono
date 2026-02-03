@@ -16,7 +16,7 @@ directories-next = "2"
 log = "0.4"
 which = "8"
 users = "0.11"
-nix = { version = "0.30", features = [
+nix = { version = "0.31", features = [
     "user",
     "signal",
     "fs",
@@ -27,30 +27,30 @@ nix = { version = "0.30", features = [
 serde = { version = "1", features = ["derive", "std"] }
 csv = "1"
 regex = "1"
-ron = "0.11"
+ron = "0.12"
 walkdir = "2"
 # Stuck on rand 0.6 due to x25519-dalek:
 # https://github.com/dalek-cryptography/curve25519-dalek/issues/731
 # https://github.com/dalek-cryptography/curve25519-dalek/pull/729
-rand = "0.10.0-rc.2"
-rand_core = { version = "0.10.0-rc.2" }
+rand = "0.10.0-rc.8"
+chacha20 = "0.10.0-rc.10"
+rand_core = { version = "0.10" }
 toml = "0.9"
 ipnet = { version = "2", features = ["serde"] }
-reqwest = { default-features = false, version = "0.12", features = [
+reqwest = { default-features = false, version = "0.13", features = [
     "blocking",
     "json",
-    "rustls-tls",
 ] } # TODO: Can we remove Tokio dependency?
-sysinfo = "0.37"
+sysinfo = "0.38"
 base64 = "0.22"
 x25519-dalek = { version = "3.0.0-pre.0", features = ["static_secrets"] }
 strum = "0.27"
 strum_macros = "0.27"
-zip = "6"
+zip = "7"
 maplit = "1"
 webbrowser = "1"
 serde_json = "1"
-signal-hook = "0.3"
+signal-hook = "0.4"
 sha2 = "0.10"
 tiny_http = "0.12"
 chrono = "0.4"
