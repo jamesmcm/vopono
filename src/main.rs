@@ -92,20 +92,18 @@ fn main() -> anyhow::Result<()> {
             clean_dead_locks()?;
             output_list(listcmd)?;
         }
-        args::Command::Synch(synchcmd) => {
-            match synchcmd.vpn_provider {
-                Some(vpn_provider) => {
-                    synch(
-                        vpn_provider.to_variant(),
-                        &synchcmd.protocol.map(|x| x.to_variant()),
-                        &uiclient,
-                    )?;
-                }
-                None => {
-                    sync_menu(&uiclient, synchcmd.protocol.map(|x| x.to_variant()))?;
-                }
+        args::Command::Synch(synchcmd) => match synchcmd.vpn_provider {
+            Some(vpn_provider) => {
+                synch(
+                    vpn_provider.to_variant(),
+                    &synchcmd.protocol.map(|x| x.to_variant()),
+                    &uiclient,
+                )?;
             }
-        }
+            None => {
+                sync_menu(&uiclient, synchcmd.protocol.map(|x| x.to_variant()))?;
+            }
+        },
         args::Command::Servers(serverscmd) => {
             print_configs(serverscmd)?;
         }
