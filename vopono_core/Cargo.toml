@@ -35,18 +35,19 @@ walkdir = "2"
 rand = "0.10.0-rc.8"
 chacha20 = "0.10.0-rc.10"
 rand_core = { version = "0.10" }
-toml = "0.9"
+toml = "1"
 ipnet = { version = "2", features = ["serde"] }
 reqwest = { default-features = false, version = "0.13", features = [
     "blocking",
     "json",
+    "rustls",
 ] } # TODO: Can we remove Tokio dependency?
 sysinfo = "0.38"
 base64 = "0.22"
 x25519-dalek = { version = "3.0.0-pre.0", features = ["static_secrets"] }
-strum = "0.27"
-strum_macros = "0.27"
-zip = "7"
+strum = "0.28"
+strum_macros = "0.28"
+zip = "8"
 maplit = "1"
 webbrowser = "1"
 serde_json = "1"

@@ -143,10 +143,11 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<i32> {
         }
     }
     let request = daemon::DaemonRequest::Execute {
-        cmd: cmd.clone(),
+        // Encode `ExecCommand` as JSON bytes carried inside the wincode daemon frame.
+        cmd: serde_json::to_vec(cmd)?,
         env: fwd_env,
     };
-    let bytes = bincode::serde::encode_to_vec(&request, bincode::config::standard())?;
+    let bytes = wincode::serialize(&request)?;
     conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
     conn.write_all(&bytes)?;
 
@@ -167,7 +168,7 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<i32> {
         for sig in &mut sigs {
             let ctrl = daemon::DaemonControl::Signal(sig);
             let req = daemon::DaemonRequest::Control(ctrl);
-            if let Ok(bytes) = bincode::serde::encode_to_vec(&req, bincode::config::standard()) {
+            if let Ok(bytes) = wincode::serialize(&req) {
                 let _ = conn_ctrl.write_all(&(bytes.len() as u32).to_be_bytes());
                 let _ = conn_ctrl.write_all(&bytes);
             }
@@ -181,15 +182,9 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<i32> {
     let mut buffer = vec![0; len];
     conn.read_exact(&mut buffer)?;
 
-    #[derive(serde::Deserialize)]
-    enum FinalResponse {
-        ExitCode(i32),
-    }
-    let (response, _): (FinalResponse, usize) =
-        bincode::serde::decode_from_slice(&buffer, bincode::config::standard())?;
-    match response {
-        FinalResponse::ExitCode(code) => Ok(code),
-    }
+    // Response is currently a single bare i32 exit code from the daemon.
+    let response: i32 = wincode::deserialize(&buffer)?;
+    Ok(response)
 }
 
 fn send_fds_over_unix_socket(conn: &LocalSocketStream, fds: &[RawFd]) -> anyhow::Result<()> {
