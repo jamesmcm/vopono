@@ -179,14 +179,17 @@ impl Drop for VethPair {
 impl Drop for NetworkManagerUnmanaged {
     fn drop(&mut self) {
         // Only restore settings if there are no other active namespaces
-        let namespaces = crate::util::get_lock_namespaces();
-        if namespaces.is_ok() && namespaces.unwrap().is_empty() {
+        if let Ok(namespaces) = crate::util::get_lock_namespaces() {
+            if !namespaces.is_empty() {
+                return;
+            }
+
             let nm_path = PathBuf::from_str("/etc/NetworkManager/conf.d/unmanaged.conf")
                 .expect("Failed to build path");
-            if self.backup_file.is_some() {
-                std::fs::copy(self.backup_file.as_ref().unwrap(), &nm_path)
+            if let Some(backup_file) = self.backup_file.as_ref() {
+                std::fs::copy(backup_file, &nm_path)
                     .expect("Failed to restore backup of NetworkManager unmanaged.conf");
-                std::fs::remove_file(self.backup_file.as_ref().unwrap())
+                std::fs::remove_file(backup_file)
                     .expect("Failed to delete backup of NetworkManager unmanaged.conf");
             } else {
                 std::fs::remove_file(&nm_path)

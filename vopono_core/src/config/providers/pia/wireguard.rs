@@ -11,6 +11,7 @@ use log::info;
 use reqwest::Url;
 use reqwest::blocking::Client;
 use reqwest::blocking::ClientBuilder;
+use reqwest::tls::Certificate;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -131,14 +132,13 @@ impl PrivateInternetAccess {
         token: &str,
         pubkey: &str,
     ) -> anyhow::Result<WireguardServerInfo> {
-        let cert = reqwest::Certificate::from_pem(PrivateInternetAccess::CERT)?;
+        let cert = Certificate::from_pem(PrivateInternetAccess::CERT)?;
 
         // The server has a self-signed certificate and doesn't have a valid domain
         // so you need to manually set the certificate as well as telling the client
         // what IP the domain should resolve to if you want it to validate properly
         let key_client = ClientBuilder::new()
-            .tls_built_in_root_certs(false)
-            .add_root_certificate(cert)
+            .tls_certs_only([cert])
             .resolve(cn, (*ip, PrivateInternetAccess::PORT).into())
             .build()?;
 

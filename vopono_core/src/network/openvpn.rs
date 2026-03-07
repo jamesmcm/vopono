@@ -353,6 +353,11 @@ pub fn killswitch(
                     &netns.name,
                     &[ipcmd, "-A", "OUTPUT", "-o", "tun+", "-j", "ACCEPT"],
                 )?;
+                let reject_type = if ipcmd == "ip6tables" {
+                    "icmp6-no-route"
+                } else {
+                    "icmp-net-unreachable"
+                };
                 NetworkNamespace::exec(
                     &netns.name,
                     &[
@@ -362,7 +367,7 @@ pub fn killswitch(
                         "-j",
                         "REJECT",
                         "--reject-with",
-                        "icmp-net-unreachable",
+                        reject_type,
                     ],
                 )?;
             }

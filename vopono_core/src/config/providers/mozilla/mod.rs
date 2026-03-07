@@ -88,7 +88,7 @@ impl MozillaVPN {
     fn get_login(&self, client: &Client) -> anyhow::Result<Login> {
         // no token given
         use base64::prelude::BASE64_URL_SAFE_NO_PAD;
-        use rand::RngCore;
+        use rand::Rng;
         use sha2::Digest;
         let mut code_verifier_random = [0u8; 32];
         let mut rng = rand::rng();

@@ -4,7 +4,7 @@ use crate::config::providers::{Input, Password, UiClient};
 use crate::config::vpn::OpenVpnProtocol;
 use crate::util::delete_all_files_in_dir;
 use anyhow::anyhow;
-use log::{debug, info};
+use log::{debug, info, warn};
 use regex::Regex;
 use reqwest::Url;
 use reqwest::header::{COOKIE, HeaderMap, HeaderName, HeaderValue};
@@ -199,9 +199,13 @@ impl OpenVpnProvider for ProtonVPN {
                     hostname = Some(format!("{start}_{number}"));
                     code = end;
                 }
-                let country = code_map
-                    .get(code)
-                    .unwrap_or_else(|| panic!("Could not find code in map: {code}"));
+                let country = match code_map.get(code) {
+                    Some(country) => *country,
+                    None => {
+                        warn!("Could not find code in country map: {code}");
+                        code
+                    }
+                };
                 let host_str = if let Some(host) = hostname {
                     format!("-{host}")
                 } else {

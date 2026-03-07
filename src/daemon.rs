@@ -31,16 +31,18 @@ use std::thread;
 
 // Do not change user's terminal modes; rely on PTY + signal/control forwarding
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug)]
 pub enum DaemonRequest {
     Execute {
-        cmd: ExecCommand,
+        // JSON-serialized `ExecCommand`. Keeping this as raw bytes lets the outer IPC
+        // frame use wincode without deriving Schema* across the entire CLI type graph.
+        cmd: Vec<u8>,
         env: std::collections::HashMap<String, String>,
     },
     Control(DaemonControl),
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug, Clone)]
 pub enum DaemonControl {
     Signal(i32),
 }
@@ -129,8 +131,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
     let len = u32::from_be_bytes(len_bytes) as usize;
     let mut buffer = vec![0u8; len];
     conn.read_exact(&mut buffer)?;
-    let (request, _len): (DaemonRequest, usize) =
-        bincode::serde::decode_from_slice(&buffer, bincode::config::standard())?;
+    let request: DaemonRequest = wincode::deserialize(&buffer)?;
 
     // Receive stdin, stdout, stderr FDs via SCM_RIGHTS
     let [client_stdin_fd, client_stdout_fd, client_stderr_fd] =
@@ -138,9 +139,11 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
 
     match request {
         DaemonRequest::Execute {
-            cmd: mut exec_command,
+            cmd,
             env: forwarded_env,
         } => {
+            // Decode the command payload from the JSON bytes carried by `DaemonRequest::Execute`.
+            let mut exec_command: ExecCommand = serde_json::from_slice(&cmd)?;
             // Set config override from client's XDG_CONFIG_HOME if present, falling back to ~/.config
             let override_base = forwarded_env
                 .get("XDG_CONFIG_HOME")
@@ -253,11 +256,8 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                         if ctrl_conn.read_exact(&mut buf).is_err() {
                             break;
                         }
-                        if let Ok((DaemonRequest::Control(ctrl), _)) =
-                            bincode::serde::decode_from_slice::<DaemonRequest, _>(
-                                &buf,
-                                bincode::config::standard(),
-                            )
+                        if let Ok(DaemonRequest::Control(ctrl)) =
+                            wincode::deserialize::<DaemonRequest>(&buf)
                         {
                             match ctrl {
                                 DaemonControl::Signal(sig) => {
@@ -355,10 +355,6 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 Some(s) => s,
                 None => child.wait()?,
             };
-            #[derive(Serialize)]
-            enum FinalResponse {
-                ExitCode(i32),
-            }
             // Remove per-client lock now that this client has finished
             if let Some(path) = client_lock_path {
                 let _ = std::fs::remove_file(path);
@@ -367,8 +363,9 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             // Ensure port forwarder is dropped before namespace teardown
             drop(port_forward_keepalive);
 
-            let response = FinalResponse::ExitCode(status.code().unwrap_or(1));
-            let bytes = bincode::serde::encode_to_vec(&response, bincode::config::standard())?;
+            // Wire format currently returns only the exit code as a bare i32.
+            let response_code = status.code().unwrap_or(1);
+            let bytes = wincode::serialize(&response_code)?;
             conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
             conn.write_all(&bytes)?;
         }
