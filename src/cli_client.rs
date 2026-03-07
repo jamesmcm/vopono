@@ -40,9 +40,9 @@ impl UiClient for CliClient {
     fn get_input(&self, inp: Input) -> anyhow::Result<String> {
         let mut d = dialoguer::Input::<String>::new().with_prompt(&inp.prompt);
 
-        if inp.validator.is_some() {
-            d = d.validate_with(inp.validator.unwrap());
-        };
+        if let Some(validator) = inp.validator {
+            d = d.validate_with(validator);
+        }
 
         Ok(d.interact()?)
     }
@@ -50,11 +50,11 @@ impl UiClient for CliClient {
     fn get_input_numeric_u16(&self, inp: InputNumericu16) -> anyhow::Result<u16> {
         let mut d = dialoguer::Input::<u16>::new().with_prompt(&inp.prompt);
 
-        if inp.default.is_some() {
-            d = d.default(inp.default.unwrap());
+        if let Some(default) = inp.default {
+            d = d.default(default);
         }
-        if inp.validator.is_some() {
-            d = d.validate_with(inp.validator.unwrap());
+        if let Some(validator) = inp.validator {
+            d = d.validate_with(validator);
         }
 
         Ok(d.interact()?)

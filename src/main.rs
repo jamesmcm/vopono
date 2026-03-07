@@ -93,14 +93,17 @@ fn main() -> anyhow::Result<()> {
             output_list(listcmd)?;
         }
         args::Command::Synch(synchcmd) => {
-            if synchcmd.vpn_provider.is_none() {
-                sync_menu(&uiclient, synchcmd.protocol.map(|x| x.to_variant()))?;
-            } else {
-                synch(
-                    synchcmd.vpn_provider.unwrap().to_variant(),
-                    &synchcmd.protocol.map(|x| x.to_variant()),
-                    &uiclient,
-                )?;
+            match synchcmd.vpn_provider {
+                Some(vpn_provider) => {
+                    synch(
+                        vpn_provider.to_variant(),
+                        &synchcmd.protocol.map(|x| x.to_variant()),
+                        &uiclient,
+                    )?;
+                }
+                None => {
+                    sync_menu(&uiclient, synchcmd.protocol.map(|x| x.to_variant()))?;
+                }
             }
         }
         args::Command::Servers(serverscmd) => {
