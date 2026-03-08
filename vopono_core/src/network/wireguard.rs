@@ -5,7 +5,7 @@ use crate::network::wireguard_config::WireguardConfig;
 use crate::util::sudo_command;
 use anyhow::{Context, anyhow};
 use ipnet::IpNet;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -13,6 +13,8 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
+
+const DEFAULT_PERSISTENT_KEEPALIVE_SECS: &str = "25";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Wireguard {
@@ -196,6 +198,27 @@ impl Wireguard {
         std::fs::remove_file("/tmp/vopono_wg.conf")
             .context("Deleting file: /tmp/vopono_wg.conf")
             .ok();
+
+        if config.peer.keepalive.is_none() {
+            info!(
+                "No PersistentKeepalive set in Wireguard config, setting {} seconds to improve recovery after network drops",
+                DEFAULT_PERSISTENT_KEEPALIVE_SECS
+            );
+            NetworkNamespace::exec(
+                &namespace.name,
+                &[
+                    &executable_wg,
+                    "set",
+                    &if_name,
+                    "peer",
+                    &config.peer.public_key,
+                    "persistent-keepalive",
+                    DEFAULT_PERSISTENT_KEEPALIVE_SECS,
+                ],
+            )
+            .context("Failed to set default Wireguard PersistentKeepalive")?;
+        }
+
         let mut interface_addresses: Vec<IpAddr> = Vec::new();
         // Extract addresses
         for address in config.interface.address.iter() {
@@ -362,7 +385,7 @@ impl Wireguard {
                     pf, &nftable
                 ));
                 nftcmd.push(format!(
-                    "add chain {} {} postmangle {{ type filter hook prerouting priority -150; }}",
+                    "add chain {} {} postmangle {{ type filter hook postrouting priority -150; }}",
                     pf, &nftable
                 ));
 
