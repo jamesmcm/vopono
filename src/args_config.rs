@@ -9,7 +9,7 @@ use vopono_core::{
     config::{providers::VpnProvider, vpn::Protocol},
     network::{
         firewall::Firewall,
-        network_interface::{NetworkInterface, get_active_interfaces},
+        network_interface::{NetworkInterface, get_active_interfaces, interface_has_default_route},
         trojan::TrojanHost,
     },
     util::{get_config_file_protocol, vopono_dir},
@@ -202,6 +202,17 @@ impl ArgsConfig {
             }
         }?;
         log::debug!("Interface: {}", &interface.name);
+        match interface_has_default_route(&interface.name) {
+            Ok(true) => {}
+            Ok(false) => warn!(
+                "Selected network interface '{}' has no default route. This can happen with a stale interface value in vopono config and may prevent namespace connectivity.",
+                &interface.name
+            ),
+            Err(e) => warn!(
+                "Could not verify connectivity for selected network interface '{}': {e}",
+                &interface.name
+            ),
+        }
 
         let provider: VpnProvider;
         let server: String;
