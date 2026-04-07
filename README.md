@@ -26,7 +26,7 @@ lynx all running through different VPN connections:
 
 | Provider                      | OpenVPN support | Wireguard support |
 | ----------------------------- | --------------- | ----------------- |
-| Mullvad                       | ✅              | ✅                |
+| Mullvad                       | ❌              | ✅                |
 | AzireVPN                      | ❌              | ✅                |
 | iVPN                          | ✅              | ✅                |
 | PrivateInternetAccess         | ✅              | ✅\*              |
@@ -142,8 +142,8 @@ You can then use vopono as above (note that the Chromium binary is
 `chromium-browser`):
 
 ```bash
-$ vopono sync --protocol openvpn mullvad
-$ vopono exec --provider mullvad --server sweden chromium-browser
+$ vopono sync --protocol openvpn protonvpn
+$ vopono exec --provider protonvpn --server sweden chromium-browser
 ```
 
 Screenshot of vopono with OpenVPN running on Raspbian:

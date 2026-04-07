@@ -289,8 +289,6 @@ If it is missing you will be prompted for your credentials.
 For PrivateInternetAccess these should be the same as your account
 credentials.
 
-For Mullvad your OpenVPN credentials are your account code as your username, and `m` as the password.
-
 For ProtonVPN you can view your OpenVPN credentials [online on your account dashboard](https://account.protonvpn.com/account#openvpn).
 The OpenVPN credentials are **not** the same as your ProtonVPN account credentials.
 
@@ -323,13 +321,6 @@ For Mullvad, valid ports are: 1300, 1301, 1302, 1194, 1195, 1196, 1197, or 53 fo
 For PrivateInternetAccess valid ports are 1198 for UDP and 502 for TCP.
 
 #### Shadowsocks socks-proxy
-
-Mullvad supports proxying via Shadowsocks, if that configuration is
-chosen with `vopono sync`. Note you must use a TCP connection on port
-443 in this case.
-
-Respond with `Y` when asked `Connect via a bridge?` during the `vopono sync` configuration for Mullvad OpenVPN to enable this configuration. It
-is not used by default.
 
 If you are using a custom provider config file, you must run the socks
 proxy server yourself (i.e. `ss-local`) if using a socks-proxy.
@@ -942,6 +933,10 @@ Note vopono attempts to delete the created mapping when vopono is closed, but th
 
 Note as of March 2025 [AzireVPN no longer offers an OpenVPN service](https://blog.azirevpn.com/openvpn-support-ending-on-march-15/).
 
+### Mullvad
+
+Note as of January 2026 [Removing OpenVPN 15th January 2026](https://mullvad.net/en/blog/removing-openvpn-15th-january-2026).
+
 ## Tunnel Port Forwarding
 
 Some providers allow port forwarding inside the tunnel, so you can open
@@ -960,7 +955,7 @@ choice can be chosen with the `--firewall` argument).
 OpenVPN must be installed for using OpenVPN providers, and wireguard-tools must be
 installed for using Wireguard providers.
 
-shadowsocks-libev must be installed for Shadowsocks support (Mullvad OpenVPN bridges).
+shadowsocks-libev must be installed for Shadowsocks support.
 
 ## Troubleshooting
 
