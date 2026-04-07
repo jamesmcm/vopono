@@ -69,7 +69,9 @@ impl VpnProvider {
     pub fn get_dyn_openvpn_provider(&self) -> anyhow::Result<Box<dyn OpenVpnProvider>> {
         match self {
             Self::PrivateInternetAccess => Ok(Box::new(pia::PrivateInternetAccess {})),
-            Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
+            Self::Mullvad => Err(anyhow!(
+                "Mullvad does not support OpenVPN as of January 2026"
+            )),
             Self::ProtonVPN => Ok(Box::new(protonvpn::ProtonVPN {})),
             Self::AzireVPN => Err(anyhow!(
                 "AzireVPN does not support OpenVPN as of March 2025"

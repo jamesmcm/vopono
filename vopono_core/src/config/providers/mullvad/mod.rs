@@ -1,14 +1,10 @@
-mod openvpn;
 mod wireguard;
 
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 
-use super::{
-    ConfigurationChoice, Input, OpenVpnProvider, Provider, ShadowsocksProvider, UiClient,
-    WireguardProvider,
-};
+use super::{Input, Provider, ShadowsocksProvider, UiClient, WireguardProvider};
 use crate::config::vpn::Protocol;
 use anyhow::anyhow;
 use log::info;
