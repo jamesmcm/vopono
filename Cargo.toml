@@ -36,7 +36,7 @@ strum_macros = "0.28"
 shellexpand = { version = "3", features = ["full"] }
 shell-words = "1"
 interprocess = "2"
-wincode = { version = "0.4", features = ["derive", "std"] }
+wincode = { version = "0.5", features = ["derive", "std"] }
 
 [package.metadata.rpm]
 package = "vopono"
