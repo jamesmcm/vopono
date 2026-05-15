@@ -999,12 +999,24 @@ is connection/firewall related or solely a DNS / hostname resolution issue.
 
 ### Docker issues with nftables
 
-Docker sets a load of its own iptables and ip6tables rules when the
-service is enabled or running.
+Docker sets firewall rules when the service is enabled or running. On
+systems where `iptables --version` reports `nf_tables`, Docker may still
+be using its iptables firewall backend, with those iptables rules
+translated into nftables rules by `iptables-nft`.
 
-Due to this, iptables is the default firewall since nftables will be
-overridden by the Docker settings, whereas the vopono iptables rules
-will correctly take priority as required.
+In that setup Docker's translated `FORWARD` chain can have policy
+`DROP`. An accept rule in a separate nftables base chain is not final if
+a later base chain drops the packet, so vopono also inserts forwarding
+exceptions into Docker's `DOCKER-USER` chain when using
+`--firewall nftables` and that chain is active. This lets vopono's
+namespace veth traffic pass before Docker's own forwarding rules.
+Those rules match the veth interfaces for one namespace and are removed
+when that namespace exits.
+
+Docker 29 also has an experimental native nftables backend. That backend
+does not provide a `DOCKER-USER` chain; user nftables rules should live
+in separate tables with the desired hook priority, as recommended by
+Docker.
 
 Note you can stop Docker and flush the rules to use nftables as follows
 (they will be recreated when Docker restarts on reboot):

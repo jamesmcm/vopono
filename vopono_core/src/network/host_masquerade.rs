@@ -2,8 +2,9 @@ use super::firewall::Firewall;
 use super::network_interface::NetworkInterface;
 use crate::util::sudo_command;
 use anyhow::Context;
-use log::debug;
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
+use std::process::Command;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct HostMasquerade {
@@ -198,6 +199,10 @@ pub struct FirewallException {
     ns_interface: NetworkInterface,
     firewall: Firewall,
     disable_ipv6: bool,
+    #[serde(default)]
+    docker_user_ipv4: bool,
+    #[serde(default)]
+    docker_user_ipv6: bool,
 }
 
 impl FirewallException {
@@ -326,6 +331,27 @@ impl FirewallException {
                         &host_interface.name, &ns_interface.name
                     )
                 })?;
+
+                // If Docker is using the iptables frontend with the nf_tables backend
+                // (iptables-nft), its FORWARD base chain can still have policy drop.
+                // An accept in vopono_bridge is not final across later nft base chains,
+                // so add the same exceptions to Docker's pre-forwarding user chain.
+                let docker_user_ipv4 =
+                    add_docker_user_exception("iptables", &host_interface, &ns_interface)?;
+                let docker_user_ipv6 = if disable_ipv6 {
+                    false
+                } else {
+                    add_docker_user_exception("ip6tables", &host_interface, &ns_interface)?
+                };
+
+                return Ok(FirewallException {
+                    host_interface,
+                    ns_interface,
+                    firewall,
+                    disable_ipv6,
+                    docker_user_ipv4,
+                    docker_user_ipv6,
+                });
             }
         }
         Ok(FirewallException {
@@ -333,12 +359,26 @@ impl FirewallException {
             ns_interface,
             firewall,
             disable_ipv6,
+            docker_user_ipv4: false,
+            docker_user_ipv6: false,
         })
     }
 }
 
 impl Drop for FirewallException {
     fn drop(&mut self) {
+        // DOCKER-USER rules are scoped to this namespace's veth interface pair.
+        // Remove them with this instance even if other vopono namespaces are
+        // still running; each namespace owns different interface-specific rules.
+        if let Firewall::NfTables = self.firewall {
+            if self.docker_user_ipv4 {
+                delete_docker_user_exception("iptables", &self.host_interface, &self.ns_interface);
+            }
+            if self.docker_user_ipv6 {
+                delete_docker_user_exception("ip6tables", &self.host_interface, &self.ns_interface);
+            }
+        }
+
         // Only drop these settings if there are no other active namespaces
         let namespaces = crate::util::get_lock_namespaces();
         debug!("Remaining namespaces: {namespaces:?}");
@@ -432,4 +472,110 @@ impl Drop for FirewallException {
             }
         }
     }
+}
+
+fn docker_user_chain_active(iptables_cmd: &str) -> bool {
+    let docker_user = Command::new(iptables_cmd)
+        .args(["-S", "DOCKER-USER"])
+        .status();
+    if !matches!(docker_user, Ok(status) if status.success()) {
+        return false;
+    }
+
+    let forward = Command::new(iptables_cmd).args(["-S", "FORWARD"]).output();
+    match forward {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).contains("-A FORWARD -j DOCKER-USER")
+        }
+        _ => false,
+    }
+}
+
+fn add_docker_user_exception(
+    iptables_cmd: &str,
+    host_interface: &NetworkInterface,
+    ns_interface: &NetworkInterface,
+) -> anyhow::Result<bool> {
+    if !docker_user_chain_active(iptables_cmd) {
+        return Ok(false);
+    }
+
+    sudo_command(&[
+        iptables_cmd,
+        "-I",
+        "DOCKER-USER",
+        "-i",
+        &host_interface.name,
+        "-o",
+        &ns_interface.name,
+        "-j",
+        "ACCEPT",
+    ])
+    .with_context(|| {
+        format!(
+            "Failed to add {iptables_cmd} DOCKER-USER input exception, host interface: {}, namespace interface: {}",
+            &host_interface.name, &ns_interface.name
+        )
+    })?;
+    sudo_command(&[
+        iptables_cmd,
+        "-I",
+        "DOCKER-USER",
+        "-o",
+        &host_interface.name,
+        "-i",
+        &ns_interface.name,
+        "-j",
+        "ACCEPT",
+    ])
+    .with_context(|| {
+        format!(
+            "Failed to add {iptables_cmd} DOCKER-USER output exception, host interface: {}, namespace interface: {}",
+            &host_interface.name, &ns_interface.name
+        )
+    })?;
+
+    Ok(true)
+}
+
+fn delete_docker_user_exception(
+    iptables_cmd: &str,
+    host_interface: &NetworkInterface,
+    ns_interface: &NetworkInterface,
+) {
+    sudo_command(&[
+        iptables_cmd,
+        "-D",
+        "DOCKER-USER",
+        "-o",
+        &host_interface.name,
+        "-i",
+        &ns_interface.name,
+        "-j",
+        "ACCEPT",
+    ])
+    .unwrap_or_else(|e| {
+        warn!(
+            "Failed to delete {iptables_cmd} DOCKER-USER output rule, host interface: {}, namespace interface: {}: {e}",
+            &host_interface.name, &ns_interface.name
+        )
+    });
+
+    sudo_command(&[
+        iptables_cmd,
+        "-D",
+        "DOCKER-USER",
+        "-i",
+        &host_interface.name,
+        "-o",
+        &ns_interface.name,
+        "-j",
+        "ACCEPT",
+    ])
+    .unwrap_or_else(|e| {
+        warn!(
+            "Failed to delete {iptables_cmd} DOCKER-USER input rule, host interface: {}, namespace interface: {}: {e}",
+            &host_interface.name, &ns_interface.name
+        )
+    });
 }
