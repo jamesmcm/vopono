@@ -15,7 +15,8 @@ use std::str::FromStr;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenVpn {
     pid: u32,
-    pub openvpn_dns: Option<IpAddr>,
+    #[serde(default)]
+    pub openvpn_dns_servers: Vec<IpAddr>,
     pub logfile: PathBuf,
     // pub distinct_remotes: Vec<String>, // Unique IP Addresses or hostnames
 }
@@ -66,6 +67,10 @@ impl OpenVpn {
             "--machine-readable-output",
             "--log",
             log_file_str.as_str(),
+            "--ignore-unknown-option",
+            "dns-updown",
+            "--dns-updown",
+            "disable",
         ])
         .to_vec();
 
@@ -123,11 +128,12 @@ impl OpenVpn {
         let mut logfile = BufReader::with_capacity(64, File::open(log_file_str)?);
         let mut pos: usize = 0;
 
-        // Parse DNS header from OpenVPN response
-        let dns_regex = Regex::new(r"dhcp-option DNS ([0-9.]+)").unwrap();
-        let mut openvpn_dns: Option<IpAddr> = None;
+        // Parse DNS headers from OpenVPN response
+        let dns_regex = Regex::new(r"dhcp-option (?:DNS6|DNS) ([^,\s']+)").unwrap();
+        let mut openvpn_dns_servers = Vec::new();
         // Tail OpenVPN log file
         loop {
+            let start = pos;
             let x = logfile.read_line(&mut buffer)?;
 
             if x > 0 {
@@ -136,15 +142,12 @@ impl OpenVpn {
 
             pos += x;
 
-            if let Some(cap) = dns_regex.captures(&buffer)
-                && openvpn_dns.is_none()
-                && let Some(ipstr) = cap.get(1)
-            {
-                debug!("Found OpenVPN DNS response: {}", ipstr.as_str());
-                let ipaddr = IpAddr::from_str(ipstr.as_str());
-                if let Ok(ip) = ipaddr {
-                    openvpn_dns = Some(ip);
-                    debug!("Set OpenVPN DNS to: {ip:?}");
+            for ip in parse_openvpn_dns_servers(&buffer[start..pos], &dns_regex) {
+                if (ip.is_ipv4() || !(disable_ipv6 || ipv6_disabled))
+                    && !openvpn_dns_servers.contains(&ip)
+                {
+                    debug!("Found OpenVPN DNS response: {ip}");
+                    openvpn_dns_servers.push(ip);
                 }
             }
 
@@ -193,7 +196,7 @@ impl OpenVpn {
 
         Ok(Self {
             pid: id,
-            openvpn_dns,
+            openvpn_dns_servers,
             logfile: log_file_path,
         })
     }
@@ -518,6 +521,19 @@ pub fn killswitch(
     Ok(())
 }
 
+fn parse_openvpn_dns_servers(log: &str, dns_regex: &Regex) -> Vec<IpAddr> {
+    dns_regex
+        .captures_iter(log)
+        .filter_map(|cap| cap.get(1))
+        .filter_map(|ipstr| IpAddr::from_str(ipstr.as_str()).ok())
+        .fold(Vec::new(), |mut servers, server| {
+            if !servers.contains(&server) {
+                servers.push(server);
+            }
+            servers
+        })
+}
+
 pub fn warn_on_scripts_config(path: &Path) -> anyhow::Result<bool> {
     let mut out = false;
     let file_string =
@@ -598,5 +614,37 @@ impl FromStr for Host {
         } else {
             Ok(Host::Hostname(s.to_string()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn parses_pushed_ipv4_and_ipv6_dns_servers() {
+        let dns_regex = Regex::new(r"dhcp-option (?:DNS6|DNS) ([^,\s']+)").unwrap();
+        let log =
+            "PUSH_REPLY,dhcp-option DNS 10.8.0.1,dhcp-option DNS6 fd00::53,route-gateway 10.8.0.1";
+
+        assert_eq!(
+            parse_openvpn_dns_servers(log, &dns_regex),
+            vec![
+                IpAddr::V4(Ipv4Addr::new(10, 8, 0, 1)),
+                IpAddr::V6("fd00::53".parse::<Ipv6Addr>().unwrap()),
+            ]
+        );
+    }
+
+    #[test]
+    fn deduplicates_pushed_dns_servers() {
+        let dns_regex = Regex::new(r"dhcp-option (?:DNS6|DNS) ([^,\s']+)").unwrap();
+        let log = "PUSH_REPLY,dhcp-option DNS 10.8.0.1,dhcp-option DNS 10.8.0.1";
+
+        assert_eq!(
+            parse_openvpn_dns_servers(log, &dns_regex),
+            vec![IpAddr::V4(Ipv4Addr::new(10, 8, 0, 1))]
+        );
     }
 }
