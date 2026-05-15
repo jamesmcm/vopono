@@ -203,6 +203,10 @@ pub struct FirewallException {
     docker_user_ipv4: bool,
     #[serde(default)]
     docker_user_ipv6: bool,
+    #[serde(default)]
+    ufw_forward_ipv4: bool,
+    #[serde(default)]
+    ufw_forward_ipv6: bool,
 }
 
 impl FirewallException {
@@ -274,6 +278,25 @@ impl FirewallException {
                         "ACCEPT",
                     ])?;
                 }
+
+                let ufw_forward_ipv4 =
+                    add_ufw_forward_exception("iptables", &host_interface, &ns_interface)?;
+                let ufw_forward_ipv6 = if disable_ipv6 {
+                    false
+                } else {
+                    add_ufw_forward_exception("ip6tables", &host_interface, &ns_interface)?
+                };
+
+                Ok(FirewallException {
+                    host_interface,
+                    ns_interface,
+                    firewall,
+                    disable_ipv6,
+                    docker_user_ipv4: false,
+                    docker_user_ipv6: false,
+                    ufw_forward_ipv4,
+                    ufw_forward_ipv6,
+                })
             }
             Firewall::NfTables => {
                 sudo_command(&["nft", "add", "table", "inet", "vopono_bridge"])
@@ -343,25 +366,30 @@ impl FirewallException {
                 } else {
                     add_docker_user_exception("ip6tables", &host_interface, &ns_interface)?
                 };
+                // UFW keeps primary chains hooked into FORWARD when disabled
+                // with MANAGE_BUILTINS=no. When iptables is backed by
+                // nf_tables, those chains can still run after vopono's nft
+                // base chain, so add early UFW exceptions too.
+                let ufw_forward_ipv4 =
+                    add_ufw_forward_exception("iptables", &host_interface, &ns_interface)?;
+                let ufw_forward_ipv6 = if disable_ipv6 {
+                    false
+                } else {
+                    add_ufw_forward_exception("ip6tables", &host_interface, &ns_interface)?
+                };
 
-                return Ok(FirewallException {
+                Ok(FirewallException {
                     host_interface,
                     ns_interface,
                     firewall,
                     disable_ipv6,
                     docker_user_ipv4,
                     docker_user_ipv6,
-                });
+                    ufw_forward_ipv4,
+                    ufw_forward_ipv6,
+                })
             }
         }
-        Ok(FirewallException {
-            host_interface,
-            ns_interface,
-            firewall,
-            disable_ipv6,
-            docker_user_ipv4: false,
-            docker_user_ipv6: false,
-        })
     }
 }
 
@@ -377,6 +405,22 @@ impl Drop for FirewallException {
             if self.docker_user_ipv6 {
                 delete_docker_user_exception("ip6tables", &self.host_interface, &self.ns_interface);
             }
+        }
+        if self.ufw_forward_ipv4 {
+            delete_forward_chain_exception(
+                "iptables",
+                "ufw-before-forward",
+                &self.host_interface,
+                &self.ns_interface,
+            );
+        }
+        if self.ufw_forward_ipv6 {
+            delete_forward_chain_exception(
+                "ip6tables",
+                "ufw6-before-forward",
+                &self.host_interface,
+                &self.ns_interface,
+            );
         }
 
         // Only drop these settings if there are no other active namespaces
@@ -475,17 +519,32 @@ impl Drop for FirewallException {
 }
 
 fn docker_user_chain_active(iptables_cmd: &str) -> bool {
-    let docker_user = Command::new(iptables_cmd)
-        .args(["-S", "DOCKER-USER"])
-        .status();
-    if !matches!(docker_user, Ok(status) if status.success()) {
+    forward_chain_active(iptables_cmd, "DOCKER-USER")
+}
+
+fn ufw_forward_chain(iptables_cmd: &str) -> &str {
+    if iptables_cmd == "ip6tables" {
+        "ufw6-before-forward"
+    } else {
+        "ufw-before-forward"
+    }
+}
+
+fn ufw_forward_chain_active(iptables_cmd: &str) -> bool {
+    forward_chain_active(iptables_cmd, ufw_forward_chain(iptables_cmd))
+}
+
+fn forward_chain_active(iptables_cmd: &str, chain: &str) -> bool {
+    let chain_status = Command::new(iptables_cmd).args(["-S", chain]).status();
+    if !matches!(chain_status, Ok(status) if status.success()) {
         return false;
     }
 
     let forward = Command::new(iptables_cmd).args(["-S", "FORWARD"]).output();
     match forward {
         Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).contains("-A FORWARD -j DOCKER-USER")
+            let jump = format!("-A FORWARD -j {chain}");
+            String::from_utf8_lossy(&output.stdout).contains(&jump)
         }
         _ => false,
     }
@@ -575,6 +634,106 @@ fn delete_docker_user_exception(
     .unwrap_or_else(|e| {
         warn!(
             "Failed to delete {iptables_cmd} DOCKER-USER input rule, host interface: {}, namespace interface: {}: {e}",
+            &host_interface.name, &ns_interface.name
+        )
+    });
+}
+
+fn add_ufw_forward_exception(
+    iptables_cmd: &str,
+    host_interface: &NetworkInterface,
+    ns_interface: &NetworkInterface,
+) -> anyhow::Result<bool> {
+    let chain = ufw_forward_chain(iptables_cmd);
+    if !ufw_forward_chain_active(iptables_cmd) {
+        return Ok(false);
+    }
+
+    add_forward_chain_exception(iptables_cmd, chain, host_interface, ns_interface)
+}
+
+fn add_forward_chain_exception(
+    iptables_cmd: &str,
+    chain: &str,
+    host_interface: &NetworkInterface,
+    ns_interface: &NetworkInterface,
+) -> anyhow::Result<bool> {
+    sudo_command(&[
+        iptables_cmd,
+        "-I",
+        chain,
+        "-i",
+        &host_interface.name,
+        "-o",
+        &ns_interface.name,
+        "-j",
+        "ACCEPT",
+    ])
+    .with_context(|| {
+        format!(
+            "Failed to add {iptables_cmd} {chain} input exception, host interface: {}, namespace interface: {}",
+            &host_interface.name, &ns_interface.name
+        )
+    })?;
+    sudo_command(&[
+        iptables_cmd,
+        "-I",
+        chain,
+        "-o",
+        &host_interface.name,
+        "-i",
+        &ns_interface.name,
+        "-j",
+        "ACCEPT",
+    ])
+    .with_context(|| {
+        format!(
+            "Failed to add {iptables_cmd} {chain} output exception, host interface: {}, namespace interface: {}",
+            &host_interface.name, &ns_interface.name
+        )
+    })?;
+
+    Ok(true)
+}
+
+fn delete_forward_chain_exception(
+    iptables_cmd: &str,
+    chain: &str,
+    host_interface: &NetworkInterface,
+    ns_interface: &NetworkInterface,
+) {
+    sudo_command(&[
+        iptables_cmd,
+        "-D",
+        chain,
+        "-o",
+        &host_interface.name,
+        "-i",
+        &ns_interface.name,
+        "-j",
+        "ACCEPT",
+    ])
+    .unwrap_or_else(|e| {
+        warn!(
+            "Failed to delete {iptables_cmd} {chain} output rule, host interface: {}, namespace interface: {}: {e}",
+            &host_interface.name, &ns_interface.name
+        )
+    });
+
+    sudo_command(&[
+        iptables_cmd,
+        "-D",
+        chain,
+        "-i",
+        &host_interface.name,
+        "-o",
+        &ns_interface.name,
+        "-j",
+        "ACCEPT",
+    ])
+    .unwrap_or_else(|e| {
+        warn!(
+            "Failed to delete {iptables_cmd} {chain} input rule, host interface: {}, namespace interface: {}: {e}",
             &host_interface.name, &ns_interface.name
         )
     });
