@@ -1047,3 +1047,23 @@ $ sudo ip6tables -t mangle -X
 Alternatively you can disable Docker iptables rules management (but
 you will have to set up equivalent rules e.g. in nftables), or use
 rootless Docker or Podman.
+
+### UFW issues with forwarding
+
+UFW can leave its primary chains hooked into `INPUT`, `OUTPUT`, and
+`FORWARD` even after `ufw disable`, depending on its
+`MANAGE_BUILTINS` setting. In particular, `ufw-before-forward` and
+`ufw6-before-forward` may still be reached from the host `FORWARD`
+chain until reboot or an explicit UFW flush.
+
+When these UFW forward hooks are present, vopono inserts namespace
+veth-specific exceptions into UFW's early forward chain as well as its
+normal firewall rules. This is useful with `--firewall iptables`, and
+is required with `--firewall nftables` on systems where UFW's iptables
+rules are translated through `iptables-nft`: an nftables `accept` in
+vopono's own base chain is not final if a later UFW compatibility chain
+drops or rejects the packet.
+
+If you need to fully remove disabled UFW rules for troubleshooting, use
+UFW's own flush mechanism or uninstall UFW and reboot. Merely running
+`ufw disable` may not remove all chains from the active ruleset.
