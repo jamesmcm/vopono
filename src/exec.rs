@@ -605,13 +605,12 @@ fn run_protocol_in_netns(
                 ));
             }
 
-            if let Some(newdns) = ns.openvpn.as_ref().unwrap().openvpn_dns
-                && parsed_command.dns.is_none()
-            {
+            let openvpn_dns_servers = ns.openvpn.as_ref().unwrap().openvpn_dns_servers.clone();
+            if !openvpn_dns_servers.is_empty() && parsed_command.dns.is_none() {
                 let old_dns = ns.dns_config.take();
                 std::mem::forget(old_dns);
                 ns.dns_config(
-                    &[newdns],
+                    &openvpn_dns_servers,
                     &[],
                     parsed_command.hosts.as_ref(),
                     parsed_command.allow_host_access,
