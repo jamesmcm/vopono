@@ -1,0 +1,37 @@
+[package]
+name = "vopono-gui"
+description = "Graphical frontend for vopono"
+version = "0.1.0"
+edition = "2024"
+authors = ["James McMurray <jamesmcm03@gmail.com>"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/jamesmcm/vopono"
+homepage = "https://github.com/jamesmcm/vopono"
+keywords = ["vopono", "vpn", "wireguard", "openvpn", "netns", "gui"]
+
+[workspace]
+
+[dependencies]
+vopono_core = { path = "../vopono_core" }
+anyhow = "1"
+eframe = { version = "0.34", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+egui = "0.34"
+gilrs = "0.11"
+gtk = "0.18"
+image = { version = "0.25", default-features = false, features = ["png"] }
+log = "0.4"
+pretty_env_logger = "0.5"
+ron = "0.12"
+serde = { version = "1", features = ["derive", "std"] }
+shell-words = "1.1"
+strum = "0.28"
+toml_edit = { version = "0.25", features = ["serde"] }
+tray-icon = "0.24"
+walkdir = "2"
+which = "8"

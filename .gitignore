@@ -1,4 +1,6 @@
 /target
+/vopono-gui/target
 Cargo.lock
 dialoguer
 test.sh
+/vopono-gui/Cargo.lock
