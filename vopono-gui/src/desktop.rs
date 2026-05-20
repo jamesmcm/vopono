@@ -129,4 +129,71 @@ fn clean_exec(exec: &str) -> String {
         .join(" ")
 }
 
-// TODO: Add a test for the above with an example .desktop file
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn parses_visible_desktop_entry() {
+        let path = write_desktop_file(
+            r#"
+            [Desktop Entry]
+            Type=Application
+            Name=Firefox
+            Exec=firefox --private-window %u
+            Icon=firefox
+            "#,
+        );
+
+        let app = parse_desktop_file(&path).expect("desktop file should parse");
+        assert_eq!(app.name, "Firefox");
+        assert_eq!(app.command, "firefox --private-window");
+        assert_eq!(app.source, path);
+    }
+
+    #[test]
+    fn skips_hidden_no_display_and_terminal_entries() {
+        for hidden_field in ["Hidden=true", "NoDisplay=true", "Terminal=true"] {
+            let path = write_desktop_file(&format!(
+                r#"
+                [Desktop Entry]
+                Name=Hidden app
+                Exec=hidden-app
+                {hidden_field}
+                "#
+            ));
+
+            assert!(parse_desktop_file(&path).is_none());
+        }
+    }
+
+    #[test]
+    fn ignores_keys_outside_desktop_entry_group() {
+        let path = write_desktop_file(
+            r#"
+            [Other Group]
+            Name=Wrong
+            Exec=wrong
+
+            [Desktop Entry]
+            Name=Right
+            Exec=right %F
+            "#,
+        );
+
+        let app = parse_desktop_file(&path).expect("desktop entry should parse");
+        assert_eq!(app.name, "Right");
+        assert_eq!(app.command, "right");
+    }
+
+    fn write_desktop_file(contents: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("vopono-gui-test-{unique}.desktop"));
+        std::fs::write(&path, contents).expect("test desktop file should be written");
+        path
+    }
+}

@@ -1,5 +1,5 @@
 use crate::gui_config::{ApplicationProfile, CustomVpnConfig, LaunchConfig};
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use std::path::PathBuf;
 use std::process::Command;
 use vopono_core::config::providers::VpnProvider;
