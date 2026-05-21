@@ -6,8 +6,9 @@ mod vpn;
 
 use crate::desktop::{DesktopApplication, scan_desktop_applications};
 use crate::gui_config::{
-    ApplicationProfile, CustomVpnConfig, GuiConfig, gui_config_path, load_gui_config,
-    load_vopono_config_text, save_gui_config, vopono_config_path,
+    ApplicationProfile, CustomVpnConfig, GuiConfig, ProviderForwardedPort, gui_config_path,
+    load_gui_config, load_vopono_config_text, read_provider_forwarded_port, save_gui_config,
+    vopono_config_path,
 };
 use crate::status::{StatusSnapshot, read_status};
 use crate::tray::{TrayCommand, TrayManager};
@@ -66,6 +67,7 @@ pub struct VoponoGuiApp {
     new_app_command: String,
     new_app_args: String,
     open_ports_text: String,
+    provider_forwarded_port: Option<ProviderForwardedPort>,
     status: StatusSnapshot,
     tray: TrayManager,
     logo_texture: Option<egui::TextureHandle>,
@@ -84,6 +86,7 @@ impl VoponoGuiApp {
         let gui_config = load_gui_config(&gui_config_path).unwrap_or_default();
         let open_ports_text = format_ports(&gui_config.launch.open_ports);
         let config_text = load_vopono_config_text(&vopono_config_path).unwrap_or_default();
+        let provider_forwarded_port = read_provider_forwarded_port().unwrap_or_default();
         let status = read_status();
         let tray = TrayManager::new(&status);
         // TODO: Fix logo to remove white background and vopono text (just icon)
@@ -110,6 +113,7 @@ impl VoponoGuiApp {
             new_app_command: String::new(),
             new_app_args: String::new(),
             open_ports_text,
+            provider_forwarded_port,
             status,
             tray,
             logo_texture,
@@ -130,6 +134,7 @@ impl VoponoGuiApp {
 
     fn refresh_status(&mut self) {
         self.status = read_status();
+        self.provider_forwarded_port = read_provider_forwarded_port().unwrap_or_default();
         self.tray.update_status(&self.status);
         self.last_status_refresh = Instant::now();
     }

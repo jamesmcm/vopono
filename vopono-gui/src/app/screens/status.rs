@@ -12,6 +12,9 @@ impl VoponoGuiApp {
             ui.label("No active vopono namespaces.");
             return;
         }
+        if let Some(status) = &self.provider_forwarded_port {
+            ui.label(format!("Latest provider forwarded port: {}", status.port));
+        }
         for ns in &self.status.namespaces {
             ui.group(|ui| {
                 ui.horizontal(|ui| {

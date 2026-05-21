@@ -70,6 +70,26 @@ impl VoponoGuiApp {
                 "Gamepad controls",
             );
         });
+        if self.gui_config.launch.port_forwarding {
+            match &self.provider_forwarded_port {
+                Some(status) => {
+                    let age = status
+                        .age()
+                        .map(format_forwarded_port_age)
+                        .unwrap_or_else(|| "unknown age".to_string());
+                    detail_label(
+                        ui,
+                        format!("Latest provider forwarded port: {} ({age})", status.port),
+                    );
+                }
+                None => {
+                    detail_label(
+                        ui,
+                        "Provider forwarded port will appear here after a callback-capable provider reports it.",
+                    );
+                }
+            }
+        }
         ui.horizontal(|ui| {
             ui.label("Open ports (-o)");
             ui.text_edit_singleline(&mut self.open_ports_text);
@@ -88,5 +108,18 @@ impl VoponoGuiApp {
             }
             ui.label("Enter launches. Arrow keys move selection.");
         });
+    }
+}
+
+fn format_forwarded_port_age(age: std::time::Duration) -> String {
+    let seconds = age.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s ago")
+    } else if seconds < 3_600 {
+        format!("{}m ago", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h ago", seconds / 3_600)
+    } else {
+        format!("{}d ago", seconds / 86_400)
     }
 }

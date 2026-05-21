@@ -1,4 +1,6 @@
-use crate::gui_config::{ApplicationProfile, CustomVpnConfig, LaunchConfig};
+use crate::gui_config::{
+    ApplicationProfile, CustomVpnConfig, LaunchConfig, ensure_port_forwarding_callback,
+};
 use anyhow::{Context, anyhow};
 use std::path::PathBuf;
 use std::process::Command;
@@ -13,7 +15,7 @@ pub fn launch_custom_config(
     let vopono = find_vopono_binary()?;
     let mut command = Command::new(&vopono);
     command.arg("exec").arg("--custom").arg(&config.path);
-    add_launch_args(&mut command, launch);
+    add_launch_args(&mut command, launch)?;
 
     if let Some(working_directory) = &app.working_directory {
         command
@@ -52,7 +54,7 @@ pub fn launch_provider_config(
         .arg(protocol.to_string())
         .arg("--server")
         .arg(server);
-    add_launch_args(&mut command, launch);
+    add_launch_args(&mut command, launch)?;
 
     if let Some(working_directory) = &app.working_directory {
         command
@@ -71,9 +73,12 @@ pub fn launch_provider_config(
     ))
 }
 
-fn add_launch_args(command: &mut Command, launch: &LaunchConfig) {
+fn add_launch_args(command: &mut Command, launch: &LaunchConfig) -> anyhow::Result<()> {
     if launch.port_forwarding {
         command.arg("--port-forwarding");
+        command
+            .arg("--port-forwarding-callback")
+            .arg(ensure_port_forwarding_callback()?);
     }
     if !launch.open_ports.is_empty() {
         command.arg("--open-ports").arg(
@@ -85,6 +90,7 @@ fn add_launch_args(command: &mut Command, launch: &LaunchConfig) {
                 .join(","),
         );
     }
+    Ok(())
 }
 
 pub fn sync_provider(provider: VpnProvider, protocol: Option<Protocol>) -> anyhow::Result<String> {

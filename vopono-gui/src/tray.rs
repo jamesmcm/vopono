@@ -138,16 +138,14 @@ impl TrayManager {
     }
 }
 
-// TODO: We will only ever support Linux - can remove the target_os filter here
-// Can we specify Linux only in Cargo.toml etc.?
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 fn ensure_platform_tray_ready() -> anyhow::Result<()> {
     Err(anyhow::anyhow!(
         "Tray creation is skipped in tests to avoid starting a GTK/AppIndicator session"
     ))
 }
 
-#[cfg(all(not(test), target_os = "linux"))]
+#[cfg(not(test))]
 fn ensure_platform_tray_ready() -> anyhow::Result<()> {
     if gtk::is_initialized_main_thread() {
         return Ok(());
@@ -161,12 +159,7 @@ fn ensure_platform_tray_ready() -> anyhow::Result<()> {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
-fn ensure_platform_tray_ready() -> anyhow::Result<()> {
-    Ok(())
-}
-
-#[cfg(all(not(test), target_os = "linux"))]
+#[cfg(not(test))]
 fn pump_platform_events() {
     if gtk::is_initialized_main_thread() {
         while gtk::events_pending() {
@@ -175,7 +168,7 @@ fn pump_platform_events() {
     }
 }
 
-#[cfg(any(test, not(target_os = "linux")))]
+#[cfg(test)]
 fn pump_platform_events() {}
 
 #[cfg(test)]
