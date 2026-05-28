@@ -11,6 +11,9 @@ readme = "README.md"
 keywords = ["vopono", "vpn", "wireguard", "openvpn", "netns"]
 
 [workspace]
+members = [".", "vopono_core"]
+default-members = ["."]
+exclude = ["vopono-gui"]
 
 [dependencies]
 vopono_core = { path = "vopono_core" }

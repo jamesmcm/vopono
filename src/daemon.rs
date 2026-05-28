@@ -156,6 +156,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             vopono_core::util::set_config_owner_override(Some((uid, gid)));
             exec_command.user = Some(user.name);
             exec_command.group = Some(group.name);
+            let requested_application = exec_command.application.clone();
 
             // Take ownership of the NetworkNamespace object (`_ns`).
             // It will now be dropped only when `handle_client` finishes,
@@ -211,17 +212,17 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             // Keep the namespace alive while the child runs
             let _ns_guard = ns;
 
-            // Create a per-client lock file under ~/.config/vopono/locks/<ns>/client-<pid>
-            // so dropping this handler does not delete the namespace if other clients are active.
-            let client_lock_path: Option<PathBuf> = (|| -> anyhow::Result<PathBuf> {
-                let mut lock_dir = vopono_core::util::config_dir()?;
-                lock_dir.push(format!("vopono/locks/{}", _ns_guard.name));
-                std::fs::create_dir_all(&lock_dir)?;
-                let path = lock_dir.join(format!("client-{}", child.id()));
-                std::fs::File::create(&path)?;
-                Ok(path)
-            })()
-            .ok();
+            // Create a per-client RON lock file under ~/.config/vopono/locks/<ns>/client-<pid>
+            // so status readers can report daemon-launched applications and Drop can see
+            // other active clients before tearing down the namespace.
+            let client_lock_path: Option<PathBuf> =
+                match _ns_guard.write_client_lockfile(child.id(), &requested_application) {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        log::warn!("Failed to write daemon client status lockfile: {error}");
+                        None
+                    }
+                };
 
             // If using PTY, bridge between client FDs and PTY master
             let mut exit_status: Option<std::process::ExitStatus> = None;

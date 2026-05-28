@@ -723,6 +723,33 @@ impl NetworkNamespace {
         Ok(lock.ns)
     }
 
+    pub fn write_client_lockfile(&self, pid: u32, command: &str) -> anyhow::Result<PathBuf> {
+        let mut lockfile_path = config_dir()?;
+        lockfile_path.push(format!("vopono/locks/{}", self.name));
+        std::fs::create_dir_all(&lockfile_path)?;
+        debug!("Writing client lockfile: {}", lockfile_path.display());
+        lockfile_path.push(format!("client-{pid}"));
+        let since_the_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards");
+        let lock = LockfileStatus {
+            ns: LockfileNamespaceStatus {
+                name: self.name.clone(),
+                provider: self.provider.clone(),
+                protocol: self.protocol.clone(),
+            },
+            start: since_the_epoch.as_secs(),
+            command: command.to_string(),
+        };
+        let lock_string = ron::ser::to_string(&lock)?;
+        let mut f = File::create(&lockfile_path)?;
+        write!(f, "{lock_string}")?;
+        debug!("Client lockfile written: {}", lockfile_path.display());
+
+        set_config_permissions()?;
+        Ok(lockfile_path)
+    }
+
     pub fn setup_nftables_firewall(&self) -> anyhow::Result<()> {
         debug!("Setting up base nftables firewall for {}", &self.name);
 
@@ -777,10 +804,17 @@ impl NetworkNamespace {
 
 impl Drop for NetworkNamespace {
     fn drop(&mut self) {
-        let mut lockfile_path = config_dir().expect("Failed to get config dir");
+        let mut lock_dir = config_dir().expect("Failed to get config dir");
+        lock_dir.push(format!("vopono/locks/{}", self.name));
+        let mut lockfile_path = lock_dir.clone();
         // Each instance responsible for deleting their own lockfile
-        lockfile_path.push(format!("vopono/locks/{}/{}", self.name, unistd::getpid()));
-        if lockfile_path.exists() {
+        lockfile_path.push(format!("{}", unistd::getpid()));
+        if crate::util::is_daemon_mode() && crate::status::has_client_lockfiles(&lock_dir) {
+            debug!(
+                "Preserving daemon namespace lock while client locks remain: {}",
+                lockfile_path.display()
+            );
+        } else if lockfile_path.exists() {
             match std::fs::remove_file(&lockfile_path) {
                 Ok(_) => {}
                 Err(e) => {
@@ -793,8 +827,7 @@ impl Drop for NetworkNamespace {
             };
         }
 
-        let mut lockfile_path = config_dir().expect("Failed to get config dir");
-        lockfile_path.push(format!("vopono/locks/{}", self.name));
+        let lockfile_path = lock_dir;
 
         // Drop if lock directory doesn't exist, or it exists but is empty
         // TODO: How can we make this check that no _other_ PIDs exist (aside from ones we have spawned)
@@ -911,4 +944,18 @@ pub struct Lockfile {
     pub ns: NetworkNamespace,
     pub start: u64,
     pub command: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LockfileStatus {
+    pub ns: LockfileNamespaceStatus,
+    pub start: u64,
+    pub command: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LockfileNamespaceStatus {
+    pub name: String,
+    pub provider: VpnProvider,
+    pub protocol: Protocol,
 }

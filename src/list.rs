@@ -37,8 +37,6 @@ pub fn print_applications() -> anyhow::Result<()> {
             }
         }
     }
-    // Avoid triggering Drop for these namespaces
-    std::mem::forget(namespaces);
     Ok(())
 }
 
@@ -74,7 +72,5 @@ pub fn print_namespaces() -> anyhow::Result<()> {
             );
         }
     }
-    // Avoid triggering Drop for these namespaces
-    std::mem::forget(namespaces);
     Ok(())
 }
