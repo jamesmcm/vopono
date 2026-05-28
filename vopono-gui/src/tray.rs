@@ -1,7 +1,7 @@
 use crate::status::StatusSnapshot;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use tray_icon::{
-    TrayIcon, TrayIconBuilder,
+    Icon, TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuEvent, MenuItem},
 };
 
@@ -20,15 +20,21 @@ pub struct TrayManager {
     status_item: Option<MenuItem>,
     active: bool,
     last_error: Option<String>,
+    icon_active: Option<Icon>,
+    icon_idle: Option<Icon>,
 }
 
 impl TrayManager {
     pub fn new(snapshot: &StatusSnapshot) -> Self {
+        let icon_active = crate::brand::tray_icon(true).ok();
+        let icon_idle = crate::brand::tray_icon(false).ok();
         let mut manager = Self {
             tray: None,
             status_item: None,
             active: false,
             last_error: None,
+            icon_active,
+            icon_idle,
         };
         manager.try_create(snapshot);
         manager
@@ -44,8 +50,7 @@ impl TrayManager {
 
         if self.active != active {
             if let Some(tray) = &self.tray
-                && let Err(error) = crate::brand::tray_icon(active)
-                    .and_then(|icon| tray.set_icon(Some(icon)).map_err(Into::into))
+                && let Err(error) = tray.set_icon(self.cached_icon(active))
             {
                 self.last_error = Some(error.to_string());
             }
@@ -130,11 +135,22 @@ impl TrayManager {
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
             .with_tooltip(snapshot.tray_text())
-            .with_icon(crate::brand::tray_icon(snapshot.active_count() > 0)?)
+            .with_icon(
+                self.cached_icon(snapshot.active_count() > 0)
+                    .ok_or_else(|| anyhow::anyhow!("Tray icon asset could not be decoded"))?,
+            )
             .build()
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
         Ok((tray, status))
+    }
+
+    fn cached_icon(&self, active: bool) -> Option<Icon> {
+        if active {
+            self.icon_active.clone()
+        } else {
+            self.icon_idle.clone()
+        }
     }
 }
 

@@ -9,7 +9,7 @@ pub mod wireguard;
 extern crate shell_words as shellwords;
 use crate::config::vpn::Protocol;
 use crate::network::firewall::Firewall;
-use crate::network::netns::Lockfile;
+use crate::status::{self, LockNamespaces};
 use anyhow::{Context, anyhow};
 use directories_next::BaseDirs;
 use ipnet::Ipv4Net;
@@ -19,9 +19,7 @@ pub use open_hosts::open_hosts;
 pub use open_ports::open_ports;
 use rand::prelude::IndexedRandom;
 use regex::Regex;
-use std::collections::HashMap;
 use std::fs;
-use std::fs::File;
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -409,8 +407,6 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
             sudo_command(&["ip", "netns", "delete", x.as_str()])
         })?;
 
-    // TODO - deserialize to struct without Drop instead
-    std::mem::forget(lock_namespaces);
     Ok(())
 }
 
@@ -558,26 +554,8 @@ pub fn get_firewall() -> anyhow::Result<Firewall> {
     }
 }
 
-pub fn get_lock_namespaces() -> anyhow::Result<HashMap<String, Vec<Lockfile>>> {
-    let mut dir = config_dir()?;
-    dir.push("vopono");
-    dir.push("locks");
-
-    let mut namespaces: HashMap<String, Vec<Lockfile>> = HashMap::new();
-    WalkDir::new(dir)
-        .into_iter()
-        .filter(|x| x.is_ok() && x.as_ref().unwrap().path().is_file())
-        .map(|x| x.unwrap())
-        .try_for_each(|x| -> anyhow::Result<()> {
-            let lockfile = File::open(x.path())?;
-            let lock: Lockfile = ron::de::from_reader(lockfile)?;
-            namespaces
-                .entry(lock.ns.name.clone())
-                .or_default()
-                .push(lock);
-            Ok(())
-        })?;
-    Ok(namespaces)
+pub fn get_lock_namespaces() -> anyhow::Result<LockNamespaces> {
+    status::strict_namespaces(status::read_lock_namespaces()?)
 }
 
 pub fn parse_command_str(command_str: &str) -> anyhow::Result<Vec<String>> {

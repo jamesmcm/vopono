@@ -23,6 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    - name: Install vopono-gui Linux dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libudev-dev libxdo-dev
     - name: Install Clippy
       run: rustup component add clippy rustfmt
     - id: cargoversion
@@ -37,11 +41,18 @@ jobs:
       run: cargo test --workspace
     - name: Build
       run: cargo build --verbose --release
+    - name: Build vopono-gui
+      run: cargo build --verbose --release --manifest-path vopono-gui/Cargo.toml
     - name: Upload Vopono Artifact
       uses: actions/upload-artifact@v4
       with:
         name: x86_64-gcc
         path: ./target/release/vopono
+    - name: Upload Vopono GUI Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: x86_64-gcc-gui
+        path: ./vopono-gui/target/release/vopono-gui
   fedorarpmbuild:
     needs: [build]
     runs-on: ubuntu-latest
@@ -223,6 +234,7 @@ jobs:
       - run: ls -lha x86_64-musl-deb
       - run: ls -lha x86_64-musl
       - run: ls -lha x86_64-gcc
+      - run: ls -lha x86_64-gcc-gui
       - run: ls -lha armv7-deb
       - run: ls -lha armv7
       - run: ls -lha armv5-deb
@@ -273,7 +285,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./fedorarpm/vopono-${{needs.quickcheck.outputs.version}}-1.fc42.x86_64.rpm
+          asset_path: ./fedorarpm/vopono-${{needs.quickcheck.outputs.version}}-1.fc44.x86_64.rpm
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_amd64_fedora.rpm'
           asset_content_type: application/octet-stream
       - name: Upload amd64 rpm opensuse Release Asset
@@ -329,4 +341,13 @@ jobs:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: ./x86_64-gcc/vopono
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_linux_x86-64_gcc'
+          asset_content_type: application/octet-stream
+      - name: Upload Vopono GUI Amd64 Binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./x86_64-gcc-gui/vopono-gui
+          asset_name: 'vopono-gui_${{needs.quickcheck.outputs.version}}_linux_x86-64_gcc'
           asset_content_type: application/octet-stream

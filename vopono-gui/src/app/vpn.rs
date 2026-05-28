@@ -2,6 +2,7 @@ use super::utils::has_files;
 use crate::gui_config::{ApplicationProfile, CustomVpnConfig, LaunchConfig};
 use crate::launcher;
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use strum::IntoEnumIterator;
 use vopono_core::config::providers::VpnProvider;
 use vopono_core::config::vpn::Protocol;
@@ -25,6 +26,13 @@ pub(super) enum VpnChoice {
 }
 
 impl VpnChoice {
+    pub(super) fn key(&self) -> String {
+        match self {
+            Self::Synced(config) => format!("synced:{}", config.path.display()),
+            Self::Custom { config, .. } => format!("custom:{}", config.path.display()),
+        }
+    }
+
     pub(super) fn primary_label(&self) -> String {
         match self {
             Self::Synced(config) => {
@@ -48,7 +56,7 @@ pub(super) fn launch_vpn_choice(
     choice: &VpnChoice,
     app: &ApplicationProfile,
     launch: &LaunchConfig,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Child)> {
     match choice {
         VpnChoice::Synced(config) => launcher::launch_provider_config(
             config.provider.clone(),

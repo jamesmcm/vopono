@@ -9,6 +9,8 @@ pub struct GuiConfig {
     #[serde(default)]
     pub custom_vpn_configs: Vec<CustomVpnConfig>,
     #[serde(default)]
+    pub vpn_config_usage: Vec<VpnConfigUsage>,
+    #[serde(default)]
     pub applications: Vec<ApplicationProfile>,
     #[serde(default)]
     pub launch: LaunchConfig,
@@ -43,6 +45,13 @@ pub struct CustomVpnConfig {
     pub name: String,
     pub path: PathBuf,
     pub protocol: String,
+    #[serde(default)]
+    pub usage_count: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VpnConfigUsage {
+    pub key: String,
     #[serde(default)]
     pub usage_count: u64,
 }

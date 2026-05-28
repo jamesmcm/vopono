@@ -88,9 +88,19 @@ impl VoponoGuiApp {
         if self.gui_config.applications.is_empty() {
             return;
         }
-        let current = self.selected_app.unwrap_or(0) as isize;
         let len = self.gui_config.applications.len() as isize;
-        self.selected_app = Some((current + delta).rem_euclid(len) as usize);
+        let current = self
+            .selected_app_cmd
+            .as_ref()
+            .and_then(|command| {
+                self.gui_config
+                    .applications
+                    .iter()
+                    .position(|app| &app.command == command)
+            })
+            .unwrap_or(0) as isize;
+        let next = (current + delta).rem_euclid(len) as usize;
+        self.selected_app_cmd = Some(self.gui_config.applications[next].command.clone());
     }
 }
 

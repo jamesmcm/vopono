@@ -5,7 +5,7 @@ use eframe::egui;
 impl VoponoGuiApp {
     pub(super) fn status_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Status");
-        if let Some(error) = &self.status.error {
+        for error in &self.status.errors {
             ui.colored_label(egui::Color32::from_rgb(220, 64, 64), error);
         }
         if self.status.namespaces.is_empty() {

@@ -46,6 +46,7 @@ impl VoponoGuiApp {
                 }
                 if let Some(index) = remove {
                     self.gui_config.applications.remove(index);
+                    self.select_default_launch_targets();
                     self.save_gui_config();
                 }
             });

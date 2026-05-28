@@ -1,15 +1,9 @@
-use serde::Deserialize;
-use std::collections::HashMap;
-use std::fs::File;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use vopono_core::config::providers::VpnProvider;
-use vopono_core::config::vpn::Protocol;
-use walkdir::WalkDir;
 
 #[derive(Clone, Debug, Default)]
 pub struct StatusSnapshot {
     pub namespaces: Vec<NamespaceStatus>,
-    pub error: Option<String>,
+    pub errors: Vec<String>,
 }
 
 impl StatusSnapshot {
@@ -18,10 +12,10 @@ impl StatusSnapshot {
     }
 
     pub fn tray_text(&self) -> String {
-        if let Some(error) = &self.error {
-            return format!("vopono status unavailable: {error}");
-        }
         if self.namespaces.is_empty() {
+            if let Some(error) = self.errors.first() {
+                return format!("vopono status unavailable: {error}");
+            }
             return "vopono: no active namespaces".to_string();
         }
 
@@ -40,6 +34,13 @@ impl StatusSnapshot {
                 if ns.applications.len() == 1 { "" } else { "s" }
             )
         }));
+        if !self.errors.is_empty() {
+            lines.push(format!(
+                "{} status warning{}",
+                self.errors.len(),
+                if self.errors.len() == 1 { "" } else { "s" }
+            ));
+        }
         lines.join("\n")
     }
 }
@@ -64,15 +65,20 @@ pub fn read_status() -> StatusSnapshot {
         Ok(snapshot) => snapshot,
         Err(error) => StatusSnapshot {
             namespaces: Vec::new(),
-            error: Some(error.to_string()),
+            errors: vec![error.to_string()],
         },
     }
 }
 
 fn read_status_inner() -> anyhow::Result<StatusSnapshot> {
-    let namespaces = read_lock_namespaces()?;
+    let status = vopono_core::status::read_lock_namespaces()?;
+    let namespaces = status.namespaces;
+    let errors = status.errors;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let mut snapshot = StatusSnapshot::default();
+    let mut snapshot = StatusSnapshot {
+        namespaces: Vec::new(),
+        errors,
+    };
 
     let mut names = namespaces.keys().cloned().collect::<Vec<_>>();
     names.sort();
@@ -106,42 +112,6 @@ fn read_status_inner() -> anyhow::Result<StatusSnapshot> {
     Ok(snapshot)
 }
 
-#[derive(Debug, Deserialize)]
-struct StatusLockfile {
-    ns: StatusNamespace,
-    start: u64,
-    command: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct StatusNamespace {
-    name: String,
-    provider: VpnProvider,
-    protocol: Protocol,
-}
-
-fn read_lock_namespaces() -> anyhow::Result<HashMap<String, Vec<StatusLockfile>>> {
-    let mut dir = vopono_core::util::config_dir()?;
-    dir.push("vopono");
-    dir.push("locks");
-
-    let mut namespaces: HashMap<String, Vec<StatusLockfile>> = HashMap::new();
-    WalkDir::new(dir)
-        .into_iter()
-        .filter(|entry| entry.is_ok() && entry.as_ref().unwrap().path().is_file())
-        .map(|entry| entry.unwrap())
-        .try_for_each(|entry| -> anyhow::Result<()> {
-            let lockfile = File::open(entry.path())?;
-            let lock: StatusLockfile = ron::de::from_reader(lockfile)?;
-            namespaces
-                .entry(lock.ns.name.clone())
-                .or_default()
-                .push(lock);
-            Ok(())
-        })?;
-    Ok(namespaces)
-}
-
 fn format_duration(seconds: u64) -> String {
     let duration = Duration::from_secs(seconds);
     let total = duration.as_secs();
@@ -163,7 +133,9 @@ fn format_duration(seconds: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use vopono_core::config::providers::VpnProvider;
+    use vopono_core::config::vpn::Protocol;
+    use vopono_core::network::netns::LockfileStatus;
 
     #[test]
     fn status_lockfile_deserializes_only_inert_status_fields() {
@@ -194,7 +166,7 @@ mod tests {
             command: "firefox --private-window",
         )"#;
 
-        let lock: StatusLockfile = ron::from_str(raw).expect("status lockfile should parse");
+        let lock: LockfileStatus = ron::from_str(raw).expect("status lockfile should parse");
         assert_eq!(lock.ns.name, "vopono_mullvad_se");
         assert_eq!(lock.ns.provider, VpnProvider::Mullvad);
         assert_eq!(lock.ns.protocol, Protocol::Wireguard);

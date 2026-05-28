@@ -3,7 +3,7 @@ use crate::gui_config::{
 };
 use anyhow::{Context, anyhow};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use vopono_core::config::providers::VpnProvider;
 use vopono_core::config::vpn::Protocol;
 
@@ -11,7 +11,7 @@ pub fn launch_custom_config(
     config: &CustomVpnConfig,
     app: &ApplicationProfile,
     launch: &LaunchConfig,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Child)> {
     let vopono = find_vopono_binary()?;
     let mut command = Command::new(&vopono);
     command.arg("exec").arg("--custom").arg(&config.path);
@@ -24,15 +24,19 @@ pub fn launch_custom_config(
     }
 
     command.arg(application_command(app));
-    command
+    prepare_background_command(&mut command);
+    let child = command
         .spawn()
         .with_context(|| format!("Failed to launch {}", app.name))?;
 
-    Ok(format!(
-        "Started {} through {} using {}",
-        app.name,
-        vopono.display(),
-        config.path.display()
+    Ok((
+        format!(
+            "Started {} through {} using {}",
+            app.name,
+            vopono.display(),
+            config.path.display()
+        ),
+        child,
     ))
 }
 
@@ -42,7 +46,7 @@ pub fn launch_provider_config(
     server: &str,
     app: &ApplicationProfile,
     launch: &LaunchConfig,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<(String, Child)> {
     // TODO: Do not shell out - but this is okay for now (since vopono also still shells out)
     let vopono = find_vopono_binary()?;
     let mut command = Command::new(&vopono);
@@ -63,13 +67,17 @@ pub fn launch_provider_config(
     }
 
     command.arg(application_command(app));
-    command
+    prepare_background_command(&mut command);
+    let child = command
         .spawn()
         .with_context(|| format!("Failed to launch {}", app.name))?;
 
-    Ok(format!(
-        "Started {} through {} {} {}",
-        app.name, provider, protocol, server
+    Ok((
+        format!(
+            "Started {} through {} {} {}",
+            app.name, provider, protocol, server
+        ),
+        child,
     ))
 }
 
@@ -100,6 +108,7 @@ pub fn sync_provider(provider: VpnProvider, protocol: Option<Protocol>) -> anyho
     if let Some(protocol) = protocol {
         command.arg("--protocol").arg(protocol.to_string());
     }
+    prepare_background_command(&mut command);
     command
         .spawn()
         .with_context(|| format!("Failed to start sync for {provider}"))?;
@@ -108,6 +117,19 @@ pub fn sync_provider(provider: VpnProvider, protocol: Option<Protocol>) -> anyho
         "Started sync for {provider} through {}",
         vopono.display()
     ))
+}
+
+fn prepare_background_command(command: &mut Command) {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
 }
 
 fn find_vopono_binary() -> anyhow::Result<PathBuf> {

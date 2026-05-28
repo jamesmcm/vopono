@@ -6,9 +6,9 @@ mod vpn;
 
 use crate::desktop::{DesktopApplication, scan_desktop_applications};
 use crate::gui_config::{
-    ApplicationProfile, CustomVpnConfig, GuiConfig, ProviderForwardedPort, gui_config_path,
-    load_gui_config, load_vopono_config_text, read_provider_forwarded_port, save_gui_config,
-    vopono_config_path,
+    ApplicationProfile, CustomVpnConfig, GuiConfig, ProviderForwardedPort, VpnConfigUsage,
+    gui_config_path, load_gui_config, load_vopono_config_text, read_provider_forwarded_port,
+    save_gui_config, vopono_config_path,
 };
 use crate::status::{StatusSnapshot, read_status};
 use crate::tray::{TrayCommand, TrayManager};
@@ -16,6 +16,7 @@ use eframe::egui;
 use file_picker::FilePicker;
 use gilrs::Gilrs;
 use std::path::PathBuf;
+use std::process::Child;
 use std::time::{Duration, Instant};
 use utils::{format_ports, parse_ports};
 use vopono_core::util::get_config_file_protocol;
@@ -58,8 +59,9 @@ pub struct VoponoGuiApp {
     config_text: String,
     desktop_apps: Vec<DesktopApplication>,
     synced_configs: Vec<vpn::SyncedVpnConfig>,
-    selected_vpn: Option<usize>,
-    selected_app: Option<usize>,
+    selected_vpn_key: Option<String>,
+    selected_app_cmd: Option<String>,
+    active_children: Vec<Child>,
     file_picker: FilePicker,
     new_custom_name: String,
     new_custom_path: String,
@@ -96,7 +98,7 @@ impl VoponoGuiApp {
         });
         let gilrs = Gilrs::new().ok();
 
-        Self {
+        let mut app = Self {
             current_view: View::Launch,
             gui_config_path,
             vopono_config_path,
@@ -104,8 +106,9 @@ impl VoponoGuiApp {
             config_text,
             desktop_apps: scan_desktop_applications(),
             synced_configs: scan_synced_configs(),
-            selected_vpn: None,
-            selected_app: None,
+            selected_vpn_key: None,
+            selected_app_cmd: None,
+            active_children: Vec::new(),
             file_picker: FilePicker::new(),
             new_custom_name: String::new(),
             new_custom_path: String::new(),
@@ -122,7 +125,10 @@ impl VoponoGuiApp {
             message: None,
             error: None,
             should_quit: false,
-        }
+        };
+        app.sort_applications();
+        app.select_default_launch_targets();
+        app
     }
 
     fn save_gui_config(&mut self) {
@@ -157,6 +163,15 @@ impl VoponoGuiApp {
                 return;
             }
         };
+        if self
+            .gui_config
+            .custom_vpn_configs
+            .iter()
+            .any(|config| config.path == path)
+        {
+            self.error = Some(format!("Custom config already exists: {}", path.display()));
+            return;
+        }
         let name = if self.new_custom_name.trim().is_empty() {
             path.file_stem()
                 .and_then(|stem| stem.to_str())
@@ -174,6 +189,7 @@ impl VoponoGuiApp {
         });
         self.new_custom_name.clear();
         self.new_custom_path.clear();
+        self.select_default_launch_targets();
         self.save_gui_config();
     }
 
@@ -182,10 +198,20 @@ impl VoponoGuiApp {
             self.error = Some("Application name and command are required".to_string());
             return;
         }
+        let command = self.new_app_command.trim();
+        if self
+            .gui_config
+            .applications
+            .iter()
+            .any(|existing| existing.command == command)
+        {
+            self.error = Some(format!("Application command already exists: {command}"));
+            return;
+        }
 
         self.gui_config.applications.push(ApplicationProfile {
             name: self.new_app_name.trim().to_string(),
-            command: self.new_app_command.trim().to_string(),
+            command: command.to_string(),
             args: self
                 .new_app_args
                 .split_whitespace()
@@ -198,6 +224,7 @@ impl VoponoGuiApp {
         self.new_app_command.clear();
         self.new_app_args.clear();
         self.sort_applications();
+        self.select_default_launch_targets();
         self.save_gui_config();
     }
 
@@ -212,6 +239,7 @@ impl VoponoGuiApp {
             {
                 self.gui_config.applications.push(profile);
                 self.sort_applications();
+                self.select_default_launch_targets();
                 self.save_gui_config();
             }
         }
@@ -225,37 +253,114 @@ impl VoponoGuiApp {
         });
     }
 
+    fn select_default_launch_targets(&mut self) {
+        let vpn_choices = self.vpn_choices();
+        if !self.selected_vpn_key.as_ref().is_some_and(|key| {
+            vpn_choices
+                .iter()
+                .any(|choice| choice.key() == key.as_str())
+        }) {
+            self.selected_vpn_key = vpn_choices.first().map(VpnChoice::key);
+        }
+
+        if !self.selected_app_cmd.as_ref().is_some_and(|command| {
+            self.gui_config
+                .applications
+                .iter()
+                .any(|app| app.command == command.as_str())
+        }) {
+            self.selected_app_cmd = self
+                .gui_config
+                .applications
+                .first()
+                .map(|app| app.command.clone());
+        }
+    }
+
+    fn vpn_usage_count(&self, choice: &VpnChoice) -> u64 {
+        match choice {
+            VpnChoice::Custom { config, .. } => config.usage_count,
+            VpnChoice::Synced(_) => {
+                let key = choice.key();
+                self.gui_config
+                    .vpn_config_usage
+                    .iter()
+                    .find(|usage| usage.key == key)
+                    .map(|usage| usage.usage_count)
+                    .unwrap_or(0)
+            }
+        }
+    }
+
+    fn increment_vpn_usage(&mut self, choice: &VpnChoice) {
+        match choice {
+            VpnChoice::Custom { index, .. } => {
+                if let Some(config) = self.gui_config.custom_vpn_configs.get_mut(*index) {
+                    config.usage_count += 1;
+                }
+            }
+            VpnChoice::Synced(_) => {
+                let key = choice.key();
+                if let Some(usage) = self
+                    .gui_config
+                    .vpn_config_usage
+                    .iter_mut()
+                    .find(|usage| usage.key == key)
+                {
+                    usage.usage_count += 1;
+                } else {
+                    self.gui_config.vpn_config_usage.push(VpnConfigUsage {
+                        key,
+                        usage_count: 1,
+                    });
+                }
+            }
+        }
+    }
+
     fn launch_selected(&mut self) {
         if !self.sync_launch_options_from_ui() {
             return;
         }
 
         let vpn_choices = self.vpn_choices();
-        let Some(vpn_index) = self.selected_vpn else {
+        let Some(vpn_key) = self.selected_vpn_key.as_deref() else {
             self.error = Some("Choose a VPN config first".to_string());
             return;
         };
-        let Some(app_index) = self.selected_app else {
+        let Some(app_command) = self.selected_app_cmd.clone() else {
             self.error = Some("Choose an application first".to_string());
             return;
         };
-        let Some(vpn_choice) = vpn_choices.get(vpn_index).cloned() else {
+        let Some(vpn_choice) = vpn_choices
+            .iter()
+            .find(|choice| choice.key() == vpn_key)
+            .cloned()
+        else {
             self.error = Some("Selected VPN config no longer exists".to_string());
             return;
         };
-        let Some(app) = self.gui_config.applications.get(app_index).cloned() else {
+        let Some(app) = self
+            .gui_config
+            .applications
+            .iter()
+            .find(|app| app.command == app_command)
+            .cloned()
+        else {
             self.error = Some("Selected application no longer exists".to_string());
             return;
         };
 
         match launch_vpn_choice(&vpn_choice, &app, &self.gui_config.launch) {
-            Ok(message) => {
-                if let VpnChoice::Custom { index, .. } = vpn_choice
-                    && let Some(config) = self.gui_config.custom_vpn_configs.get_mut(index)
+            Ok((message, child)) => {
+                self.active_children.push(child);
+                self.increment_vpn_usage(&vpn_choice);
+                if let Some(app) = self
+                    .gui_config
+                    .applications
+                    .iter_mut()
+                    .find(|app| app.command == app_command)
                 {
-                    config.usage_count += 1;
-                }
-                if let Some(app) = self.gui_config.applications.get_mut(app_index) {
                     app.usage_count += 1;
                 }
                 self.sort_applications();
@@ -269,15 +374,18 @@ impl VoponoGuiApp {
 
     fn refresh_synced_configs(&mut self) {
         self.synced_configs = scan_synced_configs();
-        if let Some(selected) = self.selected_vpn
-            && selected >= self.vpn_choices().len()
-        {
-            self.selected_vpn = None;
-        }
+        self.select_default_launch_targets();
     }
 
     fn vpn_choices(&self) -> Vec<VpnChoice> {
-        vpn_choices_from_configs(&self.gui_config.custom_vpn_configs, &self.synced_configs)
+        let mut choices =
+            vpn_choices_from_configs(&self.gui_config.custom_vpn_configs, &self.synced_configs);
+        choices.sort_by(|a, b| {
+            self.vpn_usage_count(b)
+                .cmp(&self.vpn_usage_count(a))
+                .then_with(|| a.primary_label().cmp(&b.primary_label()))
+        });
+        choices
     }
 
     fn sync_launch_options_from_ui(&mut self) -> bool {
@@ -314,6 +422,8 @@ impl eframe::App for VoponoGuiApp {
 
         self.handle_shortcuts(ctx);
         self.handle_gamepad(ctx);
+        self.active_children
+            .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
         self.tray.pump_events();
         if self.last_status_refresh.elapsed() >= Duration::from_secs(5) {
             self.refresh_status();

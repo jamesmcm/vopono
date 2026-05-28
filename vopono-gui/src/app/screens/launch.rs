@@ -24,13 +24,21 @@ impl VoponoGuiApp {
                         if vpn_choices.is_empty() {
                             ui.label("No synced or custom VPN configs found.");
                         }
-                        for (index, choice) in vpn_choices.iter().enumerate() {
-                            let selected = self.selected_vpn == Some(index);
+                        for choice in &vpn_choices {
+                            let key = choice.key();
+                            let selected = self.selected_vpn_key.as_ref() == Some(&key);
                             if ui
-                                .selectable_label(selected, choice.primary_label())
+                                .selectable_label(
+                                    selected,
+                                    format!(
+                                        "{} [{}]",
+                                        choice.primary_label(),
+                                        self.vpn_usage_count(choice)
+                                    ),
+                                )
                                 .clicked()
                             {
-                                self.selected_vpn = Some(index);
+                                self.selected_vpn_key = Some(key);
                             }
                             detail_label(ui, choice.detail_label());
                         }
@@ -42,8 +50,8 @@ impl VoponoGuiApp {
                     .id_salt(LAUNCH_APPS_SCROLL_ID)
                     .max_height(260.0)
                     .show(ui, |ui| {
-                        for (index, app) in self.gui_config.applications.iter().enumerate() {
-                            let selected = self.selected_app == Some(index);
+                        for app in &self.gui_config.applications {
+                            let selected = self.selected_app_cmd.as_ref() == Some(&app.command);
                             if ui
                                 .selectable_label(
                                     selected,
@@ -51,7 +59,7 @@ impl VoponoGuiApp {
                                 )
                                 .clicked()
                             {
-                                self.selected_app = Some(index);
+                                self.selected_app_cmd = Some(app.command.clone());
                             }
                             detail_label(ui, app.command_line());
                         }
