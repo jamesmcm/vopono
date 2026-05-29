@@ -41,17 +41,19 @@ shell-words = "1"
 interprocess = "2"
 wincode = { version = "0.5", features = ["derive", "std"] }
 
-[package.metadata.rpm]
-package = "vopono"
-
 [package.metadata.deb]
 maintainer = "James McMurray <jamesmcm03@gmail.com>"
 recommends = "wireguard-tools, openvpn"
 # Not supported in Github Actions image with cargo-deb yet
 # suggests = "shadowsocks-libev, openfortivpn"
 
-[package.metadata.rpm.cargo]
-buildflags = ["--release"]
+[package.metadata.generate-rpm]
+release = "1"
+require-sh = false
+assets = [
+    { source = "target/release/vopono", dest = "/usr/bin/vopono", mode = "0755" },
+]
 
-[package.metadata.rpm.targets]
-vopono = { path = "/usr/bin/vopono" }
+[package.metadata.generate-rpm.variants.fedora]
+# Placeholder: the Fedora action overrides this from rpm --eval '%{?fedora}'.
+release = "1.fcFEDORA"
