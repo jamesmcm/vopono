@@ -1,7 +1,6 @@
-// TODO: Fix this - use transparent background and remove text from logo
 // TODO: Is there a better way of bundling than cramming the bytes in the binary like this? This is
 // okay for now
-const LOGO_BYTES: &[u8] = include_bytes!("../../logos/voponologo.png");
+const LOGO_BYTES: &[u8] = include_bytes!("../../logos/badge.png");
 
 pub fn window_icon() -> anyhow::Result<egui::IconData> {
     let image = logo_rgba_exact(64, 64, None)?;

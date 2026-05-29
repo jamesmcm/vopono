@@ -91,10 +91,9 @@ impl VoponoGuiApp {
         let provider_forwarded_port = read_provider_forwarded_port().unwrap_or_default();
         let status = read_status();
         let tray = TrayManager::new(&status);
-        // TODO: Fix logo to remove white background and vopono text (just icon)
         let logo_texture = crate::brand::logo_texture_image().ok().map(|image| {
             cc.egui_ctx
-                .load_texture("vopono-logo", image, egui::TextureOptions::LINEAR)
+                .load_texture("vopono-badge", image, egui::TextureOptions::LINEAR)
         });
         let gilrs = Gilrs::new().ok();
 

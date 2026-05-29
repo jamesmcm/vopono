@@ -66,7 +66,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: fedorarpm
-        path: ./target/release/rpmbuild/RPMS/x86_64/*
+        path: ./target/generate-rpm/*
   opensuseleaprpmbuild:
     needs: [build]
     runs-on: ubuntu-latest
@@ -80,7 +80,7 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: opensuserpm
-        path: ./target/release/rpmbuild/RPMS/x86_64/*
+        path: ./target/generate-rpm/*
   debbuild:
     needs: [build]
     runs-on: ubuntu-latest
@@ -243,6 +243,15 @@ jobs:
       - run: ls -lha aarch64
       - run: ls -lha fedorarpm
       - run: ls -lha opensuserpm
+      - name: Find RPM release assets
+        id: rpm_assets
+        run: |
+          fedora_rpm="$(find ./fedorarpm -maxdepth 1 -name 'vopono-${{needs.quickcheck.outputs.version}}-1.fc*.x86_64.rpm' -print -quit)"
+          opensuse_rpm="$(find ./opensuserpm -maxdepth 1 -name 'vopono-${{needs.quickcheck.outputs.version}}-1.x86_64.rpm' -print -quit)"
+          test -n "$fedora_rpm"
+          test -n "$opensuse_rpm"
+          echo "fedora=$fedora_rpm" >> "$GITHUB_OUTPUT"
+          echo "opensuse=$opensuse_rpm" >> "$GITHUB_OUTPUT"
       - name: Upload amd64 deb Release Asset
         uses: actions/upload-release-asset@v1
         env:
@@ -285,7 +294,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./fedorarpm/vopono-${{needs.quickcheck.outputs.version}}-1.fc44.x86_64.rpm
+          asset_path: ${{ steps.rpm_assets.outputs.fedora }}
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_amd64_fedora.rpm'
           asset_content_type: application/octet-stream
       - name: Upload amd64 rpm opensuse Release Asset
@@ -294,7 +303,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./opensuserpm/vopono-${{needs.quickcheck.outputs.version}}-1.x86_64.rpm
+          asset_path: ${{ steps.rpm_assets.outputs.opensuse }}
           asset_name: 'vopono_${{needs.quickcheck.outputs.version}}_amd64_opensuseleap.rpm'
           asset_content_type: application/octet-stream
       - name: Upload Armv7 Static Binary
