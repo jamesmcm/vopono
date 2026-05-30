@@ -125,7 +125,7 @@ impl ArgsConfig {
             .map_err(|e| {
                 anyhow!(
                     "Shell expansion error for application: {:?}, error: {:?}",
-                    &command.application,
+                    command.application,
                     e
                 )
             })
@@ -188,8 +188,8 @@ impl ArgsConfig {
                 if active_interfaces.len() > 1 {
                     log::warn!(
                         "Multiple network interfaces are active: {:#?}, consider specifying the interface with the -i argument. Using {}",
-                        &active_interfaces,
-                        &active_interfaces[0]
+                        active_interfaces,
+                        active_interfaces[0]
                     );
                 }
                 Ok(
@@ -201,16 +201,16 @@ impl ArgsConfig {
         )?)
             }
         }?;
-        log::debug!("Interface: {}", &interface.name);
+        log::debug!("Interface: {}", interface.name);
         match interface_has_default_route(&interface.name) {
             Ok(true) => {}
             Ok(false) => warn!(
                 "Selected network interface '{}' has no default route. This can happen with a stale interface value in vopono config and may prevent namespace connectivity.",
-                &interface.name
+                interface.name
             ),
             Err(e) => warn!(
                 "Could not verify connectivity for selected network interface '{}': {e}",
-                &interface.name
+                interface.name
             ),
         }
 
@@ -349,15 +349,7 @@ impl ArgsConfig {
         let default_config_path = vopono_dir()
             .map(|p| p.join("config.toml"))
             .ok()
-            .and_then(|v| {
-                if let Ok(file_state) = fs::exists(&v)
-                    && file_state
-                {
-                    Some(v)
-                } else {
-                    None
-                }
-            });
+            .filter(|v| fs::exists(v).unwrap_or(false));
 
         let config_path = command.vopono_config.clone().or(default_config_path);
 

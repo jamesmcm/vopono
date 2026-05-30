@@ -39,7 +39,7 @@ impl Warp {
         if !std::path::Path::new(&resolv_conf_path).exists() {
             std::fs::create_dir_all(Path::new(&dir_path))?;
             std::fs::File::create(&resolv_conf_path)
-                .with_context(|| format!("Failed to create resolv.conf: {}", &resolv_conf_path))?;
+                .with_context(|| format!("Failed to create resolv.conf: {}", resolv_conf_path))?;
         }
 
         info!("Launching Warp...");

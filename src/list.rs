@@ -28,10 +28,10 @@ pub fn print_applications() -> anyhow::Result<()> {
                 let diff = now - datetime;
                 println!(
                     "{}\t{}\t{}\t{}\t{}",
-                    &ns,
-                    &lock.ns.provider,
-                    &lock.ns.protocol,
-                    &lock.command,
+                    ns,
+                    lock.ns.provider,
+                    lock.ns.protocol,
+                    lock.command,
                     compound_duration::format_wdhms(diff.to_std().unwrap().as_secs())
                 );
             }

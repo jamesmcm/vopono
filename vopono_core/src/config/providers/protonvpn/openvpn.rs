@@ -55,7 +55,7 @@ impl ProtonVPN {
                 ))
              })?.into_boxed_str());
 
-        debug!("Using AUTH cookie: {}", &raw_auth_cookie);
+        debug!("Using AUTH cookie: {}", raw_auth_cookie);
 
         // Extract the key and value parts and standardize to AUTH-xxx=yyy format
         let maybe_captures = auth_pattern.captures(raw_auth_cookie);
@@ -78,7 +78,7 @@ impl ProtonVPN {
         // Create the standardized form
         let auth_cookie =
             Box::leak(format!("AUTH-{}={}", uid.as_str(), value.as_str()).into_boxed_str());
-        debug!("Parsed AUTH cookie: {}", &auth_cookie);
+        debug!("Parsed AUTH cookie: {}", auth_cookie);
         Ok((auth_cookie, leaked_uid))
     }
 }
@@ -211,7 +211,7 @@ impl OpenVpnProvider for ProtonVPN {
                 } else {
                     String::new()
                 };
-                format!("{}-{}{}.ovpn", country, code, &host_str)
+                format!("{}-{}{}.ovpn", country, code, host_str)
             } else {
                 file.name().to_string()
             };

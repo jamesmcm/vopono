@@ -175,6 +175,10 @@ fn parse_success_response<T: DeserializeOwned>(
     })
 }
 
+fn is_not_found_response(error: &anyhow::Error) -> bool {
+    error.to_string().to_ascii_lowercase().contains("not found")
+}
+
 impl AzireVpnPortForwarding {
     // This must run on forked process inside the network namespace
     // Could just use curl?
@@ -190,10 +194,22 @@ impl AzireVpnPortForwarding {
         let output_string = exec_curl(&netns.name, "list", &cmd)?;
         log::debug!("AzireVPN Port forwarding list response: {output_string}");
 
-        let output_data: ListResponse = parse_success_response("list", &output_string)?;
+        let output_data: Option<ListResponse> = match parse_success_response("list", &output_string)
+        {
+            Ok(output_data) => Some(output_data),
+            Err(error) if is_not_found_response(&error) => {
+                log::debug!(
+                    "AzireVPN Port Forwarding list request found no existing port forwarding"
+                );
+                None
+            }
+            Err(error) => return Err(error),
+        };
 
         // If so, return that port
-        if !output_data.data.ports.is_empty() {
+        if let Some(output_data) = output_data
+            && !output_data.data.ports.is_empty()
+        {
             let port = output_data.data.ports[0].port;
             log::info!("Port forwarding already enabled on port {port}");
             return Ok(Self {
@@ -351,5 +367,16 @@ mod tests {
                 .contains("AzireVPN Port Forwarding create request returned error")
         );
         assert!(err.to_string().contains("The given data was invalid."));
+    }
+
+    #[test]
+    fn not_found_response_can_be_treated_as_empty_list() {
+        let err = parse_success_response::<ListResponse>(
+            "list",
+            r#"{"status":"error","message":"Not found"}"#,
+        )
+        .unwrap_err();
+
+        assert!(is_not_found_response(&err));
     }
 }

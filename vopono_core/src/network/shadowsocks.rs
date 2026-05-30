@@ -120,7 +120,7 @@ pub fn get_routes_from_config(path: &Path) -> anyhow::Result<Vec<IpAddr>> {
     if output_vec.is_empty() {
         return Err(anyhow!(
             "Failed to extract routes from config file: {}",
-            &path.display()
+            path.display()
         ));
     }
     Ok(output_vec)

@@ -1,7 +1,7 @@
 [package]
 name = "vopono_core"
 description = "Library code for running VPN connections in network namespaces"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2024"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 license = "GPL-3.0-or-later"
@@ -44,7 +44,7 @@ reqwest = { default-features = false, version = "0.13", features = [
 ] } # TODO: Can we remove Tokio dependency?
 sysinfo = "0.39"
 base64 = "0.22"
-x25519-dalek = { version = "3.0.0-pre.0", features = ["static_secrets"] }
+x25519-dalek = { version = "3.0.0-rc.0", features = ["static_secrets"] }
 strum = "0.28"
 strum_macros = "0.28"
 zip = "8"

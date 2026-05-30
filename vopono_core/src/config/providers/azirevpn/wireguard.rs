@@ -60,7 +60,7 @@ impl AzireVPN {
                 ))
             }
         }?;
-        debug!("device_response_data: {:?}", &device_response_data);
+        debug!("device_response_data: {:?}", device_response_data);
 
         let v4_net = IpNet::new(
             IpAddr::V4(Ipv4Addr::from_str(&device_response_data.ipv4_address)?),
@@ -95,7 +95,7 @@ impl AzireVPN {
             .json()
             .with_context(|| "Deserialisation of ReplaceKeyResponse failed")?;
 
-        debug!("replace_key_response: {:?}", &replace_key_response);
+        debug!("replace_key_response: {:?}", replace_key_response);
 
         let v4_net = IpNet::new(
             IpAddr::V4(Ipv4Addr::from_str(&device.ipv4_address)?),
@@ -275,7 +275,7 @@ impl WireguardProvider for AzireVPN {
             }
             info!(
                 "Saved Wireguard keypair details to {}",
-                &path.to_string_lossy()
+                path.to_string_lossy()
             );
         } else {
             log::error!("Failed to save Wireguard keypair details: {details:?}");
@@ -284,7 +284,7 @@ impl WireguardProvider for AzireVPN {
         // This gets locations data from token
         let location_resp: LocationsResponse = client.get(self.locations_url()).send()?.json()?;
 
-        debug!("locations_response: {:?}", &location_resp);
+        debug!("locations_response: {:?}", location_resp);
         let locations: Vec<LocationResponse> = location_resp.locations;
 
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?, IpNet::from_str("::0/0")?];
@@ -301,7 +301,7 @@ impl WireguardProvider for AzireVPN {
                 "DNS lookup for host '{}' returned no IP addresses",
                 location.pool
             ))?;
-            log::debug!("Resolved hostname: {} to IP: {}", &location.pool, &host_ip);
+            log::debug!("Resolved hostname: {} to IP: {}", location.pool, host_ip);
             // TODO: avoid hacky regex for TOML -> wireguard config conversion
             let wireguard_peer = WireguardPeer {
                 public_key: location.pubkey.clone(),

@@ -92,7 +92,7 @@ impl TrojanConfig {
         // Write to temp file
         let cert_path = std::env::temp_dir().join("trojan_cert.pem");
         std::fs::write(&cert_path, cert)
-            .with_context(|| format!("Failed to write cert to {:?}", &cert_path))?;
+            .with_context(|| format!("Failed to write cert to {:?}", cert_path))?;
         self.ssl.cert = cert_path.as_os_str().to_string_lossy().to_string();
         Ok(())
     }

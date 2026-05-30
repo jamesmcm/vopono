@@ -30,7 +30,7 @@ pub struct Wireguard {
 impl Wireguard {
     pub fn config_from_file(config_file: &Path) -> anyhow::Result<WireguardConfig> {
         let config_string = std::fs::read_to_string(config_file)
-            .context(format!("Reading Wireguard config file: {:?}", &config_file))?;
+            .context(format!("Reading Wireguard config file: {:?}", config_file))?;
 
         WireguardConfig::from_str(&config_string)
     }
@@ -63,7 +63,7 @@ impl Wireguard {
         }
 
         let mut config_string = std::fs::read_to_string(&config_file)
-            .context(format!("Reading Wireguard config file: {:?}", &config_file))?;
+            .context(format!("Reading Wireguard config file: {:?}", config_file))?;
 
         // Replace Endpoint with Trojan server for Wireguard forwarding
         if let Some(tc) = trojan_config.as_ref() {
@@ -375,18 +375,18 @@ impl Wireguard {
                 let nftable = namespace.name.clone();
                 let pf = "inet";
                 let mut nftcmd: Vec<String> = Vec::with_capacity(16);
-                nftcmd.push(format!("add table {} {}", pf, &nftable));
+                nftcmd.push(format!("add table {} {}", pf, nftable));
                 nftcmd.push(format!(
                     "add chain {} {} preraw {{ type filter hook prerouting priority -300; }}",
-                    pf, &nftable
+                    pf, nftable
                 ));
                 nftcmd.push(format!(
                     "add chain {} {} premangle {{ type filter hook prerouting priority -150; }}",
-                    pf, &nftable
+                    pf, nftable
                 ));
                 nftcmd.push(format!(
                     "add chain {} {} postmangle {{ type filter hook postrouting priority -150; }}",
-                    pf, &nftable
+                    pf, nftable
                 ));
 
                 for address in config.interface.address.iter() {
@@ -394,14 +394,14 @@ impl Wireguard {
                         IpNet::V6(address) => {
                             nftcmd.push(format!(
                 "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
-                pf, &nftable, &if_name, "ip6", address
+                pf, nftable, if_name, "ip6", address
             ));
                         }
 
                         IpNet::V4(address) => {
                             nftcmd.push(format!(
                 "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
-                pf, &nftable, &if_name, "ip", address
+                pf, nftable, if_name, "ip", address
             ));
                         }
                     }
@@ -409,11 +409,11 @@ impl Wireguard {
 
                 nftcmd.push(format!(
                     "add rule {} {} postmangle meta l4proto udp mark {} ct mark set mark",
-                    pf, &nftable, fwmark
+                    pf, nftable, fwmark
                 ));
                 nftcmd.push(format!(
                     "add rule {} {} premangle meta l4proto udp meta mark set ct mark",
-                    pf, &nftable
+                    pf, nftable
                 ));
 
                 let nftcmd = nftcmd.join("\n");
@@ -679,7 +679,7 @@ impl Drop for Wireguard {
             Ok(_) => {}
             Err(e) => warn!(
                 "Failed to delete ip link {}, {}: {:?}",
-                &self.ns_name, &self.if_name, e
+                self.ns_name, self.if_name, e
             ),
         };
 

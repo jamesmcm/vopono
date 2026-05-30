@@ -227,13 +227,13 @@ fn setup_namespace(
     if get_existing_namespaces()?.contains(&ns_name) {
         info!(
             "Using existing namespace: {}, will not modify firewall rules",
-            &ns_name
+            ns_name
         );
         ns = NetworkNamespace::from_existing(ns_name)?;
         if parsed_command.port_forwarding || parsed_command.custom_port_forwarding.is_some() {
             warn!(
                 "Re-using existing network namespace {} - will not run port forwarder, should be run when netns first created",
-                &ns.name
+                ns.name
             );
         }
         forwarder = None;
@@ -425,7 +425,7 @@ fn run_application_and_wait(
         let pid = application.handle.id();
         info!(
             "Application {} launched in network namespace {} with pid {}",
-            &parsed_command.application, &ns.name, pid
+            parsed_command.application, ns.name, pid
         );
 
         if let Some(fwd) = application.port_forwarding.as_ref() {
@@ -437,14 +437,14 @@ fn run_application_and_wait(
         if vopono_core::util::check_process_running(pid) {
             info!(
                 "Process {} still running, assumed to be daemon - will leave network namespace {} alive until ctrl+C received",
-                pid, &ns.name
+                pid, ns.name
             );
             stay_alive(Some(pid), signals);
             Ok(0)
         } else if parsed_command.keep_alive {
             info!(
                 "Keep-alive flag active - will leave network namespace {} alive until ctrl+C received",
-                &ns.name
+                ns.name
             );
             stay_alive(None, signals);
             Ok(0)
@@ -454,7 +454,7 @@ fn run_application_and_wait(
     } else {
         info!(
             "Created netns {} - will leave network namespace alive until ctrl+C received",
-            &ns.name
+            ns.name
         );
         stay_alive(None, signals);
         Ok(0)
@@ -595,10 +595,7 @@ fn run_protocol_in_netns(
                 parsed_command.disable_ipv6,
                 verbose,
             )?;
-            debug!(
-                "Checking that OpenVPN is running in namespace: {}",
-                &ns.name
-            );
+            debug!("Checking that OpenVPN is running in namespace: {}", ns.name);
             if !ns.check_openvpn_running() {
                 return Err(anyhow!(
                     "OpenVPN not running in network namespace, probable dead lock file authentication error"

@@ -48,7 +48,7 @@ impl PrivateInternetAccess {
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
         // First check if we have cached credentials from a previous sync
         if let Some((username, password)) = self.read_cached_credentials() {
-            info!("Using cached PIA credentials for user: {}", &username);
+            info!("Using cached PIA credentials for user: {}", username);
             return Ok((username, password));
         }
 
