@@ -51,7 +51,7 @@ impl VethPair {
         let nm_unmanaged = if nm_path.exists() && nm_running {
             debug!(
                 "NetworkManager detected, adding {} to unmanaged devices",
-                &dest
+                dest
             );
             let mut nm_config_path = nm_path.clone();
             nm_config_path.push("conf.d");
@@ -145,10 +145,10 @@ impl VethPair {
             "name",
             source.as_str(),
         ])
-        .with_context(|| format!("Failed to create veth pair {}, {}", &source, &dest))?;
+        .with_context(|| format!("Failed to create veth pair {}, {}", source, dest))?;
 
         sudo_command(&["ip", "link", "set", dest.as_str(), "up"])
-            .with_context(|| format!("Failed to bring up destination veth: {}", &dest))?;
+            .with_context(|| format!("Failed to bring up destination veth: {}", dest))?;
 
         sudo_command(&[
             "ip",
@@ -159,7 +159,7 @@ impl VethPair {
             &netns.name,
             "up",
         ])
-        .with_context(|| format!("Failed to bring up source veth: {}", &dest))?;
+        .with_context(|| format!("Failed to bring up source veth: {}", dest))?;
 
         Ok(Self {
             source,
@@ -172,7 +172,7 @@ impl VethPair {
 impl Drop for VethPair {
     fn drop(&mut self) {
         sudo_command(&["ip", "link", "delete", &self.dest])
-            .unwrap_or_else(|_| panic!("Failed to delete veth pair: {}", &self.dest));
+            .unwrap_or_else(|_| panic!("Failed to delete veth pair: {}", self.dest));
     }
 }
 

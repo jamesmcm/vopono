@@ -4,7 +4,7 @@ use crate::util::sudo_command;
 use anyhow::Context;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct HostMasquerade {
@@ -41,7 +41,7 @@ impl HostMasquerade {
                     .with_context(|| {
                         format!(
                             "Failed to add iptables masquerade rule, mask: {}, interface: {}",
-                            mask, &interface.name
+                            mask, interface.name
                         )
                     })?;
                 } else {
@@ -66,7 +66,7 @@ impl HostMasquerade {
                     .with_context(|| {
                         format!(
                             "Failed to add ip6tables masquerade rule, mask: {}, interface: {}",
-                            mask, &interface.name
+                            mask, interface.name
                         )
                     })?;
                 }
@@ -104,7 +104,7 @@ impl HostMasquerade {
                     .with_context(|| {
                         format!(
                             "Failed to add nftables IPv4 masquerade rule, mask: {}, interface: {}",
-                            mask, &interface.name
+                            mask, interface.name
                         )
                     })?;
                 }
@@ -127,7 +127,7 @@ impl HostMasquerade {
                     .with_context(|| {
                         format!(
                             "Failed to add nftables IPv6 masquerade rule, mask: {}, interface: {}",
-                            mask, &interface.name
+                            mask, interface.name
                         )
                     })?;
                 }
@@ -234,7 +234,7 @@ impl FirewallException {
                 .with_context(|| {
                     format!(
                         "Failed to add iptables host input exception, host interface: {}, namespace interface: {}",
-                        &host_interface.name, &ns_interface.name
+                        host_interface.name, ns_interface.name
                     )
                 })?;
                 sudo_command(&[
@@ -251,7 +251,7 @@ impl FirewallException {
                 .with_context(|| {
                     format!(
                         "Failed to add iptables host output exception, host interface: {}, namespace interface: {}",
-                        &host_interface.name, &ns_interface.name
+                        host_interface.name, ns_interface.name
                     )
                 })?;
                 if !disable_ipv6 {
@@ -330,7 +330,7 @@ impl FirewallException {
                 .with_context(|| {
                     format!(
                         "Failed to add nftables bridge input accept rule, host_interface: {}, namespace interface: {}",
-                        &host_interface.name, &ns_interface.name
+                        host_interface.name, ns_interface.name
                     )
                 })?;
 
@@ -351,7 +351,7 @@ impl FirewallException {
                 .with_context(|| {
                     format!(
                         "Failed to add nftables bridge output accept rule, host_interface: {}, namespace interface: {}",
-                        &host_interface.name, &ns_interface.name
+                        host_interface.name, ns_interface.name
                     )
                 })?;
 
@@ -443,7 +443,7 @@ impl Drop for FirewallException {
                 .unwrap_or_else(|_| {
                     log::error!(
                         "Failed to delete iptables host output rule, host interface: {}, namespace interface: {}",
-                        &self.host_interface.name, &self.ns_interface.name
+                        self.host_interface.name, self.ns_interface.name
                     )
                 });
 
@@ -461,7 +461,7 @@ impl Drop for FirewallException {
                 .unwrap_or_else(|_| {
                     log::error!(
                         "Failed to delete iptables host input rule, host interface: {}, namespace interface: {}",
-                        &self.host_interface.name, &self.ns_interface.name
+                        self.host_interface.name, self.ns_interface.name
                     )
                 });
 
@@ -480,7 +480,7 @@ impl Drop for FirewallException {
                 .unwrap_or_else(|_| {
                     log::error!(
                         "Failed to delete ip6tables host output rule, host interface: {}, namespace interface: {}",
-                        &self.host_interface.name, &self.ns_interface.name
+                        self.host_interface.name, self.ns_interface.name
                     )
                 });
 
@@ -498,7 +498,7 @@ impl Drop for FirewallException {
                 .unwrap_or_else(|_| {
                     log::error!(
                         "Failed to delete ip6tables host input rule, host interface: {}, namespace interface: {}",
-                        &self.host_interface.name, &self.ns_interface.name
+                        self.host_interface.name, self.ns_interface.name
                     )
                 });
                     }
@@ -508,7 +508,7 @@ impl Drop for FirewallException {
                     |_| {
                         log::error!(
                             "Failed to delete nftables namespace bridge firewall rule, host interface: {}, namespace interface: {}",
-                            &self.host_interface.name, &self.ns_interface.name
+                            self.host_interface.name, self.ns_interface.name
                         )
                     },
                 );
@@ -535,12 +535,19 @@ fn ufw_forward_chain_active(iptables_cmd: &str) -> bool {
 }
 
 fn forward_chain_active(iptables_cmd: &str, chain: &str) -> bool {
-    let chain_status = Command::new(iptables_cmd).args(["-S", chain]).status();
+    let chain_status = Command::new(iptables_cmd)
+        .args(["-S", chain])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     if !matches!(chain_status, Ok(status) if status.success()) {
         return false;
     }
 
-    let forward = Command::new(iptables_cmd).args(["-S", "FORWARD"]).output();
+    let forward = Command::new(iptables_cmd)
+        .args(["-S", "FORWARD"])
+        .stderr(Stdio::null())
+        .output();
     match forward {
         Ok(output) if output.status.success() => {
             let jump = format!("-A FORWARD -j {chain}");
@@ -573,7 +580,7 @@ fn add_docker_user_exception(
     .with_context(|| {
         format!(
             "Failed to add {iptables_cmd} DOCKER-USER input exception, host interface: {}, namespace interface: {}",
-            &host_interface.name, &ns_interface.name
+            host_interface.name, ns_interface.name
         )
     })?;
     sudo_command(&[
@@ -590,7 +597,7 @@ fn add_docker_user_exception(
     .with_context(|| {
         format!(
             "Failed to add {iptables_cmd} DOCKER-USER output exception, host interface: {}, namespace interface: {}",
-            &host_interface.name, &ns_interface.name
+            host_interface.name, ns_interface.name
         )
     })?;
 
@@ -616,7 +623,7 @@ fn delete_docker_user_exception(
     .unwrap_or_else(|e| {
         warn!(
             "Failed to delete {iptables_cmd} DOCKER-USER output rule, host interface: {}, namespace interface: {}: {e}",
-            &host_interface.name, &ns_interface.name
+            host_interface.name, ns_interface.name
         )
     });
 
@@ -634,7 +641,7 @@ fn delete_docker_user_exception(
     .unwrap_or_else(|e| {
         warn!(
             "Failed to delete {iptables_cmd} DOCKER-USER input rule, host interface: {}, namespace interface: {}: {e}",
-            &host_interface.name, &ns_interface.name
+            host_interface.name, ns_interface.name
         )
     });
 }
@@ -672,7 +679,7 @@ fn add_forward_chain_exception(
     .with_context(|| {
         format!(
             "Failed to add {iptables_cmd} {chain} input exception, host interface: {}, namespace interface: {}",
-            &host_interface.name, &ns_interface.name
+            host_interface.name, ns_interface.name
         )
     })?;
     sudo_command(&[
@@ -689,7 +696,7 @@ fn add_forward_chain_exception(
     .with_context(|| {
         format!(
             "Failed to add {iptables_cmd} {chain} output exception, host interface: {}, namespace interface: {}",
-            &host_interface.name, &ns_interface.name
+            host_interface.name, ns_interface.name
         )
     })?;
 
@@ -716,7 +723,7 @@ fn delete_forward_chain_exception(
     .unwrap_or_else(|e| {
         warn!(
             "Failed to delete {iptables_cmd} {chain} output rule, host interface: {}, namespace interface: {}: {e}",
-            &host_interface.name, &ns_interface.name
+            host_interface.name, ns_interface.name
         )
     });
 
@@ -734,7 +741,7 @@ fn delete_forward_chain_exception(
     .unwrap_or_else(|e| {
         warn!(
             "Failed to delete {iptables_cmd} {chain} input rule, host interface: {}, namespace interface: {}: {e}",
-            &host_interface.name, &ns_interface.name
+            host_interface.name, ns_interface.name
         )
     });
 }

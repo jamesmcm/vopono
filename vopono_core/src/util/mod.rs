@@ -230,7 +230,7 @@ pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<Ipv4Net>> {
     for caps in re.captures_iter(output) {
         ips.push(Ipv4Net::from_str(&caps["ip"])?);
     }
-    debug!("Assigned IPs: {:?}", &ips);
+    debug!("Assigned IPs: {:?}", ips);
     Ok(ips)
 }
 
@@ -257,7 +257,7 @@ pub fn get_pids_in_namespace(ns_name: &str) -> anyhow::Result<Vec<i32>> {
         .filter_map(|x| x.split_whitespace().next())
         .filter_map(|x| x.parse::<i32>().ok())
         .collect();
-    debug!("PIDs active in {}: {:?}", &ns_name, output);
+    debug!("PIDs active in {}: {:?}", ns_name, output);
 
     Ok(output)
 }
@@ -426,13 +426,13 @@ pub fn elevate_privileges(askpass: bool) -> anyhow::Result<()> {
         let sudo_flags = if askpass { "-AE" } else { "-E" };
         // TODO: This isn't passing RUST_LOG ?
 
-        debug!("Args: {:?}", &args);
+        debug!("Args: {:?}", args);
         // status blocks until the process has ended
         let status = Command::new("sudo")
             .arg(sudo_flags)
             .args(args.clone())
             .status()
-            .context(format!("Executing sudo {} {:?}", sudo_flags, &args))?;
+            .context(format!("Executing sudo {} {:?}", sudo_flags, args))?;
 
         // TODO: Could handle executing with non-sudo firejail here
 
@@ -503,7 +503,7 @@ pub fn get_configs_from_alias(list_path: &Path, alias: &str) -> Vec<PathBuf> {
 pub fn get_config_from_alias(list_path: &Path, alias: &str) -> anyhow::Result<PathBuf> {
     let paths = get_configs_from_alias(list_path, alias);
     if paths.is_empty() {
-        Err(anyhow!("Could not find config file for alias {}", &alias))
+        Err(anyhow!("Could not find config file for alias {}", alias))
     } else {
         let config = paths
             .choose(&mut rand::rng())
@@ -562,7 +562,7 @@ pub fn parse_command_str(command_str: &str) -> anyhow::Result<Vec<String>> {
     shellwords::split(command_str).map_err(|e| {
         anyhow::anyhow!(
             "Failed to parse command string: {}, error: {:?}",
-            &command_str,
+            command_str,
             e
         )
     })

@@ -49,7 +49,7 @@ impl Trojan {
 
             let cpath = std::env::temp_dir().join("trojan_forward.json");
             std::fs::write(&cpath, serde_json::to_string(&config)?)
-                .with_context(|| format!("Failed to write Trojan config to {:?}", &cpath))?;
+                .with_context(|| format!("Failed to write Trojan config to {:?}", cpath))?;
             config_path_buf = cpath;
         }
 

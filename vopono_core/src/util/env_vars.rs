@@ -13,7 +13,7 @@ pub fn get_host_env_vars() -> HashMap<String, String> {
     if which::which("pactl").is_ok() {
         match crate::util::pulseaudio::get_pulseaudio_server() {
             Ok(pa) => {
-                debug!("Found PULSE_SERVER on host: {}", &pa);
+                debug!("Found PULSE_SERVER on host: {}", pa);
                 env_vars.insert("PULSE_SERVER".to_string(), pa);
             }
             Err(e) => {

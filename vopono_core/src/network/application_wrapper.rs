@@ -176,9 +176,9 @@ impl ApplicationWrapper {
             let root_c = CString::new("/").unwrap();
             // Prepare bind-mount sources for /etc overlay
             let etc_ns_dir = format!("/etc/netns/{}", netns.name);
-            let resolv_src = CString::new(format!("{}/resolv.conf", &etc_ns_dir)).ok();
-            let hosts_src = CString::new(format!("{}/hosts", &etc_ns_dir)).ok();
-            let nsswitch_src = CString::new(format!("{}/nsswitch.conf", &etc_ns_dir)).ok();
+            let resolv_src = CString::new(format!("{}/resolv.conf", etc_ns_dir)).ok();
+            let hosts_src = CString::new(format!("{}/hosts", etc_ns_dir)).ok();
+            let nsswitch_src = CString::new(format!("{}/nsswitch.conf", etc_ns_dir)).ok();
             let resolv_dst = CString::new("/etc/resolv.conf").unwrap();
             let hosts_dst = CString::new("/etc/hosts").unwrap();
             let nsswitch_dst = CString::new("/etc/nsswitch.conf").unwrap();

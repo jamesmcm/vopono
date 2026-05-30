@@ -87,7 +87,7 @@ impl OpenFortiVpn {
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
 
-        debug!("Full OpenFortiVPN stdout: {:?}", &buffer);
+        debug!("Full OpenFortiVPN stdout: {:?}", buffer);
 
         let remote_peer = get_remote_peer(&pppd_log)?;
 
@@ -200,7 +200,7 @@ pub fn get_dns(stdout: &str) -> anyhow::Result<(Vec<IpAddr>, Vec<String>)> {
 
     debug!(
         "Found OpenFortiVPN DNS ips: {:?}, ns suffixes: {:?}",
-        &ips, &suffixes
+        ips, suffixes
     );
     Ok((ips, suffixes))
 }

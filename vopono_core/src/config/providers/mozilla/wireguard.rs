@@ -90,7 +90,7 @@ impl MozillaVPN {
             let private_key = uiclient.get_input(Input {
                prompt:format!(
                     "Private key for {}",
-                    &devices[selection].pubkey
+                    devices[selection].pubkey
                 ),
         validator: Some(Box::new( move |private_key: &String| -> Result<(), String> {
             let private_key = private_key.trim();
@@ -148,7 +148,7 @@ impl WireguardProvider for MozillaVPN {
             .json()?;
 
         let login = self.get_login(&client)?;
-        debug!("Received user info: {:?}", &login);
+        debug!("Received user info: {:?}", login);
 
         let (_device, keypair) = self.prompt_for_wg_key(&client, &login, uiclient)?;
 

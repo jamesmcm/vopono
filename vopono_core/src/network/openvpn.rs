@@ -47,7 +47,7 @@ impl OpenVpn {
         }
 
         std::fs::create_dir_all(vopono_dir()?.join("logs"))?;
-        let log_file_path = vopono_dir()?.join(format!("logs/{}_openvpn.log", &netns.name));
+        let log_file_path = vopono_dir()?.join(format!("logs/{}_openvpn.log", netns.name));
         let log_file_str: String = log_file_path.as_os_str().to_string_lossy().to_string();
         {
             File::create(&log_file_str)?;
@@ -108,7 +108,7 @@ impl OpenVpn {
         }
 
         let remotes = get_remotes_from_config(&config_file)?;
-        debug!("Found remotes: {:?}", &remotes);
+        debug!("Found remotes: {:?}", remotes);
         let working_dir = PathBuf::from(config_file_path.parent().unwrap());
 
         let handle = NetworkNamespace::exec_no_block(
@@ -137,7 +137,7 @@ impl OpenVpn {
             let x = logfile.read_line(&mut buffer)?;
 
             if x > 0 {
-                debug!("{}", &buffer[pos..].trim_end());
+                debug!("{}", buffer[pos..].trim_end());
             }
 
             pos += x;
@@ -583,7 +583,7 @@ pub fn get_remotes_from_config(path: &Path) -> anyhow::Result<Vec<Remote>> {
     if output_vec.is_empty() {
         return Err(anyhow!(
             "Failed to extract remotes from config file: {}",
-            &path.display()
+            path.display()
         ));
     }
     Ok(output_vec)

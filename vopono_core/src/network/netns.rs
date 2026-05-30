@@ -106,18 +106,18 @@ impl NetworkNamespace {
         }
 
         if let Some(ns) = parsed_ns {
-            info!("Using existing network namespace: {}", &name);
+            info!("Using existing network namespace: {}", name);
             Ok(ns)
         } else {
             log::error!(
                 "No lockfile found for namespace: {} - deleting namespace",
-                &name
+                name
             );
             sudo_command(&["ip", "netns", "delete", &name])
-                .with_context(|| format!("Failed to delete network namespace: {}", &name))?;
+                .with_context(|| format!("Failed to delete network namespace: {}", name))?;
             Err(anyhow!(
                 "No lockfile found for namespace: {} - deleting namespace",
-                &name
+                name
             ))
         }
     }
@@ -132,8 +132,8 @@ impl NetworkNamespace {
         predown_group: Option<String>,
     ) -> anyhow::Result<Self> {
         sudo_command(&["ip", "netns", "add", name.as_str()])
-            .with_context(|| format!("Failed to create network namespace: {}", &name))?;
-        info!("Created new network namespace: {}", &name);
+            .with_context(|| format!("Failed to create network namespace: {}", name))?;
+        info!("Created new network namespace: {}", name);
 
         Ok(Self {
             name,
@@ -237,9 +237,9 @@ impl NetworkNamespace {
             &self.name,
             &["ip", "addr", "add", "127.0.0.1/8", "dev", "lo"],
         )
-        .with_context(|| format!("Failed to add loopback adapter in netns: {}", &self.name))?;
+        .with_context(|| format!("Failed to add loopback adapter in netns: {}", self.name))?;
         Self::exec(&self.name, &["ip", "link", "set", "lo", "up"])
-            .with_context(|| format!("Failed to start networking in netns: {}", &self.name))?;
+            .with_context(|| format!("Failed to start networking in netns: {}", self.name))?;
         Ok(())
     }
 
@@ -249,12 +249,7 @@ impl NetworkNamespace {
             &self.name,
             &["sysctl", "-q", "net.ipv4.ping_group_range=0 2147483647"],
         )
-        .with_context(|| {
-            format!(
-                "Failed to enable unprivileged ping in netns: {}",
-                &self.name
-            )
-        })?;
+        .with_context(|| format!("Failed to enable unprivileged ping in netns: {}", self.name))?;
         Ok(())
     }
 
@@ -751,7 +746,7 @@ impl NetworkNamespace {
     }
 
     pub fn setup_nftables_firewall(&self) -> anyhow::Result<()> {
-        debug!("Setting up base nftables firewall for {}", &self.name);
+        debug!("Setting up base nftables firewall for {}", self.name);
 
         // Use `nft -f` to apply a full, idempotent ruleset in one go.
         // This is more robust than running many individual commands.
@@ -780,7 +775,7 @@ impl NetworkNamespace {
         let temp_path = std::env::temp_dir().join(temp_filename);
 
         std::fs::write(&temp_path, ruleset.as_bytes())
-            .with_context(|| format!("Failed to write nft ruleset to {:?}", &temp_path))?;
+            .with_context(|| format!("Failed to write nft ruleset to {:?}", temp_path))?;
 
         // Execute the ruleset file
         let temp_path_str = temp_path.to_str().ok_or_else(|| {
@@ -793,7 +788,7 @@ impl NetworkNamespace {
 
         // Clean up the temporary file, logging any error
         if let Err(e) = std::fs::remove_file(&temp_path) {
-            debug!("Failed to remove temporary file {:?}: {}", &temp_path, e);
+            debug!("Failed to remove temporary file {:?}: {}", temp_path, e);
         }
 
         exec_result.context("Failed to apply base nftables ruleset")?;
@@ -820,7 +815,7 @@ impl Drop for NetworkNamespace {
                 Err(e) => {
                     warn!(
                         "Failed to remove lockfile: {}, {:?}",
-                        &lockfile_path.display(),
+                        lockfile_path.display(),
                         e
                     );
                 }
@@ -886,7 +881,7 @@ impl Drop for NetworkNamespace {
                     Err(e) => {
                         log::error!(
                             "Failed to parse postdown command: {} in shutdown state - skipped postdown execution, error: {:?}",
-                            &pdcmd,
+                            pdcmd,
                             e
                         )
                     }
@@ -906,16 +901,12 @@ impl Drop for NetworkNamespace {
             if delete_result.is_err() {
                 warn!(
                     "Failed to delete network namespace: {} - will retry once",
-                    &self.name
+                    self.name
                 );
                 std::thread::sleep(std::time::Duration::from_secs(4));
 
                 sudo_command(&["ip", "netns", "delete", &self.name]).unwrap_or_else(|e| {
-                    log::error!(
-                        "Failed to delete network namespace: {}: {:?}",
-                        &self.name,
-                        e
-                    )
+                    log::error!("Failed to delete network namespace: {}: {:?}", self.name, e)
                 });
             }
         } else {

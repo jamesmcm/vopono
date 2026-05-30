@@ -5,7 +5,7 @@ use nom::{
     IResult, Parser,
     branch::alt,
     bytes::complete::{is_not, tag, take_while1},
-    character::complete::{char, line_ending, multispace0, multispace1},
+    character::complete::{char, line_ending, multispace0, multispace1, space0},
     combinator::{all_consuming, eof, map, opt, peek},
     multi::{many_till, many0},
     sequence::{delimited, preceded, separated_pair, terminated},
@@ -25,20 +25,15 @@ fn parse_key(input: &str) -> IResult<&str, &str> {
 // A value is everything after '=' until the end of the line, trimmed.
 // It also handles and removes inline comments.
 fn parse_value(input: &str) -> IResult<&str, &str> {
-    map(is_not("\n\r"), |s: &str| {
-        s.split('#').next().unwrap_or("").trim()
+    map(opt(is_not("\n\r")), |s: Option<&str>| {
+        s.unwrap_or("").split('#').next().unwrap_or("").trim()
     })
     .parse(input)
 }
 
 // A key-value pair is `Key = Value`
 fn parse_key_value(input: &str) -> IResult<&str, (&str, &str)> {
-    separated_pair(
-        parse_key,
-        delimited(multispace0, tag("="), multispace0),
-        parse_value,
-    )
-    .parse(input)
+    separated_pair(parse_key, delimited(space0, tag("="), space0), parse_value).parse(input)
 }
 
 // A section header is `[Name]`
@@ -110,6 +105,10 @@ fn spc(input: &str) -> IResult<&str, ()> {
 #[allow(clippy::type_complexity)]
 fn parse_config(input: &str) -> IResult<&str, Vec<(&str, Vec<(&str, &str)>)>> {
     all_consuming(many0(preceded(spc, parse_section))).parse(input)
+}
+
+fn split_list_value(value: &str) -> impl Iterator<Item = &str> {
+    value.split(',').map(str::trim).filter(|s| !s.is_empty())
 }
 
 #[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
@@ -317,10 +316,10 @@ impl FromStr for WireguardConfig {
                         match key {
                             "PrivateKey" => private_key = Some(value.to_string()),
                             "Address" => {
-                                addresses.extend(value.split(',').map(|s| s.trim().to_string()))
+                                addresses.extend(split_list_value(value).map(ToString::to_string))
                             }
                             "DNS" => {
-                                dns_servers.extend(value.split(',').map(|s| s.trim().to_string()))
+                                dns_servers.extend(split_list_value(value).map(ToString::to_string))
                             }
                             "MTU" => mtu = Some(value.to_string()),
                             _ => debug!("Unknown key in [Interface] section: {key}"),
@@ -361,7 +360,7 @@ impl FromStr for WireguardConfig {
                         match key {
                             "PublicKey" => public_key = Some(value.to_string()),
                             "AllowedIPs" => {
-                                allowed_ips.extend(value.split(',').map(|s| s.trim().to_string()))
+                                allowed_ips.extend(split_list_value(value).map(ToString::to_string))
                             }
                             "Endpoint" => endpoint = Some(value.to_string()),
                             "PersistentKeepalive" => keepalive = Some(value.to_string()),
@@ -404,9 +403,8 @@ where
 {
     // serde::de::value::StringDeserializer::deserialize_string(deserializer)?;
     let raw = String::deserialize(deserializer)?;
-    let strings = raw.split(',');
-    match strings
-        .map(|x| x.trim().parse::<IpNet>())
+    match split_list_value(&raw)
+        .map(|x| x.parse::<IpNet>())
         .collect::<Result<Vec<IpNet>, ipnet::AddrParseError>>()
     {
         Ok(x) => Ok(x),
@@ -430,11 +428,11 @@ where
         }
     };
     debug!("Deserializing: {raw} to Vec<IpAddr>");
-    let strings = raw.split(',');
-    match strings
-        .map(|x| x.trim().parse::<IpAddr>())
+    match split_list_value(&raw)
+        .map(|x| x.parse::<IpAddr>())
         .collect::<Result<Vec<IpAddr>, _>>()
     {
+        Ok(x) if x.is_empty() => Ok(None),
         Ok(x) => Ok(Some(x)),
         Err(x) => Err(serde::de::Error::custom(anyhow!(
             "Wireguard IpAddr deserialisation error: {:?}",
@@ -493,6 +491,29 @@ Endpoint = [2d01:4e9:c013:c690::1]:51820
 AllowedIPs = 0.0.0.0/0
 "#;
 
+    const TEST_CONFIG_TRAILING_COMMAS: &str = r#"
+[Interface]
+Address = 10.0.0.5/24,
+PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+DNS = 1.1.1.1,
+
+[Peer]
+PublicKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=
+Endpoint = 203.0.113.1:51820
+AllowedIPs = 0.0.0.0/0, ::/0,
+"#;
+
+    const TEST_CONFIG_BLANK_PUBLIC_KEY: &str = r#"
+[Interface]
+Address = 10.0.0.5/24
+PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+
+[Peer]
+PublicKey =
+AllowedIPs = 0.0.0.0/0
+Endpoint = 203.0.113.1:51820
+"#;
+
     #[test]
     fn test_parse_config_with_duplicate_dns() {
         let config = WireguardConfig::from_str(TEST_CONFIG_DUPLICATE_DNS).unwrap();
@@ -539,6 +560,24 @@ AllowedIPs = 0.0.0.0/0
             config.peer.endpoint.to_string(),
             "[2d01:4e9:c013:c690::1]:51820"
         );
+    }
+
+    #[test]
+    fn test_parse_config_ignores_empty_csv_values() {
+        let config = WireguardConfig::from_str(TEST_CONFIG_TRAILING_COMMAS).unwrap();
+
+        assert_eq!(config.interface.address.len(), 1);
+        assert_eq!(config.interface.dns.unwrap().len(), 1);
+        assert_eq!(config.peer.allowed_ips.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_config_keeps_blank_value_on_its_own_line() {
+        let config = WireguardConfig::from_str(TEST_CONFIG_BLANK_PUBLIC_KEY).unwrap();
+
+        assert_eq!(config.peer.public_key, "");
+        assert_eq!(config.peer.allowed_ips.len(), 1);
+        assert_eq!(config.peer.endpoint.to_string(), "203.0.113.1:51820");
     }
 
     #[test]

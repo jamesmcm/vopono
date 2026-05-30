@@ -140,16 +140,16 @@ impl WireguardProvider for IVPN {
             prompt_for_wg_key(uiclient)?
         } else {
             let keypair = generate_keypair()?;
-            info!("Generated Wireguard keypair (save this): {:?}", &keypair);
+            info!("Generated Wireguard keypair (save this): {:?}", keypair);
             info!(
                 "Please upload public key {} to https://www.ivpn.net/clientarea/vpn/273887/wireguard/keys",
-                &keypair.public
+                keypair.public
             );
             keypair
         };
 
         let ip_address = uiclient.get_input(Input {
-            prompt: format!("Enter the IP address linked to this public key ({})\nSee https://www.ivpn.net/clientarea/vpn/273887/wireguard/keys ", &keypair.public),
+            prompt: format!("Enter the IP address linked to this public key ({})\nSee https://www.ivpn.net/clientarea/vpn/273887/wireguard/keys ", keypair.public),
             validator: Some(Box::new(
             move |ipstr: &String| -> Result<(), String> {
                 let ip_parse = Ipv4Addr::from_str(ipstr.trim());
@@ -239,7 +239,7 @@ fn prompt_for_wg_key(uiclient: &dyn UiClient) -> anyhow::Result<WgKey> {
 
     let pubkey_clone = public_key.clone();
     let private_key = uiclient.get_input(Input {
-        prompt: format!("Private key for {}", &public_key),
+        prompt: format!("Private key for {}", public_key),
         validator: Some(Box::new(
             move |private_key: &String| -> Result<(), String> {
                 let private_key = private_key.trim();

@@ -29,20 +29,20 @@ impl DnsConfig {
     ) -> anyhow::Result<Self> {
         let dir_path = format!("/etc/netns/{ns_name}");
         std::fs::create_dir_all(&dir_path)
-            .with_context(|| format!("Failed to create directory: {}", &dir_path))?;
+            .with_context(|| format!("Failed to create directory: {}", dir_path))?;
         std::fs::set_permissions(&dir_path, PermissionsExt::from_mode(0o755)) // Directories usually need execute permission
             .with_context(|| format!("Failed to set directory permissions for {dir_path}"))?;
 
         let resolv_conf_path = format!("/etc/netns/{ns_name}/resolv.conf");
         let mut resolv = std::fs::File::create(&resolv_conf_path)
-            .with_context(|| format!("Failed to open resolv.conf: {}", &resolv_conf_path))?;
+            .with_context(|| format!("Failed to open resolv.conf: {}", resolv_conf_path))?;
         std::fs::set_permissions(&resolv_conf_path, PermissionsExt::from_mode(0o644))
             .with_context(|| format!("Failed to set file permissions for {resolv_conf_path}"))?;
 
         debug!(
             "Setting namespace {} DNS server to {}",
             ns_name,
-            &servers
+            servers
                 .iter()
                 .map(|x| format!("{x}"))
                 .collect::<Vec<String>>()
@@ -63,12 +63,12 @@ impl DnsConfig {
             debug!("--allow-host-access is true, adding host IPs to hosts file as vopono.host");
             if let Some(ipv4_pair) = &host_ips.ipv4 {
                 let entry = format!("{} vopono.host", ipv4_pair.host_ip);
-                debug!("Adding host entry: '{}'", &entry);
+                debug!("Adding host entry: '{}'", entry);
                 effective_hosts_entries.push(entry);
             }
             if let Some(ipv6_pair) = &host_ips.ipv6 {
                 let entry = format!("{} vopono.host", ipv6_pair.host_ip);
-                debug!("Adding host entry: '{}'", &entry);
+                debug!("Adding host entry: '{}'", entry);
                 effective_hosts_entries.push(entry);
             }
         }
@@ -80,9 +80,9 @@ impl DnsConfig {
         if !effective_hosts_entries.is_empty() {
             let hosts_path = format!("/etc/netns/{ns_name}/hosts");
             let mut hosts = std::fs::File::create(&hosts_path)
-                .with_context(|| format!("Failed to open hosts: {}", &hosts_path))?;
+                .with_context(|| format!("Failed to open hosts: {}", hosts_path))?;
             std::fs::set_permissions(&hosts_path, PermissionsExt::from_mode(0o644))
-                .with_context(|| format!("Failed to set file permissions for {}", &hosts_path))?;
+                .with_context(|| format!("Failed to set file permissions for {}", hosts_path))?;
 
             // Add some default entries for completeness
             writeln!(hosts, "127.0.0.1\tlocalhost")?;
@@ -222,7 +222,7 @@ impl Drop for DnsConfig {
             Ok(_) => {}
             Err(e) => warn!(
                 "Failed to delete network namespace directory: {}: {:?}",
-                &path, e
+                path, e
             ),
         }
     }

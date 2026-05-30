@@ -65,7 +65,7 @@ impl Mullvad {
             .json()?;
         info!(
             "Public key {} submitted to Mullvad. Private key will be saved in generated config files.",
-            &keypair.public
+            keypair.public
         );
         Ok(device)
     }
@@ -97,7 +97,7 @@ impl Mullvad {
 
             let user_info: UserInfo = client
                 .get("https://api.mullvad.net/accounts/v1/accounts/me")
-                .header(AUTHORIZATION, format!("Bearer {}", &auth.access_token))
+                .header(AUTHORIZATION, format!("Bearer {}", auth.access_token))
                 .send()?
                 .json()?;
 
@@ -106,7 +106,7 @@ impl Mullvad {
                 Ok(datetime) => {
                     let datetime_utc = datetime.with_timezone(&Utc);
                     if datetime_utc <= Utc::now() {
-                        warn!("Mullvad account expired on {}", &user_info.expiry);
+                        warn!("Mullvad account expired on {}", user_info.expiry);
                     }
                 }
                 Err(e) => warn!("Could not parse Mullvad account expiry date: {e}"),
@@ -116,7 +116,7 @@ impl Mullvad {
 
             let existing_devices: Vec<Device> = client
                 .get("https://api.mullvad.net/accounts/v1/devices")
-                .header(AUTHORIZATION, format!("Bearer {}", &auth.access_token))
+                .header(AUTHORIZATION, format!("Bearer {}", auth.access_token))
                 .send()?
                 .json()?;
 
@@ -140,7 +140,7 @@ impl Mullvad {
                 let mut f = std::fs::File::create(path.clone())?;
                 write!(f, "{}", serde_json::to_string(&PrivateDevice::from_device(&dev, &keypair.private))?)?;
             }
-            info!("Saved Wireguard keypair details to {}", &path.to_string_lossy());
+            info!("Saved Wireguard keypair details to {}", path.to_string_lossy());
 
             Ok((keypair, IpNet::from_str(&dev.ipv4_address).expect("Invalid IPv4 address"), IpNet::from_str(&dev.ipv6_address).expect("Invalid IPv6 address")))
         } else {
@@ -149,7 +149,7 @@ impl Mullvad {
 
             let private_key = uiclient.get_input(Input{
                     prompt: format!("Private key for {}",
-                    &existing.devices[selection].pubkey
+                    existing.devices[selection].pubkey
                 ),
         validator: Some(Box::new(move |private_key: &String| -> Result<(), String> {
 
@@ -175,7 +175,7 @@ impl Mullvad {
                 let mut f = std::fs::File::create(path.clone())?;
                 write!(f, "{}", serde_json::to_string(&PrivateDevice::from_device(&dev, &private_key))?)?;
             }
-            info!("Saved Wireguard keypair details to {}", &path.to_string_lossy());
+            info!("Saved Wireguard keypair details to {}", path.to_string_lossy());
 
 
  Ok((WgKey {
@@ -200,7 +200,7 @@ impl Mullvad {
                 let mut f = std::fs::File::create(path.clone())?;
                 write!(f, "{}", serde_json::to_string(&PrivateDevice::from_device(&dev, &keypair.private))?)?;
             }
-            info!("Saved Wireguard keypair details to {}", &path.to_string_lossy());
+            info!("Saved Wireguard keypair details to {}", path.to_string_lossy());
 
                 Ok((keypair, IpNet::from_str(&dev.ipv4_address).expect("Invalid IPv4 address"), IpNet::from_str(&dev.ipv6_address).expect("Invalid IPv6 address")))
         } else {
@@ -225,7 +225,7 @@ impl Mullvad {
             }
             info!(
                 "Saved Wireguard keypair details to {}",
-                &path.to_string_lossy()
+                path.to_string_lossy()
             );
             Ok(manual_dev)
         }
