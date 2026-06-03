@@ -28,7 +28,9 @@ use vopono_core::network::sysctl::SysCtl;
 use vopono_core::network::trojan::trojan_config::TrojanConfig;
 use vopono_core::network::wireguard::Wireguard;
 use vopono_core::util::env_vars::set_env_vars;
-use vopono_core::util::{get_config_from_alias, get_existing_namespaces, get_target_subnet};
+use vopono_core::util::{
+    get_config_from_alias, get_configs_from_alias, get_existing_namespaces, get_target_subnet,
+};
 use vopono_core::util::{parse_command_str, vopono_dir};
 
 /// Configuration struct for namespace setup results
@@ -523,7 +525,14 @@ fn run_protocol_in_netns(
                 .wireguard_dir(),
             _ => bail!("This protocol must use a custom provider"),
         }?;
-        Some(get_config_from_alias(&cdir, &parsed_command.server)?)
+        Some(
+            get_config_from_alias(&cdir, &parsed_command.server).map_err(|err| {
+                match config_alias_hint(parsed_command) {
+                    Ok(Some(hint)) => anyhow!("{err}. {hint}"),
+                    _ => err,
+                }
+            })?,
+        )
     } else {
         Some(
             parsed_command
@@ -690,6 +699,39 @@ fn run_protocol_in_netns(
         }
     }
     Ok(config_file)
+}
+
+fn config_alias_hint(parsed_command: &ArgsConfig) -> anyhow::Result<Option<String>> {
+    let other_protocols = match parsed_command.protocol {
+        Protocol::OpenVpn => vec![Protocol::Wireguard],
+        Protocol::Wireguard => vec![Protocol::OpenVpn],
+        _ => Vec::new(),
+    };
+
+    for protocol in other_protocols {
+        let dir = match protocol {
+            Protocol::OpenVpn => match parsed_command.provider.get_dyn_openvpn_provider() {
+                Ok(provider) => provider.openvpn_dir()?,
+                Err(_) => continue,
+            },
+            Protocol::Wireguard => match parsed_command.provider.get_dyn_wireguard_provider() {
+                Ok(provider) => provider.wireguard_dir()?,
+                Err(_) => continue,
+            },
+            _ => continue,
+        };
+
+        let matches = get_configs_from_alias(&dir, &parsed_command.server);
+        if !matches.is_empty() {
+            return Ok(Some(format!(
+                "Found matching {protocol:?} config under {}. Try adding `--protocol {}`.",
+                dir.display(),
+                protocol.to_string().to_lowercase()
+            )));
+        }
+    }
+
+    Ok(None)
 }
 
 fn provider_port_forwarding(

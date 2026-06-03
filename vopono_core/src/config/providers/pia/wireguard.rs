@@ -5,7 +5,7 @@ use crate::network::wireguard_config::{
 };
 use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::generate_keypair;
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use ipnet::IpNet;
 use log::info;
 use reqwest::Url;
@@ -282,25 +282,48 @@ impl WireguardProvider for PrivateInternetAccess {
         let pia_config_file = File::open(self.wireguard_config_file_path()?)?;
         let pia_config: Config = serde_json::from_reader(pia_config_file)?;
 
-        let token = PrivateInternetAccess::get_pia_token(&pia_config.user, &pia_config.pass)?;
+        let token = PrivateInternetAccess::get_pia_token(&pia_config.user, &pia_config.pass)
+            .context("Failed to authenticate with PIA while preparing Wireguard config")?;
 
-        let mut wg_config: WireguardConfig = std::fs::read_to_string(wg_config_file)?.parse()?;
+        let mut wg_config: WireguardConfig = std::fs::read_to_string(wg_config_file)
+            .with_context(|| {
+                format!(
+                    "Failed to read PIA Wireguard config {}",
+                    wg_config_file.display()
+                )
+            })?
+            .parse()
+            .with_context(|| {
+                format!(
+                    "Failed to parse PIA Wireguard config {}",
+                    wg_config_file.display()
+                )
+            })?;
         let ip = &wg_config.peer.endpoint.resolve_ip()?;
         let cn = pia_config
             .cn_lookup
             .get(ip)
             .with_context(|| format!("Could not find matching common name for IP {ip}"))?;
 
-        let server_info = PrivateInternetAccess::add_key(ip, cn, &token, &pia_config.pubkey)?;
+        let server_info = PrivateInternetAccess::add_key(ip, cn, &token, &pia_config.pubkey)
+            .with_context(|| {
+                format!("Failed to register Wireguard key with PIA server {cn} ({ip})")
+            })?;
+        validate_pia_wireguard_server_info(&server_info)?;
 
         wg_config.interface.address = vec![IpNet::new(server_info.peer_ip, 32)?];
-        wg_config.interface.dns = Some(
-            server_info
-                .dns_servers
-                .iter()
-                .filter_map(|ip| ip.parse().ok())
-                .collect(),
-        );
+        let dns_servers = server_info
+            .dns_servers
+            .iter()
+            .map(|ip| {
+                ip.parse::<IpAddr>()
+                    .with_context(|| format!("PIA returned invalid Wireguard DNS server {ip}"))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        wg_config.interface.dns = Some(dns_servers);
+        if wg_config.peer.allowed_ips.is_empty() {
+            wg_config.peer.allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?];
+        }
         wg_config.peer.public_key = server_info.server_key.clone();
         wg_config.peer.endpoint =
             format!("{}:{}", server_info.server_ip, server_info.server_port).parse()?;
@@ -312,4 +335,30 @@ impl WireguardProvider for PrivateInternetAccess {
 
         Ok(())
     }
+}
+
+fn validate_pia_wireguard_server_info(server_info: &WireguardServerInfo) -> anyhow::Result<()> {
+    if server_info.server_key.trim().is_empty() {
+        bail!("PIA returned an empty Wireguard server public key");
+    }
+    if server_info.server_port == 0 {
+        bail!("PIA returned an invalid Wireguard server port");
+    }
+    if server_info.peer_ip.is_loopback() || server_info.peer_ip.is_unspecified() {
+        bail!(
+            "PIA returned invalid Wireguard peer address {}. This usually means PIA authentication or addKey registration failed; rerun `vopono sync --protocol wireguard privateinternetaccess` and verify the credentials.",
+            server_info.peer_ip
+        );
+    }
+    if server_info.server_ip.is_loopback() || server_info.server_ip.is_unspecified() {
+        bail!(
+            "PIA returned invalid Wireguard endpoint address {}",
+            server_info.server_ip
+        );
+    }
+    if server_info.dns_servers.is_empty() {
+        bail!("PIA returned no Wireguard DNS servers");
+    }
+
+    Ok(())
 }
