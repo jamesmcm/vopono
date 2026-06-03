@@ -73,6 +73,28 @@ impl Wireguard {
                 .replace_all(&config_string, format!("Endpoint = {new_endpoint}"))
                 .to_string();
         }
+
+        let config = WireguardConfig::from_str(&config_string)
+            .with_context(|| format!("Parsing Wireguard config file: {}", config_file.display()))?;
+        if config.interface.address.is_empty() {
+            return Err(anyhow!(
+                "Wireguard config has an empty Address field: {}",
+                config_file.display()
+            ));
+        }
+        if config.peer.public_key.trim().is_empty() {
+            return Err(anyhow!(
+                "Wireguard config has an empty PublicKey field: {}. For PIA Wireguard configs, rerun `vopono sync --protocol wireguard privateinternetaccess` and check that PIA authentication succeeds.",
+                config_file.display()
+            ));
+        }
+        if config.peer.allowed_ips.is_empty() {
+            return Err(anyhow!(
+                "Wireguard config has an empty AllowedIPs field: {}. Use `AllowedIPs = 0.0.0.0/0` for IPv4-only routing or `AllowedIPs = 0.0.0.0/0, ::/0` for dual-stack routing.",
+                config_file.display()
+            ));
+        }
+
         // Create temp conf file
         {
             // TODO: Maybe properly parse ini format
@@ -115,8 +137,6 @@ impl Wireguard {
                     .join("\n")
             )?;
         }
-        let config = Self::config_from_file(&config_file)?;
-
         if firewall == Firewall::NfTables {
             let peer_endpoint_ip = config
                 .peer

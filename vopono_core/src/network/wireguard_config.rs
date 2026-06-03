@@ -623,4 +623,21 @@ Endpoint = 203.0.113.1:51820
         let roundtrip_config_2 = WireguardConfig::from_str(&generated_string_2).unwrap();
         assert_eq!(original_config_2, roundtrip_config_2);
     }
+
+    #[test]
+    fn test_empty_allowed_ips_parses_as_empty_vec() {
+        let config = r#"
+[Interface]
+PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+Address = 10.0.0.5/24
+
+[Peer]
+PublicKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=
+Endpoint = 199.50.100.1:51820
+AllowedIPs =
+"#;
+
+        let config = WireguardConfig::from_str(config).unwrap();
+        assert!(config.peer.allowed_ips.is_empty());
+    }
 }

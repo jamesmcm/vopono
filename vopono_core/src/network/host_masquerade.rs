@@ -25,11 +25,14 @@ impl HostMasquerade {
         match firewall {
             Firewall::IpTables => {
                 if let Some(ref mask) = ipv4_mask {
+                    // Insert before provider-managed chains such as piavpn.POSTROUTING.
+                    // If those chains run first they can consume or block namespace
+                    // traffic before vopono's MASQUERADE rule is reached.
                     sudo_command(&[
                         "iptables",
                         "-t",
                         "nat",
-                        "-A",
+                        "-I",
                         "POSTROUTING",
                         "-s",
                         mask,
@@ -54,7 +57,7 @@ impl HostMasquerade {
                         "ip6tables",
                         "-t",
                         "nat",
-                        "-A",
+                        "-I",
                         "POSTROUTING",
                         "-s",
                         mask,

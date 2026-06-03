@@ -7,7 +7,7 @@ authors = ["James McMurray <jamesmcm03@gmail.com>"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/jamesmcm/vopono"
 homepage = "https://github.com/jamesmcm/vopono"
-keywords = ["vopono", "vpn", "wireguard", "openvpn", "netns", "gui"]
+keywords = ["vopono", "vpn", "wireguard", "netns", "gui"]
 
 [workspace]
 
