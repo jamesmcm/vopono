@@ -6,17 +6,20 @@ mod vpn;
 
 use crate::desktop::{DesktopApplication, scan_desktop_applications};
 use crate::gui_config::{
-    ApplicationProfile, CustomVpnConfig, GuiConfig, ProviderForwardedPort, VpnConfigUsage,
-    gui_config_path, load_gui_config, load_vopono_config_text, read_provider_forwarded_port,
-    save_gui_config, vopono_config_path,
+    ApplicationEnvVar, ApplicationProfile, CustomVpnConfig, GuiConfig, ProviderForwardedPort,
+    VpnConfigUsage, gui_config_path, load_gui_config, load_vopono_config_text,
+    read_provider_forwarded_port, save_gui_config, vopono_config_path,
 };
+use crate::launcher::pipe_child_output;
 use crate::status::{StatusSnapshot, read_status};
 use crate::tray::{TrayCommand, TrayManager};
 use eframe::egui;
 use file_picker::FilePicker;
 use gilrs::Gilrs;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Child;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 use utils::{format_ports, parse_ports};
 use vopono_core::util::get_config_file_protocol;
@@ -29,15 +32,17 @@ enum View {
     Providers,
     Applications,
     Status,
+    Logs,
 }
 
 impl View {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Launch,
         Self::Config,
         Self::Providers,
         Self::Applications,
         Self::Status,
+        Self::Logs,
     ];
 
     fn label(self) -> &'static str {
@@ -47,8 +52,22 @@ impl View {
             Self::Providers => "Providers",
             Self::Applications => "Applications",
             Self::Status => "Status",
+            Self::Logs => "Logs",
         }
     }
+}
+
+struct ActiveLaunch {
+    child: Child,
+    log_id: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct LaunchLog {
+    id: u64,
+    title: String,
+    lines: Vec<String>,
+    running: bool,
 }
 
 pub struct VoponoGuiApp {
@@ -61,13 +80,19 @@ pub struct VoponoGuiApp {
     synced_configs: Vec<vpn::SyncedVpnConfig>,
     selected_vpn_key: Option<String>,
     selected_app_cmd: Option<String>,
-    active_children: Vec<Child>,
+    active_children: Vec<ActiveLaunch>,
+    log_sender: Sender<(u64, String)>,
+    log_receiver: Receiver<(u64, String)>,
+    logs: Vec<LaunchLog>,
+    next_log_id: u64,
     file_picker: FilePicker,
     new_custom_name: String,
     new_custom_path: String,
     new_app_name: String,
     new_app_command: String,
     new_app_args: String,
+    new_app_env_vars: String,
+    app_env_edit_text: BTreeMap<String, String>,
     open_ports_text: String,
     provider_forwarded_port: Option<ProviderForwardedPort>,
     status: StatusSnapshot,
@@ -96,6 +121,12 @@ impl VoponoGuiApp {
                 .load_texture("vopono-badge", image, egui::TextureOptions::LINEAR)
         });
         let gilrs = Gilrs::new().ok();
+        let (log_sender, log_receiver) = std::sync::mpsc::channel();
+        let app_env_edit_text = gui_config
+            .applications
+            .iter()
+            .map(|app| (app.command.clone(), app.env_line()))
+            .collect();
 
         let mut app = Self {
             current_view: View::Launch,
@@ -108,12 +139,18 @@ impl VoponoGuiApp {
             selected_vpn_key: None,
             selected_app_cmd: None,
             active_children: Vec::new(),
+            log_sender,
+            log_receiver,
+            logs: Vec::new(),
+            next_log_id: 1,
             file_picker: FilePicker::new(),
             new_custom_name: String::new(),
             new_custom_path: String::new(),
             new_app_name: String::new(),
             new_app_command: String::new(),
             new_app_args: String::new(),
+            new_app_env_vars: String::new(),
+            app_env_edit_text,
             open_ports_text,
             provider_forwarded_port,
             status,
@@ -197,7 +234,16 @@ impl VoponoGuiApp {
             self.error = Some("Application name and command are required".to_string());
             return;
         }
-        let command = self.new_app_command.trim();
+        let command = self.new_app_command.trim().to_string();
+        let env_vars = match parse_env_vars(&self.new_app_env_vars) {
+            Ok(env_vars) => {
+                merge_env_vars(crate::desktop::env_vars_for_command(&command), env_vars)
+            }
+            Err(error) => {
+                self.error = Some(error);
+                return;
+            }
+        };
         if self
             .gui_config
             .applications
@@ -210,18 +256,29 @@ impl VoponoGuiApp {
 
         self.gui_config.applications.push(ApplicationProfile {
             name: self.new_app_name.trim().to_string(),
-            command: command.to_string(),
+            command: command.clone(),
             args: self
                 .new_app_args
                 .split_whitespace()
                 .map(ToString::to_string)
                 .collect(),
+            env_vars,
             working_directory: None,
             usage_count: 0,
         });
         self.new_app_name.clear();
         self.new_app_command.clear();
         self.new_app_args.clear();
+        self.new_app_env_vars.clear();
+        if let Some(app) = self
+            .gui_config
+            .applications
+            .iter()
+            .find(|app| app.command == command)
+        {
+            self.app_env_edit_text
+                .insert(app.command.clone(), app.env_line());
+        }
         self.sort_applications();
         self.select_default_launch_targets();
         self.save_gui_config();
@@ -237,6 +294,10 @@ impl VoponoGuiApp {
                 .any(|existing| existing.command == profile.command)
             {
                 self.gui_config.applications.push(profile);
+                if let Some(app) = self.gui_config.applications.last() {
+                    self.app_env_edit_text
+                        .insert(app.command.clone(), app.env_line());
+                }
                 self.sort_applications();
                 self.select_default_launch_targets();
                 self.save_gui_config();
@@ -351,8 +412,18 @@ impl VoponoGuiApp {
         };
 
         match launch_vpn_choice(&vpn_choice, &app, &self.gui_config.launch) {
-            Ok((message, child)) => {
-                self.active_children.push(child);
+            Ok(result) => {
+                let log_id = self.next_log_id;
+                self.next_log_id += 1;
+                let mut child = result.child;
+                pipe_child_output(log_id, &mut child, self.log_sender.clone());
+                self.logs.push(LaunchLog {
+                    id: log_id,
+                    title: format!("{}: {}", app.name, result.command_line),
+                    lines: vec![format!("$ {}", result.command_line)],
+                    running: true,
+                });
+                self.active_children.push(ActiveLaunch { child, log_id });
                 self.increment_vpn_usage(&vpn_choice);
                 if let Some(app) = self
                     .gui_config
@@ -364,7 +435,7 @@ impl VoponoGuiApp {
                 }
                 self.sort_applications();
                 self.save_gui_config();
-                self.message = Some(message);
+                self.message = Some(result.message);
                 self.refresh_status();
             }
             Err(error) => self.error = Some(error.to_string()),
@@ -405,6 +476,14 @@ impl VoponoGuiApp {
             self.save_gui_config();
         }
     }
+
+    fn drain_log_output(&mut self) {
+        while let Ok((log_id, line)) = self.log_receiver.try_recv() {
+            if let Some(log) = self.logs.iter_mut().find(|log| log.id == log_id) {
+                log.lines.push(line);
+            }
+        }
+    }
 }
 
 impl eframe::App for VoponoGuiApp {
@@ -421,8 +500,26 @@ impl eframe::App for VoponoGuiApp {
 
         self.handle_shortcuts(ctx);
         self.handle_gamepad(ctx);
+        self.drain_log_output();
+        let mut finished = Vec::new();
         self.active_children
-            .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+            .retain_mut(|launch| match launch.child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(status)) => {
+                    finished.push((launch.log_id, format!("process exited with {status}")));
+                    false
+                }
+                Err(error) => {
+                    finished.push((launch.log_id, format!("failed to poll process: {error}")));
+                    false
+                }
+            });
+        for (log_id, line) in finished {
+            if let Some(log) = self.logs.iter_mut().find(|log| log.id == log_id) {
+                log.running = false;
+                log.lines.push(line);
+            }
+        }
         self.tray.pump_events();
         if self.last_status_refresh.elapsed() >= Duration::from_secs(5) {
             self.refresh_status();
@@ -441,4 +538,43 @@ impl eframe::App for VoponoGuiApp {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         self.main_ui(ui, frame);
     }
+}
+
+fn parse_env_vars(input: &str) -> Result<Vec<ApplicationEnvVar>, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let words = shell_words::split(input).map_err(|error| format!("Invalid env vars: {error}"))?;
+    words
+        .into_iter()
+        .map(|word| {
+            let Some((key, value)) = word.split_once('=') else {
+                return Err(format!("Env var must be KEY=VALUE: {word}"));
+            };
+            let key = key.trim();
+            if key.is_empty() {
+                return Err("Env var key cannot be empty".to_string());
+            }
+            Ok(ApplicationEnvVar {
+                key: key.to_string(),
+                value: value.to_string(),
+            })
+        })
+        .collect()
+}
+
+fn merge_env_vars(
+    mut defaults: Vec<ApplicationEnvVar>,
+    custom: Vec<ApplicationEnvVar>,
+) -> Vec<ApplicationEnvVar> {
+    for env_var in custom {
+        if let Some(existing) = defaults.iter_mut().find(|item| item.key == env_var.key) {
+            existing.value = env_var.value;
+        } else {
+            defaults.push(env_var);
+        }
+    }
+    defaults
 }

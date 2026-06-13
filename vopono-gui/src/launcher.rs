@@ -2,16 +2,25 @@ use crate::gui_config::{
     ApplicationProfile, CustomVpnConfig, LaunchConfig, ensure_port_forwarding_callback,
 };
 use anyhow::{Context, anyhow};
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::Sender;
+use std::thread;
 use vopono_core::config::providers::VpnProvider;
 use vopono_core::config::vpn::Protocol;
+
+pub struct LaunchResult {
+    pub message: String,
+    pub command_line: String,
+    pub child: Child,
+}
 
 pub fn launch_custom_config(
     config: &CustomVpnConfig,
     app: &ApplicationProfile,
     launch: &LaunchConfig,
-) -> anyhow::Result<(String, Child)> {
+) -> anyhow::Result<LaunchResult> {
     let vopono = find_vopono_binary()?;
     let mut command = Command::new(&vopono);
     command.arg("exec").arg("--custom").arg(&config.path);
@@ -24,20 +33,22 @@ pub fn launch_custom_config(
     }
 
     command.arg(application_command(app));
-    prepare_background_command(&mut command);
+    let command_line = display_command(&command);
+    prepare_background_command(&mut command, true);
     let child = command
         .spawn()
         .with_context(|| format!("Failed to launch {}", app.name))?;
 
-    Ok((
-        format!(
+    Ok(LaunchResult {
+        message: format!(
             "Started {} through {} using {}",
             app.name,
             vopono.display(),
             config.path.display()
         ),
+        command_line,
         child,
-    ))
+    })
 }
 
 pub fn launch_provider_config(
@@ -46,7 +57,7 @@ pub fn launch_provider_config(
     server: &str,
     app: &ApplicationProfile,
     launch: &LaunchConfig,
-) -> anyhow::Result<(String, Child)> {
+) -> anyhow::Result<LaunchResult> {
     // TODO: Do not shell out - but this is okay for now (since vopono also still shells out)
     let vopono = find_vopono_binary()?;
     let mut command = Command::new(&vopono);
@@ -67,18 +78,20 @@ pub fn launch_provider_config(
     }
 
     command.arg(application_command(app));
-    prepare_background_command(&mut command);
+    let command_line = display_command(&command);
+    prepare_background_command(&mut command, true);
     let child = command
         .spawn()
         .with_context(|| format!("Failed to launch {}", app.name))?;
 
-    Ok((
-        format!(
+    Ok(LaunchResult {
+        message: format!(
             "Started {} through {} {} {}",
             app.name, provider, protocol, server
         ),
+        command_line,
         child,
-    ))
+    })
 }
 
 fn add_launch_args(command: &mut Command, launch: &LaunchConfig) -> anyhow::Result<()> {
@@ -108,7 +121,7 @@ pub fn sync_provider(provider: VpnProvider, protocol: Option<Protocol>) -> anyho
     if let Some(protocol) = protocol {
         command.arg("--protocol").arg(protocol.to_string());
     }
-    prepare_background_command(&mut command);
+    prepare_background_command(&mut command, false);
     command
         .spawn()
         .with_context(|| format!("Failed to start sync for {provider}"))?;
@@ -119,11 +132,13 @@ pub fn sync_provider(provider: VpnProvider, protocol: Option<Protocol>) -> anyho
     ))
 }
 
-fn prepare_background_command(command: &mut Command) {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+fn prepare_background_command(command: &mut Command, pipe_output: bool) {
+    command.stdin(Stdio::null());
+    if pipe_output {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    } else {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
 
     #[cfg(unix)]
     {
@@ -151,10 +166,77 @@ fn find_vopono_binary() -> anyhow::Result<PathBuf> {
 }
 
 fn application_command(app: &ApplicationProfile) -> String {
-    let mut words = Vec::with_capacity(1 + app.args.len());
-    words.push(app.command.as_str());
-    words.extend(app.args.iter().map(String::as_str));
-    shell_words::join(words)
+    let command_words =
+        shell_words::split(&app.command).unwrap_or_else(|_| vec![app.command.clone()]);
+    let app_words = command_words
+        .iter()
+        .cloned()
+        .chain(app.args.iter().cloned())
+        .collect::<Vec<_>>();
+    let env_vars = effective_env_vars(app, &app_words);
+    let mut words = Vec::with_capacity(2 + env_vars.len() + command_words.len() + app.args.len());
+    if !env_vars.is_empty() {
+        words.push("env".to_string());
+        words.extend(
+            env_vars
+                .iter()
+                .filter(|env_var| !env_var.key.trim().is_empty())
+                .map(|env_var| format!("{}={}", env_var.key.trim(), env_var.value)),
+        );
+    }
+    words.extend(command_words);
+    words.extend(app.args.iter().cloned());
+    shell_words::join(words.iter().map(String::as_str))
+}
+
+fn effective_env_vars(
+    app: &ApplicationProfile,
+    app_words: &[String],
+) -> Vec<crate::gui_config::ApplicationEnvVar> {
+    let mut env_vars = app.env_vars.clone();
+    if crate::desktop::uses_flatpak_run(app_words) {
+        env_vars = crate::desktop::sudo_env_reset_vars()
+            .into_iter()
+            .chain(env_vars)
+            .fold(Vec::new(), |mut merged, env_var| {
+                if let Some(existing) = merged.iter_mut().find(|item| item.key == env_var.key) {
+                    existing.value = env_var.value;
+                } else {
+                    merged.push(env_var);
+                }
+                merged
+            });
+    }
+    env_vars
+}
+
+fn display_command(command: &Command) -> String {
+    let mut words = Vec::with_capacity(1 + command.get_args().count());
+    words.push(command.get_program().to_string_lossy().into_owned());
+    words.extend(
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned()),
+    );
+    shell_words::join(words.iter().map(String::as_str))
+}
+
+pub fn pipe_child_output(log_id: u64, child: &mut Child, sender: Sender<(u64, String)>) {
+    if let Some(stdout) = child.stdout.take() {
+        let sender = sender.clone();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let _ = sender.send((log_id, line));
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let _ = sender.send((log_id, line));
+            }
+        });
+    }
 }
 
 #[cfg(test)]
@@ -170,6 +252,7 @@ mod tests {
                 "--private-window".to_string(),
                 "https://example.com/a b".to_string(),
             ],
+            env_vars: Vec::new(),
             working_directory: None,
             usage_count: 0,
         };
@@ -178,6 +261,67 @@ mod tests {
         assert_eq!(
             shell_words::split(&command).expect("command should parse"),
             vec!["firefox", "--private-window", "https://example.com/a b"]
+        );
+    }
+
+    #[test]
+    fn application_command_prefixes_env_vars() {
+        let app = ApplicationProfile {
+            name: "Flatpak".to_string(),
+            command: "flatpak run org.example.App".to_string(),
+            args: Vec::new(),
+            env_vars: vec![crate::gui_config::ApplicationEnvVar {
+                key: "SUDO_USER".to_string(),
+                value: String::new(),
+            }],
+            working_directory: None,
+            usage_count: 0,
+        };
+
+        let command = application_command(&app);
+        assert_eq!(
+            shell_words::split(&command).expect("command should parse"),
+            vec![
+                "env",
+                "SUDO_COMMAND=",
+                "SUDO_USER=",
+                "SUDO_UID=",
+                "SUDO_GID=",
+                "SUDO_HOME=",
+                "SUDO_TTY=",
+                "flatpak",
+                "run",
+                "org.example.App"
+            ]
+        );
+    }
+
+    #[test]
+    fn application_command_resets_sudo_env_for_flatpak_args() {
+        let app = ApplicationProfile {
+            name: "Flatpak".to_string(),
+            command: "flatpak".to_string(),
+            args: vec!["run".to_string(), "org.example.App".to_string()],
+            env_vars: Vec::new(),
+            working_directory: None,
+            usage_count: 0,
+        };
+
+        let command = application_command(&app);
+        assert_eq!(
+            shell_words::split(&command).expect("command should parse"),
+            vec![
+                "env",
+                "SUDO_COMMAND=",
+                "SUDO_USER=",
+                "SUDO_UID=",
+                "SUDO_GID=",
+                "SUDO_HOME=",
+                "SUDO_TTY=",
+                "flatpak",
+                "run",
+                "org.example.App"
+            ]
         );
     }
 }

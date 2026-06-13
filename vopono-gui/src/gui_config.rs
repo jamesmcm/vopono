@@ -63,15 +63,31 @@ pub struct ApplicationProfile {
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
+    pub env_vars: Vec<ApplicationEnvVar>,
+    #[serde(default)]
     pub working_directory: Option<PathBuf>,
     #[serde(default)]
     pub usage_count: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ApplicationEnvVar {
+    pub key: String,
+    pub value: String,
 }
 
 impl ApplicationProfile {
     pub fn command_line(&self) -> String {
         std::iter::once(self.command.as_str())
             .chain(self.args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    pub fn env_line(&self) -> String {
+        self.env_vars
+            .iter()
+            .map(|env_var| format!("{}={}", env_var.key, env_var.value))
             .collect::<Vec<_>>()
             .join(" ")
     }

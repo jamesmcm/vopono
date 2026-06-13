@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=vopono GUI
+Comment=Launch applications through vopono VPN namespaces
+Exec=vopono-gui
+Icon=vopono-gui
+Terminal=false
+Categories=Network;Utility;Security;
+StartupNotify=true
