@@ -1,4 +1,4 @@
-use crate::gui_config::ApplicationProfile;
+use crate::gui_config::{ApplicationEnvVar, ApplicationProfile};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -16,6 +16,7 @@ impl DesktopApplication {
             name: self.name.clone(),
             command: self.command.clone(),
             args: Vec::new(),
+            env_vars: env_vars_for_command(&self.command),
             working_directory: None,
             usage_count: 0,
         }
@@ -129,6 +130,40 @@ fn clean_exec(exec: &str) -> String {
         .join(" ")
 }
 
+pub fn env_vars_for_command(command: &str) -> Vec<ApplicationEnvVar> {
+    let Ok(parts) = shell_words::split(command) else {
+        return Vec::new();
+    };
+    uses_flatpak_run(&parts)
+        .then(sudo_env_reset_vars)
+        .unwrap_or_default()
+}
+
+pub fn sudo_env_reset_vars() -> Vec<ApplicationEnvVar> {
+    sudo_env_reset_names()
+        .iter()
+        .map(|key| ApplicationEnvVar {
+            key: (*key).to_string(),
+            value: String::new(),
+        })
+        .collect()
+}
+
+pub fn uses_flatpak_run(parts: &[String]) -> bool {
+    parts.len() >= 2 && parts[0] == "flatpak" && parts[1] == "run"
+}
+
+fn sudo_env_reset_names() -> [&'static str; 6] {
+    [
+        "SUDO_COMMAND",
+        "SUDO_USER",
+        "SUDO_UID",
+        "SUDO_GID",
+        "SUDO_HOME",
+        "SUDO_TTY",
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,6 +185,36 @@ mod tests {
         assert_eq!(app.name, "Firefox");
         assert_eq!(app.command, "firefox --private-window");
         assert_eq!(app.source, path);
+    }
+
+    #[test]
+    fn flatpak_profiles_reset_sudo_environment() {
+        let path = write_desktop_file(
+            r#"
+            [Desktop Entry]
+            Type=Application
+            Name=Flatpak app
+            Exec=flatpak run org.example.App %u
+            "#,
+        );
+
+        let app = parse_desktop_file(&path)
+            .expect("desktop file should parse")
+            .profile();
+        assert_eq!(
+            app.env_vars
+                .iter()
+                .map(|env_var| (env_var.key.as_str(), env_var.value.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("SUDO_COMMAND", ""),
+                ("SUDO_USER", ""),
+                ("SUDO_UID", ""),
+                ("SUDO_GID", ""),
+                ("SUDO_HOME", ""),
+                ("SUDO_TTY", ""),
+            ]
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 mod applications;
 mod config;
 mod launch;
+mod logs;
 mod providers;
 mod status;
 
@@ -83,6 +84,7 @@ impl VoponoGuiApp {
                 View::Providers => self.providers_view(ui),
                 View::Applications => self.applications_view(ui),
                 View::Status => self.status_view(ui),
+                View::Logs => self.logs_view(ui),
             }
         });
 
