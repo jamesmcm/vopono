@@ -322,6 +322,12 @@ impl FromStr for WireguardConfig {
                                 dns_servers.extend(split_list_value(value).map(ToString::to_string))
                             }
                             "MTU" => mtu = Some(value.to_string()),
+                            "PreUp" | "PostUp" | "PreDown" | "PostDown" => warn!(
+                                "Ignoring wg-quick script option {key}; vopono manages namespace setup and does not execute config scripts"
+                            ),
+                            "Table" | "SaveConfig" => warn!(
+                                "Ignoring wg-quick option {key}; vopono derives namespace routes from AllowedIPs"
+                            ),
                             _ => debug!("Unknown key in [Interface] section: {key}"),
                         }
                     }
@@ -351,6 +357,11 @@ impl FromStr for WireguardConfig {
                     });
                 }
                 "Peer" => {
+                    if peer.is_some() {
+                        return Err(anyhow!(
+                            "Multiple [Peer] sections are not currently supported; refusing to apply incomplete routing rules"
+                        ));
+                    }
                     let mut public_key = None;
                     let mut allowed_ips = Vec::new();
                     let mut endpoint = None;
@@ -639,5 +650,26 @@ AllowedIPs =
 
         let config = WireguardConfig::from_str(config).unwrap();
         assert!(config.peer.allowed_ips.is_empty());
+    }
+
+    #[test]
+    fn rejects_multiple_peers_instead_of_silently_misrouting() {
+        let config = r#"
+[Interface]
+PrivateKey = private
+Address = 10.0.0.2/32
+
+[Peer]
+PublicKey = first
+AllowedIPs = 10.0.0.0/24
+Endpoint = 192.0.2.1:51820
+
+[Peer]
+PublicKey = second
+AllowedIPs = 10.1.0.0/24
+Endpoint = 192.0.2.2:51820
+"#;
+
+        assert!(WireguardConfig::from_str(config).is_err());
     }
 }

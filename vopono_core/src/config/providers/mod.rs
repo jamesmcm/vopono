@@ -146,6 +146,16 @@ pub trait OpenVpnProvider: Provider {
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)>;
     fn auth_file_path(&self) -> anyhow::Result<Option<PathBuf>>;
 
+    fn validate_auth(&self, user: &str, pass: &str) -> anyhow::Result<()> {
+        if user.is_empty() {
+            return Err(anyhow!("VPN username must not be empty"));
+        }
+        if pass.is_empty() {
+            return Err(anyhow!("VPN password must not be empty"));
+        }
+        Ok(())
+    }
+
     fn load_openvpn_auth(&self) -> anyhow::Result<(String, String)> {
         let auth_file = self.auth_file_path()?;
         if let Some(auth_file) = auth_file {
@@ -154,7 +164,10 @@ pub trait OpenVpnProvider: Provider {
             reader.read_line(&mut user)?;
             let mut pass = String::new();
             reader.read_line(&mut pass)?;
-            Ok((user.trim().to_string(), pass.trim().to_string()))
+            let user = user.trim_end_matches(['\r', '\n']).to_string();
+            let pass = pass.trim_end_matches(['\r', '\n']).to_string();
+            self.validate_auth(&user, &pass)?;
+            Ok((user, pass))
         } else {
             Err(anyhow!("Auth file required to load credentials!"))
         }

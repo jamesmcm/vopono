@@ -6,6 +6,7 @@ impl VoponoGuiApp {
     pub(super) fn launch_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Launch");
         let vpn_choices = self.vpn_choices();
+        let mut delete_custom = None;
         ui.columns(2, |columns| {
             columns[0].vertical(|ui| {
                 ui.horizontal_wrapped(|ui| {
@@ -27,20 +28,34 @@ impl VoponoGuiApp {
                         for choice in &vpn_choices {
                             let key = choice.key();
                             let selected = self.selected_vpn_key.as_ref() == Some(&key);
+                            let missing = choice.is_missing();
+                            let label = format!(
+                                "{} [{}]{}",
+                                choice.primary_label(),
+                                self.vpn_usage_count(choice),
+                                if missing { " — missing" } else { "" }
+                            );
                             if ui
                                 .selectable_label(
                                     selected,
-                                    format!(
-                                        "{} [{}]",
-                                        choice.primary_label(),
-                                        self.vpn_usage_count(choice)
-                                    ),
+                                    if missing {
+                                        egui::RichText::new(label)
+                                            .color(egui::Color32::from_rgb(220, 64, 64))
+                                    } else {
+                                        egui::RichText::new(label)
+                                    },
                                 )
                                 .clicked()
                             {
                                 self.selected_vpn_key = Some(key);
                             }
                             detail_label(ui, choice.detail_label());
+                            if selected
+                                && let Some(index) = choice.custom_index()
+                                && ui.button("Delete launch config").clicked()
+                            {
+                                delete_custom = Some(index);
+                            }
                         }
                     });
             });
@@ -66,6 +81,9 @@ impl VoponoGuiApp {
                     });
             });
         });
+        if let Some(index) = delete_custom {
+            self.remove_custom_config(index);
+        }
         ui.separator();
         ui.heading("Options");
         ui.horizontal_wrapped(|ui| {

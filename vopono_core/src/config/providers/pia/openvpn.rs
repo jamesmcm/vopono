@@ -14,7 +14,7 @@ use std::fmt::Display;
 use std::fs::File;
 use std::fs::create_dir_all;
 use std::io::{Cursor, Read, Write};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
@@ -47,11 +47,15 @@ impl PrivateInternetAccess {
 }
 
 impl OpenVpnProvider for PrivateInternetAccess {
+    fn validate_auth(&self, user: &str, pass: &str) -> anyhow::Result<()> {
+        super::validate_pia_auth(user, pass)
+    }
+
     fn provider_dns(&self) -> Option<Vec<IpAddr>> {
-        Some(vec![
-            IpAddr::V4(Ipv4Addr::new(209, 222, 18, 222)),
-            IpAddr::V4(Ipv4Addr::new(209, 222, 18, 218)),
-        ])
+        // PIA's tunnel DNS servers are pushed by OpenVPN after connecting. Do
+        // not use provider-specific resolvers to resolve the VPN endpoint
+        // before the tunnel exists; they may only be reachable through PIA.
+        None
     }
 
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {

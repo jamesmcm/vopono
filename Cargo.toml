@@ -1,7 +1,7 @@
 [package]
 name = "vopono"
 description = "Launch applications via VPN tunnels using temporary network namespaces"
-version = "0.10.18"
+version = "0.10.19"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2024"
 license = "GPL-3.0-or-later"
@@ -39,7 +39,7 @@ strum_macros = "0.28"
 shellexpand = { version = "3", features = ["full"] }
 shell-words = "1"
 interprocess = "2"
-wincode = { version = "0.5", features = ["derive", "std"] }
+wincode = { version = "0.6", features = ["derive", "std"] }
 
 [package.metadata.deb]
 maintainer = "James McMurray <jamesmcm03@gmail.com>"

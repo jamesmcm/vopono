@@ -104,9 +104,9 @@ pub fn verify_auth(
             debug!("Read auth file: {}", auth_file.to_string_lossy());
             let bufreader = BufReader::new(f);
             let mut iter = bufreader.lines();
-            // TODO: If thise fail, re-gen auth file
-            let _username = iter.next().with_context(|| "No username")??;
-            let _password = iter.next().with_context(|| "No password")??;
+            let username = iter.next().with_context(|| "No username")??;
+            let password = iter.next().with_context(|| "No password")??;
+            provider.validate_auth(&username, &password)?;
             Ok(Some(auth_file))
         }
         Err(_) => {

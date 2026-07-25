@@ -318,9 +318,12 @@ impl VoponoGuiApp {
         if !self.selected_vpn_key.as_ref().is_some_and(|key| {
             vpn_choices
                 .iter()
-                .any(|choice| choice.key() == key.as_str())
+                .any(|choice| choice.key() == key.as_str() && !choice.is_missing())
         }) {
-            self.selected_vpn_key = vpn_choices.first().map(VpnChoice::key);
+            self.selected_vpn_key = vpn_choices
+                .iter()
+                .find(|choice| !choice.is_missing())
+                .map(VpnChoice::key);
         }
 
         if !self.selected_app_cmd.as_ref().is_some_and(|command| {
@@ -445,6 +448,21 @@ impl VoponoGuiApp {
     fn refresh_synced_configs(&mut self) {
         self.synced_configs = scan_synced_configs();
         self.select_default_launch_targets();
+    }
+
+    fn remove_custom_config(&mut self, index: usize) {
+        if index >= self.gui_config.custom_vpn_configs.len() {
+            self.error = Some("Custom VPN config no longer exists".to_string());
+            return;
+        }
+
+        let removed = self.gui_config.custom_vpn_configs.remove(index);
+        self.select_default_launch_targets();
+        self.save_gui_config();
+        self.message = Some(format!(
+            "Deleted launch config '{}'; the VPN file was not deleted",
+            removed.name
+        ));
     }
 
     fn vpn_choices(&self) -> Vec<VpnChoice> {

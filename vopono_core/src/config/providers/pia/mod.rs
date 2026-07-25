@@ -36,9 +36,7 @@ impl PrivateInternetAccess {
         let mut lines = reader.lines();
         let username = lines.next()?.ok()?;
         let password = lines.next()?.ok()?;
-        let username = username.trim().to_string();
-        let password = password.trim().to_string();
-        if !username.is_empty() && !password.is_empty() {
+        if validate_pia_auth(&username, &password).is_ok() {
             Some((username, password))
         } else {
             None
@@ -53,8 +51,10 @@ impl PrivateInternetAccess {
         }
 
         let username = uiclient.get_input(Input {
-            prompt: "PrivateInternetAccess username".to_string(),
-            validator: None,
+            prompt: "PrivateInternetAccess username (p followed by 7 digits)".to_string(),
+            validator: Some(Box::new(|username| {
+                validate_pia_username(username).map_err(|error| error.to_string())
+            })),
         })?;
         let password = uiclient.get_password(Password {
             prompt: "Password".to_string(),
@@ -65,62 +65,43 @@ impl PrivateInternetAccess {
     }
 }
 
+fn validate_pia_username(username: &str) -> anyhow::Result<()> {
+    if username.len() == 8
+        && username.starts_with('p')
+        && username[1..].bytes().all(|byte| byte.is_ascii_digit())
+    {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "PIA username must be in the form p1234567; use the VPN service username, not an email address"
+        ))
+    }
+}
+
+fn validate_pia_auth(username: &str, password: &str) -> anyhow::Result<()> {
+    validate_pia_username(username)?;
+    if password.is_empty() {
+        return Err(anyhow::anyhow!("PIA password must not be empty"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Parse credentials from raw lines (username on first line, password on second).
-    /// Returns the cleaned credentials if valid, None otherwise.
-    fn parse_credentials(first_line: &str, second_line: &str) -> Option<(String, String)> {
-        let username = first_line.trim().to_string();
-        let password = second_line.trim().to_string();
-        if !username.is_empty() && !password.is_empty() {
-            Some((username, password))
-        } else {
-            None
-        }
+    #[test]
+    fn validates_pia_service_credentials() {
+        assert!(validate_pia_auth("p1234567", "password").is_ok());
+        assert!(validate_pia_auth("p1234567", " password ").is_ok());
     }
 
     #[test]
-    fn test_parse_credentials_valid() {
-        assert_eq!(
-            parse_credentials("user123", "password456"),
-            Some(("user123".to_string(), "password456".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_parse_credentials_with_whitespace() {
-        assert_eq!(
-            parse_credentials("  user123  ", "  password456  "),
-            Some(("user123".to_string(), "password456".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_parse_credentials_with_newlines() {
-        assert_eq!(
-            parse_credentials("user123\n", "password456\n"),
-            Some(("user123".to_string(), "password456".to_string()))
-        );
-    }
-
-    #[test]
-    fn test_parse_credentials_empty_username() {
-        assert_eq!(parse_credentials("", "password456"), None);
-        assert_eq!(parse_credentials("   ", "password456"), None);
-    }
-
-    #[test]
-    fn test_parse_credentials_empty_password() {
-        assert_eq!(parse_credentials("user123", ""), None);
-        assert_eq!(parse_credentials("user123", "   "), None);
-    }
-
-    #[test]
-    fn test_parse_credentials_both_empty() {
-        assert_eq!(parse_credentials("", ""), None);
-        assert_eq!(parse_credentials("   ", "   "), None);
+    fn rejects_non_service_usernames_and_empty_passwords() {
+        assert!(validate_pia_auth("user@example.com", "password").is_err());
+        assert!(validate_pia_auth("P1234567", "password").is_err());
+        assert!(validate_pia_auth("p123456", "password").is_err());
+        assert!(validate_pia_auth("p1234567", "").is_err());
     }
 
     #[test]
@@ -134,5 +115,11 @@ mod tests {
     fn test_default_protocol() {
         let pia = PrivateInternetAccess {};
         assert_eq!(pia.default_protocol(), Protocol::OpenVpn);
+    }
+
+    #[test]
+    fn openvpn_does_not_use_tunnel_dns_before_connecting() {
+        let pia = PrivateInternetAccess {};
+        assert_eq!(pia.provider_dns(), None);
     }
 }

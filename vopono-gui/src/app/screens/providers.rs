@@ -79,18 +79,23 @@ impl VoponoGuiApp {
                 let mut remove = None;
                 for (index, config) in self.gui_config.custom_vpn_configs.iter().enumerate() {
                     ui.group(|ui| {
-                        ui.label(format!("{} ({})", config.name, config.protocol));
+                        let missing = !config.path.is_file();
+                        ui.label(format!(
+                            "{} ({}){}",
+                            config.name,
+                            config.protocol,
+                            if missing { " — missing" } else { "" }
+                        ));
                         detail_label(ui, config.path.display().to_string());
                         ui.horizontal_wrapped(|ui| {
-                            if ui.button("Remove").clicked() {
+                            if ui.button("Delete launch config").clicked() {
                                 remove = Some(index);
                             }
                         });
                     });
                 }
                 if let Some(index) = remove {
-                    self.gui_config.custom_vpn_configs.remove(index);
-                    self.save_gui_config();
+                    self.remove_custom_config(index);
                 }
             });
     }

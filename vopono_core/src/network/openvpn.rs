@@ -166,13 +166,21 @@ impl OpenVpn {
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "the auth file".to_string());
+            let provider_hint = auth_file
+                .as_ref()
+                .filter(|path| path.components().any(|part| part.as_os_str() == "pia"))
+                .map(|_| {
+                    " For PIA, use the VPN service username in the form p1234567 (not an email address), then rerun `vopono sync --protocol openvpn privateinternetaccess` to replace cached credentials."
+                })
+                .unwrap_or_default();
             error!(
-                "OpenVPN authentication failed, modify your username and/or password in {}",
-                auth_path_display
+                "OpenVPN server rejected the username/password in {}.{}",
+                auth_path_display, provider_hint
             );
             return Err(anyhow!(
-                "OpenVPN authentication failed, use -v for full log output. Modify your username and/or password in {}",
-                auth_path_display
+                "OpenVPN server rejected the username/password in {}. DNS and transport settings do not cause AUTH_FAILED.{}",
+                auth_path_display,
+                provider_hint
             ));
         }
         if buffer.contains("Options error") {
