@@ -73,6 +73,7 @@ pub enum Protocol {
     AmneziaWG,
     OpenConnect,
     OpenFortiVpn,
+    Ssh,
     Warp,
     None,
 }

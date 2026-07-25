@@ -106,6 +106,7 @@ pub struct ArgsConfig {
     pub trojan_password: Option<String>,
     pub trojan_no_verify: bool,
     pub trojan_config: Option<PathBuf>,
+    pub ssh_proxy_port: u16,
 }
 
 impl ArgsConfig {
@@ -227,7 +228,11 @@ impl ArgsConfig {
 
             provider = VpnProvider::Custom;
 
-            if protocol != Protocol::OpenConnect {
+            if protocol == Protocol::Ssh {
+                server = command_else_config_option!(server, command, config).ok_or_else(|| {
+                    anyhow!("SSH server or OpenSSH host alias must be provided with --server")
+                })?;
+            } else if protocol != Protocol::OpenConnect {
                 // Encode filename with base58 so we can fit it within 16 chars for the veth pair name
                 let sname = bs58::encode(&path.to_str().unwrap()).into_string();
 
@@ -240,16 +245,19 @@ impl ArgsConfig {
             }
         } else {
             // Get server and provider
-            provider = command_else_config_option_variant!(provider, command, config).ok_or_else(
-                || {
+            let requested_protocol = command_else_config_option_variant!(protocol, command, config);
+            provider = command_else_config_option_variant!(provider, command, config)
+                .or_else(|| {
+                    (requested_protocol == Some(Protocol::Ssh)).then_some(VpnProvider::Custom)
+                })
+                .ok_or_else(|| {
                     let msg =
                 "Enter a VPN provider as a command-line argument or in the vopono config.toml file";
                     log::error!("{msg}");
                     anyhow!(msg)
-                },
-            )?;
+                })?;
 
-            if provider == VpnProvider::Custom {
+            if provider == VpnProvider::Custom && requested_protocol != Some(Protocol::Ssh) {
                 error_and_bail!("Must provide config file if using custom VPN Provider");
             }
 
@@ -262,7 +270,7 @@ impl ArgsConfig {
                 log::error!("{msg}"); anyhow!(msg)})?;
 
             // Check protocol is valid for provider
-            protocol = command_else_config_option_variant!(protocol, command, config)
+            protocol = requested_protocol
                 .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
         }
 
@@ -308,6 +316,16 @@ impl ArgsConfig {
             );
         }
 
+        if protocol == Protocol::Ssh && provider != VpnProvider::Custom {
+            error_and_bail!("SSH protocol must use the Custom provider");
+        }
+
+        let ssh_proxy_port = command
+            .ssh_proxy_port
+            .or_else(|| config.get("ssh_proxy_port").ok())
+            .or_else(|| config.get("ssh-proxy-port").ok())
+            .unwrap_or(1080);
+
         // TODO: Group some of these arguments into their own structs
         Ok(Self {
             provider,
@@ -341,6 +359,7 @@ impl ArgsConfig {
             trojan_password,
             trojan_no_verify,
             trojan_config,
+            ssh_proxy_port,
         })
     }
 

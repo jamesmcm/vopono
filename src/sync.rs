@@ -63,6 +63,9 @@ pub fn synch(
         Some(Protocol::OpenFortiVpn) => {
             error!("vopono sync not supported for OpenFortiVpn protocol");
         }
+        Some(Protocol::Ssh) => {
+            error!("vopono sync is not needed for SSH protocol");
+        }
         Some(Protocol::Warp) => {
             error!("vopono sync not supported for Cloudflare Warp protocol");
         }

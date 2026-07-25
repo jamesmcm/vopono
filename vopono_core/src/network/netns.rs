@@ -6,6 +6,7 @@ use super::openconnect::OpenConnect;
 use super::openfortivpn::OpenFortiVpn;
 use super::openvpn::OpenVpn;
 use super::shadowsocks::Shadowsocks;
+use super::ssh::SshProxy;
 use super::trojan::TrojanHost;
 use super::trojan::trojan_exec::Trojan;
 use super::veth_pair::VethPair;
@@ -37,6 +38,8 @@ pub struct NetworkNamespace {
     pub host_masquerade: Option<HostMasquerade>,
     pub firewall_exception: Option<FirewallException>,
     pub shadowsocks: Option<Shadowsocks>,
+    #[serde(default)]
+    pub ssh: Option<SshProxy>,
     pub veth_pair_ips: Option<VethPairIPs>,
     pub openconnect: Option<OpenConnect>,
     pub openfortivpn: Option<OpenFortiVpn>,
@@ -144,6 +147,7 @@ impl NetworkNamespace {
             host_masquerade: None,
             firewall_exception: None,
             shadowsocks: None,
+            ssh: None,
             veth_pair_ips: None,
             openconnect: None,
             openfortivpn: None,
@@ -573,6 +577,30 @@ impl NetworkNamespace {
             listen_port,
             password,
             encrypt_method,
+        )?);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_ssh_proxy(
+        &mut self,
+        server: &str,
+        config_file: Option<&Path>,
+        listen_port: u16,
+        user: Option<String>,
+        group: Option<String>,
+        firewall: Firewall,
+        use_killswitch: bool,
+    ) -> anyhow::Result<()> {
+        self.ssh = Some(SshProxy::run(
+            self,
+            server,
+            config_file,
+            listen_port,
+            user,
+            group,
+            firewall,
+            use_killswitch,
         )?);
         Ok(())
     }

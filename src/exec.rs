@@ -161,9 +161,14 @@ fn setup_namespace(
 ) -> anyhow::Result<NamespaceConfig> {
     create_dir_all(vopono_dir()?)?;
     let vopono_config_settings = ArgsConfig::get_config_file(&command)?;
-    let host_env_vars = vopono_core::util::env_vars::get_host_env_vars();
+    let mut host_env_vars = vopono_core::util::env_vars::get_host_env_vars();
 
     let mut parsed_command = ArgsConfig::get_cli_or_config_args(command, vopono_config_settings)?;
+    if parsed_command.protocol == Protocol::Ssh {
+        let proxy = format!("socks5h://127.0.0.1:{}", parsed_command.ssh_proxy_port);
+        host_env_vars.insert("ALL_PROXY".to_owned(), proxy.clone());
+        host_env_vars.insert("all_proxy".to_owned(), proxy);
+    }
 
     if parsed_command.provider != VpnProvider::Custom
         && parsed_command.provider != VpnProvider::None
@@ -511,7 +516,9 @@ fn run_protocol_in_netns(
         return Ok(None);
     }
 
-    let config_file = if parsed_command.protocol == Protocol::Warp {
+    let config_file = if matches!(parsed_command.protocol, Protocol::Warp | Protocol::Ssh)
+        && parsed_command.custom.is_none()
+    {
         None
     } else if parsed_command.provider != VpnProvider::Custom {
         let cdir = match parsed_command.protocol {
@@ -695,6 +702,27 @@ fn run_protocol_in_netns(
                 parsed_command.hosts.as_ref(),
                 parsed_command.firewall,
                 parsed_command.allow_host_access,
+            )?;
+        }
+        Protocol::Ssh => {
+            let dns = parsed_command
+                .dns
+                .clone()
+                .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
+            ns.dns_config(
+                &dns,
+                &[],
+                parsed_command.hosts.as_ref(),
+                parsed_command.allow_host_access,
+            )?;
+            ns.run_ssh_proxy(
+                &parsed_command.server,
+                config_file.as_deref(),
+                parsed_command.ssh_proxy_port,
+                parsed_command.user.clone(),
+                parsed_command.group.clone(),
+                parsed_command.firewall,
+                !parsed_command.no_killswitch,
             )?;
         }
     }

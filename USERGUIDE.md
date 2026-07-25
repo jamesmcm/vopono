@@ -349,6 +349,66 @@ directory as the config file itself. So any accompanying files (CA certificates,
 files, etc.) must be in the same directory with the file if using
 relative paths in the config file.
 
+### SSH dynamic proxy
+
+Vopono can start an OpenSSH dynamic port forward (`ssh -D`) inside the
+network namespace and run an application alongside it. Pass an SSH destination
+or an alias from `~/.ssh/config` as the server:
+
+```bash
+$ vopono -v exec --protocol ssh --server user@proxy.example.com \
+    "curl https://ifconfig.co"
+```
+
+The SOCKS5 proxy listens on `127.0.0.1:1080` inside the namespace. Vopono runs
+`redsocks` and transparently redirects IPv4 TCP traffic through it, so
+applications do not need their own proxy support. It also sets `ALL_PROXY` and
+`all_proxy` to `socks5h://127.0.0.1:1080` for applications which support those
+variables directly. Use `--ssh-proxy-port` to select another local port:
+
+```bash
+$ vopono exec --protocol ssh --server work-proxy \
+    --ssh-proxy-port 9080 "curl https://example.com"
+```
+
+OpenSSH uses the target user's normal SSH configuration, keys, agent, and
+known-hosts files. This means options such as `User`, `Port`, and `IdentityFile`
+can be kept in `~/.ssh/config`. Alternatively, pass a dedicated
+OpenSSH client configuration with `--custom`; the destination must still be
+given with `--server`:
+
+```bash
+$ vopono exec --protocol ssh --custom ~/.ssh/proxy_config \
+    --server work-proxy "curl https://example.com"
+```
+
+Key or agent authentication is recommended, and is required when the vopono
+daemon cannot provide an interactive SSH prompt.
+
+By default SSH mode installs a killswitch. Only loopback traffic and the SSH
+connection to the resolved proxy endpoint may leave directly. IPv4 TCP is
+redirected through SSH, UDP DNS is converted to TCP DNS and then proxied, and
+other UDP, ICMP, and IPv6 traffic is blocked because OpenSSH dynamic forwarding
+cannot carry it safely. Applications which ignore proxy environment variables
+therefore cannot bypass the proxy using ordinary TCP connections.
+
+`--no-killswitch` keeps transparent TCP and DNS proxying but permits other IPv4
+UDP and ICMP traffic to leave directly. Use this only when that leak is
+intentional. IPv6 remains blocked in SSH mode because the current transparent
+proxy path is IPv4-only.
+
+SSH mode requires both `ssh` and `redsocks` to be installed and available on
+`PATH`. Vopono checks for both before starting the connection. `ProxyJump` and
+`ProxyCommand` are not currently supported with transparent SSH proxying.
+
+The same settings can be saved in `~/.config/vopono/config.toml`:
+
+```toml
+protocol = "Ssh"
+server = "work-proxy"
+ssh_proxy_port = 1080
+```
+
 For OpenVPN be careful to remove any DNS update scripts from the OpenVPN config file e.g. for ProtonVPN OpenVPN configs, remove the following lines:
 
 ```
@@ -956,6 +1016,8 @@ OpenVPN must be installed for using OpenVPN providers, and wireguard-tools must 
 installed for using Wireguard providers.
 
 shadowsocks-libev must be installed for Shadowsocks support.
+
+OpenSSH (`ssh`) and `redsocks` must be installed for SSH transparent proxying.
 
 ## Troubleshooting
 
