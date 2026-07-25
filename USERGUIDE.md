@@ -360,6 +360,13 @@ $ vopono -v exec --protocol ssh --server user@proxy.example.com \
     "curl https://ifconfig.co"
 ```
 
+The remote SSH username and port can also be supplied separately:
+
+```bash
+$ vopono exec --protocol ssh --server proxy.example.com \
+    --ssh-user alice --ssh-port 2222 "curl https://ifconfig.co"
+```
+
 The SOCKS5 proxy listens on `127.0.0.1:1080` inside the namespace. Vopono runs
 `redsocks` and transparently redirects IPv4 TCP traffic through it, so
 applications do not need their own proxy support. It also sets `ALL_PROXY` and
@@ -373,9 +380,23 @@ $ vopono exec --protocol ssh --server work-proxy \
 
 OpenSSH uses the target user's normal SSH configuration, keys, agent, and
 known-hosts files. This means options such as `User`, `Port`, and `IdentityFile`
-can be kept in `~/.ssh/config`. Alternatively, pass a dedicated
-OpenSSH client configuration with `--custom`; the destination must still be
-given with `--server`:
+can be kept in `~/.ssh/config`. To connect to a remote SSH port other than 22,
+define it on a host alias:
+
+```ssh-config
+Host work-proxy
+    HostName proxy.example.com
+    User alice
+    Port 2222
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+Then select that alias with `--server work-proxy`. The `--ssh-proxy-port`
+option only changes the local SOCKS5 listener; it does not change the remote
+SSH port.
+
+Alternatively, pass a dedicated OpenSSH client configuration with `--custom`;
+the destination must still be given with `--server`:
 
 ```bash
 $ vopono exec --protocol ssh --custom ~/.ssh/proxy_config \
@@ -407,6 +428,8 @@ The same settings can be saved in `~/.config/vopono/config.toml`:
 protocol = "Ssh"
 server = "work-proxy"
 ssh_proxy_port = 1080
+ssh_user = "alice"
+ssh_port = 2222
 ```
 
 For OpenVPN be careful to remove any DNS update scripts from the OpenVPN config file e.g. for ProtonVPN OpenVPN configs, remove the following lines:

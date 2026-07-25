@@ -285,6 +285,14 @@ pub struct ExecCommand {
     /// Local SOCKS5 port for SSH dynamic forwarding
     #[clap(long = "ssh-proxy-port")]
     pub ssh_proxy_port: Option<u16>,
+
+    /// Username for the remote SSH server
+    #[clap(long = "ssh-user")]
+    pub ssh_user: Option<String>,
+
+    /// Port of the remote SSH server
+    #[clap(long = "ssh-port")]
+    pub ssh_port: Option<u16>,
 }
 
 #[derive(Parser, Debug)]
@@ -342,6 +350,10 @@ mod tests {
             "work-proxy",
             "--ssh-proxy-port",
             "9080",
+            "--ssh-user",
+            "gopostal",
+            "--ssh-port",
+            "2222",
             "curl example.com",
         ])
         .unwrap();
@@ -352,5 +364,7 @@ mod tests {
         assert_eq!(command.protocol.unwrap().to_variant(), Protocol::Ssh);
         assert_eq!(command.server.as_deref(), Some("work-proxy"));
         assert_eq!(command.ssh_proxy_port, Some(9080));
+        assert_eq!(command.ssh_user.as_deref(), Some("gopostal"));
+        assert_eq!(command.ssh_port, Some(2222));
     }
 }

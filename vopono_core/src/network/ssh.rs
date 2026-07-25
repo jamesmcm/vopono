@@ -3,11 +3,12 @@ use super::netns::NetworkNamespace;
 use crate::util::hostname_to_ip;
 use anyhow::{Context, anyhow, bail};
 use log::{debug, error, info, warn};
+use nix::unistd::User;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -34,6 +35,8 @@ impl SshProxy {
         server: &str,
         config_file: Option<&Path>,
         listen_port: u16,
+        ssh_user: Option<&str>,
+        ssh_port: Option<u16>,
         user: Option<String>,
         group: Option<String>,
         firewall: Firewall,
@@ -44,10 +47,30 @@ impl SshProxy {
             anyhow!("Cannot find redsocks on PATH; SSH transparent proxying requires redsocks: {e}")
         })?;
 
-        let endpoint = ssh_endpoint(server, config_file, user.as_deref())?;
-        let ssh_command = ssh_command(server, config_file, listen_port, Some(&endpoint))?;
+        let endpoint = ssh_endpoint(server, config_file, ssh_user, ssh_port, user.as_deref())?;
+        let identity_file = user
+            .as_deref()
+            .map(default_identity_file)
+            .transpose()?
+            .flatten();
+        if let Some(path) = identity_file.as_deref() {
+            debug!(
+                "Using initiating user's SSH identity: {}",
+                path.to_string_lossy()
+            );
+        }
+        let ssh_command = ssh_command(
+            server,
+            config_file,
+            identity_file.as_deref(),
+            listen_port,
+            Some(&endpoint),
+            ssh_user,
+            ssh_port,
+        )?;
         info!("Launching SSH dynamic proxy on socks5h://127.0.0.1:{listen_port}");
         let mut ssh = command_in_namespace(netns, &ssh_command, user, group);
+        ssh.stderr(Stdio::piped());
         let mut ssh = ssh.spawn().context("Failed to launch SSH dynamic proxy")?;
         let ssh_pid = ssh.id();
 
@@ -122,7 +145,7 @@ fn command_in_namespace(
     if user.is_some() || group.is_some() {
         handle.args(["sudo", "--preserve-env"]);
         if let Some(user) = user {
-            handle.args(["--user", &user]);
+            handle.args(["--set-home", "--user", &user]);
         }
         if let Some(group) = group {
             handle.args(["--group", &group]);
@@ -136,8 +159,11 @@ fn command_in_namespace(
 fn ssh_command(
     server: &str,
     config_file: Option<&Path>,
+    identity_file: Option<&Path>,
     listen_port: u16,
     endpoint: Option<&SshEndpoint>,
+    ssh_user: Option<&str>,
+    ssh_port: Option<u16>,
 ) -> anyhow::Result<Vec<String>> {
     let mut command = vec![
         "ssh".to_owned(),
@@ -145,6 +171,8 @@ fn ssh_command(
         "-N".to_owned(),
         "-o".to_owned(),
         "ExitOnForwardFailure=yes".to_owned(),
+        "-o".to_owned(),
+        "BatchMode=yes".to_owned(),
         "-D".to_owned(),
         format!("127.0.0.1:{listen_port}"),
     ];
@@ -154,23 +182,42 @@ fn ssh_command(
         command.push("-o".to_owned());
         command.push(format!("HostKeyAlias={}", endpoint.host_key_alias));
     }
+    if let Some(path) = identity_file {
+        command.push("-i".to_owned());
+        command.push(
+            path.to_str()
+                .ok_or_else(|| anyhow!("SSH identity path is not valid UTF-8"))?
+                .to_owned(),
+        );
+    }
+    add_remote_options(&mut command, ssh_user, ssh_port);
     add_config_file(&mut command, config_file)?;
     command.push(server.to_owned());
     Ok(command)
 }
 
+fn default_identity_file(user: &str) -> anyhow::Result<Option<PathBuf>> {
+    let user = User::from_name(user)?
+        .ok_or_else(|| anyhow!("Cannot find local user {user} for SSH authentication"))?;
+    let identity = user.dir.join(".ssh/id_ed25519");
+    Ok(identity.is_file().then_some(identity))
+}
+
 fn ssh_endpoint(
     server: &str,
     config_file: Option<&Path>,
+    ssh_user: Option<&str>,
+    ssh_port: Option<u16>,
     user: Option<&str>,
 ) -> anyhow::Result<SshEndpoint> {
     let mut args = vec!["ssh".to_owned(), "-G".to_owned(), "-4".to_owned()];
+    add_remote_options(&mut args, ssh_user, ssh_port);
     add_config_file(&mut args, config_file)?;
     args.push(server.to_owned());
 
     let mut command = if let Some(user) = user {
         let mut command = Command::new("sudo");
-        command.args(["--preserve-env", "--user", user]);
+        command.args(["--preserve-env", "--set-home", "--user", user]);
         command
     } else {
         Command::new(&args[0])
@@ -216,6 +263,15 @@ fn ssh_endpoint(
         port,
         host_key_alias: hostname.to_owned(),
     })
+}
+
+fn add_remote_options(command: &mut Vec<String>, user: Option<&str>, port: Option<u16>) {
+    if let Some(user) = user {
+        command.extend(["-l".to_owned(), user.to_owned()]);
+    }
+    if let Some(port) = port {
+        command.extend(["-p".to_owned(), port.to_string()]);
+    }
 }
 
 fn effective_ssh_value<'a>(config: &'a str, key: &str) -> Option<&'a str> {
@@ -271,7 +327,11 @@ fn wait_for_listener(
     let needle = format!(":{port}");
     while Instant::now() < deadline {
         if let Some(status) = child.try_wait()? {
-            bail!("{name} exited before listening on port {port}: {status}");
+            let stderr = child_stderr(child);
+            if stderr.is_empty() {
+                bail!("{name} exited before listening on port {port}: {status}");
+            }
+            bail!("{name} exited before listening on port {port}: {status}: {stderr}");
         }
         let output = NetworkNamespace::exec_with_output(&netns.name, &["ss", "-ltn"])?;
         if String::from_utf8_lossy(&output.stdout)
@@ -283,6 +343,16 @@ fn wait_for_listener(
         std::thread::sleep(Duration::from_millis(100));
     }
     bail!("Timed out waiting for {name} to listen on port {port}")
+}
+
+fn child_stderr(child: &mut std::process::Child) -> String {
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take()
+        && let Err(e) = pipe.read_to_string(&mut stderr)
+    {
+        debug!("Failed to read child process stderr: {e}");
+    }
+    stderr.trim().to_owned()
 }
 
 fn setup_transparent_firewall(
@@ -550,13 +620,15 @@ mod tests {
     #[test]
     fn builds_dynamic_forward_command() {
         assert_eq!(
-            ssh_command("proxy.example.com", None, 1080, None).unwrap(),
+            ssh_command("proxy.example.com", None, None, 1080, None, None, None).unwrap(),
             [
                 "ssh",
                 "-4",
                 "-N",
                 "-o",
                 "ExitOnForwardFailure=yes",
+                "-o",
+                "BatchMode=yes",
                 "-D",
                 "127.0.0.1:1080",
                 "proxy.example.com",
@@ -566,9 +638,43 @@ mod tests {
 
     #[test]
     fn supports_openssh_config_file() {
-        let args =
-            ssh_command("work-proxy", Some(Path::new("/tmp/ssh_config")), 9080, None).unwrap();
-        assert_eq!(&args[7..], ["-F", "/tmp/ssh_config", "work-proxy"]);
+        let args = ssh_command(
+            "work-proxy",
+            Some(Path::new("/tmp/ssh_config")),
+            None,
+            9080,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(&args[9..], ["-F", "/tmp/ssh_config", "work-proxy"]);
+    }
+
+    #[test]
+    fn supports_explicit_identity_file() {
+        let args = ssh_command(
+            "proxy.example.com",
+            None,
+            Some(Path::new("/home/alice/.ssh/id_ed25519")),
+            1080,
+            None,
+            Some("gopostal"),
+            Some(2222),
+        )
+        .unwrap();
+        assert_eq!(
+            &args[9..],
+            [
+                "-i",
+                "/home/alice/.ssh/id_ed25519",
+                "-l",
+                "gopostal",
+                "-p",
+                "2222",
+                "proxy.example.com"
+            ]
+        );
     }
 
     #[test]

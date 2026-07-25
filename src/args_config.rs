@@ -107,6 +107,8 @@ pub struct ArgsConfig {
     pub trojan_no_verify: bool,
     pub trojan_config: Option<PathBuf>,
     pub ssh_proxy_port: u16,
+    pub ssh_user: Option<String>,
+    pub ssh_port: Option<u16>,
 }
 
 impl ArgsConfig {
@@ -325,6 +327,14 @@ impl ArgsConfig {
             .or_else(|| config.get("ssh_proxy_port").ok())
             .or_else(|| config.get("ssh-proxy-port").ok())
             .unwrap_or(1080);
+        let ssh_user = command
+            .ssh_user
+            .or_else(|| config.get("ssh_user").ok())
+            .or_else(|| config.get("ssh-user").ok());
+        let ssh_port = command
+            .ssh_port
+            .or_else(|| config.get("ssh_port").ok())
+            .or_else(|| config.get("ssh-port").ok());
 
         // TODO: Group some of these arguments into their own structs
         Ok(Self {
@@ -360,6 +370,8 @@ impl ArgsConfig {
             trojan_no_verify,
             trojan_config,
             ssh_proxy_port,
+            ssh_user,
+            ssh_port,
         })
     }
 

@@ -719,6 +719,8 @@ fn run_protocol_in_netns(
                 &parsed_command.server,
                 config_file.as_deref(),
                 parsed_command.ssh_proxy_port,
+                parsed_command.ssh_user.as_deref(),
+                parsed_command.ssh_port,
                 parsed_command.user.clone(),
                 parsed_command.group.clone(),
                 parsed_command.firewall,

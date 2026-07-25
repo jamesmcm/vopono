@@ -70,8 +70,11 @@ fn main() -> anyhow::Result<()> {
             // If we're not root, try to forward the command to the running daemon.
             if !nix::unistd::getuid().is_root() {
                 match forward_to_daemon(&cmd) {
-                    Ok(exit_code) => {
+                    Ok(DaemonForward::Exit(exit_code)) => {
                         std::process::exit(exit_code);
+                    }
+                    Ok(DaemonForward::ExecutionError(message)) => {
+                        return Err(anyhow!("Daemon execution failed: {message}"));
                     }
                     Err(e) => {
                         info!("Falling back to sudo (daemon forward failed): {e}");
@@ -111,7 +114,12 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<i32> {
+enum DaemonForward {
+    Exit(i32),
+    ExecutionError(String),
+}
+
+fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<DaemonForward> {
     let name = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?;
     let mut conn = match LocalSocketStream::connect(name) {
         Ok(c) => c,
@@ -183,9 +191,10 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<i32> {
     let mut buffer = vec![0; len];
     conn.read_exact(&mut buffer)?;
 
-    // Response is currently a single bare i32 exit code from the daemon.
-    let response: i32 = wincode::deserialize(&buffer)?;
-    Ok(response)
+    match wincode::deserialize::<daemon::DaemonResponse>(&buffer)? {
+        daemon::DaemonResponse::Exit(code) => Ok(DaemonForward::Exit(code)),
+        daemon::DaemonResponse::Error(message) => Ok(DaemonForward::ExecutionError(message)),
+    }
 }
 
 fn send_fds_over_unix_socket(conn: &LocalSocketStream, fds: &[RawFd]) -> anyhow::Result<()> {
