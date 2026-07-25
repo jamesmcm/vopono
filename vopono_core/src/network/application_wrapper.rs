@@ -232,6 +232,12 @@ impl ApplicationWrapper {
                     // Give the child a stable private /etc view. Namespace-specific resolver
                     // files in the upper layer cannot be displaced when NetworkManager,
                     // Tailscale, or systemd-resolved atomically replaces the host resolv.conf.
+                    //
+                    // Tailscale MagicDNS and direct tailnet routes are intentionally unavailable
+                    // inside the VPN namespace. Users can currently expose a host-side proxy with
+                    // --allow-host-access and connect to it through vopono.host.
+                    // TODO: Reuse the existing host-side service-forwarding proxy infrastructure
+                    // to expose selected Tailscale services into the namespace automatically.
                     mount(
                         Some(overlay_source.as_c_str()),
                         etc_c.as_c_str(),

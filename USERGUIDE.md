@@ -192,6 +192,13 @@ The host IP address (as seen from inside the network namespace) is provided as t
 
 If `--allow-host-access` is set then the host machine IP (as seen from the network namespace) is also added to the hosts file as `vopono.host` so you can access services on the host machine from within the network namespace e.g. at `http://vopono.host:8080` etc.
 
+The namespace uses its VPN-specific resolver rather than the host resolver. If
+the host runs Tailscale, this means Tailscale MagicDNS names and direct tailnet
+addresses are not available inside the namespace. To reach a tailnet service,
+run a proxy for that service on the host and use `--allow-host-access` to reach
+the proxy through `vopono.host`. The proxy should listen only on the vopono host
+interface or otherwise be protected from unintended access.
+
 If provider port forwarding is enabled (e.g. `--port-forwarding` or `--custom-port-forwarding` with ProtonVPN or PIA) then the forwarded port is provided as `$VOPONO_FORWARDED_PORT`.
 
 ### Running commands before and after execution within the network namespace
