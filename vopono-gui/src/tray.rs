@@ -8,6 +8,8 @@ use tray_icon::{
 const MENU_SHOW: &str = "vopono-gui-show";
 const MENU_HIDE: &str = "vopono-gui-hide";
 const MENU_QUIT: &str = "vopono-gui-quit";
+#[cfg(not(test))]
+const MAX_GTK_EVENTS_PER_FRAME: usize = 32;
 
 pub enum TrayCommand {
     Show,
@@ -87,6 +89,20 @@ impl TrayManager {
     }
 
     pub fn pump_events(&self) {
+        pump_platform_events();
+    }
+
+    pub fn shutdown(&mut self) {
+        if let Some(tray) = &self.tray {
+            let _ = tray.set_visible(false);
+        }
+        pump_platform_events();
+
+        // Drop GTK menu objects and the AppIndicator while GTK is still being serviced.
+        // In particular, KDE's StatusNotifier bridge can stall or leave a stale taskbar
+        // entry when these are first dropped during eframe's later teardown.
+        self.status_item = None;
+        self.tray = None;
         pump_platform_events();
     }
 
@@ -178,7 +194,10 @@ fn ensure_platform_tray_ready() -> anyhow::Result<()> {
 #[cfg(not(test))]
 fn pump_platform_events() {
     if gtk::is_initialized_main_thread() {
-        while gtk::events_pending() {
+        for _ in 0..MAX_GTK_EVENTS_PER_FRAME {
+            if !gtk::events_pending() {
+                break;
+            }
             gtk::main_iteration_do(false);
         }
     }

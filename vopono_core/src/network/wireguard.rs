@@ -9,7 +9,7 @@ use log::{debug, error, info, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -97,6 +97,21 @@ impl Wireguard {
             ));
         }
 
+        // Resolve the peer with the host resolver before configuring WireGuard. A provider's
+        // tunnel DNS is not reachable until WireGuard is connected, so passing a hostname to
+        // `wg setconf` would create a DNS bootstrap dependency inside the namespace.
+        let peer_endpoint_ip = config
+            .peer
+            .endpoint
+            .resolve_ip()
+            .context("Failed to resolve Wireguard peer endpoint")?;
+        let peer_endpoint =
+            SocketAddr::new(peer_endpoint_ip, config.peer.endpoint.port()).to_string();
+        let endpoint_line = Regex::new(r"(?m)^Endpoint\s*=.*$")?;
+        config_string = endpoint_line
+            .replace_all(&config_string, format!("Endpoint = {peer_endpoint}"))
+            .to_string();
+
         // Valid keys for wireguard config (see wg(8):CONFIGURATION FILE FORMAT).
         // wg setconf does not accept wg-quick-only keys such as Address, DNS or MTU.
         let allow_keys = [
@@ -135,12 +150,6 @@ impl Wireguard {
                 .join("\n")
         )?;
         if firewall == Firewall::NfTables {
-            let peer_endpoint_ip = config
-                .peer
-                .endpoint
-                .resolve_ip()
-                .context("Failed to resolve Wireguard peer hostname for firewall rule")?;
-
             let peer_port = config.peer.endpoint.port().to_string();
             let peer_ip_str = peer_endpoint_ip.to_string();
             let ip_family = if peer_endpoint_ip.is_ipv4() {
@@ -319,11 +328,6 @@ impl Wireguard {
 
         let has_ipv4_default = has_default_allowed_ip(&config.peer.allowed_ips, true);
         let has_ipv6_default = has_default_allowed_ip(&config.peer.allowed_ips, false);
-        let peer_endpoint_ip = config
-            .peer
-            .endpoint
-            .resolve_ip()
-            .context("Failed to resolve Wireguard peer endpoint for routing")?;
         add_endpoint_bypass_route(
             namespace,
             peer_endpoint_ip,

@@ -42,6 +42,8 @@ impl VoponoGuiApp {
                 }
                 if ui.button("Exit").clicked() {
                     self.should_quit = true;
+                    self.tray.shutdown();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
         });

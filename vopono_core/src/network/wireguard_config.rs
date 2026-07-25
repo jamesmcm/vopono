@@ -204,12 +204,12 @@ impl WireguardEndpoint {
     }
     pub fn resolve_ip(&self) -> anyhow::Result<IpAddr> {
         match self {
-            WireguardEndpoint::HostnameWithPort(host, _) => {
-                let addr = host
+            WireguardEndpoint::HostnameWithPort(host, port) => {
+                let addr = (host.as_str(), *port)
                     .to_socket_addrs()
-                    .map_err(|_| anyhow!("Failed to resolve hostname"))?
+                    .with_context(|| format!("Failed to resolve Wireguard endpoint {host}"))?
                     .next()
-                    .ok_or_else(|| anyhow!("No address found for hostname"))?;
+                    .ok_or_else(|| anyhow!("No address found for Wireguard endpoint {host}"))?;
                 Ok(addr.ip())
             }
             WireguardEndpoint::IpWithPort(addr) => Ok(addr.ip()),
@@ -469,6 +469,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostname_endpoint_resolves_with_its_port() {
+        let endpoint = "localhost:51820".parse::<WireguardEndpoint>().unwrap();
+        assert!(endpoint.resolve_ip().unwrap().is_loopback());
+    }
     use std::str::FromStr;
 
     // The config from the prompt, with dummy keys and an IPv4 endpoint for simplicity.

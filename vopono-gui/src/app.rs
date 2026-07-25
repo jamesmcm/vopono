@@ -546,7 +546,12 @@ impl eframe::App for VoponoGuiApp {
             match command {
                 TrayCommand::Show => ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true)),
                 TrayCommand::Hide => ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false)),
-                TrayCommand::Quit => self.should_quit = true,
+                TrayCommand::Quit => {
+                    self.should_quit = true;
+                    self.tray.shutdown();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    return;
+                }
             }
         }
 
