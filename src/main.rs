@@ -127,6 +127,9 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<DaemonForward> {
     };
 
     debug!("Connected to daemon, forwarding command.");
+    let mut daemon_cmd = cmd.clone();
+    resolve_custom_path_for_daemon(&mut daemon_cmd, &std::env::current_dir()?);
+
     // Collect a small set of environment variables from the client session
     // that are relevant for GUI/desktop integration.
     let mut fwd_env: std::collections::HashMap<String, String> = Default::default();
@@ -153,7 +156,7 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<DaemonForward> {
     }
     let request = daemon::DaemonRequest::Execute {
         // Encode `ExecCommand` as JSON bytes carried inside the wincode daemon frame.
-        cmd: serde_json::to_vec(cmd)?,
+        cmd: serde_json::to_vec(&daemon_cmd)?,
         env: fwd_env,
     };
     let bytes = wincode::serialize(&request)?;
@@ -197,6 +200,14 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<DaemonForward> {
     }
 }
 
+fn resolve_custom_path_for_daemon(cmd: &mut ExecCommand, client_working_dir: &std::path::Path) {
+    if let Some(custom) = cmd.custom.as_mut()
+        && custom.is_relative()
+    {
+        *custom = client_working_dir.join(&*custom);
+    }
+}
+
 fn send_fds_over_unix_socket(conn: &LocalSocketStream, fds: &[RawFd]) -> anyhow::Result<()> {
     let LocalSocketStream::UdSocket(sock) = conn;
     let fd = sock.as_fd();
@@ -207,4 +218,27 @@ fn send_fds_over_unix_socket(conn: &LocalSocketStream, fds: &[RawFd]) -> anyhow:
     sendmsg::<()>(fd.as_raw_fd(), &iov, &[cmsg], MsgFlags::empty(), None)
         .map(|_| ())
         .map_err(|e| e.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn resolves_relative_custom_path_for_daemon() {
+        let app =
+            args::App::try_parse_from(["vopono", "exec", "--custom", "./foo.conf", "firefox"])
+                .unwrap();
+        let args::Command::Exec(mut command) = app.cmd.unwrap() else {
+            panic!("expected exec command");
+        };
+
+        resolve_custom_path_for_daemon(&mut command, Path::new("/home/example"));
+
+        assert_eq!(
+            command.custom.as_deref(),
+            Some(Path::new("/home/example/./foo.conf"))
+        );
+    }
 }
