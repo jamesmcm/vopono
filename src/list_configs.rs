@@ -25,6 +25,7 @@ pub fn print_configs(cmd: ServersCommand) -> anyhow::Result<()> {
         Protocol::Warp => bail!("Config listing not implemented for Cloudflare Warp"),
         Protocol::OpenConnect => bail!("Config listing not implemented for OpenConnect"),
         Protocol::OpenFortiVpn => bail!("Config listing not implemented for OpenFortiVPN"),
+        Protocol::Ssh => bail!("Config listing not implemented for SSH"),
         Protocol::None => bail!("Config listing not implemented for None Protocol"),
     }?;
     if !cdir.exists() || cdir.read_dir()?.next().is_none() {

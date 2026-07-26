@@ -204,12 +204,12 @@ impl WireguardEndpoint {
     }
     pub fn resolve_ip(&self) -> anyhow::Result<IpAddr> {
         match self {
-            WireguardEndpoint::HostnameWithPort(host, _) => {
-                let addr = host
+            WireguardEndpoint::HostnameWithPort(host, port) => {
+                let addr = (host.as_str(), *port)
                     .to_socket_addrs()
-                    .map_err(|_| anyhow!("Failed to resolve hostname"))?
+                    .with_context(|| format!("Failed to resolve Wireguard endpoint {host}"))?
                     .next()
-                    .ok_or_else(|| anyhow!("No address found for hostname"))?;
+                    .ok_or_else(|| anyhow!("No address found for Wireguard endpoint {host}"))?;
                 Ok(addr.ip())
             }
             WireguardEndpoint::IpWithPort(addr) => Ok(addr.ip()),
@@ -322,6 +322,12 @@ impl FromStr for WireguardConfig {
                                 dns_servers.extend(split_list_value(value).map(ToString::to_string))
                             }
                             "MTU" => mtu = Some(value.to_string()),
+                            "PreUp" | "PostUp" | "PreDown" | "PostDown" => warn!(
+                                "Ignoring wg-quick script option {key}; vopono manages namespace setup and does not execute config scripts"
+                            ),
+                            "Table" | "SaveConfig" => warn!(
+                                "Ignoring wg-quick option {key}; vopono derives namespace routes from AllowedIPs"
+                            ),
                             _ => debug!("Unknown key in [Interface] section: {key}"),
                         }
                     }
@@ -351,6 +357,11 @@ impl FromStr for WireguardConfig {
                     });
                 }
                 "Peer" => {
+                    if peer.is_some() {
+                        return Err(anyhow!(
+                            "Multiple [Peer] sections are not currently supported; refusing to apply incomplete routing rules"
+                        ));
+                    }
                     let mut public_key = None;
                     let mut allowed_ips = Vec::new();
                     let mut endpoint = None;
@@ -458,6 +469,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hostname_endpoint_resolves_with_its_port() {
+        let endpoint = "localhost:51820".parse::<WireguardEndpoint>().unwrap();
+        assert!(endpoint.resolve_ip().unwrap().is_loopback());
+    }
     use std::str::FromStr;
 
     // The config from the prompt, with dummy keys and an IPv4 endpoint for simplicity.
@@ -639,5 +656,26 @@ AllowedIPs =
 
         let config = WireguardConfig::from_str(config).unwrap();
         assert!(config.peer.allowed_ips.is_empty());
+    }
+
+    #[test]
+    fn rejects_multiple_peers_instead_of_silently_misrouting() {
+        let config = r#"
+[Interface]
+PrivateKey = private
+Address = 10.0.0.2/32
+
+[Peer]
+PublicKey = first
+AllowedIPs = 10.0.0.0/24
+Endpoint = 192.0.2.1:51820
+
+[Peer]
+PublicKey = second
+AllowedIPs = 10.1.0.0/24
+Endpoint = 192.0.2.2:51820
+"#;
+
+        assert!(WireguardConfig::from_str(config).is_err());
     }
 }

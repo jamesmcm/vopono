@@ -26,7 +26,10 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, RawFd};
 use std::os::fd::{BorrowedFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::thread;
 
 // Do not change user's terminal modes; rely on PTY + signal/control forwarding
@@ -45,6 +48,12 @@ pub enum DaemonRequest {
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug, Clone)]
 pub enum DaemonControl {
     Signal(i32),
+}
+
+#[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug)]
+pub enum DaemonResponse {
+    Exit(i32),
+    Error(String),
 }
 
 // Note: Output is bridged via passed file descriptors; no streaming over the socket.
@@ -85,8 +94,16 @@ pub fn start() -> anyhow::Result<()> {
 
     for conn in listener.incoming().filter_map(handle_accept_error) {
         thread::spawn(move || {
+            let mut error_conn = conn.try_clone().ok();
             if let Err(e) = handle_client(conn) {
                 error!("Error handling client: {}", e);
+                if let Some(conn) = error_conn.as_mut() {
+                    let response = DaemonResponse::Error(format!("{e:#}"));
+                    if let Ok(bytes) = wincode::serialize(&response) {
+                        let _ = conn.write_all(&(bytes.len() as u32).to_be_bytes());
+                        let _ = conn.write_all(&bytes);
+                    }
+                }
             }
         });
     }
@@ -288,15 +305,21 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                     }
                 });
 
-                let (tx_done, _rx_done) = mpsc::channel::<()>();
                 // stdin copier: client stdin -> pty master
-                let tx_done_stdin = tx_done.clone();
                 let mut stdin_reader = client_stdin;
                 let mut pty_writer = pty_master_file_w;
                 let child_pgid_for_stdin = child_pgid; // Pid is Copy; used for optional SIGHUP on EOF
-                thread::spawn(move || {
+                let child_done = Arc::new(AtomicBool::new(false));
+                let child_done_for_stdin = Arc::clone(&child_done);
+                let stdin_copier = thread::spawn(move || {
                     let mut buf = [0u8; 4096];
-                    while let Ok(n) = stdin_reader.read(&mut buf) {
+                    while !child_done_for_stdin.load(Ordering::Acquire) {
+                        if !fd_readable(stdin_reader.as_raw_fd(), 50) {
+                            continue;
+                        }
+                        let Ok(n) = stdin_reader.read(&mut buf) else {
+                            break;
+                        };
                         if n == 0 {
                             // Client reached EOF (Ctrl-D in cooked mode or client closed input).
                             // Inject EOT into the child's TTY so interactive shells exit cleanly.
@@ -313,11 +336,9 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                             break;
                         }
                     }
-                    let _ = tx_done_stdin.send(());
                 });
 
                 // output copier: pty master -> client stdout (stderr merges on TTY)
-                let tx_done_out = tx_done.clone();
                 let mut pty_reader = pty_master_file_r;
                 let mut stdout_writer = client_stdout;
                 thread::spawn(move || {
@@ -331,10 +352,9 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                         }
                         let _ = stdout_writer.flush();
                     }
-                    let _ = tx_done_out.send(());
                 });
 
-                // Wait for child to exit; do not block on copier threads
+                // Wait for child to exit.
                 loop {
                     match child.try_wait() {
                         Ok(Some(status)) => {
@@ -348,8 +368,11 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                         }
                     }
                 }
-                // Close fds so copier threads unwind promptly
-                // Copiers own their fds; nothing more to drop here
+                // Stop and join the terminal reader before replying to the client. Leaving this
+                // thread alive would let it steal terminal-query responses from the caller's
+                // shell after the command has completed.
+                child_done.store(true, Ordering::Release);
+                let _ = stdin_copier.join();
             }
 
             let status = match exit_status {
@@ -364,9 +387,8 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             // Ensure port forwarder is dropped before namespace teardown
             drop(port_forward_keepalive);
 
-            // Wire format currently returns only the exit code as a bare i32.
             let response_code = status.code().unwrap_or(1);
-            let bytes = wincode::serialize(&response_code)?;
+            let bytes = wincode::serialize(&DaemonResponse::Exit(response_code))?;
             conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
             conn.write_all(&bytes)?;
         }
@@ -378,6 +400,16 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
     vopono_core::util::set_config_dir_override(None);
     vopono_core::util::set_config_owner_override(None);
     Ok(())
+}
+
+fn fd_readable(fd: RawFd, timeout_ms: i32) -> bool {
+    let mut poll_fd = nix::libc::pollfd {
+        fd,
+        events: nix::libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll_fd points to one initialized pollfd for the duration of this call.
+    unsafe { nix::libc::poll(&mut poll_fd, 1, timeout_ms) > 0 }
 }
 
 fn recv_fds_over_unix_socket(

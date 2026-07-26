@@ -21,9 +21,21 @@ pub fn launch_custom_config(
     app: &ApplicationProfile,
     launch: &LaunchConfig,
 ) -> anyhow::Result<LaunchResult> {
+    if !config.path.is_file() {
+        return Err(anyhow!(
+            "Custom VPN config is missing or is not a file: {}",
+            config.path.display()
+        ));
+    }
+
     let vopono = find_vopono_binary()?;
     let mut command = Command::new(&vopono);
-    command.arg("exec").arg("--custom").arg(&config.path);
+    command
+        .arg("exec")
+        .arg("--custom")
+        .arg(&config.path)
+        .arg("--protocol")
+        .arg(&config.protocol);
     add_launch_args(&mut command, launch)?;
 
     if let Some(working_directory) = &app.working_directory {

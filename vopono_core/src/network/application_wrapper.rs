@@ -22,6 +22,7 @@ use crate::util::{env_vars::set_env_vars, get_all_running_process_names, parse_c
 pub struct ApplicationWrapper {
     pub handle: Child,
     pub port_forwarding: Option<Box<dyn Forwarder>>,
+    _etc_overlay: Option<tempfile::TempDir>,
 }
 
 impl ApplicationWrapper {
@@ -63,7 +64,7 @@ impl ApplicationWrapper {
 
         let app_vec_ptrs: Vec<&str> = app_vec.iter().map(|s| s.as_str()).collect();
 
-        let handle = Self::run_with_env_in_netns(
+        let (handle, etc_overlay) = Self::run_with_env_in_netns(
             netns,
             app_vec_ptrs.as_slice(),
             user,
@@ -80,6 +81,7 @@ impl ApplicationWrapper {
         Ok(Self {
             handle,
             port_forwarding,
+            _etc_overlay: etc_overlay,
         })
     }
 
@@ -102,15 +104,15 @@ impl ApplicationWrapper {
         set_dir: Option<PathBuf>,
         forwarder: Option<&dyn Forwarder>,
         host_env_vars: &std::collections::HashMap<String, String>,
-    ) -> anyhow::Result<Child> {
-        let is_root = nix::unistd::getuid().is_root();
+    ) -> anyhow::Result<(Child, Option<tempfile::TempDir>)> {
         let (prog, args) = command.split_first().context("Command cannot be empty")?;
         let mut handle: Command;
 
-        // Use direct setns only for the daemon path. If stdio_fds provided, we must use setns.
-        // Otherwise, fall back to ip netns exec (even when root) for non-daemon usage.
-        let use_direct_setns =
-            is_root && (stdio_fds.is_some() || (capture_output && capture_input));
+        // The daemon needs direct setns so it can attach the client's stdio and PTY without
+        // another process layer.
+        let use_direct_setns = nix::unistd::getuid().is_root()
+            && (stdio_fds.is_some() || (capture_output && capture_input));
+        let mut etc_overlay = None;
 
         if use_direct_setns {
             handle = Command::new(prog);
@@ -174,15 +176,37 @@ impl ApplicationWrapper {
             let netns_path_cstr = CString::new(format!("/var/run/netns/{}", netns.name))?;
             let want_controlling_tty = take_controlling_tty;
             let root_c = CString::new("/").unwrap();
-            // Prepare bind-mount sources for /etc overlay
             let etc_ns_dir = format!("/etc/netns/{}", netns.name);
-            let resolv_src = CString::new(format!("{}/resolv.conf", etc_ns_dir)).ok();
-            let hosts_src = CString::new(format!("{}/hosts", etc_ns_dir)).ok();
-            let nsswitch_src = CString::new(format!("{}/nsswitch.conf", etc_ns_dir)).ok();
-            let resolv_dst = CString::new("/etc/resolv.conf").unwrap();
-            let hosts_dst = CString::new("/etc/hosts").unwrap();
-            let nsswitch_dst = CString::new("/etc/nsswitch.conf").unwrap();
+            let overlay = tempfile::Builder::new()
+                .prefix("vopono-etc-")
+                .tempdir()
+                .context("Failed to create private /etc overlay directory")?;
+            let upper_dir = overlay.path().join("upper");
+            let work_dir = overlay.path().join("work");
+            std::fs::create_dir(&upper_dir)?;
+            std::fs::create_dir(&work_dir)?;
+            for name in ["resolv.conf", "hosts", "nsswitch.conf"] {
+                let source = PathBuf::from(&etc_ns_dir).join(name);
+                if source.is_file() {
+                    std::fs::copy(&source, upper_dir.join(name)).with_context(|| {
+                        format!(
+                            "Failed to stage {} for namespace {}",
+                            source.display(),
+                            netns.name
+                        )
+                    })?;
+                }
+            }
+            let overlay_options = CString::new(format!(
+                "lowerdir=/etc,upperdir={},workdir={}",
+                upper_dir.display(),
+                work_dir.display()
+            ))?;
+            let overlay_source = CString::new("vopono-etc").unwrap();
+            let overlay_type = CString::new("overlay").unwrap();
+            let etc_c = CString::new("/etc").unwrap();
             let ping_path = CString::new("/proc/sys/net/ipv4/ping_group_range").unwrap();
+            etc_overlay = Some(overlay);
 
             unsafe {
                 handle.pre_exec(move || {
@@ -205,28 +229,22 @@ impl ApplicationWrapper {
                         None,
                     )?;
 
-                    // Helper to bind a file if the source exists
-                    let bind_if_exists = |src_opt: &Option<CString>,
-                                          dst: &CString|
-                     -> Result<(), std::io::Error> {
-                        if let Some(src) = src_opt
-                            && libc::access(src.as_ptr(), libc::R_OK) == 0
-                        {
-                            mount::<std::ffi::CStr, std::ffi::CStr, std::ffi::CStr, std::ffi::CStr>(
-                                Some(src.as_c_str()),
-                                dst.as_c_str(),
-                                None,
-                                MsFlags::MS_BIND,
-                                None,
-                            )?;
-                        }
-                        Ok(())
-                    };
-
-                    // Overlay resolv.conf, hosts, nsswitch.conf for proper name resolution within netns
-                    bind_if_exists(&resolv_src, &resolv_dst)?;
-                    bind_if_exists(&hosts_src, &hosts_dst)?;
-                    bind_if_exists(&nsswitch_src, &nsswitch_dst)?;
+                    // Give the child a stable private /etc view. Namespace-specific resolver
+                    // files in the upper layer cannot be displaced when NetworkManager,
+                    // Tailscale, or systemd-resolved atomically replaces the host resolv.conf.
+                    //
+                    // Tailscale MagicDNS and direct tailnet routes are intentionally unavailable
+                    // inside the VPN namespace. Users can currently expose a host-side proxy with
+                    // --allow-host-access and connect to it through vopono.host.
+                    // TODO: Reuse the existing host-side service-forwarding proxy infrastructure
+                    // to expose selected Tailscale services into the namespace automatically.
+                    mount(
+                        Some(overlay_source.as_c_str()),
+                        etc_c.as_c_str(),
+                        Some(overlay_type.as_c_str()),
+                        MsFlags::empty(),
+                        Some(overlay_options.as_c_str()),
+                    )?;
 
                     // Enable unprivileged ping inside the netns by widening ping_group_range
                     // Write "0 2147483647" to /proc/sys/net/ipv4/ping_group_range via raw syscalls
@@ -271,7 +289,11 @@ impl ApplicationWrapper {
             handle = Command::new("ip");
             handle.args(["netns", "exec", netns.name.as_str()]);
 
-            let mut sudo_args: Vec<String> = vec!["sudo".to_string(), "--preserve-env".to_string()];
+            let mut sudo_args: Vec<String> = vec![
+                "sudo".to_string(),
+                "--preserve-env".to_string(),
+                "--set-home".to_string(),
+            ];
             if let Some(user_str) = &user {
                 sudo_args.push("--user".to_string());
                 sudo_args.push(user_str.clone());
@@ -336,6 +358,6 @@ impl ApplicationWrapper {
         }
 
         let child = handle.spawn()?;
-        Ok(child)
+        Ok((child, etc_overlay))
     }
 }

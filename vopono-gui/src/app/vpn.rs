@@ -49,6 +49,21 @@ impl VpnChoice {
             Self::Custom { config, .. } => config.path.display().to_string(),
         }
     }
+
+    pub(super) fn is_missing(&self) -> bool {
+        !match self {
+            Self::Synced(config) => &config.path,
+            Self::Custom { config, .. } => &config.path,
+        }
+        .is_file()
+    }
+
+    pub(super) fn custom_index(&self) -> Option<usize> {
+        match self {
+            Self::Custom { index, .. } => Some(*index),
+            Self::Synced(_) => None,
+        }
+    }
 }
 
 pub(super) fn launch_vpn_choice(
@@ -216,6 +231,22 @@ mod tests {
         let choices = vpn_choices_from_configs(&[custom], &[synced]);
         assert!(matches!(choices[0], VpnChoice::Custom { .. }));
         assert!(matches!(choices[1], VpnChoice::Synced(_)));
+    }
+
+    #[test]
+    fn custom_choice_reports_missing_file() {
+        let choice = VpnChoice::Custom {
+            index: 0,
+            config: CustomVpnConfig {
+                name: "Missing".to_string(),
+                path: PathBuf::from("/path/that/does/not/exist/vopono.conf"),
+                protocol: "wireguard".to_string(),
+                usage_count: 0,
+            },
+        };
+
+        assert!(choice.is_missing());
+        assert_eq!(choice.custom_index(), Some(0));
     }
 
     #[test]

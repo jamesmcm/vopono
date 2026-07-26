@@ -281,6 +281,18 @@ pub struct ExecCommand {
     /// Trojan config file (will override other settings)
     #[clap(long = "trojan-config")]
     pub trojan_config: Option<PathBuf>,
+
+    /// Local SOCKS5 port for SSH dynamic forwarding
+    #[clap(long = "ssh-proxy-port")]
+    pub ssh_proxy_port: Option<u16>,
+
+    /// Username for the remote SSH server
+    #[clap(long = "ssh-user")]
+    pub ssh_user: Option<String>,
+
+    /// Port of the remote SSH server
+    #[clap(long = "ssh-port")]
+    pub ssh_port: Option<u16>,
 }
 
 #[derive(Parser, Debug)]
@@ -319,4 +331,40 @@ fn parse_host_or_ip(arg: &str) -> anyhow::Result<IpAddr> {
 /// Parse a list of hosts/IPs separated by comma
 fn parse_hosts_or_ips(arg: &str) -> anyhow::Result<IpAddr> {
     parse_host_or_ip(arg.trim()).map_err(|e| anyhow::anyhow!("Failed to parse host or IP: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{App, Command};
+    use clap::Parser;
+    use vopono_core::config::vpn::Protocol;
+
+    #[test]
+    fn parses_ssh_dynamic_proxy_options() {
+        let app = App::try_parse_from([
+            "vopono",
+            "exec",
+            "--protocol",
+            "ssh",
+            "--server",
+            "work-proxy",
+            "--ssh-proxy-port",
+            "9080",
+            "--ssh-user",
+            "gopostal",
+            "--ssh-port",
+            "2222",
+            "curl example.com",
+        ])
+        .unwrap();
+
+        let Command::Exec(command) = app.cmd.unwrap() else {
+            panic!("expected exec command");
+        };
+        assert_eq!(command.protocol.unwrap().to_variant(), Protocol::Ssh);
+        assert_eq!(command.server.as_deref(), Some("work-proxy"));
+        assert_eq!(command.ssh_proxy_port, Some(9080));
+        assert_eq!(command.ssh_user.as_deref(), Some("gopostal"));
+        assert_eq!(command.ssh_port, Some(2222));
+    }
 }

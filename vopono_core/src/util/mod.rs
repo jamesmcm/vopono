@@ -523,24 +523,43 @@ pub fn get_config_file_protocol(config_file: &Path) -> anyhow::Result<Protocol> 
         )
     })?;
 
+    detect_config_protocol(&content).with_context(|| {
+        format!(
+            "Could not detect VPN protocol for {}",
+            config_file.display()
+        )
+    })
+}
+
+fn detect_config_protocol(content: &str) -> anyhow::Result<Protocol> {
     if content.contains("[Interface]") {
         if content.contains("Jc =")
-            | content.contains("Jmin =")
-            | content.contains("Jmax =")
-            | content.contains("S1 =")
-            | content.contains("S2 =")
-            | content.contains("H1 =")
-            | content.contains("H2 =")
-            | content.contains("H3 =")
-            | content.contains("H4 =")
+            || content.contains("Jmin =")
+            || content.contains("Jmax =")
+            || content.contains("S1 =")
+            || content.contains("S2 =")
+            || content.contains("H1 =")
+            || content.contains("H2 =")
+            || content.contains("H3 =")
+            || content.contains("H4 =")
         {
             return Ok(Protocol::AmneziaWG);
         }
 
         Ok(Protocol::Wireguard)
-    } else {
-        // TODO: Don't always assume OpenVPN
+    } else if content.lines().any(|line| {
+        let line = line.trim_start();
+        line == "client"
+            || line.starts_with("remote ")
+            || line.starts_with("dev ")
+            || line.starts_with("proto ")
+            || line.starts_with("<ca>")
+    }) {
         Ok(Protocol::OpenVpn)
+    } else {
+        Err(anyhow!(
+            "Config is neither a Wireguard/AmneziaWG config nor a recognizable OpenVPN config"
+        ))
     }
 }
 
@@ -573,4 +592,30 @@ pub fn hostname_to_ip(hostname: &str) -> anyhow::Result<Vec<IpAddr>> {
     let ip_addrs = socket_addrs.map(|addr| addr.ip()).collect();
 
     Ok(ip_addrs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_supported_custom_config_protocols() {
+        assert_eq!(
+            detect_config_protocol("[Interface]\nPrivateKey = secret").unwrap(),
+            Protocol::Wireguard
+        );
+        assert_eq!(
+            detect_config_protocol("[Interface]\nJc = 4").unwrap(),
+            Protocol::AmneziaWG
+        );
+        assert_eq!(
+            detect_config_protocol("client\nremote vpn.example.com 1194").unwrap(),
+            Protocol::OpenVpn
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_custom_config_format() {
+        assert!(detect_config_protocol("this is not a VPN config").is_err());
+    }
 }

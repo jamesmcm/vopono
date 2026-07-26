@@ -70,8 +70,11 @@ fn main() -> anyhow::Result<()> {
             // If we're not root, try to forward the command to the running daemon.
             if !nix::unistd::getuid().is_root() {
                 match forward_to_daemon(&cmd) {
-                    Ok(exit_code) => {
+                    Ok(DaemonForward::Exit(exit_code)) => {
                         std::process::exit(exit_code);
+                    }
+                    Ok(DaemonForward::ExecutionError(message)) => {
+                        return Err(anyhow!("Daemon execution failed: {message}"));
                     }
                     Err(e) => {
                         info!("Falling back to sudo (daemon forward failed): {e}");
@@ -111,7 +114,12 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<i32> {
+enum DaemonForward {
+    Exit(i32),
+    ExecutionError(String),
+}
+
+fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<DaemonForward> {
     let name = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?;
     let mut conn = match LocalSocketStream::connect(name) {
         Ok(c) => c,
@@ -119,6 +127,9 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<i32> {
     };
 
     debug!("Connected to daemon, forwarding command.");
+    let mut daemon_cmd = cmd.clone();
+    resolve_custom_path_for_daemon(&mut daemon_cmd, &std::env::current_dir()?);
+
     // Collect a small set of environment variables from the client session
     // that are relevant for GUI/desktop integration.
     let mut fwd_env: std::collections::HashMap<String, String> = Default::default();
@@ -145,7 +156,7 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<i32> {
     }
     let request = daemon::DaemonRequest::Execute {
         // Encode `ExecCommand` as JSON bytes carried inside the wincode daemon frame.
-        cmd: serde_json::to_vec(cmd)?,
+        cmd: serde_json::to_vec(&daemon_cmd)?,
         env: fwd_env,
     };
     let bytes = wincode::serialize(&request)?;
@@ -183,9 +194,18 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<i32> {
     let mut buffer = vec![0; len];
     conn.read_exact(&mut buffer)?;
 
-    // Response is currently a single bare i32 exit code from the daemon.
-    let response: i32 = wincode::deserialize(&buffer)?;
-    Ok(response)
+    match wincode::deserialize::<daemon::DaemonResponse>(&buffer)? {
+        daemon::DaemonResponse::Exit(code) => Ok(DaemonForward::Exit(code)),
+        daemon::DaemonResponse::Error(message) => Ok(DaemonForward::ExecutionError(message)),
+    }
+}
+
+fn resolve_custom_path_for_daemon(cmd: &mut ExecCommand, client_working_dir: &std::path::Path) {
+    if let Some(custom) = cmd.custom.as_mut()
+        && custom.is_relative()
+    {
+        *custom = client_working_dir.join(&*custom);
+    }
 }
 
 fn send_fds_over_unix_socket(conn: &LocalSocketStream, fds: &[RawFd]) -> anyhow::Result<()> {
@@ -198,4 +218,27 @@ fn send_fds_over_unix_socket(conn: &LocalSocketStream, fds: &[RawFd]) -> anyhow:
     sendmsg::<()>(fd.as_raw_fd(), &iov, &[cmsg], MsgFlags::empty(), None)
         .map(|_| ())
         .map_err(|e| e.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn resolves_relative_custom_path_for_daemon() {
+        let app =
+            args::App::try_parse_from(["vopono", "exec", "--custom", "./foo.conf", "firefox"])
+                .unwrap();
+        let args::Command::Exec(mut command) = app.cmd.unwrap() else {
+            panic!("expected exec command");
+        };
+
+        resolve_custom_path_for_daemon(&mut command, Path::new("/home/example"));
+
+        assert_eq!(
+            command.custom.as_deref(),
+            Some(Path::new("/home/example/./foo.conf"))
+        );
+    }
 }

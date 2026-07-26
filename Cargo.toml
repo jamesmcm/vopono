@@ -1,7 +1,7 @@
 [package]
 name = "vopono"
 description = "Launch applications via VPN tunnels using temporary network namespaces"
-version = "0.10.18"
+version = "0.10.19"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2024"
 license = "GPL-3.0-or-later"
@@ -39,19 +39,25 @@ strum_macros = "0.28"
 shellexpand = { version = "3", features = ["full"] }
 shell-words = "1"
 interprocess = "2"
-wincode = { version = "0.5", features = ["derive", "std"] }
+wincode = { version = "0.6", features = ["derive", "std"] }
 
 [package.metadata.deb]
 maintainer = "James McMurray <jamesmcm03@gmail.com>"
-recommends = "wireguard-tools, openvpn"
+recommends = "wireguard-tools, openvpn, openssh-client, redsocks"
+maintainer-scripts = "packaging/debian"
+assets = [
+    ["target/release/vopono", "usr/bin/", "755"],
+    ["vopono.service", "usr/lib/systemd/system/vopono.service", "644"],
+]
 # Not supported in Github Actions image with cargo-deb yet
 # suggests = "shadowsocks-libev, openfortivpn"
 
 [package.metadata.generate-rpm]
 release = "1"
-require-sh = false
+post_install_script = "packaging/rpm/post-install.sh"
 assets = [
     { source = "target/release/vopono", dest = "/usr/bin/vopono", mode = "0755" },
+    { source = "vopono.service", dest = "/usr/lib/systemd/system/vopono.service", mode = "0644" },
 ]
 
 [package.metadata.generate-rpm.variants.fedora]

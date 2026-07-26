@@ -14,7 +14,7 @@ impl VoponoGuiApp {
     pub(super) fn main_ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        egui::Panel::top("top_bar").show_inside(ui, |ui| {
+        egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if let Some(texture) = &self.logo_texture {
                     ui.add(
@@ -42,6 +42,8 @@ impl VoponoGuiApp {
                 }
                 if ui.button("Exit").clicked() {
                     self.should_quit = true;
+                    self.tray.shutdown();
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
         });
@@ -49,7 +51,7 @@ impl VoponoGuiApp {
         egui::Panel::left("navigation")
             .resizable(false)
             .default_size(180.0)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.heading("Navigation");
                 });
@@ -63,7 +65,7 @@ impl VoponoGuiApp {
                 }
             });
 
-        egui::CentralPanel::default_margins().show_inside(ui, |ui| {
+        egui::CentralPanel::default_margins().show(ui, |ui| {
             if let Some(message) = self.message.take() {
                 ui.colored_label(egui::Color32::from_rgb(31, 153, 88), message);
             }
