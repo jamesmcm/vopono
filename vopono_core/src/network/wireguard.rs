@@ -97,14 +97,43 @@ impl Wireguard {
             ));
         }
 
+        let has_ipv4_default = has_default_allowed_ip(&config.peer.allowed_ips, true);
+        let has_ipv6_default = has_default_allowed_ip(&config.peer.allowed_ips, false);
+        let has_ipv6_address = config
+            .interface
+            .address
+            .iter()
+            .any(|address| matches!(address, IpNet::V6(_)));
+        if has_ipv6_default && !has_ipv6_address {
+            warn!(
+                "Wireguard config routes IPv6 but has no IPv6 interface address; IPv6 traffic will be blocked by the killswitch"
+            );
+        }
+
         // Resolve the peer with the host resolver before configuring WireGuard. A provider's
         // tunnel DNS is not reachable until WireGuard is connected, so passing a hostname to
         // `wg setconf` would create a DNS bootstrap dependency inside the namespace.
-        let peer_endpoint_ip = config
+        let endpoint_addresses = config
             .peer
             .endpoint
-            .resolve_ip()
+            .resolve_ips()
             .context("Failed to resolve Wireguard peer endpoint")?;
+        let peer_endpoint_ip =
+            select_endpoint_ip(&endpoint_addresses, disable_ipv6).with_context(|| {
+                format!(
+                    "No usable Wireguard endpoint found for {}{}",
+                    config.peer.endpoint,
+                    if disable_ipv6 {
+                        " while IPv6 is disabled"
+                    } else {
+                        ""
+                    }
+                )
+            })?;
+        debug!(
+            "Resolved Wireguard peer endpoint {} to {} (candidates: {:?})",
+            config.peer.endpoint, peer_endpoint_ip, endpoint_addresses
+        );
         let peer_endpoint =
             SocketAddr::new(peer_endpoint_ip, config.peer.endpoint.port()).to_string();
         let endpoint_line = Regex::new(r"(?m)^Endpoint\s*=.*$")?;
@@ -319,15 +348,21 @@ impl Wireguard {
                 vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]
             });
         // TODO: DNS suffixes?
-        namespace.dns_config(&dns, &[], hosts_entries, allow_host_access)?;
+        let dns_egress_interface =
+            (use_killswitch && (has_ipv4_default || has_ipv6_default)).then_some(if_name.as_str());
+        namespace.dns_config_with_interface(
+            &dns,
+            &[],
+            hosts_entries,
+            allow_host_access,
+            dns_egress_interface,
+        )?;
         let fwmark = WIREGUARD_FWMARK;
         NetworkNamespace::exec(
             &namespace.name,
             &[&executable_wg, "set", &if_name, "fwmark", fwmark],
         )?;
 
-        let has_ipv4_default = has_default_allowed_ip(&config.peer.allowed_ips, true);
-        let has_ipv6_default = has_default_allowed_ip(&config.peer.allowed_ips, false);
         add_endpoint_bypass_route(
             namespace,
             peer_endpoint_ip,
@@ -344,7 +379,12 @@ impl Wireguard {
             has_ipv4_default,
         )?;
         if has_ipv4_default {
-            sudo_command(&["sysctl", "-q", "net.ipv4.conf.all.src_valid_mark=1"])?;
+            // This sysctl belongs to the namespace containing the fwmark policy rules. Setting
+            // it only in the host namespace does not configure Wireguard's routing namespace.
+            NetworkNamespace::exec(
+                &namespace.name,
+                &["sysctl", "-q", "net.ipv4.conf.all.src_valid_mark=1"],
+            )?;
         }
 
         if disable_ipv6 {
@@ -546,6 +586,26 @@ fn has_default_allowed_ip(allowed_ips: &[IpNet], ipv4: bool) -> bool {
         .any(|network| network.prefix_len() == 0 && network.addr().is_ipv4() == ipv4)
 }
 
+fn select_endpoint_ip(addresses: &[IpAddr], disable_ipv6: bool) -> anyhow::Result<IpAddr> {
+    let ipv4 = addresses.iter().copied().find(IpAddr::is_ipv4);
+
+    if let Some(ipv4) = ipv4 {
+        // The outer Wireguard transport can carry IPv6 traffic, so prefer IPv4 whenever it is
+        // available. This avoids making a dual-stack endpoint depend on host IPv6 forwarding
+        // and also supports IPv4-only Wireguard servers whose hostnames have an AAAA record.
+        return Ok(ipv4);
+    }
+
+    if disable_ipv6 {
+        return Err(anyhow!("Only IPv6 Wireguard endpoints were resolved"));
+    }
+
+    addresses
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow!("No Wireguard endpoint addresses were resolved"))
+}
+
 fn endpoint_needs_bypass_route(
     endpoint: IpAddr,
     allowed_ips: &[IpNet],
@@ -723,14 +783,61 @@ pub fn killswitch(
                     "REJECT",
                 ],
             )
-            .context("Executing ip6tables")?;
+            .context("Executing iptables killswitch")?;
 
             if !disable_ipv6 {
+                let veth_ifname = netns
+                    .veth_pair
+                    .as_ref()
+                    .context("Veth pair not set while configuring IPv6 killswitch")?
+                    .source
+                    .as_str();
+
+                // ICMPv6 sent through Wireguard is encrypted by the interface and is safe to
+                // allow. On the veth, only neighbour discovery is needed to reach the host
+                // gateway. In particular, do not accept all ICMPv6 here: that would let tools
+                // such as ping6 bypass the full-tunnel killswitch.
                 NetworkNamespace::exec(
                     &netns.name,
-                    &["ip6tables", "-A", "OUTPUT", "-p", "icmpv6", "-j", "ACCEPT"],
+                    &[
+                        "ip6tables",
+                        "-A",
+                        "OUTPUT",
+                        "-o",
+                        ifname,
+                        "-p",
+                        "icmpv6",
+                        "-j",
+                        "ACCEPT",
+                    ],
                 )
-                .context("Allowing ICMPv6 for NDP")?;
+                .context("Allowing ICMPv6 through Wireguard")?;
+
+                for icmpv6_type in ["135", "136"] {
+                    NetworkNamespace::exec(
+                        &netns.name,
+                        &[
+                            "ip6tables",
+                            "-A",
+                            "OUTPUT",
+                            "-o",
+                            veth_ifname,
+                            "-p",
+                            "icmpv6",
+                            "-m",
+                            "icmp6",
+                            "--icmpv6-type",
+                            icmpv6_type,
+                            "-j",
+                            "ACCEPT",
+                        ],
+                    )
+                    .with_context(|| {
+                        format!(
+                            "Allowing IPv6 neighbour discovery type {icmpv6_type} on {veth_ifname}"
+                        )
+                    })?;
+                }
 
                 NetworkNamespace::exec(
                     &netns.name,
@@ -759,6 +866,13 @@ pub fn killswitch(
         }
         Firewall::NfTables => {
             if !disable_ipv6 {
+                let veth_ifname = netns
+                    .veth_pair
+                    .as_ref()
+                    .context("Veth pair not set while configuring IPv6 killswitch")?
+                    .source
+                    .as_str();
+
                 NetworkNamespace::exec(
                     &netns.name,
                     &[
@@ -768,13 +882,40 @@ pub fn killswitch(
                         "inet",
                         &netns.name,
                         "output",
+                        "oifname",
+                        ifname,
                         "meta",
                         "l4proto",
                         "icmpv6",
                         "accept",
                     ],
                 )
-                .context("Allowing ICMPv6 for NDP in nftables")?;
+                .context("Allowing ICMPv6 through Wireguard in nftables")?;
+
+                for icmpv6_type in ["nd-neighbor-solicit", "nd-neighbor-advert"] {
+                    NetworkNamespace::exec(
+                        &netns.name,
+                        &[
+                            "nft",
+                            "add",
+                            "rule",
+                            "inet",
+                            &netns.name,
+                            "output",
+                            "oifname",
+                            veth_ifname,
+                            "icmpv6",
+                            "type",
+                            icmpv6_type,
+                            "accept",
+                        ],
+                    )
+                    .with_context(|| {
+                        format!(
+                            "Allowing IPv6 neighbour discovery type {icmpv6_type} on {veth_ifname} in nftables"
+                        )
+                    })?;
+                }
             }
 
             NetworkNamespace::exec(
@@ -892,5 +1033,35 @@ mod tests {
             &allowed_ips,
             true
         ));
+    }
+
+    #[test]
+    fn selects_ipv4_for_dual_stack_endpoint() {
+        let addresses = vec![
+            "2001:db8::10".parse().unwrap(),
+            "192.0.2.10".parse().unwrap(),
+        ];
+
+        assert_eq!(
+            select_endpoint_ip(&addresses, false).unwrap(),
+            "192.0.2.10".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn uses_ipv6_when_it_is_the_only_endpoint_family() {
+        let addresses = vec!["2001:db8::10".parse().unwrap()];
+
+        assert_eq!(
+            select_endpoint_ip(&addresses, false).unwrap(),
+            "2001:db8::10".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn ipv6_endpoint_is_rejected_when_ipv6_is_disabled() {
+        let addresses = vec!["2001:db8::10".parse().unwrap()];
+
+        assert!(select_endpoint_ip(&addresses, true).is_err());
     }
 }

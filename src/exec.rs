@@ -323,13 +323,33 @@ fn setup_namespace(
             parsed_command.firewall,
             parsed_command.disable_ipv6,
         )?;
-        _sysctl = SysCtl::enable_ipv4_forwarding();
+        // IPv6 forwarding is enabled only for protocols with a family-aware
+        // killswitch. Protocols without one remain fail-closed on the host
+        // veth even when IPv6 is enabled in the namespace.
+        let enable_ipv6_forwarding = !parsed_command.disable_ipv6
+            && matches!(
+                parsed_command.protocol,
+                Protocol::OpenVpn | Protocol::Wireguard | Protocol::AmneziaWG
+            );
+        _sysctl = SysCtl::enable_forwarding(enable_ipv6_forwarding)?;
 
         let config_file = run_protocol_in_netns(&parsed_command, &mut ns, uiclient, verbose)?;
         ns.set_config_file(config_file);
 
         if let Some(ref hosts) = parsed_command.open_hosts {
-            vopono_core::util::open_hosts(&ns.name, hosts, parsed_command.firewall)?;
+            let effective_hosts: Vec<IpAddr> = hosts
+                .iter()
+                .copied()
+                .filter(|host| {
+                    if parsed_command.disable_ipv6 && host.is_ipv6() {
+                        warn!("Skipping IPv6 open-hosts entry {host} because IPv6 is disabled");
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            vopono_core::util::open_hosts(&ns.name, &effective_hosts, parsed_command.firewall)?;
         }
 
         forwarder = provider_port_forwarding(&parsed_command, &ns)?;
@@ -619,14 +639,23 @@ fn run_protocol_in_netns(
             }
 
             let openvpn_dns_servers = ns.openvpn.as_ref().unwrap().openvpn_dns_servers.clone();
-            if !openvpn_dns_servers.is_empty() && parsed_command.dns.is_none() {
+            if (!openvpn_dns_servers.is_empty() && parsed_command.dns.is_none())
+                || !parsed_command.no_killswitch
+            {
+                let effective_dns =
+                    if !openvpn_dns_servers.is_empty() && parsed_command.dns.is_none() {
+                        &openvpn_dns_servers
+                    } else {
+                        &dns
+                    };
                 let old_dns = ns.dns_config.take();
                 std::mem::forget(old_dns);
-                ns.dns_config(
-                    &openvpn_dns_servers,
+                ns.dns_config_with_interface(
+                    effective_dns,
                     &[],
                     parsed_command.hosts.as_ref(),
                     parsed_command.allow_host_access,
+                    (!parsed_command.no_killswitch).then_some("tun+"),
                 )?;
             }
         }

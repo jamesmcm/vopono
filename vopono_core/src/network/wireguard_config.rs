@@ -202,18 +202,28 @@ impl WireguardEndpoint {
             WireguardEndpoint::IpWithPort(addr) => addr.port(),
         }
     }
-    pub fn resolve_ip(&self) -> anyhow::Result<IpAddr> {
+    pub fn resolve_ips(&self) -> anyhow::Result<Vec<IpAddr>> {
         match self {
             WireguardEndpoint::HostnameWithPort(host, port) => {
-                let addr = (host.as_str(), *port)
+                let addresses = (host.as_str(), *port)
                     .to_socket_addrs()
                     .with_context(|| format!("Failed to resolve Wireguard endpoint {host}"))?
-                    .next()
-                    .ok_or_else(|| anyhow!("No address found for Wireguard endpoint {host}"))?;
-                Ok(addr.ip())
+                    .map(|addr| addr.ip())
+                    .collect::<Vec<_>>();
+                if addresses.is_empty() {
+                    return Err(anyhow!("No address found for Wireguard endpoint {host}"));
+                }
+                Ok(addresses)
             }
-            WireguardEndpoint::IpWithPort(addr) => Ok(addr.ip()),
+            WireguardEndpoint::IpWithPort(addr) => Ok(vec![addr.ip()]),
         }
+    }
+
+    pub fn resolve_ip(&self) -> anyhow::Result<IpAddr> {
+        self.resolve_ips()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("No address found for Wireguard endpoint"))
     }
 
     pub fn is_ip(&self) -> bool {
