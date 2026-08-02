@@ -8,7 +8,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::net::IpAddr;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -246,14 +246,15 @@ pub fn killswitch(
     disable_ipv6: bool,
 ) -> anyhow::Result<()> {
     debug!("Setting OpenVPN killswitch....");
+    let endpoints = resolve_remote_endpoints(remotes, disable_ipv6)?;
 
     match firewall {
         Firewall::IpTables => {
-            let ipcmds = if disable_ipv6 {
+            let ipcmds: &[&str] = if disable_ipv6 {
                 crate::network::firewall::disable_ipv6(netns, firewall)?;
-                vec!["iptables"]
+                &["iptables"]
             } else {
-                vec!["iptables", "ip6tables"]
+                &["iptables", "ip6tables"]
             };
 
             for ipcmd in ipcmds {
@@ -287,84 +288,48 @@ pub fn killswitch(
                     &[ipcmd, "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"],
                 )?;
 
-                // TODO: Tidy this up - remote can be IPv4 or IPv6 address or hostname
-                for remote in remotes {
-                    let port_str = format!("{}", remote.port);
-                    match &remote.host {
-                        // TODO: Fix this to specify destination address - but need hostname
-                        // resolution working
-                        Host::IPv4(ip) => {
-                            if ipcmd == "iptables" {
-                                NetworkNamespace::exec(
-                                    &netns.name,
-                                    &[
-                                        ipcmd,
-                                        "-A",
-                                        "OUTPUT",
-                                        "-p",
-                                        &remote.protocol.to_string(),
-                                        "-m",
-                                        &remote.protocol.to_string(),
-                                        "-d",
-                                        &ip.to_string(),
-                                        "--dport",
-                                        port_str.as_str(),
-                                        "-j",
-                                        "ACCEPT",
-                                    ],
-                                )?;
-                            }
-                        }
-                        Host::IPv6(ip) => {
-                            if ipcmd == "ip6tables" {
-                                NetworkNamespace::exec(
-                                    &netns.name,
-                                    &[
-                                        ipcmd,
-                                        "-A",
-                                        "OUTPUT",
-                                        "-p",
-                                        &remote.protocol.to_string(),
-                                        "-m",
-                                        &remote.protocol.to_string(),
-                                        "-d",
-                                        &ip.to_string(),
-                                        "--dport",
-                                        port_str.as_str(),
-                                        "-j",
-                                        "ACCEPT",
-                                    ],
-                                )?;
-                            }
-                        }
-                        Host::Hostname(_name) => {
-                            NetworkNamespace::exec(
-                                &netns.name,
-                                &[
-                                    ipcmd,
-                                    "-A",
-                                    "OUTPUT",
-                                    "-p",
-                                    &remote.protocol.to_string(),
-                                    // "-d",
-                                    // &name.to_string(),
-                                    "-m",
-                                    &remote.protocol.to_string(),
-                                    "--dport",
-                                    port_str.as_str(),
-                                    "-j",
-                                    "ACCEPT",
-                                ],
-                            )?;
-                        }
+                for endpoint in &endpoints {
+                    let endpoint_ipcmd = if endpoint.address.is_ipv4() {
+                        "iptables"
+                    } else {
+                        "ip6tables"
+                    };
+                    if endpoint_ipcmd != *ipcmd {
+                        continue;
                     }
+
+                    let protocol = endpoint.protocol.to_string();
+                    let address = endpoint.address.to_string();
+                    let port = endpoint.port.to_string();
+                    NetworkNamespace::exec(
+                        &netns.name,
+                        &[
+                            ipcmd,
+                            "-A",
+                            "OUTPUT",
+                            "-p",
+                            protocol.as_str(),
+                            "-m",
+                            protocol.as_str(),
+                            "-d",
+                            address.as_str(),
+                            "--dport",
+                            port.as_str(),
+                            "-j",
+                            "ACCEPT",
+                        ],
+                    )?;
+                }
+
+                if *ipcmd == "ip6tables" {
+                    add_iptables_neighbor_discovery_rules(netns)?;
                 }
 
                 NetworkNamespace::exec(
                     &netns.name,
                     &[ipcmd, "-A", "OUTPUT", "-o", "tun+", "-j", "ACCEPT"],
                 )?;
-                let reject_type = if ipcmd == "ip6tables" {
+                let reject_type = if *ipcmd == "ip6tables" {
                     "icmp6-no-route"
                 } else {
                     "icmp-net-unreachable"
@@ -387,7 +352,6 @@ pub fn killswitch(
             if disable_ipv6 {
                 crate::network::firewall::disable_ipv6(netns, firewall)?;
             }
-            // TODO: Test this with port forwarding
             NetworkNamespace::exec(
                 &netns.name,
                 &[
@@ -420,75 +384,38 @@ pub fn killswitch(
                 ],
             )?;
 
-            for remote in remotes {
-                let port_str = format!("{}", remote.port);
-                match &remote.host {
-                    // TODO: Fix this to specify destination address - but need hostname
-                    // resolution working
-                    Host::IPv4(ip) => {
-                        NetworkNamespace::exec(
-                            &netns.name,
-                            &[
-                                "nft",
-                                "add",
-                                "rule",
-                                "inet",
-                                &netns.name,
-                                "output",
-                                "ip",
-                                "daddr",
-                                &ip.to_string(),
-                                &remote.protocol.to_string(),
-                                "dport",
-                                port_str.as_str(),
-                                "counter",
-                                "accept",
-                            ],
-                        )?;
-                    }
-                    Host::IPv6(ip) => {
-                        NetworkNamespace::exec(
-                            &netns.name,
-                            &[
-                                "nft",
-                                "add",
-                                "rule",
-                                "inet",
-                                &netns.name,
-                                "output",
-                                "ip6",
-                                "daddr",
-                                &ip.to_string(),
-                                &remote.protocol.to_string(),
-                                "dport",
-                                port_str.as_str(),
-                                "counter",
-                                "accept",
-                            ],
-                        )?;
-                    }
-                    Host::Hostname(_name) => {
-                        // This rule allows traffic to the correct port/protocol regardless of destination IP.
-                        // This is necessary because the hostname is resolved to an IP by OpenVPN,
-                        // and we allow that IP via the DNS rules.
-                        NetworkNamespace::exec(
-                            &netns.name,
-                            &[
-                                "nft",
-                                "add",
-                                "rule",
-                                "inet",
-                                &netns.name,
-                                "output",
-                                &remote.protocol.to_string(),
-                                "dport",
-                                port_str.as_str(),
-                                "counter",
-                                "accept",
-                            ],
-                        )?;
-                    }
-                }
+            if !disable_ipv6 {
+                add_nft_neighbor_discovery_rules(netns)?;
+            }
+
+            for endpoint in &endpoints {
+                let address_family = if endpoint.address.is_ipv4() {
+                    "ip"
+                } else {
+                    "ip6"
+                };
+                let address = endpoint.address.to_string();
+                let protocol = endpoint.protocol.to_string();
+                let port = endpoint.port.to_string();
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[
+                        "nft",
+                        "add",
+                        "rule",
+                        "inet",
+                        &netns.name,
+                        "output",
+                        address_family,
+                        "daddr",
+                        address.as_str(),
+                        protocol.as_str(),
+                        "dport",
+                        port.as_str(),
+                        "counter",
+                        "accept",
+                    ],
+                )?;
             }
 
             NetworkNamespace::exec(
@@ -507,6 +434,23 @@ pub fn killswitch(
                 ],
             )?;
 
+            // Port-opening rules are inserted before this rule, so --open-ports,
+            // --forward, and provider-assigned forwarded ports continue to work
+            // while all other traffic remains blocked.
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "input",
+                    "counter",
+                    "drop",
+                ],
+            )?;
+
             NetworkNamespace::exec(
                 &netns.name,
                 &[
@@ -519,11 +463,132 @@ pub fn killswitch(
                     "counter",
                     "reject",
                     "with",
-                    "icmp",
+                    "icmpx",
                     "type",
-                    "net-unreachable",
+                    "admin-prohibited",
                 ],
             )?;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct RemoteEndpoint {
+    address: IpAddr,
+    port: u16,
+    protocol: OpenVpnProtocol,
+}
+
+fn resolve_remote_endpoints(
+    remotes: &[Remote],
+    disable_ipv6: bool,
+) -> anyhow::Result<Vec<RemoteEndpoint>> {
+    let mut endpoints = Vec::new();
+    for remote in remotes {
+        let addresses: Vec<IpAddr> = match &remote.host {
+            Host::IPv4(address) => vec![IpAddr::V4(*address)],
+            Host::IPv6(address) => vec![IpAddr::V6(*address)],
+            Host::Hostname(hostname) => (hostname.as_str(), remote.port)
+                .to_socket_addrs()
+                .with_context(|| format!("Failed to resolve OpenVPN remote hostname {hostname}"))?
+                .map(|address| address.ip())
+                .collect(),
+        };
+
+        for address in addresses {
+            if disable_ipv6 && address.is_ipv6() {
+                continue;
+            }
+            if !endpoints.iter().any(|endpoint: &RemoteEndpoint| {
+                endpoint.address == address
+                    && endpoint.port == remote.port
+                    && endpoint.protocol == remote.protocol
+            }) {
+                endpoints.push(RemoteEndpoint {
+                    address,
+                    port: remote.port,
+                    protocol: remote.protocol.clone(),
+                });
+            }
+        }
+    }
+
+    if endpoints.is_empty() {
+        anyhow::bail!("OpenVPN has no usable remote endpoints after applying IPv6 settings");
+    }
+    Ok(endpoints)
+}
+
+fn add_iptables_neighbor_discovery_rules(netns: &NetworkNamespace) -> anyhow::Result<()> {
+    let veth_ifname = netns
+        .veth_pair
+        .as_ref()
+        .context("Veth pair not set while configuring OpenVPN IPv6 killswitch")?
+        .source
+        .as_str();
+
+    for (chain, interface_flag) in [("INPUT", "-i"), ("OUTPUT", "-o")] {
+        for icmpv6_type in ["135", "136"] {
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
+                    "ip6tables",
+                    "-A",
+                    chain,
+                    interface_flag,
+                    veth_ifname,
+                    "-p",
+                    "icmpv6",
+                    "-m",
+                    "icmp6",
+                    "--icmpv6-type",
+                    icmpv6_type,
+                    "-j",
+                    "ACCEPT",
+                ],
+            )
+            .with_context(|| {
+                format!("Allowing IPv6 neighbour discovery type {icmpv6_type} on {veth_ifname}")
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn add_nft_neighbor_discovery_rules(netns: &NetworkNamespace) -> anyhow::Result<()> {
+    let veth_ifname = netns
+        .veth_pair
+        .as_ref()
+        .context("Veth pair not set while configuring OpenVPN IPv6 killswitch")?
+        .source
+        .as_str();
+
+    for (chain, interface_keyword) in [("input", "iifname"), ("output", "oifname")] {
+        for icmpv6_type in ["nd-neighbor-solicit", "nd-neighbor-advert"] {
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    chain,
+                    interface_keyword,
+                    veth_ifname,
+                    "icmpv6",
+                    "type",
+                    icmpv6_type,
+                    "counter",
+                    "accept",
+                ],
+            )
+            .with_context(|| {
+                format!(
+                    "Allowing IPv6 neighbour discovery type {icmpv6_type} on {veth_ifname} in nftables"
+                )
+            })?;
         }
     }
     Ok(())
@@ -654,5 +719,49 @@ mod tests {
             parse_openvpn_dns_servers(log, &dns_regex),
             vec![IpAddr::V4(Ipv4Addr::new(10, 8, 0, 1))]
         );
+    }
+
+    #[test]
+    fn remote_endpoints_keep_only_enabled_address_families() {
+        let remotes = vec![
+            Remote {
+                host: Host::IPv4(Ipv4Addr::new(192, 0, 2, 10)),
+                port: 1194,
+                protocol: OpenVpnProtocol::UDP,
+            },
+            Remote {
+                host: Host::IPv6("2001:db8::10".parse().unwrap()),
+                port: 1194,
+                protocol: OpenVpnProtocol::UDP,
+            },
+        ];
+
+        let endpoints = resolve_remote_endpoints(&remotes, true).unwrap();
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(
+            endpoints[0].address,
+            "192.0.2.10".parse::<IpAddr>().unwrap()
+        );
+
+        let endpoints = resolve_remote_endpoints(&remotes, false).unwrap();
+        assert_eq!(endpoints.len(), 2);
+    }
+
+    #[test]
+    fn remote_endpoints_are_deduplicated() {
+        let remotes = vec![
+            Remote {
+                host: Host::IPv4(Ipv4Addr::new(192, 0, 2, 10)),
+                port: 1194,
+                protocol: OpenVpnProtocol::UDP,
+            },
+            Remote {
+                host: Host::IPv4(Ipv4Addr::new(192, 0, 2, 10)),
+                port: 1194,
+                protocol: OpenVpnProtocol::UDP,
+            },
+        ];
+
+        assert_eq!(resolve_remote_endpoints(&remotes, false).unwrap().len(), 1);
     }
 }

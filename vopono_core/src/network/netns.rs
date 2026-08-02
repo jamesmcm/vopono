@@ -1,4 +1,4 @@
-use super::dns_config::DnsConfig;
+use super::dns_config::{DnsConfig, DnsConfigOptions};
 use super::firewall::Firewall;
 use super::host_masquerade::HostMasquerade;
 use super::network_interface::NetworkInterface;
@@ -468,6 +468,17 @@ impl NetworkNamespace {
         hosts_entries: Option<&Vec<String>>,
         allow_host_access: bool,
     ) -> anyhow::Result<()> {
+        self.dns_config_with_interface(server, suffixes, hosts_entries, allow_host_access, None)
+    }
+
+    pub fn dns_config_with_interface(
+        &mut self,
+        server: &[IpAddr],
+        suffixes: &[&str],
+        hosts_entries: Option<&Vec<String>>,
+        allow_host_access: bool,
+        egress_interface: Option<&str>,
+    ) -> anyhow::Result<()> {
         self.dns_config = Some(DnsConfig::new(
             self.name.clone(),
             server,
@@ -476,8 +487,11 @@ impl NetworkNamespace {
             self.veth_pair_ips
                 .as_ref()
                 .expect("Failed to get veth pair IPs for DNS config"),
-            allow_host_access,
-            self.firewall,
+            DnsConfigOptions {
+                allow_host_access,
+                firewall: self.firewall,
+                egress_interface,
+            },
         )?);
         Ok(())
     }
