@@ -1,5 +1,5 @@
-use clap::Parser;
 use clap::ValueEnum;
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize}; // Import serde traits
 use std::fmt::{Debug, Display}; // Import Debug
 use std::net::IpAddr;
@@ -102,10 +102,13 @@ pub struct App {
     pub cmd: Option<Command>,
 }
 
-#[derive(Parser, Debug)]
+#[derive(Subcommand, Debug)]
 pub enum Command {
-    #[clap(name = "daemon", about = "Run the vopono daemon (requires root)")]
-    Daemon,
+    #[clap(
+        name = "daemon",
+        about = "Run or inspect the privileged root vopono daemon"
+    )]
+    Daemon(DaemonCommand),
     #[clap(
         name = "exec",
         about = "Execute an application with the given VPN connection"
@@ -116,6 +119,17 @@ pub enum Command {
         about = "List running vopono namespaces and applications"
     )]
     List(ListCommand),
+    #[clap(name = "status", about = "Show active namespaces and applications")]
+    Status(StatusCommand),
+    #[clap(
+        name = "providers",
+        about = "List provider capabilities and configuration state"
+    )]
+    Providers(ProvidersCommand),
+    #[clap(name = "provider", about = "Inspect a provider")]
+    Provider(ProviderCommand),
+    #[clap(name = "stop", about = "Stop a running application or namespace")]
+    Stop(StopCommand),
     #[clap(
         name = "sync",
         about = "Synchronise local server lists with VPN providers"
@@ -129,6 +143,91 @@ pub enum Command {
 }
 
 #[derive(Parser, Debug)]
+pub struct DaemonCommand {
+    #[clap(subcommand)]
+    pub command: Option<DaemonSubcommand>,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum DaemonSubcommand {
+    #[clap(
+        name = "start",
+        about = "Start the privileged vopono daemon (requires root)"
+    )]
+    Start,
+    #[clap(name = "status", about = "Show daemon health")]
+    Status(JsonCommand),
+}
+
+#[derive(Parser, Debug, Clone, Copy)]
+pub struct JsonCommand {
+    /// Emit versioned JSON instead of human-readable output.
+    #[clap(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct StatusCommand {
+    /// Emit versioned JSON instead of human-readable output.
+    #[clap(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct ProvidersCommand {
+    /// Emit versioned JSON instead of human-readable output.
+    #[clap(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct ProviderCommand {
+    #[clap(subcommand)]
+    pub command: ProviderSubcommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProviderSubcommand {
+    #[clap(name = "status", about = "Show provider configuration state")]
+    Status(ProviderStatusCommand),
+}
+
+#[derive(Parser, Debug)]
+pub struct ProviderStatusCommand {
+    /// VPN provider.
+    #[clap(value_enum, ignore_case = true)]
+    pub vpn_provider: WrappedArg<VpnProvider>,
+
+    /// Emit versioned JSON instead of human-readable output.
+    #[clap(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct StopCommand {
+    #[clap(subcommand)]
+    pub target: StopTarget,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum StopTarget {
+    #[clap(name = "application", about = "Stop an application by PID")]
+    Application(StopIdCommand),
+    #[clap(name = "namespace", about = "Stop a namespace and its applications")]
+    Namespace(StopIdCommand),
+}
+
+#[derive(Parser, Debug)]
+pub struct StopIdCommand {
+    /// Application PID or namespace ID.
+    pub id: String,
+
+    /// Emit versioned JSON instead of human-readable output.
+    #[clap(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
 pub struct SynchCommand {
     /// VPN Provider - will launch interactive menu if not provided
     #[clap(value_enum, ignore_case = true)]
@@ -137,6 +236,10 @@ pub struct SynchCommand {
     /// VPN Protocol (if not given will try to sync both)
     #[clap(value_enum, long = "protocol", short = 'c', ignore_case = true)]
     pub protocol: Option<WrappedArg<Protocol>>,
+
+    /// Emit a versioned JSON result after the interactive sync completes.
+    #[clap(long = "json")]
+    pub json: bool,
 }
 
 #[derive(Parser, Clone, Serialize, Deserialize, Debug)]
@@ -298,8 +401,18 @@ pub struct ExecCommand {
 #[derive(Parser, Debug)]
 pub struct ListCommand {
     /// VPN Provider
-    #[clap(value_parser(clap::builder::PossibleValuesParser::from(&["namespaces", "applications"])))]
-    pub list_type: Option<String>,
+    #[clap(value_enum)]
+    pub list_type: Option<ListType>,
+
+    /// Emit versioned JSON instead of human-readable output.
+    #[clap(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ListType {
+    Namespaces,
+    Applications,
 }
 
 #[derive(Parser, Debug)]
@@ -315,6 +428,14 @@ pub struct ServersCommand {
     /// VPN Server prefix
     #[clap(long = "prefix", short = 's')]
     pub prefix: Option<String>,
+
+    /// Optional country code/name filter.
+    #[clap(long = "country")]
+    pub country: Option<String>,
+
+    /// Emit versioned JSON instead of human-readable output.
+    #[clap(long = "json")]
+    pub json: bool,
 }
 
 fn parse_host_or_ip(arg: &str) -> anyhow::Result<IpAddr> {
@@ -335,7 +456,7 @@ fn parse_hosts_or_ips(arg: &str) -> anyhow::Result<IpAddr> {
 
 #[cfg(test)]
 mod tests {
-    use super::{App, Command};
+    use super::{App, Command, DaemonSubcommand, ListType};
     use clap::Parser;
     use vopono_core::config::vpn::Protocol;
 
@@ -366,5 +487,45 @@ mod tests {
         assert_eq!(command.ssh_proxy_port, Some(9080));
         assert_eq!(command.ssh_user.as_deref(), Some("gopostal"));
         assert_eq!(command.ssh_port, Some(2222));
+    }
+
+    #[test]
+    fn daemon_without_subcommand_is_the_daemon_start_command() {
+        let app = App::try_parse_from(["vopono", "daemon"]).unwrap();
+        let Command::Daemon(command) = app.cmd.unwrap() else {
+            panic!("expected daemon command");
+        };
+        assert!(command.command.is_none());
+    }
+
+    #[test]
+    fn daemon_status_is_a_subcommand() {
+        let app = App::try_parse_from(["vopono", "daemon", "status", "--json"]).unwrap();
+        let Command::Daemon(command) = app.cmd.unwrap() else {
+            panic!("expected daemon command");
+        };
+        assert!(matches!(
+            command.command,
+            Some(DaemonSubcommand::Status(status)) if status.json
+        ));
+    }
+
+    #[test]
+    fn daemon_start_is_an_explicit_alias_for_the_bare_command() {
+        let app = App::try_parse_from(["vopono", "daemon", "start"]).unwrap();
+        let Command::Daemon(command) = app.cmd.unwrap() else {
+            panic!("expected daemon command");
+        };
+        assert!(matches!(command.command, Some(DaemonSubcommand::Start)));
+    }
+
+    #[test]
+    fn list_type_is_typed() {
+        let app = App::try_parse_from(["vopono", "list", "namespaces", "--json"]).unwrap();
+        let Command::List(command) = app.cmd.unwrap() else {
+            panic!("expected list command");
+        };
+        assert!(matches!(command.list_type, Some(ListType::Namespaces)));
+        assert!(command.json);
     }
 }

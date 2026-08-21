@@ -10,7 +10,17 @@ pub type LockNamespaces = HashMap<String, Vec<LockfileStatus>>;
 
 #[derive(Clone, Debug, Default)]
 pub struct LockNamespacesStatus {
+    /// Effective status/application view. In daemon mode, numeric primary
+    /// locks are hidden here when per-client locks exist, so the daemon itself
+    /// is not reported as an extra application. Without client locks, the
+    /// primary lock is also the application record used by direct CLI runs.
     pub namespaces: LockNamespaces,
+    /// The authoritative numeric lock for each namespace is retained here for
+    /// metadata such as creation time, provider, server, and port forwarding.
+    /// Its on-disk form contains the full serialized NetworkNamespace needed
+    /// to reconstruct an existing namespace; `client-*` locks are temporary,
+    /// per-application status/reference locks and cannot do that.
+    pub primary_namespaces: LockNamespaces,
     pub errors: Vec<String>,
 }
 
@@ -49,6 +59,25 @@ pub fn read_lock_namespaces_from_dir(
         match File::open(entry.path()) {
             Ok(lockfile) => match ron::de::from_reader::<_, LockfileStatus>(lockfile) {
                 Ok(lock) => {
+                    let lock = if lock.application_pid.is_none()
+                        && lockfile_kind == LockfileKind::Client
+                    {
+                        match entry
+                            .path()
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .and_then(|name| name.strip_prefix("client-"))
+                            .and_then(|pid| pid.parse::<u32>().ok())
+                        {
+                            Some(pid) => LockfileStatus {
+                                application_pid: Some(pid),
+                                ..lock
+                            },
+                            None => lock,
+                        }
+                    } else {
+                        lock
+                    };
                     let locks = grouped_locks.entry(lock.ns.name.clone()).or_default();
                     match lockfile_kind {
                         LockfileKind::Primary => locks.primary.push(lock),
@@ -73,14 +102,25 @@ pub fn read_lock_namespaces_from_dir(
     }
 
     Ok(LockNamespacesStatus {
+        primary_namespaces: grouped_locks
+            .iter()
+            .filter_map(|(namespace, locks)| {
+                locks
+                    .primary
+                    .first()
+                    .cloned()
+                    .map(|lock| (namespace.clone(), vec![lock]))
+            })
+            .collect(),
         namespaces: grouped_locks
             .into_iter()
             .map(|(namespace, locks)| {
                 if locks.client.is_empty() {
                     (namespace, locks.primary)
                 } else {
-                    // In daemon mode the numeric daemon PID lock is namespace metadata, not an
-                    // application. Keep only per-client locks for status/list output.
+                    // In daemon mode the numeric primary lock is namespace
+                    // state/lifecycle metadata, while client-* locks represent
+                    // the applications and keep the namespace alive.
                     (namespace, locks.client)
                 }
             })

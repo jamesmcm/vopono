@@ -17,7 +17,7 @@ use std::{
 use vopono_core::config::providers::{UiClient, VpnProvider};
 use vopono_core::config::vpn::{Protocol, verify_auth};
 use vopono_core::network::application_wrapper::ApplicationWrapper;
-use vopono_core::network::netns::NetworkNamespace;
+use vopono_core::network::netns::{NetworkNamespace, PortForwardingStatus};
 use vopono_core::network::network_interface::NetworkInterface;
 use vopono_core::network::port_forwarding::Forwarder;
 use vopono_core::network::port_forwarding::azirevpn::AzireVpnPortForwarding;
@@ -69,6 +69,7 @@ pub fn execute_as_daemon(
         None,
         false,
     )?;
+    ns.update_lockfile_application_pid(application.handle.id())?;
     Ok((application, ns))
 }
 
@@ -124,6 +125,7 @@ pub fn execute_as_daemon_with_stdio(
         stdio_fds,
         take_controlling_tty,
     )?;
+    ns.update_lockfile_application_pid(application.handle.id())?;
     Ok((application, ns))
 }
 
@@ -254,6 +256,11 @@ fn setup_namespace(
             parsed_command.user.clone(),
             parsed_command.group.clone(),
         )?;
+        ns.set_server(Some(parsed_command.server.clone()));
+        ns.set_port_configuration(
+            parsed_command.open_ports.as_deref(),
+            parsed_command.forward.as_deref(),
+        );
         let target_subnet = get_target_subnet()?;
         ns.add_loopback()?;
         ns.add_veth_pair()?;
@@ -352,7 +359,22 @@ fn setup_namespace(
             vopono_core::util::open_hosts(&ns.name, &effective_hosts, parsed_command.firewall)?;
         }
 
-        forwarder = provider_port_forwarding(&parsed_command, &ns)?;
+        let created_forwarder = provider_port_forwarding(&parsed_command, &ns)?;
+        if let Some(fwd) = created_forwarder.as_ref() {
+            let provider = if parsed_command.custom.is_some() {
+                parsed_command.custom_port_forwarding.clone()
+            } else {
+                Some(parsed_command.provider.clone())
+            };
+            if let Some(provider) = provider {
+                ns.set_port_forwarding(Some(PortForwardingStatus {
+                    provider,
+                    port: fwd.forwarded_port(),
+                    automatic: true,
+                }));
+            }
+        }
+        forwarder = created_forwarder;
 
         if let Some(pucmd) = parsed_command.postup.clone() {
             let mut sudo_args = Vec::new();
@@ -450,6 +472,7 @@ fn run_application_and_wait(
         )?;
 
         let pid = application.handle.id();
+        ns.update_lockfile_application_pid(pid)?;
         info!(
             "Application {} launched in network namespace {} with pid {}",
             parsed_command.application, ns.name, pid

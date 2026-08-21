@@ -25,6 +25,7 @@ use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, RawFd};
 use std::os::fd::{BorrowedFd, IntoRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -33,6 +34,79 @@ use std::sync::{
 use std::thread;
 
 // Do not change user's terminal modes; rely on PTY + signal/control forwarding
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DaemonStatus {
+    pub available: bool,
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub socket: String,
+    pub version: String,
+    pub compatible: bool,
+}
+
+/// Return a machine-readable health snapshot without requiring systemd.
+pub fn status() -> DaemonStatus {
+    let unavailable = || DaemonStatus {
+        available: false,
+        running: false,
+        pid: None,
+        socket: SOCKET_PATH.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        compatible: false,
+    };
+
+    if !Path::new(SOCKET_PATH).exists() {
+        return unavailable();
+    }
+
+    let Ok(name) = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>() else {
+        return unavailable();
+    };
+    let Ok(stream) = LocalSocketStream::connect(name) else {
+        return unavailable();
+    };
+    let LocalSocketStream::UdSocket(socket) = &stream;
+    let pid = getsockopt(&socket.as_fd(), PeerCredentials)
+        .ok()
+        .map(|credentials| credentials.pid() as u32);
+
+    DaemonStatus {
+        available: true,
+        running: true,
+        pid,
+        socket: SOCKET_PATH.to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        compatible: true,
+    }
+}
+
+pub fn print_status(json: bool) -> anyhow::Result<()> {
+    let status = status();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+    } else {
+        println!(
+            "daemon\t{}\tpid={}\tsocket={}\tversion={}\tcompatible={}",
+            if status.available {
+                "available"
+            } else {
+                "unavailable"
+            },
+            status
+                .pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            status.socket,
+            status.version,
+            status.compatible,
+        );
+    }
+    Ok(())
+}
+
+// The CLI JSON interface remains the stable v1 integration surface. A direct
+// socket RPC can be added later if live events or lower polling overhead justify it.
 
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug)]
 pub enum DaemonRequest {

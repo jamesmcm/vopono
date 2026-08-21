@@ -5,10 +5,14 @@
 mod args;
 mod args_config;
 mod cli_client;
+mod control;
 mod daemon;
+mod errors;
 mod exec;
 mod list;
 mod list_configs;
+mod providers;
+mod server_metadata;
 mod sync;
 
 use crate::args::ExecCommand;
@@ -19,7 +23,7 @@ use interprocess::TryClone;
 use interprocess::local_socket::ToFsName;
 use interprocess::local_socket::prelude::*;
 use interprocess::os::unix::local_socket::FilesystemUdSocket;
-use list::output_list;
+use list::{output_list, output_status};
 use list_configs::print_configs;
 use log::{LevelFilter, debug, info, warn};
 use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
@@ -56,16 +60,21 @@ fn main() -> anyhow::Result<()> {
         .expect("Subcommand is required when not in daemon mode.");
 
     match cmd {
-        args::Command::Daemon => {
-            if !nix::unistd::getuid().is_root() {
-                eprintln!("Error: The daemon command requires root privileges.");
-                std::process::exit(1);
+        args::Command::Daemon(command) => match command.command {
+            Some(args::DaemonSubcommand::Status(status)) => {
+                handle_result(daemon::print_status(status.json), status.json)?;
             }
-            // Mark process context so libraries can adjust behavior (e.g., logging verbosity)
-            vopono_core::util::set_daemon_mode(true);
-            info!("Starting vopono in daemon mode.");
-            return daemon::start();
-        }
+            Some(args::DaemonSubcommand::Start) | None => {
+                if !nix::unistd::getuid().is_root() {
+                    eprintln!("Error: The daemon command requires root privileges.");
+                    std::process::exit(1);
+                }
+                // Mark process context so libraries can adjust behavior (e.g., logging verbosity)
+                vopono_core::util::set_daemon_mode(true);
+                info!("Starting vopono in daemon mode.");
+                return daemon::start();
+            }
+        },
         args::Command::Exec(cmd) => {
             // If we're not root, try to forward the command to the running daemon.
             if !nix::unistd::getuid().is_root() {
@@ -92,26 +101,106 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(exit_code);
         }
         args::Command::List(listcmd) => {
-            clean_dead_locks()?;
-            output_list(listcmd)?;
+            let json = listcmd.json;
+            handle_result(output_list(listcmd), json)?;
+        }
+        args::Command::Status(status) => {
+            handle_result(output_status(status.json), status.json)?;
+        }
+        args::Command::Providers(providerscmd) => {
+            handle_result(
+                providers::print_providers(providerscmd.json),
+                providerscmd.json,
+            )?;
+        }
+        args::Command::Provider(providercmd) => match providercmd.command {
+            args::ProviderSubcommand::Status(status) => {
+                handle_result(
+                    providers::print_provider_status(status.vpn_provider.to_variant(), status.json),
+                    status.json,
+                )?;
+            }
+        },
+        args::Command::Stop(stopcmd) => {
+            let (json, result) = match stopcmd.target {
+                args::StopTarget::Application(command) => {
+                    if !nix::unistd::getuid().is_root() {
+                        elevate_privileges(app.askpass)?;
+                    }
+                    let json = command.json;
+                    (json, control::stop_application(&command.id))
+                }
+                args::StopTarget::Namespace(command) => {
+                    if !nix::unistd::getuid().is_root() {
+                        elevate_privileges(app.askpass)?;
+                    }
+                    let json = command.json;
+                    (json, control::stop_namespace(&command.id))
+                }
+            };
+            match result {
+                Ok(result) => control::print_result(&result, json)?,
+                Err(error) => handle_result(Err(error), json)?,
+            }
         }
         args::Command::Synch(synchcmd) => match synchcmd.vpn_provider {
             Some(vpn_provider) => {
-                synch(
-                    vpn_provider.to_variant(),
-                    &synchcmd.protocol.map(|x| x.to_variant()),
-                    &uiclient,
+                let json = synchcmd.json;
+                handle_result(
+                    synch(
+                        vpn_provider.to_variant(),
+                        &synchcmd.protocol.map(|x| x.to_variant()),
+                        &uiclient,
+                    ),
+                    json,
                 )?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"version": providers::SCHEMA_VERSION, "success": true})
+                    );
+                }
             }
             None => {
-                sync_menu(&uiclient, synchcmd.protocol.map(|x| x.to_variant()))?;
+                let json = synchcmd.json;
+                handle_result(
+                    sync_menu(&uiclient, synchcmd.protocol.map(|x| x.to_variant())),
+                    json,
+                )?;
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::json!({"version": providers::SCHEMA_VERSION, "success": true})
+                    );
+                }
             }
         },
         args::Command::Servers(serverscmd) => {
-            print_configs(serverscmd)?;
+            let json = serverscmd.json;
+            handle_result(print_configs(serverscmd), json)?;
         }
     }
     Ok(())
+}
+
+fn handle_result(result: anyhow::Result<()>, json: bool) -> anyhow::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "version": providers::SCHEMA_VERSION,
+                    "error": {
+                    "code": errors::ErrorCode::from_anyhow(&error),
+                        "message": error.to_string(),
+                    }
+                })
+            );
+            std::process::exit(1);
+        }
+        Err(error) => Err(error),
+    }
 }
 
 enum DaemonForward {

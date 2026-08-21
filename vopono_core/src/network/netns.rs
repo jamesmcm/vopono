@@ -52,6 +52,30 @@ pub struct NetworkNamespace {
     pub predown_group: Option<String>,
     pub config_file: Option<PathBuf>, // Used to save config file path in lockfile
     pub trojan: Option<Trojan>,
+    /// The server selector supplied by the caller. The selected config file is
+    /// retained separately so status clients can distinguish an alias from the
+    /// concrete endpoint chosen for it.
+    #[serde(default)]
+    pub server: Option<String>,
+    /// Persisted description of a provider-managed forwarded port. The live
+    /// forwarder itself is intentionally not serialized into the lockfile.
+    #[serde(default)]
+    pub port_forwarding: Option<PortForwardingStatus>,
+    /// Ports opened inside the namespace by --open-ports.
+    #[serde(default)]
+    pub open_ports: Vec<u16>,
+    /// Ports proxied from the host into the namespace by --forward.
+    #[serde(default)]
+    pub forwarded_ports: Vec<u16>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PortForwardingStatus {
+    pub provider: VpnProvider,
+    pub port: u16,
+    /// `true` means vopono obtained/refreshed the mapping; `false` is useful
+    /// for providers where the user configures a port on the provider side.
+    pub automatic: bool,
 }
 
 /// Pair of IP addresses for veth tunnel
@@ -160,7 +184,28 @@ impl NetworkNamespace {
             predown_group,
             config_file: None,
             trojan: None,
+            server: None,
+            port_forwarding: None,
+            open_ports: Vec::new(),
+            forwarded_ports: Vec::new(),
         })
+    }
+
+    pub fn set_server(&mut self, server: Option<String>) {
+        self.server = server;
+    }
+
+    pub fn set_port_configuration(
+        &mut self,
+        open_ports: Option<&[u16]>,
+        forwarded_ports: Option<&[u16]>,
+    ) {
+        self.open_ports = open_ports.unwrap_or_default().to_vec();
+        self.forwarded_ports = forwarded_ports.unwrap_or_default().to_vec();
+    }
+
+    pub fn set_port_forwarding(&mut self, status: Option<PortForwardingStatus>) {
+        self.port_forwarding = status;
     }
 
     pub fn set_config_file(&mut self, config_file: Option<PathBuf>) {
@@ -754,6 +799,8 @@ impl NetworkNamespace {
             ns: self,
             command: command.to_string(),
             start: since_the_epoch.as_secs(),
+            application_pid: None,
+            application_started_at: None,
         };
         let lock_string = ron::ser::to_string(&lock)?;
         let mut f = File::create(&lockfile_path)?;
@@ -762,6 +809,29 @@ impl NetworkNamespace {
 
         set_config_permissions()?;
         Ok(lock.ns)
+    }
+
+    /// Update the application PID in the primary lock after the child process
+    /// has been spawned. Older lockfiles simply omit this optional field.
+    pub fn update_lockfile_application_pid(&self, pid: u32) -> anyhow::Result<()> {
+        let mut lockfile_path = config_dir()?;
+        lockfile_path.push(format!("vopono/locks/{}/{}", self.name, unistd::getpid()));
+        if !lockfile_path.exists() {
+            return Ok(());
+        }
+        let file = File::open(&lockfile_path)?;
+        let mut lock: Lockfile = ron::de::from_reader(file)?;
+        lock.application_pid = Some(pid);
+        lock.application_started_at = Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_secs(),
+        );
+        let lock_string = ron::ser::to_string(&lock)?;
+        let mut file = File::create(&lockfile_path)?;
+        write!(file, "{lock_string}")?;
+        Ok(())
     }
 
     pub fn write_client_lockfile(&self, pid: u32, command: &str) -> anyhow::Result<PathBuf> {
@@ -778,9 +848,16 @@ impl NetworkNamespace {
                 name: self.name.clone(),
                 provider: self.provider.clone(),
                 protocol: self.protocol.clone(),
+                server: self.server.clone(),
+                config_file: self.config_file.clone(),
+                port_forwarding: self.port_forwarding.clone(),
+                open_ports: self.open_ports.clone(),
+                forwarded_ports: self.forwarded_ports.clone(),
             },
             start: since_the_epoch.as_secs(),
             command: command.to_string(),
+            application_pid: Some(pid),
+            application_started_at: Some(since_the_epoch.as_secs()),
         };
         let lock_string = ron::ser::to_string(&lock)?;
         let mut f = File::create(&lockfile_path)?;
@@ -981,6 +1058,10 @@ pub struct Lockfile {
     pub ns: NetworkNamespace,
     pub start: u64,
     pub command: String,
+    #[serde(default)]
+    pub application_pid: Option<u32>,
+    #[serde(default)]
+    pub application_started_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -988,6 +1069,10 @@ pub struct LockfileStatus {
     pub ns: LockfileNamespaceStatus,
     pub start: u64,
     pub command: String,
+    #[serde(default)]
+    pub application_pid: Option<u32>,
+    #[serde(default)]
+    pub application_started_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -995,4 +1080,14 @@ pub struct LockfileNamespaceStatus {
     pub name: String,
     pub provider: VpnProvider,
     pub protocol: Protocol,
+    #[serde(default)]
+    pub server: Option<String>,
+    #[serde(default)]
+    pub config_file: Option<PathBuf>,
+    #[serde(default)]
+    pub port_forwarding: Option<PortForwardingStatus>,
+    #[serde(default)]
+    pub open_ports: Vec<u16>,
+    #[serde(default)]
+    pub forwarded_ports: Vec<u16>,
 }

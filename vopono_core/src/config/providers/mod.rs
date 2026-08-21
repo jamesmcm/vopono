@@ -50,6 +50,42 @@ pub enum VpnProvider {
 
 // Do this since we can't downcast from Provider to other trait objects
 impl VpnProvider {
+    // Keep these explicit: the machine-facing IDs are stable API values and
+    // intentionally do not depend on Rust's enum or Display names.
+    /// Stable, lower-case identifier used by machine-facing interfaces.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::PrivateInternetAccess => "privateinternetaccess",
+            Self::Mullvad => "mullvad",
+            Self::ProtonVPN => "protonvpn",
+            Self::MozillaVPN => "mozillavpn",
+            Self::AzireVPN => "azirevpn",
+            Self::AirVPN => "airvpn",
+            Self::IVPN => "ivpn",
+            Self::NordVPN => "nordvpn",
+            Self::Warp => "warp",
+            Self::Custom => "custom",
+            Self::None => "none",
+        }
+    }
+
+    /// Human-readable provider name for frontend display.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::PrivateInternetAccess => "Private Internet Access",
+            Self::Mullvad => "Mullvad",
+            Self::ProtonVPN => "ProtonVPN",
+            Self::MozillaVPN => "Mozilla VPN",
+            Self::AzireVPN => "AzireVPN",
+            Self::AirVPN => "AirVPN",
+            Self::IVPN => "IVPN",
+            Self::NordVPN => "NordVPN",
+            Self::Warp => "Cloudflare WARP",
+            Self::Custom => "Custom",
+            Self::None => "None",
+        }
+    }
+
     pub fn get_dyn_provider(&self) -> Box<dyn Provider> {
         match self {
             Self::PrivateInternetAccess => Box::new(pia::PrivateInternetAccess {}),
@@ -92,6 +128,7 @@ impl VpnProvider {
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
             Self::MozillaVPN => Ok(Box::new(mozilla::MozillaVPN {})),
             Self::AzireVPN => Ok(Box::new(azirevpn::AzireVPN {})),
+            Self::AirVPN => Ok(Box::new(airvpn::AirVPN {})),
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
             Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),

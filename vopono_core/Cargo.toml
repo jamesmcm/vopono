@@ -40,6 +40,7 @@ ipnet = { version = "2", features = ["serde"] }
 reqwest = { default-features = false, version = "0.13", features = [
     "blocking",
     "json",
+    "query",
     "rustls",
 ] } # TODO: Can we remove Tokio dependency?
 sysinfo = "0.39"

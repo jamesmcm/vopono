@@ -1,12 +1,13 @@
 use std::{
     ffi::CString,
+    io::Write,
     os::fd::{BorrowedFd, FromRawFd, IntoRawFd},
     os::unix::{io::RawFd, process::CommandExt},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
 
-use anyhow::Context;
+use anyhow::{Context, bail};
 use log::debug;
 use nix::{
     fcntl::{OFlag, open},
@@ -17,7 +18,28 @@ use nix::{
 };
 
 use super::{netns::NetworkNamespace, port_forwarding::Forwarder};
-use crate::util::{env_vars::set_env_vars, get_all_running_process_names, parse_command_str};
+use crate::util::{
+    check_process_running, env_vars::set_env_vars, get_running_process_pids, parse_command_str,
+    process_is_in_network_namespace,
+};
+
+// TODO: Completely block running known bad applications like gnome-terminal which will never
+// obey the netns
+// These are known single-instance clients. The list is deliberately limited
+// to warning candidates; arbitrary desktop launchers cannot be classified
+// reliably without application-specific integration.
+const SINGLE_INSTANCE_APPLICATIONS: &[&str] = &[
+    "google-chrome-stable",
+    "google-chrome-beta",
+    "google-chrome",
+    "chromium",
+    "chromium-browser",
+    "brave",
+    "brave-browser",
+    "firefox",
+    "firefox-developer-edition",
+    "firefox-bin",
+];
 
 pub struct ApplicationWrapper {
     pub handle: Child,
@@ -40,31 +62,50 @@ impl ApplicationWrapper {
         stdio_fds: Option<(RawFd, RawFd, RawFd)>,
         take_controlling_tty: bool,
     ) -> anyhow::Result<Self> {
-        let running_processes = get_all_running_process_names();
         let app_vec = parse_command_str(application)?;
 
-        for shared_process_app in [
-            "google-chrome-stable",
-            "google-chrome-beta",
-            "google-chrome",
-            "chromium",
-            "firefox",
-            "firefox-developer-edition",
-        ]
-        .iter()
+        let shared_process_name = app_vec.first().and_then(|program| {
+            Path::new(program)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| SINGLE_INSTANCE_APPLICATIONS.contains(name))
+        });
+        let shared_process_pids = shared_process_name
+            .map(|name| {
+                get_running_process_pids(name)
+                    .into_iter()
+                    .filter(|pid| {
+                        // A matching process already inside this exact netns
+                        // cannot cause the host-namespace escape described by
+                        // this warning.  If inspection fails, keep the warning
+                        // conservative and report the PID to the user.
+                        !matches!(process_is_in_network_namespace(*pid, &netns.name), Ok(true))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if let Some(shared_process_name) = shared_process_name
+            && !shared_process_pids.is_empty()
         {
-            if app_vec.contains(&shared_process_app.to_string())
-                && running_processes.contains(&shared_process_app.to_string())
-            {
-                log::error!(
-                    "{shared_process_app} is already running. You must force it to use a separate profile in order to launch a new process!"
-                );
-            }
+            report_warning(
+                format!(
+                    "{shared_process_name} is already running outside network namespace '{}' (PID(s): {}). It may reuse that process instead of starting inside vopono; use a separate profile/data directory or stop the existing instance.",
+                    netns.name,
+                    shared_process_pids
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                silent,
+                stdio_fds,
+            );
         }
 
         let app_vec_ptrs: Vec<&str> = app_vec.iter().map(|s| s.as_str()).collect();
 
-        let (handle, etc_overlay) = Self::run_with_env_in_netns(
+        let (mut handle, etc_overlay) = Self::run_with_env_in_netns(
             netns,
             app_vec_ptrs.as_slice(),
             user,
@@ -78,6 +119,41 @@ impl ApplicationWrapper {
             port_forwarding.as_deref(),
             host_env_vars,
         )?;
+
+        let pid = handle.id();
+        if check_process_running(pid) {
+            match process_is_in_network_namespace(pid, &netns.name) {
+                Ok(true) => {
+                    debug!(
+                        "Verified application PID {pid} is in network namespace '{}'",
+                        netns.name
+                    );
+                }
+                Ok(false) => {
+                    let _ = handle.kill();
+                    let _ = handle.wait();
+                    bail!(
+                        "Refusing to launch application: PID {pid} is not in network namespace '{}'",
+                        netns.name
+                    );
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Could not verify that application PID {pid} is in network namespace '{}': {error}",
+                        netns.name
+                    );
+                }
+            }
+        } else if !shared_process_pids.is_empty() {
+            report_warning(
+                format!(
+                    "Application launcher PID {pid} exited before its network namespace could be verified; the existing process may have handled the request instead."
+                ),
+                silent,
+                stdio_fds,
+            );
+        }
+
         Ok(Self {
             handle,
             port_forwarding,
@@ -236,8 +312,9 @@ impl ApplicationWrapper {
                     // Tailscale MagicDNS and direct tailnet routes are intentionally unavailable
                     // inside the VPN namespace. Users can currently expose a host-side proxy with
                     // --allow-host-access and connect to it through vopono.host.
-                    // TODO: Reuse the existing host-side service-forwarding proxy infrastructure
-                    // to expose selected Tailscale services into the namespace automatically.
+                    // Host-side service forwarding remains opt-in; exposing
+                    // selected Tailscale services automatically would weaken
+                    // the namespace boundary.
                     mount(
                         Some(overlay_source.as_c_str()),
                         etc_c.as_c_str(),
@@ -359,5 +436,19 @@ impl ApplicationWrapper {
 
         let child = handle.spawn()?;
         Ok((child, etc_overlay))
+    }
+}
+
+fn report_warning(message: String, silent: bool, stdio_fds: Option<(RawFd, RawFd, RawFd)>) {
+    if silent {
+        if let Some((_, _, stderr_fd)) = stdio_fds
+            && let Ok(dup_fd) = nix::unistd::dup(unsafe { BorrowedFd::borrow_raw(stderr_fd) })
+        {
+            let mut stderr = std::fs::File::from(dup_fd);
+            let _ = writeln!(stderr, "warning: {message}");
+            let _ = stderr.flush();
+        }
+    } else {
+        log::warn!("{message}");
     }
 }

@@ -33,7 +33,7 @@ lynx all running through different VPN connections:
 | ProtonVPN                     | ✅\*\*          | ✅\*\*\*          |
 | MozillaVPN                    | ❌              | ✅                |
 | NordVPN                       | ✅              | ❌                |
-| AirVPN                        | ✅              | ❌                |
+| AirVPN                        | ✅              | ✅                |
 | Cloudflare Warp\*\*\*\*       | ❌              | ❌                |
 | Self host (--custom)          | ✅              | ✅                |
 
@@ -55,6 +55,10 @@ argument.
 \*\*\*\* Cloudflare Warp uses its own protocol. Set both the provider and
 protocol to `warp`. Note you must first register with `sudo warp-cli registration new` and then run it once with `sudo warp-svc` and `sudo warp-cli connect` and `sudo warp-cli debug connectivity-check disable` outside of vopono - then kill `sudo warp-svc` without running `sudo warp-cli disconnect` so it will auto-connect when run.
 Please verify this works first before trying it with vopono. 
+
+AirVPN port forwarding is supported as a provider capability, but forwarded
+ports must currently be configured in AirVPN's client area; vopono does not
+claim or toggle AirVPN account ports automatically.
 
 
 ## Usage
@@ -85,6 +89,8 @@ For a smoother experience, run the privileged root daemon and keep using `vopono
 
 - Start once at boot via systemd: `sudo systemctl enable --now vopono`
 - Or run manually as root: `sudo vopono daemon`
+- The explicit equivalent is `sudo vopono daemon start`; inspect it with
+  `vopono daemon status --json`.
 - Then use vopono normally as your user: `vopono exec --provider mullvad --server se firefox`
 
 See [USERGUIDE.md](USERGUIDE.md) for a ready‑to‑copy systemd unit.

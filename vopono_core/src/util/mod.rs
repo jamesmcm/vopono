@@ -270,6 +270,37 @@ pub fn check_process_running(pid: u32) -> bool {
     s.process(sysinfo::Pid::from_u32(pid)).is_some()
 }
 
+/// Return the PIDs of processes whose comm name matches `process_name`.
+///
+/// This intentionally uses the kernel-visible process name rather than the
+/// command line.  It is suitable for detecting common single-instance
+/// applications before launch, but callers should treat it as a warning
+/// signal rather than as an identity guarantee.
+pub fn get_running_process_pids(process_name: &str) -> Vec<u32> {
+    let s = System::new_with_specifics(
+        RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
+    );
+    s.processes()
+        .iter()
+        .filter(|(_, process)| process.name().to_string_lossy() == process_name)
+        .map(|(pid, _)| pid.as_u32())
+        .collect()
+}
+
+/// Check whether a process is currently attached to a named network namespace.
+///
+/// Linux exposes the namespace identity in both paths as `net:[inode]`, so
+/// comparing the symlink targets is more reliable than relying on a process
+/// name, command line, or PID alone.
+pub fn process_is_in_network_namespace(pid: u32, ns_name: &str) -> anyhow::Result<bool> {
+    let process_namespace = fs::read_link(format!("/proc/{pid}/ns/net"))
+        .with_context(|| format!("Could not inspect network namespace for PID {pid}"))?;
+    let target_namespace = fs::read_link(format!("/var/run/netns/{ns_name}"))
+        .with_context(|| format!("Could not inspect network namespace '{ns_name}'"))?;
+
+    Ok(process_namespace == target_namespace)
+}
+
 pub fn get_all_running_pids() -> Vec<u32> {
     let s = System::new_with_specifics(
         RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),

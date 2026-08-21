@@ -78,6 +78,23 @@ pub enum Protocol {
     None,
 }
 
+impl Protocol {
+    // Keep these explicit because they are stable machine-facing API values.
+    /// Stable, lower-case identifier for machine-facing interfaces.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::OpenVpn => "openvpn",
+            Self::Wireguard => "wireguard",
+            Self::AmneziaWG => "amneziawg",
+            Self::OpenConnect => "openconnect",
+            Self::OpenFortiVpn => "openfortivpn",
+            Self::Ssh => "ssh",
+            Self::Warp => "warp",
+            Self::None => "none",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct VpnServer {
     pub name: String,
