@@ -271,9 +271,18 @@ impl ArgsConfig {
                 let msg = "VPN server prefix must be provided as a command-line argument or in the vopono config.toml file";
                 log::error!("{msg}"); anyhow!(msg)})?;
 
-            // Check protocol is valid for provider
-            protocol = requested_protocol
-                .unwrap_or_else(|| provider.get_dyn_provider().default_protocol());
+            // `--provider None` launches an isolated namespace without any VPN
+            // service; it overrides protocol settings from CLI args or the
+            // vopono config file rather than failing the None/None pairing
+            // check below.
+            protocol = if provider == VpnProvider::None {
+                if let Some(requested) = requested_protocol.filter(|p| *p != Protocol::None) {
+                    warn!("Provider None ignores the configured protocol ({requested})");
+                }
+                Protocol::None
+            } else {
+                requested_protocol.unwrap_or_else(|| provider.get_dyn_provider().default_protocol())
+            };
         }
 
         // TODO: Error handling

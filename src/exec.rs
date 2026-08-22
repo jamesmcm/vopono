@@ -2,6 +2,7 @@ use crate::args_config::ArgsConfig;
 use crate::cli_client::CliClient;
 
 use super::args::ExecCommand;
+use super::args::WrappedArg;
 use super::sync::synch;
 use anyhow::{anyhow, bail};
 use log::{debug, error, info, warn};
@@ -162,6 +163,28 @@ fn setup_namespace(
     auto_sync_if_missing: bool,
 ) -> anyhow::Result<NamespaceConfig> {
     create_dir_all(vopono_dir()?)?;
+
+    // Attach mode (`--existing-netns <name>`): reuse a running namespace
+    // as-is. The connection settings are neutralized here, at the CLI layer,
+    // so defaults from the user's vopono config.toml (provider, protocol,
+    // server) cannot trigger config sync or server requirements for a
+    // namespace that already exists. Provider None also satisfies the
+    // provider/protocol pairing validation without bringing up any service.
+    let mut command = command;
+    let mut foreign_attach = false;
+    if let Some(netns) = command.existing_netns.clone() {
+        ensure_namespace_exists(&netns)?;
+        // A lockfile means vopono created this namespace and owns its
+        // lifecycle; anything else is attached untouched.
+        foreign_attach = !vopono_core::status::read_lock_namespaces()?
+            .namespaces
+            .contains_key(&netns);
+        info!("Attaching to existing network namespace: {netns}");
+        command.custom_netns_name = Some(netns);
+        command.provider = Some(WrappedArg::new(VpnProvider::None));
+        command.protocol = Some(WrappedArg::new(Protocol::None));
+    }
+
     let vopono_config_settings = ArgsConfig::get_config_file(&command)?;
     let mut host_env_vars = vopono_core::util::env_vars::get_host_env_vars();
 
@@ -234,6 +257,20 @@ fn setup_namespace(
     let forwarder;
 
     if get_existing_namespaces()?.contains(&ns_name) {
+        if foreign_attach {
+            info!(
+                "Attaching to unmanaged namespace {} - vopono will not modify it and will leave it running on exit",
+                ns_name
+            );
+            ns = NetworkNamespace::attach_unmanaged(ns_name)?;
+            forwarder = None;
+            return Ok(NamespaceConfig {
+                ns,
+                parsed_command,
+                forwarder,
+                host_env_vars,
+            });
+        }
         info!(
             "Using existing namespace: {}, will not modify firewall rules",
             ns_name
@@ -525,6 +562,17 @@ fn stay_alive(pid: Option<u32>, mut signals: Signals) {
     receiver.recv().unwrap();
     handle.close();
     thread.join().unwrap();
+}
+
+/// Verify a namespace exists before attaching to it.
+fn ensure_namespace_exists(name: &str) -> anyhow::Result<()> {
+    let existing = get_existing_namespaces()?;
+    if !existing.iter().any(|ns| ns == name) {
+        bail!(
+            "Network namespace '{name}' does not exist - nothing to attach to. Active namespaces: {existing:?}"
+        );
+    }
+    Ok(())
 }
 
 fn run_protocol_in_netns(

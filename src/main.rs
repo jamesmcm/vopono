@@ -5,6 +5,7 @@
 mod api;
 mod args;
 mod args_config;
+mod check;
 mod cli_client;
 mod control;
 mod daemon;
@@ -111,6 +112,14 @@ fn main() -> anyhow::Result<()> {
         args::Command::Status(status) => {
             handle_result(output_status(status.json), status.json)?;
         }
+        args::Command::Check(check) => {
+            handle_check(check, app.askpass)?;
+        }
+        args::Command::Probe(probe) => {
+            // Hidden helper: always runs in-place (the daemon launches it
+            // inside the target namespace); never forward or escalate.
+            check::run_probe(probe)?;
+        }
         args::Command::Providers(providerscmd) => {
             handle_result(
                 providers::print_providers(providerscmd.json),
@@ -196,6 +205,69 @@ fn handle_result(result: anyhow::Result<()>, json: bool) -> anyhow::Result<()> {
             std::process::exit(1);
         }
         Err(error) => Err(error),
+    }
+}
+
+/// Connectivity check: prefer the running root daemon (unprivileged callers
+/// cannot enter a namespace themselves), fall back to sudo like `exec`.
+fn handle_check(command: args::CheckCommand, askpass: bool) -> anyhow::Result<()> {
+    let host = command
+        .host
+        .clone()
+        .unwrap_or_else(|| check::DEFAULT_CHECK_HOST.to_string());
+    let local = || check::probe_namespace(&command.id, &host, command.port, command.timeout_ms);
+
+    let status = if nix::unistd::getuid().is_root() {
+        local()
+    } else {
+        match forward_check_to_daemon(&command, &host) {
+            Ok(status) => status,
+            Err(forward_error) => {
+                info!("Falling back to sudo (daemon check forward failed): {forward_error}");
+                clean_dead_locks()?;
+                elevate_privileges(askpass)?;
+                local()
+            }
+        }
+    };
+
+    if command.json {
+        api::print_json(&check::ConnectivityDocument {
+            version: api::SCHEMA_VERSION,
+            result: status,
+        })?;
+    } else {
+        println!("{}", status.human_line());
+    }
+    Ok(())
+}
+
+/// Route a connectivity check through the root daemon over `/run/vopono.sock`.
+/// Returns `Err` when the daemon is unreachable so the caller can fall back;
+/// daemon-side failures are reported as a disconnected result.
+fn forward_check_to_daemon(
+    command: &args::CheckCommand,
+    host: &str,
+) -> anyhow::Result<check::ConnectivityStatus> {
+    let name = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?;
+    let mut conn =
+        LocalSocketStream::connect(name).map_err(|e| anyhow!("Daemon not running: {e}"))?;
+    daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_STOP_TIMEOUT_SECONDS)?;
+
+    let request = daemon::DaemonRequest::CheckNamespace(daemon::CheckNamespaceRequest {
+        id: command.id.clone(),
+        host: Some(host.to_string()),
+        port: Some(command.port),
+        timeout_ms: Some(command.timeout_ms),
+    });
+    let bytes = wincode::serialize(&request)?;
+    daemon::write_framed(&mut conn, &bytes)?;
+
+    let response_bytes = daemon::read_framed(&mut conn, daemon::MAX_FRAME_LEN)?;
+    match wincode::deserialize::<daemon::DaemonResponse>(&response_bytes)? {
+        daemon::DaemonResponse::Json(payload) => Ok(serde_json::from_slice(&payload)?),
+        daemon::DaemonResponse::Error(message) => Err(anyhow!("Daemon reported: {message}")),
+        _ => Err(anyhow!("Unexpected daemon response to check request")),
     }
 }
 

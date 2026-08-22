@@ -58,6 +58,11 @@ pub struct NetworkNamespace {
     /// Runtime state shared with the status/lockfile projections.
     #[serde(default)]
     pub state: NamespaceState,
+    /// True when this handle wraps a namespace that was not created by vopono
+    /// (attached via `--existing-netns`). Such namespaces are never modified,
+    /// lockfile-tracked or torn down on drop.
+    #[serde(default)]
+    pub unmanaged: bool,
 }
 
 /// Server/port metadata mirrored into the lockfiles so read-only commands can
@@ -165,6 +170,44 @@ impl NetworkNamespace {
         }
     }
 
+    /// Wrap an already-running network namespace that was not created by
+    /// vopono. The caller must have verified the namespace exists.
+    ///
+    /// Unlike [`Self::from_existing`] this never inspects or writes lockfiles,
+    /// and [`Drop`] leaves the namespace and its firewall configuration
+    /// untouched - its lifecycle belongs to whoever created it.
+    pub fn attach_unmanaged(name: String) -> anyhow::Result<Self> {
+        info!(
+            "Attaching to existing unmanaged network namespace: {}",
+            name
+        );
+        Ok(Self {
+            name,
+            veth_pair: None,
+            dns_config: None,
+            openvpn: None,
+            wireguard: None,
+            host_masquerade: None,
+            firewall_exception: None,
+            shadowsocks: None,
+            ssh: None,
+            veth_pair_ips: None,
+            openconnect: None,
+            openfortivpn: None,
+            warp: None,
+            provider: VpnProvider::None,
+            protocol: Protocol::None,
+            firewall: Firewall::IpTables,
+            predown: None,
+            predown_user: None,
+            predown_group: None,
+            config_file: None,
+            trojan: None,
+            state: NamespaceState::default(),
+            unmanaged: true,
+        })
+    }
+
     pub fn new(
         name: String,
         provider: VpnProvider,
@@ -201,6 +244,7 @@ impl NetworkNamespace {
             config_file: None,
             trojan: None,
             state: NamespaceState::default(),
+            unmanaged: false,
         })
     }
 
@@ -804,6 +848,10 @@ impl NetworkNamespace {
     }
 
     pub fn write_lockfile(self, command: &str) -> anyhow::Result<Self> {
+        if self.unmanaged {
+            // Unmanaged namespaces are not vopono's to track or clean up.
+            return Ok(self);
+        }
         let mut lockfile_path = config_dir()?;
         lockfile_path.push(format!("vopono/locks/{}", self.name));
         std::fs::create_dir_all(&lockfile_path)?;
@@ -834,6 +882,9 @@ impl NetworkNamespace {
     /// Best-effort: a missing lockfile is logged and ignored so daemon startup
     /// is not aborted by an already-torn-down namespace entry.
     pub fn update_lockfile_application_pid(&self, pid: u32) -> anyhow::Result<()> {
+        if self.unmanaged {
+            return Ok(());
+        }
         let mut lockfile_path = config_dir()?;
         lockfile_path.push(format!("vopono/locks/{}/{}", self.name, unistd::getpid()));
         if !lockfile_path.exists() {
@@ -886,7 +937,15 @@ impl NetworkNamespace {
         Ok(())
     }
 
-    pub fn write_client_lockfile(&self, pid: u32, command: &str) -> anyhow::Result<PathBuf> {
+    pub fn write_client_lockfile(
+        &self,
+        pid: u32,
+        command: &str,
+    ) -> anyhow::Result<Option<PathBuf>> {
+        if self.unmanaged {
+            // Unmanaged namespaces are not vopono's to track or clean up.
+            return Ok(None);
+        }
         let mut lockfile_path = config_dir()?;
         lockfile_path.push(format!("vopono/locks/{}", self.name));
         std::fs::create_dir_all(&lockfile_path)?;
@@ -914,7 +973,7 @@ impl NetworkNamespace {
         debug!("Client lockfile written: {}", lockfile_path.display());
 
         set_config_permissions()?;
-        Ok(lockfile_path)
+        Ok(Some(lockfile_path))
     }
 
     pub fn setup_nftables_firewall(&self) -> anyhow::Result<()> {
@@ -971,6 +1030,13 @@ impl NetworkNamespace {
 
 impl Drop for NetworkNamespace {
     fn drop(&mut self) {
+        if self.unmanaged {
+            debug!(
+                "Namespace {} is not managed by vopono - leaving it untouched",
+                self.name
+            );
+            return;
+        }
         let mut lock_dir = config_dir().expect("Failed to get config dir");
         lock_dir.push(format!("vopono/locks/{}", self.name));
         let mut lockfile_path = lock_dir.clone();

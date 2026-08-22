@@ -94,9 +94,59 @@ execute your internal VPN command. Note the `-i foo` which tells vopono
 to use the Wireguard interface for connecting the network namespace!
 
 ```sh
-$ vopono -v exec --create-netns-only --provider None --protocol None --server None -i foo bash
-$ sudo ip netns exec vo_none_None bash
+$ vopono -v exec --provider None -i foo bash
+$ sudo ip netns exec vo_none_none bash
 $ ./vpn.sh
+```
+
+### Attaching to an existing namespace
+
+Use `--existing-netns` to launch another application in a namespace that is
+already running, without repeating the provider, protocol and server
+arguments:
+
+```bash
+$ vopono exec --existing-netns vo_ar_romania firefox-developer-edition
+```
+
+Nothing else should be passed with `--existing-netns`: connection settings
+are taken from the running namespace, and provider/protocol/server defaults
+in your vopono config.toml are ignored for the launch.
+
+Namespaces created by vopono are reused as-is and keep their normal
+lifecycle. Foreign namespaces (created by hand or other tools) are also
+supported: vopono attaches without modifying them, does not track them in
+`vopono status`, and leaves them running when the application exits.
+
+Similarly, `--provider None` on its own creates a fresh namespace without any
+VPN service - it overrides protocol and server settings from the CLI or config
+file, so you no longer need to repeat them.
+
+### Checking connectivity
+
+`check` runs a TCP connectivity probe inside a running namespace. It uses the
+root daemon when available (unprivileged users cannot enter namespaces) and
+falls back to sudo otherwise:
+
+```bash
+$ vopono check vo_ar_romania
+vo_ar_romania	connected	38ms	tcp 1.1.1.1:443
+```
+
+The target host and port can be overridden with `--host`, `--port` and
+`--timeout-ms`; use `--json` for machine-readable output:
+
+```bash
+$ vopono check vo_ar_romania --json
+{
+  "version": 1,
+  "result": {
+    "id": "vo_ar_romania",
+    "connected": true,
+    "latency_ms": 38,
+    "target": "tcp 1.1.1.1:443"
+  }
+}
 ```
 
 Note you can set config files in `/etc/netns/vo_none_None/` to have them

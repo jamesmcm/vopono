@@ -198,6 +198,8 @@ pub enum DaemonRequest {
     Version,
     /// Lifecycle control executed with the daemon's root privileges.
     Stop(DaemonStopRequest),
+    /// Probe connectivity of an existing network namespace (requires root).
+    CheckNamespace(CheckNamespaceRequest),
 }
 
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug, Clone)]
@@ -217,6 +219,14 @@ pub struct DaemonStopRequest {
     /// Client's XDG_CONFIG_HOME so the daemon reads the caller's lockfiles
     /// rather than root's.
     pub config_home: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug, Clone)]
+pub struct CheckNamespaceRequest {
+    pub id: String,
+    pub host: Option<String>,
+    pub port: Option<u16>,
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug)]
@@ -409,7 +419,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             // other active clients before tearing down the namespace.
             let client_lock_path: Option<PathBuf> =
                 match _ns_guard.write_client_lockfile(child.id(), &requested_application) {
-                    Ok(path) => Some(path),
+                    Ok(path) => path,
                     Err(error) => {
                         log::warn!("Failed to write daemon client status lockfile: {error}");
                         None
@@ -593,6 +603,25 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 Ok(result) => serde_json::to_vec(&result)?,
                 Err(error) => serde_json::to_vec(&crate::errors::error_json_value(&error))?,
             };
+            let bytes = wincode::serialize(&DaemonResponse::Json(payload))?;
+            conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
+            conn.write_all(&bytes)?;
+        }
+        DaemonRequest::CheckNamespace(request) => {
+            // The probe needs root to enter the namespace, so it can only run
+            // here (or in the sudo fallback path of the CLI).
+            let status = crate::check::probe_namespace(
+                &request.id,
+                request
+                    .host
+                    .as_deref()
+                    .unwrap_or(crate::check::DEFAULT_CHECK_HOST),
+                request.port.unwrap_or(crate::check::DEFAULT_CHECK_PORT),
+                request
+                    .timeout_ms
+                    .unwrap_or(crate::check::DEFAULT_CHECK_TIMEOUT_MS),
+            );
+            let payload = serde_json::to_vec(&status)?;
             let bytes = wincode::serialize(&DaemonResponse::Json(payload))?;
             conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
             conn.write_all(&bytes)?;
