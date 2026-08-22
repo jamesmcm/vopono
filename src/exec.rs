@@ -9,7 +9,7 @@ use log::{debug, error, info, warn};
 use signal_hook::iterator::SignalsInfo;
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use std::net::{IpAddr, Ipv4Addr};
-use std::os::fd::RawFd;
+use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::{
     fs::create_dir_all,
@@ -112,6 +112,16 @@ pub fn execute_as_daemon_with_stdio(
         }
     }
 
+    // Machine-readable launch summary for frontend integrations, written to
+    // the client's stdout before any application output. Take ownership of
+    // the descriptor up-front: ApplicationWrapper hands it to the spawned
+    // child via Stdio::from_raw_fd, which closes it on drop.
+    let report_out: Option<OwnedFd> = if parsed_command.json {
+        stdio_fds.map(|(_, stdout_fd, _)| unsafe { OwnedFd::from_raw_fd(stdout_fd) })
+    } else {
+        None
+    };
+
     let ns = ns.write_lockfile(&parsed_command.application)?;
     let application = ApplicationWrapper::new(
         &ns,
@@ -126,8 +136,29 @@ pub fn execute_as_daemon_with_stdio(
         stdio_fds,
         take_controlling_tty,
     )?;
-    ns.update_lockfile_application_pid(application.handle.id())?;
+    let pid = application.handle.id();
+    ns.update_lockfile_application_pid(pid)?;
+
+    if let Some(report_out) = report_out {
+        let report = launch_report(&ns, pid, application.port_forwarding.as_deref());
+        let mut out = std::fs::File::from(report_out);
+        let _ = writeln!(out, "{report}");
+        let _ = out.flush();
+    }
+
     Ok((application, ns))
+}
+
+/// Single-line machine-readable launch summary for `exec --json`.
+fn launch_report(ns: &NetworkNamespace, pid: u32, forwarder: Option<&dyn Forwarder>) -> String {
+    serde_json::json!({
+        "version": crate::api::SCHEMA_VERSION,
+        "event": "launched",
+        "namespace": ns.name,
+        "pid": pid,
+        "forwarded_port": forwarder.map(|f| f.forwarded_port()),
+    })
+    .to_string()
 }
 
 /// The main entry point for the non-daemon (sudo-based fallback) execution path.
@@ -503,6 +534,14 @@ fn run_application_and_wait(
             "Application {} launched in network namespace {} with pid {}",
             parsed_command.application, ns.name, pid
         );
+
+        if parsed_command.json {
+            println!(
+                "{}",
+                launch_report(ns, pid, application.port_forwarding.as_deref())
+            );
+            io::stdout().flush()?;
+        }
 
         if let Some(fwd) = application.port_forwarding.as_ref() {
             info!("Port Forwarding on port {}", fwd.forwarded_port())

@@ -1,10 +1,63 @@
 use crate::network::netns::LockfileStatus;
 use crate::util::config_dir;
 use log::debug;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
+
+/// Sidecar file next to a namespace's lockfiles holding the latest
+/// provider-assigned forwarded port, refreshed by the forwarder thread.
+const FORWARDED_PORT_SIDECAR: &str = "port-forwarding.json";
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ForwardedPortSidecar {
+    port: u16,
+    updated: u64,
+}
+
+/// Record the latest provider-assigned forwarded port for a namespace.
+///
+/// Written to a sidecar file rather than by rewriting the RON lockfile:
+/// primary lockfiles embed namespace handles that must never be deserialized
+/// on background threads (dropping such a copy would tear down the live
+/// namespace).
+pub fn record_forwarded_port(locks_dir: &Path, ns_name: &str, port: u16) -> anyhow::Result<()> {
+    let updated = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let sidecar = ForwardedPortSidecar { port, updated };
+    let dir = locks_dir.join(ns_name);
+    std::fs::create_dir_all(&dir)?;
+    let tmp = dir.join(format!("{FORWARDED_PORT_SIDECAR}.tmp"));
+    let path = dir.join(FORWARDED_PORT_SIDECAR);
+    std::fs::write(&tmp, serde_json::to_vec(&sidecar)?)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Replace the reported forwarded port with the sidecar value when present.
+/// Provider and automatic flag still come from the embedded lockfile state.
+fn overlay_forwarded_port(locks_root: &Path, ns_name: &str, locks: &mut [LockfileStatus]) {
+    let Ok(raw) = std::fs::read(locks_root.join(ns_name).join(FORWARDED_PORT_SIDECAR)) else {
+        return;
+    };
+    let Ok(sidecar) = serde_json::from_slice::<ForwardedPortSidecar>(&raw) else {
+        debug!("Ignoring malformed forwarded-port sidecar for {ns_name}");
+        return;
+    };
+    for lock in locks.iter_mut() {
+        if let Some(status) = lock.ns.state.port_forwarding.as_mut()
+            && status.port != sidecar.port
+        {
+            debug!(
+                "Forwarded port for {ns_name} renewed: {} -> {}",
+                status.port, sidecar.port
+            );
+            status.port = sidecar.port;
+        }
+    }
+}
 
 pub type LockNamespaces = HashMap<String, Vec<LockfileStatus>>;
 
@@ -54,7 +107,7 @@ pub fn read_lock_namespaces_from_dir(
         return Ok(LockNamespacesStatus::default());
     }
 
-    for entry in WalkDir::new(dir) {
+    for entry in WalkDir::new(&dir) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -107,6 +160,13 @@ pub fn read_lock_namespaces_from_dir(
                 errors.push(format!("{}: {error}", entry.path().display()));
             }
         }
+    }
+
+    // Forwarder renewals update the sidecar, not the RON lockfiles, so
+    // reflect the latest forwarded port in every derived view.
+    for (namespace, locks) in grouped_locks.iter_mut() {
+        overlay_forwarded_port(&dir, namespace, &mut locks.primary);
+        overlay_forwarded_port(&dir, namespace, &mut locks.client);
     }
 
     Ok(LockNamespacesStatus {
@@ -236,6 +296,72 @@ mod tests {
         assert_eq!(client_pid_from_lockfile_name("client-4242"), Some(4242));
         assert_eq!(client_pid_from_lockfile_name("client-pid"), None);
         assert_eq!(client_pid_from_lockfile_name("12345"), None);
+    }
+
+    fn forwarding_lock(namespace: &str, port: u16) -> String {
+        format!(
+            r#"(ns:(name:"{namespace}",provider:ProtonVPN,protocol:Wireguard,state:(port_forwarding:Some((provider:ProtonVPN,port:{port},automatic:true)))),start:1,command:"curl")"#
+        )
+    }
+
+    #[test]
+    fn forwarded_port_sidecar_overlays_renewed_port() {
+        let dir = unique_temp_dir("forwarded-port");
+        let ns_dir = dir.join("vo_p_se");
+        fs::create_dir_all(&ns_dir).unwrap();
+        fs::write(ns_dir.join("100"), forwarding_lock("vo_p_se", 1111)).unwrap();
+
+        // No sidecar yet: the embedded port is reported as-is.
+        let status = read_lock_namespaces_from_dir(&dir).unwrap();
+        assert_eq!(
+            status.namespaces["vo_p_se"][0]
+                .ns
+                .state
+                .port_forwarding
+                .as_ref()
+                .unwrap()
+                .port,
+            1111
+        );
+
+        record_forwarded_port(&dir, "vo_p_se", 2222).unwrap();
+        let status = read_lock_namespaces_from_dir(&dir).unwrap();
+        let forwarding = status.namespaces["vo_p_se"][0]
+            .ns
+            .state
+            .port_forwarding
+            .as_ref()
+            .unwrap();
+        assert_eq!(forwarding.port, 2222);
+        // Provider/automatic still come from the lockfile state.
+        assert_eq!(forwarding.provider, VpnProvider::ProtonVPN);
+        assert!(forwarding.automatic);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn malformed_forwarded_port_sidecar_is_ignored() {
+        let dir = unique_temp_dir("forwarded-port-bad");
+        let ns_dir = dir.join("vo_p_se");
+        fs::create_dir_all(&ns_dir).unwrap();
+        fs::write(ns_dir.join("100"), forwarding_lock("vo_p_se", 1111)).unwrap();
+        fs::write(ns_dir.join("port-forwarding.json"), "not json").unwrap();
+
+        let status = read_lock_namespaces_from_dir(&dir).unwrap();
+        assert_eq!(
+            status.namespaces["vo_p_se"][0]
+                .ns
+                .state
+                .port_forwarding
+                .as_ref()
+                .unwrap()
+                .port,
+            1111
+        );
+        assert!(status.errors.is_empty());
+
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -211,16 +211,36 @@ fn handle_result(result: anyhow::Result<()>, json: bool) -> anyhow::Result<()> {
 /// Connectivity check: prefer the running root daemon (unprivileged callers
 /// cannot enter a namespace themselves), fall back to sudo like `exec`.
 fn handle_check(command: args::CheckCommand, askpass: bool) -> anyhow::Result<()> {
-    let host = command
-        .host
+    let v4_host = command
+        .v4_host
         .clone()
-        .unwrap_or_else(|| check::DEFAULT_CHECK_HOST.to_string());
-    let local = || check::probe_namespace(&command.id, &host, command.port, command.timeout_ms);
+        .unwrap_or_else(|| check::DEFAULT_V4_HOST.to_string());
+    let v6_host = command
+        .v6_host
+        .clone()
+        .unwrap_or_else(|| check::DEFAULT_V6_HOST.to_string());
+    let dns_host = command
+        .dns_host
+        .clone()
+        .unwrap_or_else(|| check::DEFAULT_DNS_HOST.to_string());
+    let local = || {
+        check::probe_namespace(
+            &command.id,
+            &v4_host,
+            &v6_host,
+            command.port,
+            command.timeout_ms,
+            &dns_host,
+            command.skip_ipv4,
+            command.skip_ipv6,
+            command.skip_dns,
+        )
+    };
 
     let status = if nix::unistd::getuid().is_root() {
         local()
     } else {
-        match forward_check_to_daemon(&command, &host) {
+        match forward_check_to_daemon(&command, &v4_host, &v6_host, &dns_host) {
             Ok(status) => status,
             Err(forward_error) => {
                 info!("Falling back to sudo (daemon check forward failed): {forward_error}");
@@ -247,7 +267,9 @@ fn handle_check(command: args::CheckCommand, askpass: bool) -> anyhow::Result<()
 /// daemon-side failures are reported as a disconnected result.
 fn forward_check_to_daemon(
     command: &args::CheckCommand,
-    host: &str,
+    v4_host: &str,
+    v6_host: &str,
+    dns_host: &str,
 ) -> anyhow::Result<check::ConnectivityStatus> {
     let name = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?;
     let mut conn =
@@ -256,9 +278,14 @@ fn forward_check_to_daemon(
 
     let request = daemon::DaemonRequest::CheckNamespace(daemon::CheckNamespaceRequest {
         id: command.id.clone(),
-        host: Some(host.to_string()),
         port: Some(command.port),
         timeout_ms: Some(command.timeout_ms),
+        v4_host: Some(v4_host.to_string()),
+        v6_host: Some(v6_host.to_string()),
+        skip_ipv4: Some(command.skip_ipv4),
+        skip_ipv6: Some(command.skip_ipv6),
+        dns_host: Some(dns_host.to_string()),
+        skip_dns: Some(command.skip_dns),
     });
     let bytes = wincode::serialize(&request)?;
     daemon::write_framed(&mut conn, &bytes)?;

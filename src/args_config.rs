@@ -109,6 +109,8 @@ pub struct ArgsConfig {
     pub ssh_proxy_port: u16,
     pub ssh_user: Option<String>,
     pub ssh_port: Option<u16>,
+    /// Emit a machine-readable launch report on stdout.
+    pub json: bool,
 }
 
 impl ArgsConfig {
@@ -345,6 +347,8 @@ impl ArgsConfig {
             .or_else(|| config.get("ssh_port").ok())
             .or_else(|| config.get("ssh-port").ok());
 
+        let json = command_else_config_bool!(json, command, config);
+
         // TODO: Group some of these arguments into their own structs
         Ok(Self {
             provider,
@@ -381,6 +385,7 @@ impl ArgsConfig {
             ssh_proxy_port,
             ssh_user,
             ssh_port,
+            json,
         })
     }
 

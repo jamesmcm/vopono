@@ -127,6 +127,20 @@ impl VpnProvider {
         )
     }
 
+    /// Whether port forwarding is available for this provider when using the
+    /// given protocol. PIA and ProtonVPN forwarders are tunnel-agnostic;
+    /// AzireVPN only implements its flow over Wireguard. AirVPN exposes
+    /// manually configured forwarded ports regardless of protocol.
+    pub fn port_forwarding_for(&self, protocol: Protocol) -> bool {
+        if !self.supports_port_forwarding() {
+            return false;
+        }
+        match self {
+            Self::AzireVPN => matches!(protocol, Protocol::Wireguard),
+            _ => true,
+        }
+    }
+
     pub fn get_dyn_provider(&self) -> Box<dyn Provider> {
         match self {
             Self::PrivateInternetAccess => Box::new(pia::PrivateInternetAccess {}),

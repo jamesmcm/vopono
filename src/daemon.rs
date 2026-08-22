@@ -224,9 +224,17 @@ pub struct DaemonStopRequest {
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug, Clone)]
 pub struct CheckNamespaceRequest {
     pub id: String,
-    pub host: Option<String>,
     pub port: Option<u16>,
     pub timeout_ms: Option<u64>,
+    /// IPv4 target for the tunnel reachability check.
+    pub v4_host: Option<String>,
+    /// IPv6 target for the tunnel reachability check.
+    pub v6_host: Option<String>,
+    pub skip_ipv4: Option<bool>,
+    pub skip_ipv6: Option<bool>,
+    /// Hostname resolved via the namespace's own DNS configuration.
+    pub dns_host: Option<String>,
+    pub skip_dns: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug)]
@@ -613,13 +621,24 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             let status = crate::check::probe_namespace(
                 &request.id,
                 request
-                    .host
+                    .v4_host
                     .as_deref()
-                    .unwrap_or(crate::check::DEFAULT_CHECK_HOST),
+                    .unwrap_or(crate::check::DEFAULT_V4_HOST),
+                request
+                    .v6_host
+                    .as_deref()
+                    .unwrap_or(crate::check::DEFAULT_V6_HOST),
                 request.port.unwrap_or(crate::check::DEFAULT_CHECK_PORT),
                 request
                     .timeout_ms
-                    .unwrap_or(crate::check::DEFAULT_CHECK_TIMEOUT_MS),
+                    .unwrap_or(crate::check::DEFAULT_TIMEOUT_MS),
+                request
+                    .dns_host
+                    .as_deref()
+                    .unwrap_or(crate::check::DEFAULT_DNS_HOST),
+                request.skip_ipv4.unwrap_or(false),
+                request.skip_ipv6.unwrap_or(false),
+                request.skip_dns.unwrap_or(false),
             );
             let payload = serde_json::to_vec(&status)?;
             let bytes = wincode::serialize(&DaemonResponse::Json(payload))?;

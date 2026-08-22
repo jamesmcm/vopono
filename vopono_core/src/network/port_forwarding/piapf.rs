@@ -21,6 +21,7 @@ pub struct Piapf {
 pub struct ThreadParamsImpl {
     pub port: u16,
     pub netns_name: String,
+    pub locks_dir: std::path::PathBuf,
     pub signature: String,
     pub payload: String,
     pub hostname: String,
@@ -40,6 +41,10 @@ impl ThreadParameters for ThreadParamsImpl {
 
     fn get_netns_name(&self) -> String {
         self.netns_name.clone()
+    }
+
+    fn get_locks_dir(&self) -> std::path::PathBuf {
+        self.locks_dir.clone()
     }
 }
 
@@ -167,6 +172,7 @@ impl Piapf {
 
         let params = ThreadParamsImpl {
             netns_name: ns.name.clone(),
+            locks_dir: crate::util::config_dir()?.join("vopono").join("locks"),
             hostname: vpn_hostname,
             gateway: vpn_gateway,
             pia_cert_path,
