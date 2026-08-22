@@ -1,4 +1,5 @@
 use super::netns::NetworkNamespace;
+use log::debug;
 use serde::{Deserialize, Serialize};
 use strum_macros::{Display, EnumIter};
 
@@ -54,6 +55,73 @@ pub fn disable_ipv6(netns: &NetworkNamespace, firewall: Firewall) -> anyhow::Res
                     &netns.name,
                     "drop_ipv6_forward",
                     "{ type filter hook forward priority -1 ; policy drop; }",
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Tag return traffic entering the namespace through the host veth with the
+/// Wireguard fwmark. These packets are the only tunnel-related traffic that
+/// arrives outside the tunnel device; without the tag their reverse-path
+/// lookup follows the fwmark policy routing table back to the tunnel device
+/// instead of the ingress interface, so hosts enforcing strict reverse-path
+/// filtering (rp_filter=1) silently drop them. Requires
+/// net.ipv4.conf.*.src_valid_mark=1 (set during Wireguard setup) for the
+/// kernel to honour the mark during source validation. Rules live inside the
+/// namespace and are discarded with it.
+pub fn tag_return_traffic(
+    netns: &NetworkNamespace,
+    ingress_iface: &str,
+    fwmark: &str,
+    firewall: Firewall,
+) -> anyhow::Result<()> {
+    debug!(
+        "Tagging return traffic on {ingress_iface} with fwmark {fwmark} in netns {}",
+        netns.name
+    );
+    match firewall {
+        Firewall::IpTables => NetworkNamespace::exec(
+            &netns.name,
+            &[
+                "iptables",
+                "-t",
+                "mangle",
+                "-A",
+                "PREROUTING",
+                "-i",
+                ingress_iface,
+                "-j",
+                "MARK",
+                "--set-xmark",
+                fwmark,
+            ],
+        )?,
+        Firewall::NfTables => {
+            NetworkNamespace::exec(&netns.name, &["nft", "add", "table", "ip", &netns.name])?;
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
+                    "nft",
+                    "add",
+                    "chain",
+                    "ip",
+                    &netns.name,
+                    "prerouting_mark",
+                    "{ type filter hook prerouting priority -150 ; }",
+                ],
+            )?;
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "ip",
+                    &netns.name,
+                    "prerouting_mark",
+                    &format!("iifname \"{ingress_iface}\" meta mark set {fwmark}"),
                 ],
             )?;
         }

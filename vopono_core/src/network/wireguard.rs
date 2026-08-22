@@ -363,13 +363,7 @@ impl Wireguard {
             &[&executable_wg, "set", &if_name, "fwmark", fwmark],
         )?;
 
-        add_endpoint_bypass_route(
-            namespace,
-            peer_endpoint_ip,
-            &config.peer.allowed_ips,
-            has_ipv4_default,
-            has_ipv6_default,
-        )?;
+        add_endpoint_bypass_route(namespace, peer_endpoint_ip, &config.peer.allowed_ips)?;
         add_routes(
             namespace,
             &if_name,
@@ -386,6 +380,19 @@ impl Wireguard {
                 &["sysctl", "-q", "net.ipv4.conf.all.src_valid_mark=1"],
             )?;
         }
+
+        // Tag veth-ingress return traffic with the tunnel fwmark so its
+        // reverse path stays symmetric even under strict rp_filter.
+        crate::network::firewall::tag_return_traffic(
+            namespace,
+            &namespace
+                .veth_pair
+                .as_ref()
+                .context("Veth pair not set while tagging return traffic")?
+                .source,
+            fwmark,
+            firewall,
+        )?;
 
         if disable_ipv6 {
             crate::network::firewall::disable_ipv6(namespace, firewall)?;
@@ -606,30 +613,25 @@ fn select_endpoint_ip(addresses: &[IpAddr], disable_ipv6: bool) -> anyhow::Resul
         .ok_or_else(|| anyhow!("No Wireguard endpoint addresses were resolved"))
 }
 
-fn endpoint_needs_bypass_route(
-    endpoint: IpAddr,
-    allowed_ips: &[IpNet],
-    has_family_default: bool,
-) -> bool {
-    !has_family_default
-        && allowed_ips
-            .iter()
-            .any(|network| network.contains(&endpoint))
+/// The endpoint is the only remote whose traffic enters/leaves the namespace
+/// via the veth instead of the tunnel, so its route must stay symmetric:
+/// without a specific route in the main table, an unmarked return packet from
+/// the endpoint reverse-routes through the fwmark policy table to the tunnel
+/// device and hosts with strict reverse-path filtering (rp_filter=1) silently
+/// drop it. A /32 (or /128) via the veth gateway keeps both directions on the
+/// veth regardless of rp_filter mode.
+fn endpoint_needs_bypass_route(endpoint: IpAddr, allowed_ips: &[IpNet]) -> bool {
+    allowed_ips
+        .iter()
+        .any(|network| network.contains(&endpoint))
 }
 
 fn add_endpoint_bypass_route(
     namespace: &NetworkNamespace,
     endpoint: IpAddr,
     allowed_ips: &[IpNet],
-    has_ipv4_default: bool,
-    has_ipv6_default: bool,
 ) -> anyhow::Result<()> {
-    let has_family_default = if endpoint.is_ipv4() {
-        has_ipv4_default
-    } else {
-        has_ipv6_default
-    };
-    if !endpoint_needs_bypass_route(endpoint, allowed_ips, has_family_default) {
+    if !endpoint_needs_bypass_route(endpoint, allowed_ips) {
         return Ok(());
     }
 
@@ -1015,23 +1017,26 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_inside_split_tunnel_needs_bypass_route() {
+    fn endpoint_inside_allowed_ips_needs_bypass_route() {
         let allowed_ips = networks(&["192.168.1.0/24"]);
 
         assert!(endpoint_needs_bypass_route(
             "192.168.1.10".parse().unwrap(),
-            &allowed_ips,
-            false
+            &allowed_ips
         ));
         assert!(!endpoint_needs_bypass_route(
             "203.0.113.10".parse().unwrap(),
-            &allowed_ips,
-            false
+            &allowed_ips
         ));
-        assert!(!endpoint_needs_bypass_route(
-            "192.168.1.10".parse().unwrap(),
-            &allowed_ips,
-            true
+
+        let default_allowed_ips = networks(&["0.0.0.0/0", "::/0"]);
+        assert!(endpoint_needs_bypass_route(
+            "203.0.113.10".parse().unwrap(),
+            &default_allowed_ips
+        ));
+        assert!(endpoint_needs_bypass_route(
+            "2001:db8::10".parse().unwrap(),
+            &default_allowed_ips
         ));
     }
 
