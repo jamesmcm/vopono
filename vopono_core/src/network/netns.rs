@@ -7,6 +7,7 @@ use super::openfortivpn::OpenFortiVpn;
 use super::openvpn::OpenVpn;
 use super::shadowsocks::Shadowsocks;
 use super::ssh::SshProxy;
+use super::sysctl::SysCtl;
 use super::trojan::TrojanHost;
 use super::trojan::trojan_exec::Trojan;
 use super::veth_pair::VethPair;
@@ -512,6 +513,10 @@ impl NetworkNamespace {
                 .context("Failed to add IPv6 host access route")?;
             }
         }
+
+        // Strict reverse-path filtering on the host would silently drop VPN
+        // return traffic entering via the veth, so relax it in the namespace.
+        SysCtl::relax_strict_rp_filter(&self.name)?;
 
         // Store the IPs
         self.veth_pair_ips = Some(veth_ips);
