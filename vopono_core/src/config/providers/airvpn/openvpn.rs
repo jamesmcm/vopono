@@ -194,7 +194,7 @@ mod tests {
     fn generator_names_are_reduced_to_stable_config_ids() {
         assert_eq!(
             generator_filename("AirVPN_CH-Zurich_Achernar_UDP-443.ovpn", "ovpn"),
-            "ch-Achernar.ovpn"
+            "switzerland-ch-Achernar.ovpn"
         );
         assert_eq!(
             generator_filename("ca-Custom.ovpn", "ovpn"),

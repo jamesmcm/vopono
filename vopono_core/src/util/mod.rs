@@ -236,8 +236,16 @@ pub fn get_allocated_ip_addresses() -> anyhow::Result<Vec<Ipv4Net>> {
 }
 
 pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
-    let output = Command::new("ip").args(["netns", "list"]).output()?.stdout;
-    let output = std::str::from_utf8(&output)?
+    let output = Command::new("ip").args(["netns", "list"]).output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "ip netns list failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let output = std::str::from_utf8(&output.stdout)?
         .split('\n')
         .map(|x| x.split_whitespace().next())
         .filter(|x| x.is_some())
@@ -289,16 +297,20 @@ pub fn get_running_process_pids(process_name: &str) -> Vec<u32> {
 
 /// Check whether a process is currently attached to a named network namespace.
 ///
-/// Linux exposes the namespace identity in both paths as `net:[inode]`, so
-/// comparing the symlink targets is more reliable than relying on a process
-/// name, command line, or PID alone.
+/// Namespace identity is compared via the `(device, inode)` pair of the
+/// namespace files: every namespace gets a unique inode on its nsfs
+/// superblock. Reading the symlink targets is not reliable here because
+/// `readlink(2)` on `/run/netns/<name>` bind mounts returns `EINVAL` on
+/// several kernels.
 pub fn process_is_in_network_namespace(pid: u32, ns_name: &str) -> anyhow::Result<bool> {
-    let process_namespace = fs::read_link(format!("/proc/{pid}/ns/net"))
+    let process_namespace = fs::metadata(format!("/proc/{pid}/ns/net"))
         .with_context(|| format!("Could not inspect network namespace for PID {pid}"))?;
-    let target_namespace = fs::read_link(format!("/var/run/netns/{ns_name}"))
+    let target_namespace = fs::metadata(format!("/var/run/netns/{ns_name}"))
         .with_context(|| format!("Could not inspect network namespace '{ns_name}'"))?;
 
-    Ok(process_namespace == target_namespace)
+    use std::os::unix::fs::MetadataExt;
+    Ok(process_namespace.ino() == target_namespace.ino()
+        && process_namespace.dev() == target_namespace.dev())
 }
 
 pub fn get_all_running_pids() -> Vec<u32> {
@@ -513,45 +525,66 @@ pub fn delete_all_files_in_dir(dir: &Path) -> anyhow::Result<()> {
 }
 
 pub fn get_configs_from_alias(list_path: &Path, alias: &str) -> Vec<PathBuf> {
-    WalkDir::new(list_path)
-        .into_iter()
-        .filter_map(|x| x.ok())
-        .filter(|x| {
-            x.path().is_file()
-                && x.path().extension().is_some()
-                && (x.path().extension().expect("No file extension") == "conf"
-                    || x.path().extension().expect("No file extension") == "ovpn")
-        })
-        .map(|x| {
-            (
-                x.clone(),
-                x.file_name()
-                    .to_str()
-                    .expect("No filename")
-                    .split('-')
-                    .next()
-                    .expect("No - in filename")
-                    .to_string(),
-                x.file_name()
-                    .to_str()
-                    .expect("No filename")
-                    .split('-')
-                    .nth(1)
-                    .unwrap_or("")
-                    .to_string(),
-            )
-        })
-        .filter(|x| {
-            x.2.starts_with(alias)
-                || (x.1.starts_with(alias))
-                || x.0
-                    .file_name()
-                    .to_str()
-                    .expect("No filename")
-                    .starts_with(alias)
-        })
-        .map(|x| PathBuf::from(x.0.path()))
-        .collect::<Vec<PathBuf>>()
+    let alias = alias.trim().to_ascii_lowercase();
+    let code_to_country = country_map::code_to_country_map();
+    let country_to_code = country_map::country_to_code_map();
+    let mut country_matches = Vec::new();
+    let mut other_matches = Vec::new();
+
+    for entry in WalkDir::new(list_path).into_iter().filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file()
+            || !path
+                .extension()
+                .is_some_and(|ext| ext == "conf" || ext == "ovpn")
+        {
+            continue;
+        }
+
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(stem) = path.file_stem().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let components = stem
+            .split('-')
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>();
+        if components.is_empty() {
+            continue;
+        }
+
+        let component_match = alias.is_empty()
+            || components
+                .iter()
+                .any(|component| component.starts_with(&alias))
+            || file_name.to_ascii_lowercase().starts_with(&alias);
+        if !component_match {
+            continue;
+        }
+
+        let country_match = !alias.is_empty()
+            && (components[0].starts_with(&alias)
+                || code_to_country
+                    .get(components[0].as_str())
+                    .is_some_and(|country| country.starts_with(&alias))
+                || country_to_code
+                    .get(components[0].as_str())
+                    .is_some_and(|code| code.starts_with(&alias)));
+
+        if country_match {
+            country_matches.push(path.to_path_buf());
+        } else {
+            other_matches.push(path.to_path_buf());
+        }
+    }
+
+    if country_matches.is_empty() {
+        other_matches
+    } else {
+        country_matches
+    }
 }
 
 pub fn get_config_from_alias(list_path: &Path, alias: &str) -> anyhow::Result<PathBuf> {
@@ -671,5 +704,32 @@ mod tests {
     #[test]
     fn rejects_unknown_custom_config_format() {
         assert!(detect_config_protocol("this is not a VPN config").is_err());
+    }
+
+    #[test]
+    fn country_aliases_are_prioritized_over_server_prefixes() {
+        let directory = tempfile::tempdir().unwrap();
+        for filename in [
+            "romania-ro-canes.conf",
+            "canada-ca-ross.conf",
+            "ro-legacy.conf",
+            "ca-ross.conf",
+        ] {
+            std::fs::File::create(directory.path().join(filename)).unwrap();
+        }
+
+        let mut romania = get_configs_from_alias(directory.path(), "ro")
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        romania.sort();
+        assert_eq!(romania, ["ro-legacy.conf", "romania-ro-canes.conf"]);
+
+        let mut ross = get_configs_from_alias(directory.path(), "ross")
+            .into_iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        ross.sort();
+        assert_eq!(ross, ["ca-ross.conf", "canada-ca-ross.conf"]);
     }
 }

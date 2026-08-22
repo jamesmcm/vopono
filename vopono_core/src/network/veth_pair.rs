@@ -169,10 +169,50 @@ impl VethPair {
     }
 }
 
+fn link_is_missing(name: &str) -> anyhow::Result<bool> {
+    let output = std::process::Command::new("ip")
+        .args(["link", "show", name])
+        .output()
+        .with_context(|| format!("Failed to inspect veth pair: {name}"))?;
+    if output.status.success() {
+        return Ok(false);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let normalized = stderr.to_ascii_lowercase();
+    if normalized.contains("does not exist") || normalized.contains("cannot find device") {
+        return Ok(true);
+    }
+
+    Err(anyhow::anyhow!(
+        "ip link show {name} failed with status {}: {}",
+        output.status,
+        stderr.trim()
+    ))
+}
+
 impl Drop for VethPair {
     fn drop(&mut self) {
-        sudo_command(&["ip", "link", "delete", &self.dest])
-            .unwrap_or_else(|_| panic!("Failed to delete veth pair: {}", self.dest));
+        // Concurrent teardowns (e.g. `vopono stop` racing the session that
+        // owns the namespace) can legitimately delete this interface first;
+        // a missing veth must not panic inside Drop, which would abort the
+        // daemon connection thread mid-response.
+        if let Err(error) = sudo_command(&["ip", "link", "delete", &self.dest]) {
+            match link_is_missing(&self.dest) {
+                Ok(true) => {
+                    debug!("Veth pair {} was already removed", self.dest);
+                }
+                Ok(false) => {
+                    log::error!("Failed to delete veth pair {}: {error}", self.dest);
+                }
+                Err(inspect_error) => {
+                    log::error!(
+                        "Failed to delete veth pair {}: {error}; could not verify whether it was removed: {inspect_error}",
+                        self.dest
+                    );
+                }
+            }
+        }
     }
 }
 

@@ -177,7 +177,7 @@ mod tests {
     fn archive_entry_names_reduce_to_stable_config_ids() {
         assert_eq!(
             generator_filename("AirVPN_NL-Alblasserdam_Alcyone_UDP-1637.conf", "conf"),
-            "nl-Alcyone.conf"
+            "netherlands-nl-Alcyone.conf"
         );
         assert_eq!(
             generator_filename("weird-entry.conf", "conf"),

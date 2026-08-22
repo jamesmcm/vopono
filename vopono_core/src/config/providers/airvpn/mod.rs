@@ -44,7 +44,7 @@ pub(super) fn http_client() -> anyhow::Result<reqwest::blocking::Client> {
 
 /// Reduce a generator archive entry name such as
 /// `AirVPN_CH-Zurich_Achernar_UDP-443.ovpn` to the stable config id vopono
-/// uses (`ch-Achernar.{extension}`).
+/// uses (`switzerland-ch-Achernar.{extension}`).
 ///
 /// Falls back to the original name when it does not follow the generator's
 /// `{word}_{location}_{server}_{...}` layout.
@@ -52,11 +52,19 @@ pub(super) fn generator_filename(entry_name: &str, extension: &str) -> String {
     let fields = entry_name.split('_').collect::<Vec<_>>();
     match (fields.first(), fields.get(1), fields.get(2)) {
         (Some(&"AirVPN"), Some(location), Some(server)) => {
-            let country_code = location.split('-').next().unwrap_or_default();
+            let country_code = location
+                .split('-')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
             if country_code.is_empty() || server.is_empty() {
                 entry_name.to_string()
+            } else if let Some(country) =
+                crate::util::country_map::code_to_country_map().get(country_code.as_str())
+            {
+                format!("{country}-{country_code}-{server}.{extension}")
             } else {
-                format!("{}-{server}.{extension}", country_code.to_ascii_lowercase())
+                format!("{country_code}-{server}.{extension}")
             }
         }
         _ => entry_name.to_string(),
@@ -126,11 +134,15 @@ mod tests {
     fn generator_names_are_reduced_to_stable_config_ids() {
         assert_eq!(
             generator_filename("AirVPN_CH-Zurich_Achernar_UDP-443.ovpn", "ovpn"),
-            "ch-Achernar.ovpn"
+            "switzerland-ch-Achernar.ovpn"
         );
         assert_eq!(
             generator_filename("AirVPN_NL-Alblasserdam_Alcyone_UDP-1637.conf", "conf"),
-            "nl-Alcyone.conf"
+            "netherlands-nl-Alcyone.conf"
+        );
+        assert_eq!(
+            generator_filename("AirVPN_RO-Bucharest_Canes_UDP-1637.conf", "conf"),
+            "romania-ro-Canes.conf"
         );
         assert_eq!(
             generator_filename("ca-Custom.ovpn", "ovpn"),

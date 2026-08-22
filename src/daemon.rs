@@ -91,7 +91,9 @@ pub fn status() -> DaemonStatus {
         return snapshot;
     };
     let LocalSocketStream::UdSocket(socket) = &stream;
-    set_socket_timeouts(&stream);
+    if set_socket_timeouts(&stream).is_err() {
+        return snapshot;
+    }
     snapshot.available = true;
     snapshot.pid = getsockopt(&socket.as_fd(), PeerCredentials)
         .ok()
@@ -115,14 +117,30 @@ fn versions_compatible(daemon_version: &str, client_version: &str) -> bool {
     !daemon_major.is_empty() && daemon_major == client_major
 }
 
-pub(crate) fn set_socket_timeouts(stream: &LocalSocketStream) {
+pub(crate) const DAEMON_HANDSHAKE_TIMEOUT_SECONDS: i64 = 2;
+pub(crate) const DAEMON_STOP_TIMEOUT_SECONDS: i64 = 30;
+
+pub(crate) fn set_socket_timeouts(stream: &LocalSocketStream) -> anyhow::Result<()> {
+    // Bound the handshake so a wedged daemon cannot hang status/list polling.
+    set_socket_timeouts_for(stream, DAEMON_HANDSHAKE_TIMEOUT_SECONDS)
+}
+
+/// Lifecycle operations (stop) may legitimately outlast the handshake bound:
+/// teardown can terminate processes and retry namespace deletion for several
+/// seconds before responding.
+pub(crate) fn set_socket_timeouts_for(
+    stream: &LocalSocketStream,
+    seconds: i64,
+) -> anyhow::Result<()> {
     use nix::sys::socket::sockopt::{ReceiveTimeout, SendTimeout};
     use nix::sys::time::TimeValLike;
-    // Bound the handshake so a wedged daemon cannot hang status/list polling.
-    let timeout = nix::sys::time::TimeVal::seconds(2);
+    let timeout = nix::sys::time::TimeVal::seconds(seconds);
     let LocalSocketStream::UdSocket(socket) = stream;
-    let _ = nix::sys::socket::setsockopt(&socket.as_fd(), ReceiveTimeout, &timeout);
-    let _ = nix::sys::socket::setsockopt(&socket.as_fd(), SendTimeout, &timeout);
+    nix::sys::socket::setsockopt(&socket.as_fd(), ReceiveTimeout, &timeout)
+        .context("Failed to set daemon receive timeout")?;
+    nix::sys::socket::setsockopt(&socket.as_fd(), SendTimeout, &timeout)
+        .context("Failed to set daemon send timeout")?;
+    Ok(())
 }
 
 fn query_daemon_version(stream: &mut LocalSocketStream) -> Option<String> {

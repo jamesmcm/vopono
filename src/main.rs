@@ -142,9 +142,15 @@ fn main() -> anyhow::Result<()> {
             if !nix::unistd::getuid().is_root() {
                 match forward_stop_to_daemon(request.clone(), json) {
                     Ok(code) => exit_code = code,
-                    Err(error) => {
+                    Err(StopForwardError::Retry(error)) => {
                         info!("Falling back to sudo (daemon stop forward failed): {error}");
                         run_stop_locally(request, json, app.askpass)?;
+                    }
+                    Err(StopForwardError::Indeterminate(error)) => {
+                        // The request reached the daemon, but its result could
+                        // not be read. Retrying locally could race the daemon's
+                        // teardown and stop the wrong process/namespace.
+                        handle_result(Err(error), json)?;
                     }
                 }
             } else {
@@ -235,28 +241,42 @@ fn run_stop_locally(request: StopRequest, json: bool, askpass: bool) -> anyhow::
 
 /// Route a stop through the root daemon over `/run/vopono.sock`.
 ///
-/// Returns the exit code the client should use; an `Err` means the daemon was
-/// unavailable or failed before producing a result document (callers then fall
-/// back to local execution).
-fn forward_stop_to_daemon(request: StopRequest, json: bool) -> anyhow::Result<i32> {
-    let name = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?;
-    let mut conn = LocalSocketStream::connect(name).map_err(|_| anyhow!("Daemon not running"))?;
-    daemon::set_socket_timeouts(&conn);
+/// Returns the exit code the client should use. Errors before the request is
+/// written permit local fallback; errors after that point are indeterminate and
+/// must be reported without retrying, since the daemon may still be tearing
+/// down the requested process or namespace.
+fn forward_stop_to_daemon(request: StopRequest, json: bool) -> Result<i32, StopForwardError> {
+    let name = SOCKET_PATH
+        .to_fs_name::<FilesystemUdSocket>()
+        .map_err(|error| StopForwardError::Retry(error.into()))?;
+    let mut conn = LocalSocketStream::connect(name)
+        .map_err(|_| StopForwardError::Retry(anyhow!("Daemon not running")))?;
+    daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_STOP_TIMEOUT_SECONDS)
+        .map_err(StopForwardError::Retry)?;
 
     let daemon_request = daemon::DaemonRequest::Stop(daemon::DaemonStopRequest {
         target: request.daemon_target(),
         config_home: std::env::var("XDG_CONFIG_HOME").ok(),
     });
-    let bytes = wincode::serialize(&daemon_request)?;
-    daemon::write_framed(&mut conn, &bytes)?;
+    let bytes = wincode::serialize(&daemon_request)
+        .map_err(|error| StopForwardError::Retry(error.into()))?;
+    daemon::write_framed(&mut conn, &bytes).map_err(StopForwardError::Indeterminate)?;
 
-    let response_bytes = daemon::read_framed(&mut conn, daemon::MAX_FRAME_LEN)?;
-    match wincode::deserialize::<daemon::DaemonResponse>(&response_bytes)? {
+    let response_bytes = daemon::read_framed(&mut conn, daemon::MAX_FRAME_LEN)
+        .map_err(StopForwardError::Indeterminate)?;
+    match wincode::deserialize::<daemon::DaemonResponse>(&response_bytes)
+        .map_err(|error| StopForwardError::Indeterminate(error.into()))?
+    {
         daemon::DaemonResponse::Json(payload) => {
-            let value: serde_json::Value = serde_json::from_slice(&payload)?;
+            let value: serde_json::Value = serde_json::from_slice(&payload)
+                .map_err(|error| StopForwardError::Indeterminate(error.into()))?;
             if value.get("error").is_some() {
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&value)?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&value)
+                            .map_err(|error| StopForwardError::Indeterminate(error.into()))?
+                    );
                 } else {
                     eprintln!(
                         "Error: {}",
@@ -267,14 +287,24 @@ fn forward_stop_to_daemon(request: StopRequest, json: bool) -> anyhow::Result<i3
                 }
                 Ok(1)
             } else {
-                let result: control::StopResult = serde_json::from_value(value)?;
-                control::print_result(&result, json)?;
+                let result: control::StopResult = serde_json::from_value(value)
+                    .map_err(|error| StopForwardError::Indeterminate(error.into()))?;
+                control::print_result(&result, json).map_err(StopForwardError::Indeterminate)?;
                 Ok(0)
             }
         }
-        daemon::DaemonResponse::Error(message) => Err(anyhow!("Daemon reported: {message}")),
-        _ => Err(anyhow!("Unexpected daemon response to stop request")),
+        daemon::DaemonResponse::Error(message) => Err(StopForwardError::Indeterminate(anyhow!(
+            "Daemon reported: {message}"
+        ))),
+        _ => Err(StopForwardError::Indeterminate(anyhow!(
+            "Unexpected daemon response to stop request"
+        ))),
     }
+}
+
+enum StopForwardError {
+    Retry(anyhow::Error),
+    Indeterminate(anyhow::Error),
 }
 
 enum DaemonForward {

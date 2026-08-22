@@ -16,7 +16,9 @@ use crate::config::providers::{UiClient, VpnProvider};
 use crate::config::vpn::Protocol;
 use crate::network::host_masquerade::FirewallException;
 use crate::network::wireguard_config::WireguardPeer;
-use crate::util::{config_dir, parse_command_str, set_config_permissions, sudo_command};
+use crate::util::{
+    config_dir, get_existing_namespaces, parse_command_str, set_config_permissions, sudo_command,
+};
 use anyhow::{Context, anyhow};
 use log::{debug, info, warn};
 use nix::unistd;
@@ -836,16 +838,38 @@ impl NetworkNamespace {
             );
             return Ok(());
         }
-        let file = File::open(&lockfile_path)?;
-        let mut lock: Lockfile = ron::de::from_reader(file)?;
-        lock.application_pid = Some(pid);
-        lock.application_started_at = Some(
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("Time went backwards")
-                .as_secs(),
-        );
-        let lock_string = ron::ser::to_string(&lock)?;
+        // Read back only the scalar metadata and re-serialize the document
+        // from the live namespace by reference. Deserializing the embedded
+        // NetworkNamespace (or round-tripping it through a generic value)
+        // would either run its teardown Drop impl against the live namespace
+        // or rewrite the document in a shape `LockfileStatus` cannot parse.
+        #[derive(serde::Deserialize)]
+        struct LockfileMeta {
+            start: u64,
+            command: String,
+        }
+        #[derive(serde::Serialize)]
+        struct LockfileUpdateView<'a> {
+            ns: &'a NetworkNamespace,
+            start: u64,
+            command: &'a str,
+            application_pid: Option<u32>,
+            application_started_at: Option<u64>,
+        }
+        let meta: LockfileMeta = ron::de::from_reader(File::open(&lockfile_path)?)?;
+        let view = LockfileUpdateView {
+            ns: self,
+            start: meta.start,
+            command: &meta.command,
+            application_pid: Some(pid),
+            application_started_at: Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("Time went backwards")
+                    .as_secs(),
+            ),
+        };
+        let lock_string = ron::ser::to_string(&view)?;
         // Write to a sibling temporary file first so readers never observe a
         // partially written lockfile, then atomically move it into place.
         let temporary_path = lockfile_path.with_extension("tmp");
@@ -1040,6 +1064,19 @@ impl Drop for NetworkNamespace {
             self.wireguard = None;
             self.host_masquerade = None;
             self.firewall_exception = None;
+            // A concurrent teardown (e.g. `vopono stop` racing the session
+            // that owns this namespace) may have removed the handle already;
+            // that is success, not an error worth retrying for 4 seconds.
+            let still_exists = get_existing_namespaces()
+                .map(|namespaces| namespaces.iter().any(|name| name == &self.name))
+                .unwrap_or(true);
+            if !still_exists {
+                debug!(
+                    "Network namespace {} already removed by another teardown",
+                    self.name
+                );
+                return;
+            }
             let delete_result = sudo_command(&["ip", "netns", "delete", &self.name]);
             if delete_result.is_err() {
                 warn!(
