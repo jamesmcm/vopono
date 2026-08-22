@@ -7,12 +7,17 @@ use vopono_core::config::vpn::Protocol;
 use vopono_core::util::set_config_permissions;
 
 use crate::args::WrappedArg;
+use crate::providers::record_sync;
 
 pub fn sync_menu(uiclient: &dyn UiClient, protocol: Option<Protocol>) -> anyhow::Result<()> {
     let variants = WrappedArg::<VpnProvider>::value_variants()
         .iter()
         .filter(|x| {
-            ![VpnProvider::Custom, VpnProvider::None, VpnProvider::Warp].contains(&x.to_variant())
+            let provider = x.to_variant();
+            provider.supports_sync()
+                && protocol
+                    .as_ref()
+                    .is_none_or(|protocol| supports_sync_protocol(&provider, protocol))
         })
         .map(|x| x.to_variant().to_string())
         .collect::<Vec<String>>();
@@ -41,18 +46,20 @@ pub fn synch(
     protocol: &Option<Protocol>,
     uiclient: &dyn UiClient,
 ) -> anyhow::Result<()> {
-    // TODO: Separate availability from functionality, so we can filter disabled protocols from the UI
+    let provider_to_record = provider.clone();
     match protocol {
         Some(Protocol::OpenVpn) => {
             info!("Starting OpenVPN configuration...");
             let provider = provider.get_dyn_openvpn_provider()?;
             provider.create_openvpn_config(uiclient)?;
+            record_sync(&provider_to_record, Protocol::OpenVpn)?;
             // downcast?
         }
         Some(Protocol::Wireguard) => {
             info!("Starting Wireguard configuration...");
             let provider = provider.get_dyn_wireguard_provider()?;
             provider.create_wireguard_config(uiclient)?;
+            record_sync(&provider_to_record, Protocol::Wireguard)?;
         }
         Some(Protocol::AmneziaWG) => {
             error!("vopono sync not supported for AmneziaWG protocol");
@@ -77,14 +84,21 @@ pub fn synch(
             if let Ok(p) = provider.get_dyn_openvpn_provider() {
                 info!("Starting OpenVPN configuration...");
                 p.create_openvpn_config(uiclient)?;
+                record_sync(&provider_to_record, Protocol::OpenVpn)?;
             }
             if let Ok(p) = provider.get_dyn_wireguard_provider() {
                 info!("Starting Wireguard configuration...");
                 p.create_wireguard_config(uiclient)?;
+                record_sync(&provider_to_record, Protocol::Wireguard)?;
             }
         }
     }
 
     set_config_permissions()?;
     Ok(())
+}
+
+fn supports_sync_protocol(provider: &VpnProvider, protocol: &Protocol) -> bool {
+    // Single source of truth in vopono_core.
+    provider.supported_sync_protocols().contains(protocol)
 }

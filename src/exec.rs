@@ -69,6 +69,7 @@ pub fn execute_as_daemon(
         None,
         false,
     )?;
+    ns.update_lockfile_application_pid(application.handle.id())?;
     Ok((application, ns))
 }
 
@@ -124,6 +125,7 @@ pub fn execute_as_daemon_with_stdio(
         stdio_fds,
         take_controlling_tty,
     )?;
+    ns.update_lockfile_application_pid(application.handle.id())?;
     Ok((application, ns))
 }
 
@@ -254,6 +256,11 @@ fn setup_namespace(
             parsed_command.user.clone(),
             parsed_command.group.clone(),
         )?;
+        ns.set_server(Some(parsed_command.server.clone()));
+        ns.set_port_configuration(
+            parsed_command.open_ports.as_deref(),
+            parsed_command.forward.as_deref(),
+        );
         let target_subnet = get_target_subnet()?;
         ns.add_loopback()?;
         ns.add_veth_pair()?;
@@ -352,7 +359,11 @@ fn setup_namespace(
             vopono_core::util::open_hosts(&ns.name, &effective_hosts, parsed_command.firewall)?;
         }
 
-        forwarder = provider_port_forwarding(&parsed_command, &ns)?;
+        // Single source for forwarder creation and its lockfile-visible
+        // status, so provider selection logic cannot drift between them.
+        let setup = provider_port_forwarding(&parsed_command, &ns)?;
+        ns.set_port_forwarding(setup.status);
+        forwarder = setup.forwarder;
 
         if let Some(pucmd) = parsed_command.postup.clone() {
             let mut sudo_args = Vec::new();
@@ -450,6 +461,7 @@ fn run_application_and_wait(
         )?;
 
         let pid = application.handle.id();
+        ns.update_lockfile_application_pid(pid)?;
         info!(
             "Application {} launched in network namespace {} with pid {}",
             parsed_command.application, ns.name, pid
@@ -793,11 +805,18 @@ fn config_alias_hint(parsed_command: &ArgsConfig) -> anyhow::Result<Option<Strin
     Ok(None)
 }
 
+/// Result of forwarder creation: the live forwarder plus the lockfile-visible
+/// status describing it.
+struct PortForwardingSetup {
+    forwarder: Option<Box<dyn Forwarder>>,
+    status: Option<vopono_core::network::netns::PortForwardingStatus>,
+}
+
 fn provider_port_forwarding(
     parsed_command: &ArgsConfig,
     ns: &NetworkNamespace,
-) -> anyhow::Result<Option<Box<dyn Forwarder>>> {
-    let forwarder: Option<Box<dyn Forwarder>> = if parsed_command.port_forwarding
+) -> anyhow::Result<PortForwardingSetup> {
+    let (forwarder, provider) = if parsed_command.port_forwarding
         || parsed_command.custom_port_forwarding.is_some()
     {
         let provider_or_custom = if parsed_command.custom.is_some() {
@@ -809,8 +828,9 @@ fn provider_port_forwarding(
         if let Some(provider) = &provider_or_custom {
             debug!("Will use {:?} as provider for port forwarding", provider);
         }
+        let forwarding_provider = provider_or_custom.clone();
 
-        match provider_or_custom {
+        let forwarder: Option<Box<dyn Forwarder>> = match provider_or_custom {
             Some(VpnProvider::PrivateInternetAccess) => {
                 let conf_path = ns.config_file.clone().expect("No PIA config file provided");
                 let conf_name = conf_path
@@ -870,13 +890,29 @@ fn provider_port_forwarding(
                 );
                 None
             }
-        }
+        };
+
+        // Only keep the provider tag when a forwarder actually runs.
+        let provider_for_status = forwarder.is_some().then_some(forwarding_provider).flatten();
+        (forwarder, provider_for_status)
     } else {
-        None
+        return Ok(PortForwardingSetup {
+            forwarder: None,
+            status: None,
+        });
     };
 
     if let Some(fwd) = forwarder.as_ref() {
         vopono_core::util::open_ports(ns, &[fwd.forwarded_port()], parsed_command.firewall)?;
     }
-    Ok(forwarder)
+
+    let status = forwarder.as_ref().zip(provider).map(|(fwd, provider)| {
+        vopono_core::network::netns::PortForwardingStatus {
+            provider: provider.clone(),
+            port: fwd.forwarded_port(),
+            automatic: true,
+        }
+    });
+
+    Ok(PortForwardingSetup { forwarder, status })
 }

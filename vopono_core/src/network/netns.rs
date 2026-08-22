@@ -16,7 +16,9 @@ use crate::config::providers::{UiClient, VpnProvider};
 use crate::config::vpn::Protocol;
 use crate::network::host_masquerade::FirewallException;
 use crate::network::wireguard_config::WireguardPeer;
-use crate::util::{config_dir, parse_command_str, set_config_permissions, sudo_command};
+use crate::util::{
+    config_dir, get_existing_namespaces, parse_command_str, set_config_permissions, sudo_command,
+};
 use anyhow::{Context, anyhow};
 use log::{debug, info, warn};
 use nix::unistd;
@@ -52,6 +54,43 @@ pub struct NetworkNamespace {
     pub predown_group: Option<String>,
     pub config_file: Option<PathBuf>, // Used to save config file path in lockfile
     pub trojan: Option<Trojan>,
+    /// Runtime state shared with the status/lockfile projections.
+    #[serde(default)]
+    pub state: NamespaceState,
+}
+
+/// Server/port metadata mirrored into the lockfiles so read-only commands can
+/// report it without access to the live namespace objects.
+///
+/// Embedded by value in both [`NetworkNamespace`] and
+/// [`LockfileNamespaceStatus`]; keep new shared fields here instead of adding
+/// parallel copies to each struct.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct NamespaceState {
+    /// The server selector supplied by the caller. The selected config file is
+    /// retained separately so status clients can distinguish an alias from the
+    /// concrete endpoint chosen for it.
+    #[serde(default)]
+    pub server: Option<String>,
+    /// Persisted description of a provider-managed forwarded port. The live
+    /// forwarder itself is intentionally not serialized into the lockfile.
+    #[serde(default)]
+    pub port_forwarding: Option<PortForwardingStatus>,
+    /// Ports opened inside the namespace by --open-ports.
+    #[serde(default)]
+    pub open_ports: Vec<u16>,
+    /// Ports proxied from the host into the namespace by --forward.
+    #[serde(default)]
+    pub forwarded_ports: Vec<u16>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PortForwardingStatus {
+    pub provider: VpnProvider,
+    pub port: u16,
+    /// `true` means vopono obtained/refreshed the mapping; `false` is useful
+    /// for providers where the user configures a port on the provider side.
+    pub automatic: bool,
 }
 
 /// Pair of IP addresses for veth tunnel
@@ -160,7 +199,25 @@ impl NetworkNamespace {
             predown_group,
             config_file: None,
             trojan: None,
+            state: NamespaceState::default(),
         })
+    }
+
+    pub fn set_server(&mut self, server: Option<String>) {
+        self.state.server = server;
+    }
+
+    pub fn set_port_configuration(
+        &mut self,
+        open_ports: Option<&[u16]>,
+        forwarded_ports: Option<&[u16]>,
+    ) {
+        self.state.open_ports = open_ports.unwrap_or_default().to_vec();
+        self.state.forwarded_ports = forwarded_ports.unwrap_or_default().to_vec();
+    }
+
+    pub fn set_port_forwarding(&mut self, status: Option<PortForwardingStatus>) {
+        self.state.port_forwarding = status;
     }
 
     pub fn set_config_file(&mut self, config_file: Option<PathBuf>) {
@@ -754,6 +811,8 @@ impl NetworkNamespace {
             ns: self,
             command: command.to_string(),
             start: since_the_epoch.as_secs(),
+            application_pid: None,
+            application_started_at: None,
         };
         let lock_string = ron::ser::to_string(&lock)?;
         let mut f = File::create(&lockfile_path)?;
@@ -762,6 +821,64 @@ impl NetworkNamespace {
 
         set_config_permissions()?;
         Ok(lock.ns)
+    }
+
+    /// Update the application PID in the primary lock after the child process
+    /// has been spawned. Older lockfiles simply omit this optional field.
+    ///
+    /// Best-effort: a missing lockfile is logged and ignored so daemon startup
+    /// is not aborted by an already-torn-down namespace entry.
+    pub fn update_lockfile_application_pid(&self, pid: u32) -> anyhow::Result<()> {
+        let mut lockfile_path = config_dir()?;
+        lockfile_path.push(format!("vopono/locks/{}/{}", self.name, unistd::getpid()));
+        if !lockfile_path.exists() {
+            debug!(
+                "Skipping application pid update; primary lockfile {} is missing",
+                lockfile_path.display()
+            );
+            return Ok(());
+        }
+        // Read back only the scalar metadata and re-serialize the document
+        // from the live namespace by reference. Deserializing the embedded
+        // NetworkNamespace (or round-tripping it through a generic value)
+        // would either run its teardown Drop impl against the live namespace
+        // or rewrite the document in a shape `LockfileStatus` cannot parse.
+        #[derive(serde::Deserialize)]
+        struct LockfileMeta {
+            start: u64,
+            command: String,
+        }
+        #[derive(serde::Serialize)]
+        struct LockfileUpdateView<'a> {
+            ns: &'a NetworkNamespace,
+            start: u64,
+            command: &'a str,
+            application_pid: Option<u32>,
+            application_started_at: Option<u64>,
+        }
+        let meta: LockfileMeta = ron::de::from_reader(File::open(&lockfile_path)?)?;
+        let view = LockfileUpdateView {
+            ns: self,
+            start: meta.start,
+            command: &meta.command,
+            application_pid: Some(pid),
+            application_started_at: Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("Time went backwards")
+                    .as_secs(),
+            ),
+        };
+        let lock_string = ron::ser::to_string(&view)?;
+        // Write to a sibling temporary file first so readers never observe a
+        // partially written lockfile, then atomically move it into place.
+        let temporary_path = lockfile_path.with_extension("tmp");
+        {
+            let mut file = File::create(&temporary_path)?;
+            write!(file, "{lock_string}")?;
+        }
+        std::fs::rename(&temporary_path, &lockfile_path)?;
+        Ok(())
     }
 
     pub fn write_client_lockfile(&self, pid: u32, command: &str) -> anyhow::Result<PathBuf> {
@@ -778,9 +895,13 @@ impl NetworkNamespace {
                 name: self.name.clone(),
                 provider: self.provider.clone(),
                 protocol: self.protocol.clone(),
+                config_file: self.config_file.clone(),
+                state: self.state.clone(),
             },
             start: since_the_epoch.as_secs(),
             command: command.to_string(),
+            application_pid: Some(pid),
+            application_started_at: Some(since_the_epoch.as_secs()),
         };
         let lock_string = ron::ser::to_string(&lock)?;
         let mut f = File::create(&lockfile_path)?;
@@ -943,6 +1064,19 @@ impl Drop for NetworkNamespace {
             self.wireguard = None;
             self.host_masquerade = None;
             self.firewall_exception = None;
+            // A concurrent teardown (e.g. `vopono stop` racing the session
+            // that owns this namespace) may have removed the handle already;
+            // that is success, not an error worth retrying for 4 seconds.
+            let still_exists = get_existing_namespaces()
+                .map(|namespaces| namespaces.iter().any(|name| name == &self.name))
+                .unwrap_or(true);
+            if !still_exists {
+                debug!(
+                    "Network namespace {} already removed by another teardown",
+                    self.name
+                );
+                return;
+            }
             let delete_result = sudo_command(&["ip", "netns", "delete", &self.name]);
             if delete_result.is_err() {
                 warn!(
@@ -981,6 +1115,10 @@ pub struct Lockfile {
     pub ns: NetworkNamespace,
     pub start: u64,
     pub command: String,
+    #[serde(default)]
+    pub application_pid: Option<u32>,
+    #[serde(default)]
+    pub application_started_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -988,6 +1126,10 @@ pub struct LockfileStatus {
     pub ns: LockfileNamespaceStatus,
     pub start: u64,
     pub command: String,
+    #[serde(default)]
+    pub application_pid: Option<u32>,
+    #[serde(default)]
+    pub application_started_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -995,4 +1137,22 @@ pub struct LockfileNamespaceStatus {
     pub name: String,
     pub provider: VpnProvider,
     pub protocol: Protocol,
+    #[serde(default)]
+    pub config_file: Option<PathBuf>,
+    /// Server/port metadata shared with [`NetworkNamespace`].
+    #[serde(default)]
+    pub state: NamespaceState,
+}
+
+impl NetworkNamespace {
+    /// Explicitly tear down the namespace.
+    ///
+    /// Runs lockfile removal, the predown hook, and destructor cleanup for the
+    /// firewall, veth pair, DNS config, and VPN protocol processes, then
+    /// removes the network namespace. Semantically identical to dropping the
+    /// value (the `Drop` impl owns the cleanup), but makes the teardown
+    /// visible at the call site instead of relying on an implicit drop.
+    pub fn teardown(self) {
+        drop(self);
+    }
 }

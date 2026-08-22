@@ -2,13 +2,18 @@
 #![allow(clippy::large_enum_variant)]
 #![allow(dead_code)]
 
+mod api;
 mod args;
 mod args_config;
 mod cli_client;
+mod control;
 mod daemon;
+mod errors;
 mod exec;
 mod list;
 mod list_configs;
+mod providers;
+mod server_metadata;
 mod sync;
 
 use crate::args::ExecCommand;
@@ -19,7 +24,7 @@ use interprocess::TryClone;
 use interprocess::local_socket::ToFsName;
 use interprocess::local_socket::prelude::*;
 use interprocess::os::unix::local_socket::FilesystemUdSocket;
-use list::output_list;
+use list::{output_list, output_status};
 use list_configs::print_configs;
 use log::{LevelFilter, debug, info, warn};
 use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
@@ -56,16 +61,21 @@ fn main() -> anyhow::Result<()> {
         .expect("Subcommand is required when not in daemon mode.");
 
     match cmd {
-        args::Command::Daemon => {
-            if !nix::unistd::getuid().is_root() {
-                eprintln!("Error: The daemon command requires root privileges.");
-                std::process::exit(1);
+        args::Command::Daemon(command) => match command.command {
+            Some(args::DaemonSubcommand::Status(status)) => {
+                handle_result(daemon::print_status(status.json), status.json)?;
             }
-            // Mark process context so libraries can adjust behavior (e.g., logging verbosity)
-            vopono_core::util::set_daemon_mode(true);
-            info!("Starting vopono in daemon mode.");
-            return daemon::start();
-        }
+            Some(args::DaemonSubcommand::Start) | None => {
+                if !nix::unistd::getuid().is_root() {
+                    eprintln!("Error: The daemon command requires root privileges.");
+                    std::process::exit(1);
+                }
+                // Mark process context so libraries can adjust behavior (e.g., logging verbosity)
+                vopono_core::util::set_daemon_mode(true);
+                info!("Starting vopono in daemon mode.");
+                return daemon::start();
+            }
+        },
         args::Command::Exec(cmd) => {
             // If we're not root, try to forward the command to the running daemon.
             if !nix::unistd::getuid().is_root() {
@@ -92,26 +102,209 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(exit_code);
         }
         args::Command::List(listcmd) => {
+            // Restore dead-lock cleanup so list output does not resurrect
+            // stale applications (and stop cannot act on recycled PIDs).
             clean_dead_locks()?;
-            output_list(listcmd)?;
+            let json = listcmd.json;
+            handle_result(output_list(listcmd), json)?;
         }
-        args::Command::Synch(synchcmd) => match synchcmd.vpn_provider {
-            Some(vpn_provider) => {
-                synch(
-                    vpn_provider.to_variant(),
-                    &synchcmd.protocol.map(|x| x.to_variant()),
-                    &uiclient,
+        args::Command::Status(status) => {
+            handle_result(output_status(status.json), status.json)?;
+        }
+        args::Command::Providers(providerscmd) => {
+            handle_result(
+                providers::print_providers(providerscmd.json),
+                providerscmd.json,
+            )?;
+        }
+        args::Command::Provider(providercmd) => match providercmd.command {
+            args::ProviderSubcommand::Status(status) => {
+                handle_result(
+                    providers::print_provider_status(status.vpn_provider.to_variant(), status.json),
+                    status.json,
                 )?;
             }
-            None => {
-                sync_menu(&uiclient, synchcmd.protocol.map(|x| x.to_variant()))?;
-            }
         },
+        args::Command::Stop(stopcmd) => {
+            let (json, request): (bool, StopRequest) = match stopcmd.target {
+                args::StopTarget::Application(command) => {
+                    (command.json, StopRequest::Application(command.id))
+                }
+                args::StopTarget::Namespace(command) => {
+                    (command.json, StopRequest::Namespace(command.id))
+                }
+            };
+
+            // Prefer the running root daemon: no sudo prompt and lifecycle
+            // stays serialized through a single control plane. Fall back to
+            // local execution when the daemon is unavailable.
+            let mut exit_code = 0;
+            if !nix::unistd::getuid().is_root() {
+                match forward_stop_to_daemon(request.clone(), json) {
+                    Ok(code) => exit_code = code,
+                    Err(StopForwardError::Retry(error)) => {
+                        info!("Falling back to sudo (daemon stop forward failed): {error}");
+                        run_stop_locally(request, json, app.askpass)?;
+                    }
+                    Err(StopForwardError::Indeterminate(error)) => {
+                        // The request reached the daemon, but its result could
+                        // not be read. Retrying locally could race the daemon's
+                        // teardown and stop the wrong process/namespace.
+                        handle_result(Err(error), json)?;
+                    }
+                }
+            } else {
+                run_stop_locally(request, json, app.askpass)?;
+            }
+            if exit_code != 0 {
+                std::process::exit(exit_code);
+            }
+        }
+        args::Command::Synch(synchcmd) => {
+            let json = synchcmd.json;
+            handle_result(
+                match synchcmd.vpn_provider {
+                    Some(vpn_provider) => synch(
+                        vpn_provider.to_variant(),
+                        &synchcmd.protocol.map(|x| x.to_variant()),
+                        &uiclient,
+                    ),
+                    None => sync_menu(&uiclient, synchcmd.protocol.map(|x| x.to_variant())),
+                },
+                json,
+            )?;
+            if json {
+                api::print_success_json();
+            }
+        }
         args::Command::Servers(serverscmd) => {
-            print_configs(serverscmd)?;
+            let json = serverscmd.json;
+            handle_result(print_configs(serverscmd), json)?;
         }
     }
     Ok(())
+}
+
+fn handle_result(result: anyhow::Result<()>, json: bool) -> anyhow::Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) if json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&errors::error_json_value(&error))?
+            );
+            std::process::exit(1);
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// A lifecycle stop request, independent of transport (daemon RPC or local).
+#[derive(Clone, Debug)]
+enum StopRequest {
+    Application(String),
+    Namespace(String),
+}
+
+impl StopRequest {
+    fn daemon_target(&self) -> daemon::DaemonStopTarget {
+        match self {
+            StopRequest::Application(id) => daemon::DaemonStopTarget::Application(id.clone()),
+            StopRequest::Namespace(id) => daemon::DaemonStopTarget::Namespace(id.clone()),
+        }
+    }
+}
+
+fn run_stop_locally(request: StopRequest, json: bool, askpass: bool) -> anyhow::Result<()> {
+    if !nix::unistd::getuid().is_root() {
+        clean_dead_locks()?;
+        elevate_privileges(askpass)?;
+    } else {
+        clean_dead_locks()?;
+    }
+    let result = match request {
+        StopRequest::Application(id) => control::stop_application(&id),
+        StopRequest::Namespace(id) => control::stop_namespace(&id),
+    };
+    match result {
+        Ok(result) => control::print_result(&result, json),
+        Err(error) if json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&errors::error_json_value(&error))?
+            );
+            std::process::exit(1);
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Route a stop through the root daemon over `/run/vopono.sock`.
+///
+/// Returns the exit code the client should use. Errors before the request is
+/// written permit local fallback; errors after that point are indeterminate and
+/// must be reported without retrying, since the daemon may still be tearing
+/// down the requested process or namespace.
+fn forward_stop_to_daemon(request: StopRequest, json: bool) -> Result<i32, StopForwardError> {
+    let name = SOCKET_PATH
+        .to_fs_name::<FilesystemUdSocket>()
+        .map_err(|error| StopForwardError::Retry(error.into()))?;
+    let mut conn = LocalSocketStream::connect(name)
+        .map_err(|_| StopForwardError::Retry(anyhow!("Daemon not running")))?;
+    daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_STOP_TIMEOUT_SECONDS)
+        .map_err(StopForwardError::Retry)?;
+
+    let daemon_request = daemon::DaemonRequest::Stop(daemon::DaemonStopRequest {
+        target: request.daemon_target(),
+        config_home: std::env::var("XDG_CONFIG_HOME").ok(),
+    });
+    let bytes = wincode::serialize(&daemon_request)
+        .map_err(|error| StopForwardError::Retry(error.into()))?;
+    daemon::write_framed(&mut conn, &bytes).map_err(StopForwardError::Indeterminate)?;
+
+    let response_bytes = daemon::read_framed(&mut conn, daemon::MAX_FRAME_LEN)
+        .map_err(StopForwardError::Indeterminate)?;
+    match wincode::deserialize::<daemon::DaemonResponse>(&response_bytes)
+        .map_err(|error| StopForwardError::Indeterminate(error.into()))?
+    {
+        daemon::DaemonResponse::Json(payload) => {
+            let value: serde_json::Value = serde_json::from_slice(&payload)
+                .map_err(|error| StopForwardError::Indeterminate(error.into()))?;
+            if value.get("error").is_some() {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&value)
+                            .map_err(|error| StopForwardError::Indeterminate(error.into()))?
+                    );
+                } else {
+                    eprintln!(
+                        "Error: {}",
+                        value["error"]["message"]
+                            .as_str()
+                            .unwrap_or("unknown error")
+                    );
+                }
+                Ok(1)
+            } else {
+                let result: control::StopResult = serde_json::from_value(value)
+                    .map_err(|error| StopForwardError::Indeterminate(error.into()))?;
+                control::print_result(&result, json).map_err(StopForwardError::Indeterminate)?;
+                Ok(0)
+            }
+        }
+        daemon::DaemonResponse::Error(message) => Err(StopForwardError::Indeterminate(anyhow!(
+            "Daemon reported: {message}"
+        ))),
+        _ => Err(StopForwardError::Indeterminate(anyhow!(
+            "Unexpected daemon response to stop request"
+        ))),
+    }
+}
+
+enum StopForwardError {
+    Retry(anyhow::Error),
+    Indeterminate(anyhow::Error),
 }
 
 enum DaemonForward {
@@ -197,6 +390,7 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<DaemonForward> {
     match wincode::deserialize::<daemon::DaemonResponse>(&buffer)? {
         daemon::DaemonResponse::Exit(code) => Ok(DaemonForward::Exit(code)),
         daemon::DaemonResponse::Error(message) => Ok(DaemonForward::ExecutionError(message)),
+        _ => Err(anyhow!("Unexpected daemon response to exec request")),
     }
 }
 

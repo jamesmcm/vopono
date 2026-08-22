@@ -2,11 +2,8 @@ use super::AirVPN;
 use super::{ConfigurationChoice, OpenVpnProvider};
 use crate::config::providers::UiClient;
 use crate::util::delete_all_files_in_dir;
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use log::debug;
-use serde_json::Value;
-use std::collections::HashMap;
-use std::env;
 use std::fmt::Display;
 use std::fs::File;
 use std::fs::create_dir_all;
@@ -23,7 +20,8 @@ impl OpenVpnProvider for AirVPN {
     }
 
     fn prompt_for_auth(&self, _uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
-        //NOTE: not required for AirVPN
+        // AirVPN embeds the generated connection credentials in each profile;
+        // the provider trait still requires this no-op authentication result.
         Ok(("unused".to_string(), "unused".to_string()))
     }
 
@@ -33,92 +31,63 @@ impl OpenVpnProvider for AirVPN {
     }
 
     fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
-        let use_country_code: bool = true;
         let config_choice = uiclient.get_configuration_choice(&ConfigType::default())?;
-        let client = reqwest::blocking::Client::new();
+        let config_type = ConfigType::iter()
+            .nth(config_choice)
+            .ok_or_else(|| anyhow!("Invalid AirVPN OpenVPN configuration selection"))?;
+        let client = super::http_client()?;
 
-        let status_response = client
-            .get("https://airvpn.org/api/status/")
-            .send()?
-            .text()?;
-
-        let deserialized_json: HashMap<String, Value> =
-            serde_json::from_str(&status_response).unwrap();
-        let all_servers_array = deserialized_json
-            .get("servers")
-            .unwrap()
-            .as_array()
-            .unwrap();
-
-        let mut request_server_names = "".to_string();
-        for item in all_servers_array {
-            let public_name = item
-                .as_object()
-                .unwrap()
-                .get("public_name")
-                .unwrap()
-                .to_string()
-                .replace('\"', "");
-            if !request_server_names.is_empty() {
-                // separate server names with '%2C'
-                request_server_names.push_str("%2C");
-            }
-            request_server_names.push_str(&public_name);
+        let servers = super::fetch_servers(&client)?;
+        let server_names = servers
+            .iter()
+            .map(|server| server.public_name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        if server_names.is_empty() {
+            anyhow::bail!("AirVPN returned no servers while generating OpenVPN configs");
         }
 
-        let generator_url = ConfigType::iter()
-            .nth(config_choice)
-            .expect("Bad ConfigType index")
-            .url()?
-            .replace("{servers}", request_server_names.as_str());
-
-        // TODO: Add validator that it is lower case, hexadecimal, 40-character string
-        let api_key = env::var("AIRVPN_API_KEY").or_else(|_|
-                uiclient.get_input(crate::config::providers::Input{prompt: "Enter your AirVPN API key (see https://airvpn.org/apisettings/ )".to_string(), validator: None})
-                  ).map_err(|_| {
-                    anyhow!("Cannot generate AirVPN OpenVPN config files: AIRVPN_API_KEY is not defined in your environment variables. Get your key by activating API access in the Client Area at https://airvpn.org/apisettings/")
-                })?.trim().to_string();
+        let api_key = super::require_api_key(uiclient, "OpenVPN")?;
         let zipfile = client
-            .get(generator_url)
+            .get("https://airvpn.org/api/generator/")
+            .query(&[
+                ("protocols", config_type.protocol_selector()),
+                ("download", "zip".to_string()),
+                ("system", "linux".to_string()),
+                // Keep the generated profile IPv4-only to match vopono's
+                // default namespace behavior; advanced IP-layer choices are
+                // intentionally not frontend selectors.
+                ("iplayer_exit", "ipv4".to_string()),
+                ("servers", server_names),
+            ])
             .header("API-KEY", api_key)
-            .send()?;
-        let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
+            .send()?
+            .error_for_status()
+            .context("AirVPN OpenVPN config request failed")?;
+        let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))
+            .context("AirVPN returned an invalid OpenVPN archive")?;
         let openvpn_dir = self.openvpn_dir()?;
-        let country_map = crate::util::country_map::code_to_country_map();
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
         for i in 0..zip.len() {
             let mut file_contents: Vec<u8> = Vec::with_capacity(4096);
-            let mut file = zip.by_index(i).unwrap();
+            let mut file = zip.by_index(i)?;
             file.read_to_end(&mut file_contents)?;
 
-            let enclosed = file.enclosed_name();
-            let filename = if let Some("ovpn") = enclosed
+            let original_name = file.name().to_string();
+            let filename = if let Some("ovpn") = file
+                .enclosed_name()
                 .as_ref()
                 .and_then(|p| p.extension())
                 .and_then(|x| x.to_str())
             {
-                let fname = file.name();
-                let fname_vec: Vec<&str> = fname.split('_').collect();
-                let country_code = fname_vec[1].split('-').next().unwrap().to_lowercase();
-                let city = fname_vec[1].split('-').collect::<Vec<&str>>()[1];
-                let server_name = fname_vec[2];
-                debug!("country_code: {country_code}");
-                debug!("city: {city}");
-                debug!("server_name: {server_name}");
-                if let Some(country) = country_map
-                    .get(country_code.as_str())
-                    .filter(|_| !use_country_code)
-                {
-                    format!("{country}-{server_name}.ovpn")
-                } else {
-                    format!("{country_code}-{server_name}.ovpn")
-                }
+                let filename = super::generator_filename(&original_name, "ovpn");
+                debug!("Writing OpenVPN config: {filename}");
+                filename
             } else {
-                file.name().to_string()
+                original_name
             };
 
-            debug!("Reading file: {}", file.name());
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
             outfile.write_all(file_contents.as_slice())?;
@@ -131,32 +100,44 @@ impl OpenVpnProvider for AirVPN {
 #[derive(EnumIter, PartialEq, Default)]
 enum ConfigType {
     #[default]
-    UDP443,
-    TCP443,
+    Udp443,
+    Tcp443,
+    Udp53,
+    Udp80,
+    Udp1194,
+    Udp2018,
+    Tcp53,
+    Tcp80,
+    Tcp1194,
+    Tcp2018,
 }
 
 impl ConfigType {
-    fn url(&self) -> anyhow::Result<String> {
-        let s = match self {
-            Self::UDP443 => {
-                "https://airvpn.org/api/generator/?protocols=openvpn_1_udp_443&download=zip&system=linux&iplayer_exit=ipv4&servers={servers}"
-            }
-            Self::TCP443 => {
-                "https://airvpn.org/api/generator/?protocols=openvpn_1_tcp_443&download=zip&system=linux&iplayer_exit=ipv4&servers={servers}"
-            }
-        };
+    fn transport(&self) -> &'static str {
+        match self {
+            Self::Udp53 | Self::Udp80 | Self::Udp443 | Self::Udp1194 | Self::Udp2018 => "udp",
+            Self::Tcp53 | Self::Tcp80 | Self::Tcp443 | Self::Tcp1194 | Self::Tcp2018 => "tcp",
+        }
+    }
 
-        Ok(s.parse()?)
+    fn port(&self) -> u16 {
+        match self {
+            Self::Udp53 | Self::Tcp53 => 53,
+            Self::Udp80 | Self::Tcp80 => 80,
+            Self::Udp443 | Self::Tcp443 => 443,
+            Self::Udp1194 | Self::Tcp1194 => 1194,
+            Self::Udp2018 | Self::Tcp2018 => 2018,
+        }
+    }
+
+    fn protocol_selector(&self) -> String {
+        format!("openvpn_1_{}_{}", self.transport(), self.port())
     }
 }
 
 impl Display for ConfigType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::UDP443 => "UDP",
-            Self::TCP443 => "TCP",
-        };
-        write!(f, "{s}")
+        write!(f, "{} {}", self.transport().to_uppercase(), self.port())
     }
 }
 
@@ -169,16 +150,55 @@ impl ConfigurationChoice for ConfigType {
         Self::iter().map(|x| format!("{x}")).collect()
     }
     fn all_descriptions(&self) -> Option<Vec<String>> {
-        Some(Self::iter().map(|x| x.description().unwrap()).collect())
+        Some(Self::iter().filter_map(|x| x.description()).collect())
     }
 
     fn description(&self) -> Option<String> {
-        Some(
-            match self {
-                Self::UDP443 => "Protocol: UDP, Port: 443, Entry IP: 1",
-                Self::TCP443 => "Protocol: TCP, Port: 443, Entry IP: 1",
-            }
-            .to_string(),
-        )
+        Some(format!(
+            "Protocol: {}, Port: {}, Entry IP: 1",
+            self.transport().to_uppercase(),
+            self.port()
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::generator_filename;
+    use super::ConfigType;
+    use strum::IntoEnumIterator;
+
+    #[test]
+    fn direct_generator_modes_have_stable_selectors() {
+        let selectors = ConfigType::iter()
+            .map(|config| config.protocol_selector())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selectors,
+            vec![
+                "openvpn_1_udp_443",
+                "openvpn_1_tcp_443",
+                "openvpn_1_udp_53",
+                "openvpn_1_udp_80",
+                "openvpn_1_udp_1194",
+                "openvpn_1_udp_2018",
+                "openvpn_1_tcp_53",
+                "openvpn_1_tcp_80",
+                "openvpn_1_tcp_1194",
+                "openvpn_1_tcp_2018",
+            ]
+        );
+    }
+
+    #[test]
+    fn generator_names_are_reduced_to_stable_config_ids() {
+        assert_eq!(
+            generator_filename("AirVPN_CH-Zurich_Achernar_UDP-443.ovpn", "ovpn"),
+            "switzerland-ch-Achernar.ovpn"
+        );
+        assert_eq!(
+            generator_filename("ca-Custom.ovpn", "ovpn"),
+            "ca-Custom.ovpn"
+        );
     }
 }

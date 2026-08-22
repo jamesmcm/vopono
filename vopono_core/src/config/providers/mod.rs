@@ -50,6 +50,83 @@ pub enum VpnProvider {
 
 // Do this since we can't downcast from Provider to other trait objects
 impl VpnProvider {
+    // Keep these explicit: the machine-facing IDs are stable API values and
+    // intentionally do not depend on Rust's enum or Display names.
+    /// Stable, lower-case identifier used by machine-facing interfaces.
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::PrivateInternetAccess => "privateinternetaccess",
+            Self::Mullvad => "mullvad",
+            Self::ProtonVPN => "protonvpn",
+            Self::MozillaVPN => "mozillavpn",
+            Self::AzireVPN => "azirevpn",
+            Self::AirVPN => "airvpn",
+            Self::IVPN => "ivpn",
+            Self::NordVPN => "nordvpn",
+            Self::Warp => "warp",
+            Self::Custom => "custom",
+            Self::None => "none",
+        }
+    }
+
+    /// Human-readable provider name for frontend display.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::PrivateInternetAccess => "Private Internet Access",
+            Self::Mullvad => "Mullvad",
+            Self::ProtonVPN => "ProtonVPN",
+            Self::MozillaVPN => "Mozilla VPN",
+            Self::AzireVPN => "AzireVPN",
+            Self::AirVPN => "AirVPN",
+            Self::IVPN => "IVPN",
+            Self::NordVPN => "NordVPN",
+            Self::Warp => "Cloudflare WARP",
+            Self::Custom => "Custom",
+            Self::None => "None",
+        }
+    }
+
+    /// Protocols for which this provider can generate/sync configurations.
+    ///
+    /// Single source of truth so the CLI, sync menu, and server listings cannot
+    /// drift apart. Providers needing per-protocol setup beyond OpenVPN/Wireguard
+    /// must extend this method together with their dyn getters.
+    pub fn supported_sync_protocols(&self) -> Vec<Protocol> {
+        let mut protocols = Vec::new();
+        if self.get_dyn_openvpn_provider().is_ok() {
+            protocols.push(Protocol::OpenVpn);
+        }
+        if self.get_dyn_wireguard_provider().is_ok() {
+            protocols.push(Protocol::Wireguard);
+        }
+        if matches!(self, Self::Warp) {
+            protocols.push(Protocol::Warp);
+        }
+        protocols
+    }
+
+    /// Whether `vopono sync` applies to this provider at all.
+    pub fn supports_sync(&self) -> bool {
+        !matches!(self, Self::Warp | Self::Custom | Self::None)
+    }
+
+    /// Whether the provider offers forwarded ports that users must configure
+    /// on the provider side (vopono can open the tunnel port but cannot claim it).
+    pub fn supports_port_forwarding(&self) -> bool {
+        matches!(
+            self,
+            Self::PrivateInternetAccess | Self::ProtonVPN | Self::AzireVPN | Self::AirVPN
+        )
+    }
+
+    /// Whether vopono can obtain/refresh the forwarded port automatically.
+    pub fn has_automatic_port_forwarding(&self) -> bool {
+        matches!(
+            self,
+            Self::PrivateInternetAccess | Self::ProtonVPN | Self::AzireVPN
+        )
+    }
+
     pub fn get_dyn_provider(&self) -> Box<dyn Provider> {
         match self {
             Self::PrivateInternetAccess => Box::new(pia::PrivateInternetAccess {}),
@@ -92,6 +169,7 @@ impl VpnProvider {
             Self::Mullvad => Ok(Box::new(mullvad::Mullvad {})),
             Self::MozillaVPN => Ok(Box::new(mozilla::MozillaVPN {})),
             Self::AzireVPN => Ok(Box::new(azirevpn::AzireVPN {})),
+            Self::AirVPN => Ok(Box::new(airvpn::AirVPN {})),
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
             Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
@@ -182,4 +260,49 @@ pub trait OpenVpnProvider: Provider {
 pub trait ShadowsocksProvider: Provider {
     fn password(&self) -> String;
     fn encrypt_method(&self) -> String;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VpnProvider;
+    use crate::config::vpn::Protocol;
+
+    #[test]
+    fn sync_protocol_capabilities_match_dyn_providers() {
+        let airvpn = VpnProvider::AirVPN.supported_sync_protocols();
+        assert!(airvpn.contains(&Protocol::OpenVpn));
+        assert!(airvpn.contains(&Protocol::Wireguard));
+
+        // Mullvad dropped OpenVPN support; only Wireguard remains.
+        assert_eq!(
+            VpnProvider::Mullvad.supported_sync_protocols(),
+            vec![Protocol::Wireguard]
+        );
+
+        // Warp reports only its own protocol and never participates in
+        // config-file syncing.
+        assert_eq!(
+            VpnProvider::Warp.supported_sync_protocols(),
+            vec![Protocol::Warp]
+        );
+        assert!(!VpnProvider::Warp.supports_sync());
+        assert!(!VpnProvider::Custom.supports_sync());
+    }
+
+    #[test]
+    fn port_forwarding_capabilities_are_explicit() {
+        assert!(VpnProvider::AirVPN.supports_port_forwarding());
+        assert!(!VpnProvider::AirVPN.has_automatic_port_forwarding());
+
+        for automatic in [
+            VpnProvider::PrivateInternetAccess,
+            VpnProvider::ProtonVPN,
+            VpnProvider::AzireVPN,
+        ] {
+            assert!(automatic.supports_port_forwarding());
+            assert!(automatic.has_automatic_port_forwarding());
+        }
+
+        assert!(!VpnProvider::Mullvad.supports_port_forwarding());
+    }
 }

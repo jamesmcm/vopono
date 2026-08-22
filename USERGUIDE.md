@@ -259,6 +259,23 @@ Valid ports for Mullvad Wireguard are: 53, 4000-33433, 33565-51820 and 52000-600
 The same is true for MozillaVPN since it is mostly a wrapper around Mullvad's
 Wireguard services.
 
+#### AirVPN Wireguard
+
+AirVPN Wireguard configuration files can be generated directly by vopono:
+
+```bash
+$ vopono sync airvpn --protocol wireguard
+```
+
+Enable API access in the [AirVPN client area](https://airvpn.org/apisettings/)
+and provide the resulting API key when prompted, or set `AIRVPN_API_KEY` for
+non-interactive use. Live API tests verified UDP 1637 and UDP 47107 as
+Wireguard connection-port choices.
+
+AirVPN forwarded ports remain an account-side setting. vopono can open the
+corresponding tunnel port with `--open-ports`, but it cannot currently create,
+assign, or toggle AirVPN forwarded ports through the public API.
+
 ### OpenVPN
 
 Install vopono and use `vopono sync` to
@@ -302,6 +319,10 @@ The OpenVPN credentials are **not** the same as your ProtonVPN account credentia
 For AirVPN the OpenVPN connection uses a key embedded in the config
 files, however you will need to provide your AirVPN API key and enable
 API access in [the client area webpage](https://airvpn.org/apisettings/) when running `vopono sync`.
+The sync menu offers the currently verified direct OpenVPN generator modes:
+UDP or TCP on ports 53, 80, 443, 1194, and 2018. It does not yet expose the
+generator's separate OpenVPN-over-SSL/SSH or other advanced TLS/profile
+options.
 Note that ports for forwarding must also be added in [the client area webpage](https://airvpn.org/ports/), 
 and it is also possible to configure the VPN tunnel [DNS settings there](https://airvpn.org/dns/).
 
@@ -1036,6 +1057,42 @@ connectivity, etc.).
 
 For AirVPN you must enable the port in [the client area webpage](https://airvpn.org/ports/),
 and then use `--protocol openvpn -o PORTNUMBER`.
+
+### Machine-readable frontend interface
+
+The following commands emit versioned JSON for frontends such as Quickshell:
+
+```bash
+vopono status --json
+vopono list namespaces --json
+vopono list applications --json
+vopono providers --json
+vopono provider status airvpn --json
+vopono servers airvpn --protocol wireguard --json
+vopono daemon status --json
+```
+
+Use `vopono stop application PID --json` or
+`vopono stop namespace NAMESPACE --json` for lifecycle control. Stop requests
+are routed through the running root daemon when available (no sudo password
+prompt); otherwise vopono falls back to local execution. The preferred
+polling interface is `status --json`; its top-level `version` field is the
+schema version, and error documents carry a stable machine-readable `code`
+alongside the message. Namespace status includes provider-managed forwarding,
+local `open_ports`, and host `forwarded_ports`.
+
+`status` is the canonical aggregate snapshot: it includes daemon health,
+namespaces, applications, selected server metadata, and port state. The
+daemon entry reports the daemon's own `version`, with `compatible` comparing
+major versions against this client. The
+`list namespaces` and `list applications` commands are smaller projections
+of that same snapshot for scripts that only need one collection; without a
+type, `list` defaults to applications. `servers` is separate discovery of
+locally synchronized configuration files, rather than a view of active
+namespaces.
+
+Start the daemon with either `sudo vopono daemon` or the explicit
+`sudo vopono daemon start`; inspect it with `vopono daemon status --json`.
 
 ## Dependencies
 

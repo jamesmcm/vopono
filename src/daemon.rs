@@ -22,9 +22,10 @@ use signal_hook::{
 };
 use std::io::IoSliceMut;
 use std::io::{Read, Write};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, RawFd};
-use std::os::fd::{BorrowedFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{BorrowedFd, IntoRawFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -33,6 +34,156 @@ use std::sync::{
 use std::thread;
 
 // Do not change user's terminal modes; rely on PTY + signal/control forwarding
+
+/// Machine-readable health snapshot of the privileged daemon.
+///
+/// `version` is the daemon's *reported* version (not this binary's); when the
+/// daemon cannot answer the handshake it stays `None` and `compatible` is
+/// `false`.
+#[derive(Clone, Debug, Serialize)]
+pub struct DaemonStatus {
+    pub available: bool,
+    pub pid: Option<u32>,
+    pub socket: String,
+    pub version: Option<String>,
+    pub compatible: bool,
+}
+
+impl DaemonStatus {
+    /// Single human-readable rendering shared by `daemon status` and the
+    /// aggregate `status` output.
+    pub fn human_line(&self) -> String {
+        format!(
+            "daemon\t{}\tpid={}\tsocket={}\tversion={}\tcompatible={}",
+            if self.available {
+                "available"
+            } else {
+                "unavailable"
+            },
+            self.pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            self.socket,
+            self.version.as_deref().unwrap_or("-"),
+            self.compatible,
+        )
+    }
+}
+
+/// Return a machine-readable health snapshot without requiring systemd.
+pub fn status() -> DaemonStatus {
+    let mut snapshot = DaemonStatus {
+        available: false,
+        pid: None,
+        socket: SOCKET_PATH.to_string(),
+        version: None,
+        compatible: false,
+    };
+
+    if !Path::new(SOCKET_PATH).exists() {
+        return snapshot;
+    }
+
+    let Ok(name) = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>() else {
+        return snapshot;
+    };
+    let Ok(mut stream) = LocalSocketStream::connect(name) else {
+        return snapshot;
+    };
+    let LocalSocketStream::UdSocket(socket) = &stream;
+    if set_socket_timeouts(&stream).is_err() {
+        return snapshot;
+    }
+    snapshot.available = true;
+    snapshot.pid = getsockopt(&socket.as_fd(), PeerCredentials)
+        .ok()
+        .map(|credentials| credentials.pid() as u32);
+
+    // Handshake so `compatible` compares the daemon's real version against
+    // this client instead of unconditionally reporting success.
+    if let Some(version) = query_daemon_version(&mut stream) {
+        snapshot.compatible = versions_compatible(&version, env!("CARGO_PKG_VERSION"));
+        snapshot.version = Some(version);
+    }
+    // A daemon that does not answer the handshake predates it: leave
+    // version unset and compatible=false while still reporting availability.
+    snapshot
+}
+
+/// Compatible means an identical major version (breaking-change proxy).
+fn versions_compatible(daemon_version: &str, client_version: &str) -> bool {
+    let daemon_major = daemon_version.split('.').next().unwrap_or_default();
+    let client_major = client_version.split('.').next().unwrap_or_default();
+    !daemon_major.is_empty() && daemon_major == client_major
+}
+
+pub(crate) const DAEMON_HANDSHAKE_TIMEOUT_SECONDS: i64 = 2;
+pub(crate) const DAEMON_STOP_TIMEOUT_SECONDS: i64 = 30;
+
+pub(crate) fn set_socket_timeouts(stream: &LocalSocketStream) -> anyhow::Result<()> {
+    // Bound the handshake so a wedged daemon cannot hang status/list polling.
+    set_socket_timeouts_for(stream, DAEMON_HANDSHAKE_TIMEOUT_SECONDS)
+}
+
+/// Lifecycle operations (stop) may legitimately outlast the handshake bound:
+/// teardown can terminate processes and retry namespace deletion for several
+/// seconds before responding.
+pub(crate) fn set_socket_timeouts_for(
+    stream: &LocalSocketStream,
+    seconds: i64,
+) -> anyhow::Result<()> {
+    use nix::sys::socket::sockopt::{ReceiveTimeout, SendTimeout};
+    use nix::sys::time::TimeValLike;
+    let timeout = nix::sys::time::TimeVal::seconds(seconds);
+    let LocalSocketStream::UdSocket(socket) = stream;
+    nix::sys::socket::setsockopt(&socket.as_fd(), ReceiveTimeout, &timeout)
+        .context("Failed to set daemon receive timeout")?;
+    nix::sys::socket::setsockopt(&socket.as_fd(), SendTimeout, &timeout)
+        .context("Failed to set daemon send timeout")?;
+    Ok(())
+}
+
+fn query_daemon_version(stream: &mut LocalSocketStream) -> Option<String> {
+    let request = wincode::serialize(&DaemonRequest::Version).ok()?;
+    write_framed(stream, &request).ok()?;
+    let response = read_framed(stream, MAX_FRAME_LEN).ok()?;
+    let parsed = wincode::deserialize::<DaemonResponse>(&response).ok()?;
+    match parsed {
+        DaemonResponse::Version(version) => Some(version),
+        _ => None,
+    }
+}
+
+pub(crate) const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+
+pub(crate) fn write_framed(stream: &mut LocalSocketStream, payload: &[u8]) -> anyhow::Result<()> {
+    stream.write_all(&(payload.len() as u32).to_be_bytes())?;
+    stream.write_all(payload)?;
+    Ok(())
+}
+
+pub(crate) fn read_framed(
+    stream: &mut LocalSocketStream,
+    max_len: usize,
+) -> anyhow::Result<Vec<u8>> {
+    let mut len_bytes = [0u8; 4];
+    stream.read_exact(&mut len_bytes)?;
+    let len = u32::from_be_bytes(len_bytes) as usize;
+    anyhow::ensure!(len <= max_len, "Daemon frame too large: {len}");
+    let mut buffer = vec![0u8; len];
+    stream.read_exact(&mut buffer)?;
+    Ok(buffer)
+}
+
+pub fn print_status(json: bool) -> anyhow::Result<()> {
+    let status = status();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+    } else {
+        println!("{}", status.human_line());
+    }
+    Ok(())
+}
 
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug)]
 pub enum DaemonRequest {
@@ -43,6 +194,10 @@ pub enum DaemonRequest {
         env: std::collections::HashMap<String, String>,
     },
     Control(DaemonControl),
+    /// Ask the daemon for its own version (handshake for `compatible`).
+    Version,
+    /// Lifecycle control executed with the daemon's root privileges.
+    Stop(DaemonStopRequest),
 }
 
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug, Clone)]
@@ -50,10 +205,27 @@ pub enum DaemonControl {
     Signal(i32),
 }
 
+#[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug, Clone)]
+pub enum DaemonStopTarget {
+    Application(String),
+    Namespace(String),
+}
+
+#[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug)]
+pub struct DaemonStopRequest {
+    pub target: DaemonStopTarget,
+    /// Client's XDG_CONFIG_HOME so the daemon reads the caller's lockfiles
+    /// rather than root's.
+    pub config_home: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug)]
 pub enum DaemonResponse {
     Exit(i32),
     Error(String),
+    Version(String),
+    /// Serialized JSON document (e.g. a stop result or error document).
+    Json(Vec<u8>),
 }
 
 // Note: Output is bridged via passed file descriptors; no streaming over the socket.
@@ -143,22 +315,25 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
     // Note: Do not set config override yet; we may adopt client's XDG_CONFIG_HOME.
 
     // Read a framed request (length-prefixed u32 then payload)
-    let mut len_bytes = [0u8; 4];
-    conn.read_exact(&mut len_bytes)?;
-    let len = u32::from_be_bytes(len_bytes) as usize;
-    let mut buffer = vec![0u8; len];
-    conn.read_exact(&mut buffer)?;
-    let request: DaemonRequest = wincode::deserialize(&buffer)?;
-
-    // Receive stdin, stdout, stderr FDs via SCM_RIGHTS
-    let [client_stdin_fd, client_stdout_fd, client_stderr_fd] =
-        recv_fds_over_unix_socket(&conn, 3)?;
+    let request: DaemonRequest = {
+        let mut len_bytes = [0u8; 4];
+        conn.read_exact(&mut len_bytes)?;
+        let len = u32::from_be_bytes(len_bytes) as usize;
+        anyhow::ensure!(len <= MAX_FRAME_LEN, "Client frame too large: {len}");
+        let mut buffer = vec![0u8; len];
+        conn.read_exact(&mut buffer)?;
+        wincode::deserialize(&buffer)?
+    };
 
     match request {
         DaemonRequest::Execute {
             cmd,
             env: forwarded_env,
         } => {
+            // Receive stdin, stdout, stderr FDs via SCM_RIGHTS (exec only)
+            let [client_stdin_fd, client_stdout_fd, client_stderr_fd] =
+                recv_fds_over_unix_socket(&conn, 3)?;
+
             // Decode the command payload from the JSON bytes carried by `DaemonRequest::Execute`.
             let mut exec_command: ExecCommand = serde_json::from_slice(&cmd)?;
             // Set config override from client's XDG_CONFIG_HOME if present, falling back to ~/.config
@@ -392,6 +567,36 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
             conn.write_all(&bytes)?;
         }
+        DaemonRequest::Version => {
+            let bytes = wincode::serialize(&DaemonResponse::Version(
+                env!("CARGO_PKG_VERSION").to_string(),
+            ))?;
+            conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
+            conn.write_all(&bytes)?;
+        }
+        DaemonRequest::Stop(stop_request) => {
+            // Adopt the caller's config root so lockfile operations hit the
+            // same state the client sees, then run the privileged control op.
+            let override_base = stop_request
+                .config_home
+                .map(PathBuf::from)
+                .filter(|path| path.exists())
+                .unwrap_or_else(|| user.dir.join(".config"));
+            vopono_core::util::set_config_dir_override(Some(override_base));
+            vopono_core::util::set_config_owner_override(Some((uid, gid)));
+
+            let outcome = match stop_request.target {
+                DaemonStopTarget::Application(id) => crate::control::stop_application(&id),
+                DaemonStopTarget::Namespace(id) => crate::control::stop_namespace(&id),
+            };
+            let payload = match outcome {
+                Ok(result) => serde_json::to_vec(&result)?,
+                Err(error) => serde_json::to_vec(&crate::errors::error_json_value(&error))?,
+            };
+            let bytes = wincode::serialize(&DaemonResponse::Json(payload))?;
+            conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
+            conn.write_all(&bytes)?;
+        }
         DaemonRequest::Control(_) => {
             // Ignore unexpected control frame sent as the first message
         }
@@ -447,4 +652,18 @@ fn recv_fds_over_unix_socket(
         ));
     }
     Ok([fds[0], fds[1], fds[2]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::versions_compatible;
+
+    #[test]
+    fn compatibility_requires_matching_major_version() {
+        assert!(versions_compatible("0.10.20", "0.10.20"));
+        assert!(versions_compatible("0.10.20", "0.9.1"));
+        assert!(!versions_compatible("1.0.0", "0.10.20"));
+        // An empty/garbage daemon answer is never treated as compatible.
+        assert!(!versions_compatible("", "0.10.20"));
+    }
 }
