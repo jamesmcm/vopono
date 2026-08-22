@@ -15,6 +15,10 @@ pub trait ThreadParameters {
     fn get_callback_command(&self) -> Option<String>;
     fn get_loop_delay(&self) -> u64;
     fn get_netns_name(&self) -> String;
+    /// Resolved vopono locks directory. Captured on the creating thread
+    /// because the config-dir override is thread-local and background
+    /// refresh threads would otherwise resolve the wrong root.
+    fn get_locks_dir(&self) -> std::path::PathBuf;
 }
 
 pub trait ThreadLoopForwarder: Forwarder {
@@ -40,6 +44,15 @@ pub trait ThreadLoopForwarder: Forwarder {
                     }
                     Ok(p) => {
                         log::debug!("Thread refreshed port: {p}");
+                        // Keep the lockfile-visible status in sync so status
+                        // readers see the renewed port, not the initial one.
+                        if let Err(e) = crate::status::record_forwarded_port(
+                            &params.get_locks_dir(),
+                            &params.get_netns_name(),
+                            p,
+                        ) {
+                            log::warn!("Failed to update forwarded port status: {e:?}");
+                        }
                         Self::callback_command(&params, p);
                     }
                 }

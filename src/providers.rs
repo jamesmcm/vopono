@@ -2,7 +2,7 @@ use anyhow::Context;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::{File, create_dir_all};
+use std::fs::{self, File, create_dir_all};
 use strum::IntoEnumIterator;
 use vopono_core::config::providers::VpnProvider;
 use vopono_core::config::vpn::Protocol;
@@ -17,6 +17,9 @@ pub struct ProviderInfo {
     pub requires_auth: bool,
     pub port_forwarding: bool,
     pub port_forwarding_automatic: bool,
+    /// Port forwarding availability per protocol id (e.g. `wireguard` ->
+    /// true, `openvpn` -> false for AzireVPN).
+    pub port_forwarding_by_protocol: BTreeMap<String, bool>,
     pub configured: bool,
     pub last_sync: Option<String>,
     pub server_count: usize,
@@ -27,6 +30,8 @@ pub struct ProviderProtocolInfo {
     pub configured: bool,
     pub last_sync: Option<String>,
     pub server_count: usize,
+    /// Whether port forwarding is available over this protocol.
+    pub port_forwarding: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -68,8 +73,14 @@ pub fn print_providers(json: bool) -> anyhow::Result<()> {
         "id\tname\tprotocols\tconfigured\tlast_sync\tport_forwarding\tautomatic_port_forwarding\tserver_count"
     );
     for provider in providers {
+        let pf_by_protocol = provider
+            .port_forwarding_by_protocol
+            .iter()
+            .map(|(protocol, supported)| format!("{protocol}:{supported}"))
+            .collect::<Vec<_>>()
+            .join(",");
         println!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             provider.id,
             provider.name,
             provider.protocols.join(","),
@@ -77,6 +88,7 @@ pub fn print_providers(json: bool) -> anyhow::Result<()> {
             provider.last_sync.as_deref().unwrap_or("never"),
             provider.port_forwarding,
             provider.port_forwarding_automatic,
+            pf_by_protocol,
             provider.server_count
         );
     }
@@ -114,7 +126,7 @@ pub fn provider_status(provider: VpnProvider) -> anyhow::Result<ProviderStatus> 
     let mut protocol_status = BTreeMap::new();
     for protocol in provider.supported_sync_protocols() {
         let id = protocol.id().to_string();
-        let server_count = config_count(&provider, protocol)?;
+        let server_count = config_count(&provider, protocol.clone())?;
         let metadata_entry = metadata
             .as_ref()
             .and_then(|metadata| metadata.protocols.get(&id));
@@ -124,6 +136,7 @@ pub fn provider_status(provider: VpnProvider) -> anyhow::Result<ProviderStatus> 
                 configured: server_count > 0,
                 last_sync: metadata_entry.map(|entry| entry.last_sync.clone()),
                 server_count,
+                port_forwarding: provider.port_forwarding_for(protocol.clone()),
             },
         );
     }
@@ -173,6 +186,15 @@ pub fn provider_info(provider: &VpnProvider) -> anyhow::Result<ProviderInfo> {
         requires_auth: sync_supported,
         port_forwarding: provider.supports_port_forwarding(),
         port_forwarding_automatic: provider.has_automatic_port_forwarding(),
+        port_forwarding_by_protocol: protocols
+            .iter()
+            .map(|protocol| {
+                (
+                    protocol.id().to_string(),
+                    provider.port_forwarding_for(protocol.clone()),
+                )
+            })
+            .collect(),
         configured: server_count > 0,
         last_sync,
         server_count,
@@ -191,12 +213,23 @@ pub fn record_sync(provider: &VpnProvider, protocol: Protocol) -> anyhow::Result
     metadata.protocols.insert(
         protocol.id().to_string(),
         SyncProtocolMetadata {
-            last_sync: timestamp,
-            server_count: config_count(provider, protocol)?,
+            last_sync: timestamp.clone(),
+            server_count: config_count(provider, protocol.clone())?,
         },
     );
     let file = File::create(metadata_path)?;
     serde_json::to_writer_pretty(file, &metadata)?;
+
+    // Global completion stamp so frontends can watch a single file (with e.g.
+    // a FileView) instead of polling `providers --json` for new configs.
+    let stamp = serde_json::json!({
+        "timestamp": timestamp,
+        "provider": provider.id(),
+        "protocol": protocol.id().to_string(),
+    });
+    let stamp_path = vopono_core::util::vopono_dir()?.join(".last-sync");
+    fs::write(&stamp_path, serde_json::to_vec_pretty(&stamp)?)
+        .with_context(|| format!("Failed to write sync stamp {}", stamp_path.display()))?;
     Ok(())
 }
 
@@ -252,9 +285,60 @@ mod tests {
             airvpn.protocols,
             vec!["openvpn".to_string(), "wireguard".to_string()]
         );
+        // AirVPN forwards manually and protocol-independently.
+        assert_eq!(
+            airvpn.port_forwarding_by_protocol,
+            BTreeMap::from([
+                ("openvpn".to_string(), true),
+                ("wireguard".to_string(), true)
+            ])
+        );
 
         let mullvad = provider_info(&VpnProvider::Mullvad).unwrap();
         assert!(!mullvad.port_forwarding);
         assert_eq!(mullvad.protocols, vec!["wireguard".to_string()]);
+        assert_eq!(
+            mullvad.port_forwarding_by_protocol,
+            BTreeMap::from([("wireguard".to_string(), false)])
+        );
+    }
+
+    #[test]
+    fn port_forwarding_matrix_reflects_protocol_support() {
+        use vopono_core::config::vpn::Protocol;
+        // AzireVPN's forwarder only implements the Wireguard flow.
+        assert!(VpnProvider::AzireVPN.port_forwarding_for(Protocol::Wireguard));
+        assert!(!VpnProvider::AzireVPN.port_forwarding_for(Protocol::OpenVpn));
+        // PIA and ProtonVPN forwarders are tunnel-agnostic.
+        for provider in [VpnProvider::PrivateInternetAccess, VpnProvider::ProtonVPN] {
+            assert!(provider.port_forwarding_for(Protocol::Wireguard));
+            assert!(provider.port_forwarding_for(Protocol::OpenVpn));
+        }
+        assert!(!VpnProvider::Mullvad.port_forwarding_for(Protocol::Wireguard));
+    }
+
+    #[test]
+    fn sync_writes_global_completion_stamp() {
+        let dir = std::env::temp_dir().join(format!(
+            "vopono-sync-stamp-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        vopono_core::util::set_config_dir_override(Some(dir.clone()));
+
+        let result = record_sync(&VpnProvider::AirVPN, Protocol::Wireguard);
+        vopono_core::util::set_config_dir_override(None);
+        result.unwrap();
+
+        let stamp_path = dir.join("vopono").join(".last-sync");
+        let stamp: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(stamp_path).unwrap()).unwrap();
+        assert_eq!(stamp["provider"], "airvpn");
+        assert_eq!(stamp["protocol"], "wireguard");
+        assert!(stamp["timestamp"].is_string());
+        let _ = fs::remove_dir_all(dir);
     }
 }

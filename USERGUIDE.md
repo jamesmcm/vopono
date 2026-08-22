@@ -94,10 +94,98 @@ execute your internal VPN command. Note the `-i foo` which tells vopono
 to use the Wireguard interface for connecting the network namespace!
 
 ```sh
-$ vopono -v exec --create-netns-only --provider None --protocol None --server None -i foo bash
-$ sudo ip netns exec vo_none_None bash
+$ vopono -v exec --provider None -i foo bash
+$ sudo ip netns exec vo_none_none bash
 $ ./vpn.sh
 ```
+
+### Attaching to an existing namespace
+
+Use `--existing-netns` to launch another application in a namespace that is
+already running, without repeating the provider, protocol and server
+arguments:
+
+```bash
+$ vopono exec --existing-netns vo_ar_romania firefox-developer-edition
+```
+
+Nothing else should be passed with `--existing-netns`: connection settings
+are taken from the running namespace, and provider/protocol/server defaults
+in your vopono config.toml are ignored for the launch.
+
+Namespaces created by vopono are reused as-is and keep their normal
+lifecycle. Foreign namespaces (created by hand or other tools) are also
+supported: vopono attaches without modifying them, does not track them in
+`vopono status`, and leaves them running when the application exits.
+
+Similarly, `--provider None` on its own creates a fresh namespace without any
+VPN service - it overrides protocol and server settings from the CLI or config
+file, so you no longer need to repeat them.
+
+### Checking connectivity
+
+`check` probes a running namespace over both address families (one TCP
+connection each) plus a DNS resolution using the namespace's own resolver.
+It uses the root daemon when available (unprivileged users cannot enter
+namespaces) and falls back to sudo otherwise:
+
+```bash
+$ vopono check vo_ar_romania
+vo_ar_romania	connected	v4 69ms	v6 69ms	dns 1.0.0.1,1.1.1.1,2606:4700:4700::1001,2606:4700:4700::1111 55ms
+```
+
+Each family is reported independently, so a half-broken tunnel is visible at
+a glance (`v4 69ms v6 failed (network unreachable)`). Targets can be
+overridden with `--v4-host`, `--v6-host` and `--port`; individual checks can
+be skipped with `--skip-ipv4`, `--skip-ipv6`, `--skip-dns`; the DNS hostname
+with `--dns-host`; and the per-family timeout with `--timeout-ms`. Use
+`--json` for machine-readable output:
+
+```bash
+$ vopono check vo_ar_romania --json
+{
+  "version": 1,
+  "result": {
+    "id": "vo_ar_romania",
+    "connected": true,
+    "ipv4": {
+      "target": "1.1.1.1:443",
+      "latency_ms": 69
+    },
+    "ipv6": {
+      "target": "[2606:4700:4700::1111]:443",
+      "latency_ms": 69
+    },
+    "dns": {
+      "host": "one.one.one.one",
+      "resolved_ips": ["1.0.0.1", "1.1.1.1", "2606:4700:4700::1001", "2606:4700:4700::1111"],
+      "latency_ms": 55
+    }
+  }
+}
+```
+
+When run as an unprivileged user, `check` transparently forwards the probe to
+the running root daemon (falling back to sudo when no daemon is available), so
+frontends can treat namespace health as a daemon capability without spawning
+anything inside the namespace themselves.
+
+### Launch reports and sync stamps
+
+`vopono exec --json` emits a single-line launch summary on stdout once the
+application has started:
+
+```json
+{"version":1,"event":"launched","namespace":"vo_ar_romania","pid":183041,"forwarded_port":null}
+```
+
+Scan stdout for `"event":"launched"` rather than assuming it is the first
+line - host-side setup commands may print earlier lines.
+
+Every completed `vopono sync` also updates `~/.config/vopono/.last-sync`
+with the timestamp, provider and protocol, so frontends can detect newly
+synced configurations by watching that single file instead of polling
+`providers --json`.
 
 Note you can set config files in `/etc/netns/vo_none_None/` to have them
 apply only in the network namespace e.g.:
@@ -200,6 +288,10 @@ the proxy through `vopono.host`. The proxy should listen only on the vopono host
 interface or otherwise be protected from unintended access.
 
 If provider port forwarding is enabled (e.g. `--port-forwarding` or `--custom-port-forwarding` with ProtonVPN or PIA) then the forwarded port is provided as `$VOPONO_FORWARDED_PORT`.
+
+When the provider renews the forwarded port, the new value is picked up
+automatically: forwarders record each renewal and `vopono status --json`
+always reports the current port in the namespace's `port_forwarding` field.
 
 ### Running commands before and after execution within the network namespace
 

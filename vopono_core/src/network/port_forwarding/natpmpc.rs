@@ -22,6 +22,7 @@ pub struct Natpmpc {
 
 pub struct ThreadParamsImpl {
     pub netns_name: String,
+    pub locks_dir: std::path::PathBuf,
     pub callback: Option<String>,
 }
 
@@ -34,6 +35,9 @@ impl ThreadParameters for ThreadParamsImpl {
     }
     fn get_netns_name(&self) -> String {
         self.netns_name.clone()
+    }
+    fn get_locks_dir(&self) -> std::path::PathBuf {
+        self.locks_dir.clone()
     }
 }
 
@@ -110,6 +114,7 @@ impl Natpmpc {
 
         let params = ThreadParamsImpl {
             netns_name: ns.name.clone(),
+            locks_dir: crate::util::config_dir()?.join("vopono").join("locks"),
             callback: callback.cloned(),
         };
 

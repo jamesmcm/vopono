@@ -44,6 +44,10 @@ where
 }
 
 impl<T: IntoEnumIterator + Clone + Display> WrappedArg<T> {
+    pub fn new(variant: T) -> Self {
+        Self { variant }
+    }
+
     pub fn to_variant(&self) -> T {
         self.variant.clone()
     }
@@ -114,6 +118,17 @@ pub enum Command {
         about = "Execute an application with the given VPN connection"
     )]
     Exec(ExecCommand),
+    #[clap(
+        name = "check",
+        about = "Check network connectivity of a running namespace"
+    )]
+    Check(CheckCommand),
+    #[clap(
+        name = "__connectivity-probe",
+        about = "Internal TCP probe executed inside a network namespace",
+        hide = true
+    )]
+    Probe(ProbeCommand),
     #[clap(
         name = "list",
         about = "List running vopono namespaces and applications"
@@ -340,6 +355,17 @@ pub struct ExecCommand {
     #[clap(long = "vopono-config")]
     pub vopono_config: Option<PathBuf>,
 
+    /// Attach to an existing network namespace by name (e.g. vo_ar_romania)
+    /// instead of creating a new connection. Namespaces created by vopono are
+    /// used as-is; foreign namespaces are attached without modifying them and
+    /// are left running on exit. Provider, protocol, server and custom config
+    /// options are ignored.
+    #[clap(
+        long = "existing-netns",
+        conflicts_with_all = &["provider", "protocol", "server", "custom", "custom_netns_name"]
+    )]
+    pub existing_netns: Option<String>,
+
     /// Custom name for the generated network namespace
     /// Will use this network namespace directly if it exists
     #[clap(long = "custom-netns-name")]
@@ -396,6 +422,83 @@ pub struct ExecCommand {
     /// Port of the remote SSH server
     #[clap(long = "ssh-port")]
     pub ssh_port: Option<u16>,
+
+    /// Emit a machine-readable launch report (namespace, PID, forwarded port)
+    /// as the first line on stdout.
+    #[clap(long = "json")]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct CheckCommand {
+    /// Network namespace ID (as shown by `vopono status`)
+    pub id: String,
+
+    /// TCP port used for both family checks
+    #[clap(long = "port", default_value_t = crate::check::DEFAULT_CHECK_PORT)]
+    pub port: u16,
+
+    /// Connection timeout in milliseconds per family
+    #[clap(long = "timeout-ms", default_value_t = crate::check::DEFAULT_TIMEOUT_MS)]
+    pub timeout_ms: u64,
+
+    /// IPv4 target to connect to
+    #[clap(long = "v4-host")]
+    pub v4_host: Option<String>,
+
+    /// IPv6 target to connect to
+    #[clap(long = "v6-host")]
+    pub v6_host: Option<String>,
+
+    /// Skip the IPv4 connectivity check
+    #[clap(long = "skip-ipv4")]
+    pub skip_ipv4: bool,
+
+    /// Skip the IPv6 connectivity check
+    #[clap(long = "skip-ipv6")]
+    pub skip_ipv6: bool,
+
+    /// Hostname resolved via the namespace's own DNS configuration
+    #[clap(long = "dns-host")]
+    pub dns_host: Option<String>,
+
+    /// Skip the DNS resolution check
+    #[clap(long = "skip-dns")]
+    pub skip_dns: bool,
+
+    /// Emit versioned JSON instead of human-readable output.
+    #[clap(long = "json")]
+    pub json: bool,
+}
+
+/// Hidden helper executed inside a network namespace by the connectivity
+/// check. Probes each enabled address family plus optional DNS resolution and
+/// exits 0/1.
+#[derive(Parser, Debug)]
+pub struct ProbeCommand {
+    #[clap(long = "v4-host")]
+    pub v4_host: Option<String>,
+
+    #[clap(long = "v6-host")]
+    pub v6_host: Option<String>,
+
+    #[clap(long = "port")]
+    pub port: u16,
+
+    #[clap(long = "timeout-ms")]
+    pub timeout_ms: u64,
+
+    #[clap(long = "dns-host")]
+    pub dns_host: Option<String>,
+
+    #[clap(long = "skip-ipv4")]
+    pub skip_ipv4: bool,
+
+    #[clap(long = "skip-ipv6")]
+    pub skip_ipv6: bool,
+
+    #[clap(long = "skip-dns")]
+    pub skip_dns: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -527,5 +630,75 @@ mod tests {
         };
         assert!(matches!(command.list_type, Some(ListType::Namespaces)));
         assert!(command.json);
+    }
+
+    #[test]
+    fn existing_netns_rejects_connection_settings() {
+        for extra in [
+            vec!["--provider", "mullvad"],
+            vec!["--protocol", "wireguard"],
+            vec!["--server", "se"],
+            vec!["--custom", "/tmp/foo.conf"],
+            vec!["--custom-netns-name", "vo_x"],
+        ] {
+            let mut argv = vec!["vopono", "exec", "--existing-netns", "vo_ar_romania"];
+            argv.extend(extra);
+            argv.push("firefox");
+            assert!(
+                App::try_parse_from(argv).is_err(),
+                "expected conflict error"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_netns_parses_standalone() {
+        let app = App::try_parse_from([
+            "vopono",
+            "exec",
+            "--existing-netns",
+            "vo_ar_romania",
+            "firefox",
+        ])
+        .unwrap();
+        let Command::Exec(command) = app.cmd.unwrap() else {
+            panic!("expected exec command");
+        };
+        assert_eq!(command.existing_netns.as_deref(), Some("vo_ar_romania"));
+        assert!(command.provider.is_none());
+        assert!(command.protocol.is_none());
+    }
+
+    #[test]
+    fn check_defaults_and_json() {
+        let app = App::try_parse_from(["vopono", "check", "vo_ar_romania", "--json"]).unwrap();
+        let Command::Check(command) = app.cmd.unwrap() else {
+            panic!("expected check command");
+        };
+        assert_eq!(command.id, "vo_ar_romania");
+        assert_eq!(command.v4_host, None);
+        assert_eq!(command.v6_host, None);
+        assert!(!command.skip_ipv4);
+        assert!(!command.skip_ipv6);
+        assert_eq!(command.port, crate::check::DEFAULT_CHECK_PORT);
+        assert_eq!(command.timeout_ms, crate::check::DEFAULT_TIMEOUT_MS);
+        assert_eq!(command.dns_host, None);
+        assert!(!command.skip_dns);
+        assert!(command.json);
+    }
+
+    #[test]
+    fn provider_values_parse_case_insensitively() {
+        for spelling in ["airvpn", "AirVPN", "AIRVPN", "aIrVpN"] {
+            let app =
+                App::try_parse_from(["vopono", "exec", "-p", spelling, "-c", "None", "x"]).unwrap();
+            let Command::Exec(command) = app.cmd.unwrap() else {
+                panic!("expected exec command");
+            };
+            assert_eq!(
+                command.provider.unwrap().to_variant(),
+                vopono_core::config::providers::VpnProvider::AirVPN
+            );
+        }
     }
 }
