@@ -2,29 +2,17 @@ use super::AirVPN;
 use super::{ConfigurationChoice, OpenVpnProvider};
 use crate::config::providers::UiClient;
 use crate::util::delete_all_files_in_dir;
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use log::debug;
-use serde::Deserialize;
 use std::fmt::Display;
-use std::fs::create_dir_all;
 use std::fs::File;
+use std::fs::create_dir_all;
 use std::io::{Cursor, Read, Write};
 use std::net::IpAddr;
 use std::path::PathBuf;
-use std::time::Duration;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use zip::ZipArchive;
-
-#[derive(Debug, Deserialize)]
-struct StatusResponse {
-    servers: Vec<AirServer>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AirServer {
-    public_name: String,
-}
 
 impl OpenVpnProvider for AirVPN {
     fn provider_dns(&self) -> Option<Vec<IpAddr>> {
@@ -47,20 +35,10 @@ impl OpenVpnProvider for AirVPN {
         let config_type = ConfigType::iter()
             .nth(config_choice)
             .ok_or_else(|| anyhow!("Invalid AirVPN OpenVPN configuration selection"))?;
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("Failed to create AirVPN HTTP client")?;
+        let client = super::http_client()?;
 
-        let status_response: StatusResponse = client
-            .get("https://airvpn.org/api/status/")
-            .send()?
-            .error_for_status()
-            .context("AirVPN server status request failed")?
-            .json()
-            .context("Failed to parse AirVPN server status")?;
-        let server_names = status_response
-            .servers
+        let servers = super::fetch_servers(&client)?;
+        let server_names = servers
             .iter()
             .map(|server| server.public_name.as_str())
             .collect::<Vec<_>>()
@@ -69,14 +47,7 @@ impl OpenVpnProvider for AirVPN {
             anyhow::bail!("AirVPN returned no servers while generating OpenVPN configs");
         }
 
-        // TODO: DRY - factor this out to mod.rs (duplicated in Wireguard config generation)
-        let api_key = std::env::var("AIRVPN_API_KEY").or_else(|_|
-                uiclient.get_input(crate::config::providers::Input{prompt: "Enter your AirVPN API key (see https://airvpn.org/apisettings/ )".to_string(), validator: Some(Box::new(|value: &String| super::validate_api_key(value)))})
-                  ).map_err(|_| {
-                    anyhow!("Cannot generate AirVPN OpenVPN config files: AIRVPN_API_KEY is not defined in your environment variables. Get your key by activating API access in the Client Area at https://airvpn.org/apisettings/")
-                })?.trim().to_string();
-        super::validate_api_key(&api_key)
-            .map_err(|error| anyhow!("Invalid AirVPN API key: {error}"))?;
+        let api_key = super::require_api_key(uiclient, "OpenVPN")?;
         let zipfile = client
             .get("https://airvpn.org/api/generator/")
             .query(&[
@@ -110,7 +81,7 @@ impl OpenVpnProvider for AirVPN {
                 .and_then(|p| p.extension())
                 .and_then(|x| x.to_str())
             {
-                let filename = openvpn_filename(&original_name);
+                let filename = super::generator_filename(&original_name, "ovpn");
                 debug!("Writing OpenVPN config: {filename}");
                 filename
             } else {
@@ -191,24 +162,10 @@ impl ConfigurationChoice for ConfigType {
     }
 }
 
-fn openvpn_filename(name: &str) -> String {
-    let fields = name.split('_').collect::<Vec<_>>();
-    match (fields.get(1), fields.get(2)) {
-        (Some(location), Some(server)) => {
-            let country_code = location.split('-').next().unwrap_or_default();
-            if country_code.is_empty() || server.is_empty() {
-                name.to_string()
-            } else {
-                format!("{}-{server}.ovpn", country_code.to_ascii_lowercase())
-            }
-        }
-        _ => name.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{openvpn_filename, ConfigType};
+    use super::super::generator_filename;
+    use super::ConfigType;
     use strum::IntoEnumIterator;
 
     #[test]
@@ -236,9 +193,12 @@ mod tests {
     #[test]
     fn generator_names_are_reduced_to_stable_config_ids() {
         assert_eq!(
-            openvpn_filename("AirVPN_CH-Zurich_Achernar_UDP-443.ovpn"),
+            generator_filename("AirVPN_CH-Zurich_Achernar_UDP-443.ovpn", "ovpn"),
             "ch-Achernar.ovpn"
         );
-        assert_eq!(openvpn_filename("ca-Custom.ovpn"), "ca-Custom.ovpn");
+        assert_eq!(
+            generator_filename("ca-Custom.ovpn", "ovpn"),
+            "ca-Custom.ovpn"
+        );
     }
 }

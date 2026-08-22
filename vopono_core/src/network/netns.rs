@@ -52,6 +52,19 @@ pub struct NetworkNamespace {
     pub predown_group: Option<String>,
     pub config_file: Option<PathBuf>, // Used to save config file path in lockfile
     pub trojan: Option<Trojan>,
+    /// Runtime state shared with the status/lockfile projections.
+    #[serde(default)]
+    pub state: NamespaceState,
+}
+
+/// Server/port metadata mirrored into the lockfiles so read-only commands can
+/// report it without access to the live namespace objects.
+///
+/// Embedded by value in both [`NetworkNamespace`] and
+/// [`LockfileNamespaceStatus`]; keep new shared fields here instead of adding
+/// parallel copies to each struct.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct NamespaceState {
     /// The server selector supplied by the caller. The selected config file is
     /// retained separately so status clients can distinguish an alias from the
     /// concrete endpoint chosen for it.
@@ -184,15 +197,12 @@ impl NetworkNamespace {
             predown_group,
             config_file: None,
             trojan: None,
-            server: None,
-            port_forwarding: None,
-            open_ports: Vec::new(),
-            forwarded_ports: Vec::new(),
+            state: NamespaceState::default(),
         })
     }
 
     pub fn set_server(&mut self, server: Option<String>) {
-        self.server = server;
+        self.state.server = server;
     }
 
     pub fn set_port_configuration(
@@ -200,12 +210,12 @@ impl NetworkNamespace {
         open_ports: Option<&[u16]>,
         forwarded_ports: Option<&[u16]>,
     ) {
-        self.open_ports = open_ports.unwrap_or_default().to_vec();
-        self.forwarded_ports = forwarded_ports.unwrap_or_default().to_vec();
+        self.state.open_ports = open_ports.unwrap_or_default().to_vec();
+        self.state.forwarded_ports = forwarded_ports.unwrap_or_default().to_vec();
     }
 
     pub fn set_port_forwarding(&mut self, status: Option<PortForwardingStatus>) {
-        self.port_forwarding = status;
+        self.state.port_forwarding = status;
     }
 
     pub fn set_config_file(&mut self, config_file: Option<PathBuf>) {
@@ -813,10 +823,17 @@ impl NetworkNamespace {
 
     /// Update the application PID in the primary lock after the child process
     /// has been spawned. Older lockfiles simply omit this optional field.
+    ///
+    /// Best-effort: a missing lockfile is logged and ignored so daemon startup
+    /// is not aborted by an already-torn-down namespace entry.
     pub fn update_lockfile_application_pid(&self, pid: u32) -> anyhow::Result<()> {
         let mut lockfile_path = config_dir()?;
         lockfile_path.push(format!("vopono/locks/{}/{}", self.name, unistd::getpid()));
         if !lockfile_path.exists() {
+            debug!(
+                "Skipping application pid update; primary lockfile {} is missing",
+                lockfile_path.display()
+            );
             return Ok(());
         }
         let file = File::open(&lockfile_path)?;
@@ -829,8 +846,14 @@ impl NetworkNamespace {
                 .as_secs(),
         );
         let lock_string = ron::ser::to_string(&lock)?;
-        let mut file = File::create(&lockfile_path)?;
-        write!(file, "{lock_string}")?;
+        // Write to a sibling temporary file first so readers never observe a
+        // partially written lockfile, then atomically move it into place.
+        let temporary_path = lockfile_path.with_extension("tmp");
+        {
+            let mut file = File::create(&temporary_path)?;
+            write!(file, "{lock_string}")?;
+        }
+        std::fs::rename(&temporary_path, &lockfile_path)?;
         Ok(())
     }
 
@@ -848,11 +871,8 @@ impl NetworkNamespace {
                 name: self.name.clone(),
                 provider: self.provider.clone(),
                 protocol: self.protocol.clone(),
-                server: self.server.clone(),
                 config_file: self.config_file.clone(),
-                port_forwarding: self.port_forwarding.clone(),
-                open_ports: self.open_ports.clone(),
-                forwarded_ports: self.forwarded_ports.clone(),
+                state: self.state.clone(),
             },
             start: since_the_epoch.as_secs(),
             command: command.to_string(),
@@ -1081,13 +1101,21 @@ pub struct LockfileNamespaceStatus {
     pub provider: VpnProvider,
     pub protocol: Protocol,
     #[serde(default)]
-    pub server: Option<String>,
-    #[serde(default)]
     pub config_file: Option<PathBuf>,
+    /// Server/port metadata shared with [`NetworkNamespace`].
     #[serde(default)]
-    pub port_forwarding: Option<PortForwardingStatus>,
-    #[serde(default)]
-    pub open_ports: Vec<u16>,
-    #[serde(default)]
-    pub forwarded_ports: Vec<u16>,
+    pub state: NamespaceState,
+}
+
+impl NetworkNamespace {
+    /// Explicitly tear down the namespace.
+    ///
+    /// Runs lockfile removal, the predown hook, and destructor cleanup for the
+    /// firewall, veth pair, DNS config, and VPN protocol processes, then
+    /// removes the network namespace. Semantically identical to dropping the
+    /// value (the `Drop` impl owns the cleanup), but makes the teardown
+    /// visible at the call site instead of relying on an implicit drop.
+    pub fn teardown(self) {
+        drop(self);
+    }
 }

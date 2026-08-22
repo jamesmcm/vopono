@@ -2,18 +2,17 @@ use super::args::{ListCommand, ListType};
 use anyhow::anyhow;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
-use std::collections::BTreeSet;
 use vopono_core::network::netns::{LockfileNamespaceStatus, LockfileStatus, PortForwardingStatus};
 use vopono_core::status::read_lock_namespaces;
 use vopono_core::util::parse_command_str;
 
-use crate::providers::SCHEMA_VERSION;
-use crate::{daemon, server_metadata};
+use crate::api;
+use crate::server_metadata;
 
 #[derive(Debug, Serialize)]
 pub struct StatusDocument {
     pub version: u8,
-    pub daemon: daemon::DaemonStatus,
+    pub daemon: crate::daemon::DaemonStatus,
     pub namespaces: Vec<NamespaceEntry>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
@@ -25,7 +24,9 @@ pub struct NamespaceEntry {
     pub provider: String,
     pub protocol: String,
     pub server: Option<ServerStatus>,
-    pub created_at: String,
+    /// RFC 3339 timestamp of when the namespace was created; `null` when the
+    /// recorded epoch value cannot be represented as a calendar timestamp.
+    pub created_at: Option<String>,
     pub uptime_seconds: u64,
     pub applications: Vec<ApplicationEntry>,
     pub port_forwarding: Option<PortForwardingEntry>,
@@ -52,11 +53,15 @@ pub struct PortForwardingEntry {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ApplicationEntry {
+    /// PID string when known. Without a recorded PID the id is synthesized
+    /// from the command and start time; it is unique within one snapshot but
+    /// is not stable across restarts and cannot be used with `stop`.
     pub id: String,
     pub pid: Option<u32>,
     pub command: String,
     pub argv: Vec<String>,
-    pub started_at: String,
+    /// RFC 3339 timestamp; `null` when unrepresentable (see [`NamespaceEntry::created_at`]).
+    pub started_at: Option<String>,
     pub uptime_seconds: u64,
 }
 
@@ -85,14 +90,14 @@ struct ApplicationListEntry {
     protocol: String,
     command: String,
     argv: Vec<String>,
-    started_at: String,
+    started_at: Option<String>,
     uptime_seconds: u64,
 }
 
 pub fn output_status(json: bool) -> anyhow::Result<()> {
     let snapshot = status_snapshot()?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&snapshot)?);
+        api::print_json(&snapshot)?;
     } else {
         print_human_status(&snapshot);
     }
@@ -104,14 +109,11 @@ pub fn output_list(listcmd: ListCommand) -> anyhow::Result<()> {
     match listcmd.list_type.unwrap_or(ListType::Applications) {
         ListType::Namespaces => {
             if listcmd.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&NamespaceListDocument {
-                        version: SCHEMA_VERSION,
-                        namespaces: snapshot.namespaces,
-                        errors: snapshot.errors,
-                    })?
-                );
+                api::print_json(&NamespaceListDocument {
+                    version: api::SCHEMA_VERSION,
+                    namespaces: snapshot.namespaces,
+                    errors: snapshot.errors,
+                })?;
             } else {
                 print_namespaces(&snapshot.namespaces);
             }
@@ -119,14 +121,11 @@ pub fn output_list(listcmd: ListCommand) -> anyhow::Result<()> {
         ListType::Applications => {
             let applications = flatten_applications(&snapshot.namespaces);
             if listcmd.json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&ApplicationListDocument {
-                        version: SCHEMA_VERSION,
-                        applications,
-                        errors: snapshot.errors,
-                    })?
-                );
+                api::print_json(&ApplicationListDocument {
+                    version: api::SCHEMA_VERSION,
+                    applications,
+                    errors: snapshot.errors,
+                })?;
             } else {
                 print_applications(&snapshot.namespaces);
             }
@@ -142,23 +141,13 @@ pub fn status_snapshot() -> anyhow::Result<StatusDocument> {
     let mut namespaces = lock_status
         .namespaces
         .iter()
-        .map(|(id, locks)| {
-            namespace_entry(
-                id,
-                locks,
-                lock_status
-                    .primary_namespaces
-                    .get(id)
-                    .and_then(|locks| locks.first()),
-                now_seconds,
-            )
-        })
+        .map(|(id, locks)| namespace_entry(id, locks, lock_status.metadata_for(id), now_seconds))
         .collect::<anyhow::Result<Vec<_>>>()?;
     namespaces.sort_by(|left, right| left.id.cmp(&right.id));
 
     Ok(StatusDocument {
-        version: SCHEMA_VERSION,
-        daemon: daemon::status(),
+        version: api::SCHEMA_VERSION,
+        daemon: crate::daemon::status(),
         namespaces,
         errors: lock_status.errors,
     })
@@ -176,6 +165,8 @@ fn namespace_entry(
         .first()
         .ok_or_else(|| anyhow!("Namespace {id} has no lock entries"))?;
     let metadata = primary.unwrap_or(first);
+    // Prefer the primary (creator) lock for creation time; fall back to the
+    // earliest application lock so direct CLI runs still report sensibly.
     let created = primary.map(|lock| lock.start).unwrap_or_else(|| {
         locks
             .iter()
@@ -193,16 +184,17 @@ fn namespace_entry(
         id: id.to_string(),
         provider: namespace.provider.id().to_string(),
         protocol: namespace.protocol.id().to_string(),
-        server: server_status(namespace)?,
+        server: server_status(namespace),
         created_at: format_timestamp(created),
         uptime_seconds: now_seconds.saturating_sub(created),
         applications,
         port_forwarding: namespace
+            .state
             .port_forwarding
             .as_ref()
             .map(port_forwarding_entry),
-        open_ports: namespace.open_ports.clone(),
-        forwarded_ports: namespace.forwarded_ports.clone(),
+        open_ports: namespace.state.open_ports.clone(),
+        forwarded_ports: namespace.state.forwarded_ports.clone(),
     })
 }
 
@@ -228,35 +220,17 @@ fn application_entry(lock: &LockfileStatus, now_seconds: u64) -> ApplicationEntr
     }
 }
 
-fn server_status(namespace: &LockfileNamespaceStatus) -> anyhow::Result<Option<ServerStatus>> {
+fn server_status(namespace: &LockfileNamespaceStatus) -> Option<ServerStatus> {
     let config_id = namespace.config_file.as_ref().and_then(|path| {
         path.file_stem()
             .and_then(|stem| stem.to_str())
             .map(str::to_string)
     });
-    let id = config_id.or_else(|| namespace.server.clone());
-    let Some(id) = id else {
-        return Ok(None);
-    };
-
-    let parts = server_metadata::id_parts(&id);
+    let id = config_id.or_else(|| namespace.state.server.clone())?;
+    let aliases = server_metadata::aliases_for(&id, namespace.state.server.as_deref());
     let (country_code, country) = server_metadata::country_from_id(&id);
-    let mut aliases = BTreeSet::new();
-    aliases.insert(id.clone());
-    if let Some(requested) = &namespace.server {
-        aliases.insert(requested.to_ascii_lowercase());
-    }
-    for part in parts {
-        aliases.insert(part);
-    }
-    if let Some(code) = &country_code {
-        aliases.insert(code.clone());
-    }
-    if let Some(country) = &country {
-        aliases.insert(country.to_ascii_lowercase());
-    }
 
-    Ok(Some(ServerStatus {
+    Some(ServerStatus {
         id,
         aliases: aliases.into_iter().collect(),
         country_code,
@@ -264,13 +238,12 @@ fn server_status(namespace: &LockfileNamespaceStatus) -> anyhow::Result<Option<S
         hostname: namespace
             .config_file
             .as_deref()
-            .and_then(|path| server_metadata::config_hostname(path, &namespace.protocol).ok())
-            .flatten(),
+            .and_then(|path| server_metadata::config_hostname(path, &namespace.protocol)),
         config_file: namespace
             .config_file
             .as_ref()
             .map(|path| path.display().to_string()),
-    }))
+    })
 }
 
 fn port_forwarding_entry(status: &PortForwardingStatus) -> PortForwardingEntry {
@@ -310,23 +283,7 @@ fn flatten_applications(namespaces: &[NamespaceEntry]) -> Vec<ApplicationListEnt
 }
 
 fn print_human_status(status: &StatusDocument) {
-    let daemon_state = if status.daemon.available {
-        "available"
-    } else {
-        "unavailable"
-    };
-    println!(
-        "daemon\t{}\tpid={}\tsocket={}\tversion={}\tcompatible={}",
-        daemon_state,
-        status
-            .daemon
-            .pid
-            .map(|pid| pid.to_string())
-            .unwrap_or_else(|| "-".to_string()),
-        status.daemon.socket,
-        status.daemon.version,
-        status.daemon.compatible,
-    );
+    println!("{}", status.daemon.human_line());
     print_namespaces(&status.namespaces);
     if !status.errors.is_empty() {
         for error in &status.errors {
@@ -378,10 +335,66 @@ fn print_applications(namespaces: &[NamespaceEntry]) {
     }
 }
 
-fn format_timestamp(timestamp: u64) -> String {
+/// RFC 3339 rendering of a unix-epoch seconds value; `None` when the value
+/// cannot be a valid timestamp so JSON consumers see `null`, never a number
+/// masquerading as a date string.
+fn format_timestamp(timestamp: u64) -> Option<String> {
     i64::try_from(timestamp)
         .ok()
         .and_then(|seconds| DateTime::<Utc>::from_timestamp(seconds, 0))
         .map(|date| date.to_rfc3339_opts(SecondsFormat::Secs, true))
-        .unwrap_or_else(|| timestamp.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{application_entry, format_timestamp, namespace_entry};
+    use vopono_core::config::providers::VpnProvider;
+    use vopono_core::config::vpn::Protocol;
+    use vopono_core::network::netns::{LockfileNamespaceStatus, LockfileStatus};
+
+    fn lock(name: &str, command: &str, start: u64) -> LockfileStatus {
+        LockfileStatus {
+            ns: LockfileNamespaceStatus {
+                name: name.to_string(),
+                provider: VpnProvider::Mullvad,
+                protocol: Protocol::Wireguard,
+                config_file: None,
+                state: Default::default(),
+            },
+            start,
+            command: command.to_string(),
+            application_pid: None,
+            application_started_at: None,
+        }
+    }
+
+    #[test]
+    fn timestamps_render_as_rfc3339_or_null() {
+        assert_eq!(format_timestamp(0).as_deref(), Some("1970-01-01T00:00:00Z"));
+        // Out-of-range values become null rather than a numeric string.
+        assert_eq!(format_timestamp(u64::MAX), None);
+    }
+
+    #[test]
+    fn synthetic_application_ids_are_deterministic() {
+        let entry = application_entry(&lock("vo_m_se", "firefox", 100), 200);
+        assert!(entry.pid.is_none());
+        assert_eq!(entry.id, "firefox:100");
+        assert_eq!(entry.command, "firefox");
+        assert_eq!(entry.uptime_seconds, 100);
+    }
+
+    #[test]
+    fn creation_time_falls_back_to_earliest_lock_without_primary() {
+        let mut later = lock("vo_m_se", "transmission", 500);
+        later.application_pid = Some(300);
+        later.application_started_at = Some(600);
+        let earlier = lock("vo_m_se", "firefox", 400);
+
+        let entry = namespace_entry("vo_m_se", &[later, earlier], None, 1000)
+            .expect("namespace entry should build");
+        assert_eq!(entry.created_at.as_deref(), Some("1970-01-01T00:06:40Z"));
+        assert_eq!(entry.uptime_seconds, 600);
+        assert_eq!(entry.applications.len(), 2);
+    }
 }

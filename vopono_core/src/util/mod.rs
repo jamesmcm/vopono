@@ -422,6 +422,28 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Remove every lockfile for a single namespace, then the directory itself.
+///
+/// Owns the `vopono/locks` layout so callers (e.g. the lifecycle control
+/// commands) do not need to know where lockfiles live on disk.
+pub fn remove_lock_files(namespace: &str) -> anyhow::Result<()> {
+    let mut lock_dir = config_dir()?;
+    lock_dir.push(format!("vopono/locks/{namespace}"));
+    if !lock_dir.exists() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(&lock_dir)? {
+        let entry = entry?;
+        if entry.path().is_file() {
+            debug!("Removing lockfile: {}", entry.path().display());
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    // Best-effort: only succeeds when the directory is now empty.
+    std::fs::remove_dir(&lock_dir).ok();
+    Ok(())
+}
+
 pub fn clean_dead_namespaces() -> anyhow::Result<()> {
     let lock_namespaces = get_lock_namespaces()?;
     let existing_namespaces = get_existing_namespaces()?;

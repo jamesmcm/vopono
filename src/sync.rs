@@ -14,7 +14,7 @@ pub fn sync_menu(uiclient: &dyn UiClient, protocol: Option<Protocol>) -> anyhow:
         .iter()
         .filter(|x| {
             let provider = x.to_variant();
-            ![VpnProvider::Custom, VpnProvider::None, VpnProvider::Warp].contains(&provider)
+            provider.supports_sync()
                 && protocol
                     .as_ref()
                     .is_none_or(|protocol| supports_sync_protocol(&provider, protocol))
@@ -99,9 +99,6 @@ pub fn synch(
 }
 
 fn supports_sync_protocol(provider: &VpnProvider, protocol: &Protocol) -> bool {
-    match protocol {
-        Protocol::OpenVpn => provider.get_dyn_openvpn_provider().is_ok(),
-        Protocol::Wireguard => provider.get_dyn_wireguard_provider().is_ok(),
-        _ => false,
-    }
+    // Single source of truth in vopono_core.
+    provider.supported_sync_protocols().contains(protocol)
 }

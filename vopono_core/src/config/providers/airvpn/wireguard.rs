@@ -1,23 +1,13 @@
 use super::AirVPN;
 use crate::config::providers::{ConfigurationChoice, Provider, UiClient, WireguardProvider};
 use anyhow::{Context, anyhow};
+use log::debug;
 use serde::Deserialize;
 use std::fs::{File, create_dir_all, read_dir, remove_dir_all, rename};
-use std::io::Write;
-use std::time::Duration;
+use std::io::{Cursor, Read, Write};
 use strum::IntoEnumIterator;
 use strum_macros::{Display, EnumIter};
-
-#[derive(Debug, Deserialize)]
-struct StatusResponse {
-    servers: Vec<AirServer>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AirServer {
-    public_name: String,
-    country_code: String,
-}
+use zip::ZipArchive;
 
 #[derive(Debug, Deserialize)]
 struct GeneratorError {
@@ -26,10 +16,10 @@ struct GeneratorError {
 
 #[derive(Debug, Display, EnumIter, PartialEq, Default)]
 enum WireguardConfigType {
-    // Verified against the live AirVPN generator API. The web generator and
-    // server documentation may also show 51820 under advanced settings, but
-    // the authenticated API request currently returns an empty-package error
-    // for it, so it is not exposed until that discrepancy is resolved.
+    // Verified against the live AirVPN generator API (re-checked 2026-08-22):
+    // UDP 1637 and 47107 return valid packages; 51820 plus the OpenVPN-style
+    // ports (53, 80, 443, 1194, 2018) all return "zero files in package"
+    // errors. Re-verify against the API before exposing any other port.
     #[default]
     #[strum(to_string = "UDP 1637")]
     Udp1637,
@@ -70,44 +60,17 @@ impl ConfigurationChoice for WireguardConfigType {
 
 impl WireguardProvider for AirVPN {
     fn create_wireguard_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
-        // TODO: Factor out API key request to mod.rs since it is common for both Wireguard and
-        // OpenVPN config generation
-        let api_key = std::env::var("AIRVPN_API_KEY")
-            .or_else(|_| {
-                uiclient.get_input(crate::config::providers::Input {
-                    prompt: "Enter your AirVPN API key (see https://airvpn.org/apisettings/ )"
-                        .to_string(),
-                    validator: Some(Box::new(|value: &String| super::validate_api_key(value))),
-                })
-            })
-            .map_err(|_| {
-                anyhow!(
-                    "Cannot generate AirVPN Wireguard config files: AIRVPN_API_KEY is not defined in your environment variables. Get your key by activating API access in the Client Area at https://airvpn.org/apisettings/"
-                )
-            })?
-            .trim()
-            .to_string();
-        super::validate_api_key(&api_key)
-            .map_err(|error| anyhow!("Invalid AirVPN API key: {error}"))?;
+        let api_key = super::require_api_key(uiclient, "Wireguard")?;
 
         let config_choice = uiclient.get_configuration_choice(&WireguardConfigType::default())?;
         let port = WireguardConfigType::iter()
             .nth(config_choice)
             .context("Invalid AirVPN Wireguard port selection")?
             .port();
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .context("Failed to create AirVPN HTTP client")?;
-        let servers: StatusResponse = client
-            .get("https://airvpn.org/api/status/")
-            .send()?
-            .error_for_status()
-            .context("AirVPN server status request failed")?
-            .json()
-            .context("Failed to parse AirVPN server status")?;
+        let client = super::http_client()?;
+        let servers = super::fetch_servers(&client)?;
 
-        if servers.servers.is_empty() {
+        if servers.is_empty() {
             anyhow::bail!("AirVPN returned no servers while generating Wireguard configs");
         }
 
@@ -119,61 +82,62 @@ impl WireguardProvider for AirVPN {
         }
         create_dir_all(&staging_dir)?;
 
+        // One generator request builds the package for every server at once
+        // (verified live 2026-08-22), mirroring the OpenVPN flow; the
+        // response is a zip archive, with failures reported as JSON errors.
         let result = (|| -> anyhow::Result<()> {
-            for server in servers.servers {
-                let response = client
-                    .get("https://airvpn.org/api/generator/")
-                    .query(&[
-                        ("protocols", format!("wireguard_1_udp_{port}")),
-                        ("servers", server.public_name.clone()),
-                        ("device", "default".to_string()),
-                        ("resolve", "on".to_string()),
-                        // Keep the stable generator defaults here; advanced
-                        // IP-layer settings are not frontend selectors.
-                        ("iplayer_entry", "ipv4".to_string()),
-                    ])
-                    .header("API-KEY", &api_key)
-                    .send()
-                    .with_context(|| {
-                        format!(
-                            "AirVPN Wireguard config request failed for {}",
-                            server.public_name
-                        )
-                    })?
-                    .error_for_status()
-                    .with_context(|| {
-                        format!(
-                            "AirVPN rejected Wireguard config request for {}",
-                            server.public_name
-                        )
-                    })?;
-                let config = response.text().with_context(|| {
-                    format!("Invalid AirVPN response for {}", server.public_name)
-                })?;
-                if !config.contains("[Interface]") || !config.contains("[Peer]") {
-                    if let Ok(error) = serde_json::from_str::<GeneratorError>(&config)
-                        && let Some(message) = error.error
-                    {
-                        anyhow::bail!(
-                            "AirVPN generator rejected {}: {}",
-                            server.public_name,
-                            message
-                        );
-                    }
-                    anyhow::bail!(
-                        "AirVPN returned a non-Wireguard response for {}",
-                        server.public_name
-                    );
+            let server_names = servers
+                .iter()
+                .map(|server| server.public_name.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let response = client
+                .get("https://airvpn.org/api/generator/")
+                .query(&[
+                    ("protocols", format!("wireguard_1_udp_{port}")),
+                    ("servers", server_names),
+                    ("download", "zip".to_string()),
+                    ("system", "linux".to_string()),
+                    ("device", "default".to_string()),
+                    ("resolve", "on".to_string()),
+                    // Keep the stable generator defaults here; advanced
+                    // IP-layer settings are not frontend selectors.
+                    ("iplayer_entry", "ipv4".to_string()),
+                ])
+                .header("API-KEY", &api_key)
+                .send()
+                .context("AirVPN Wireguard config request failed")?
+                .error_for_status()
+                .context("AirVPN rejected Wireguard config request")?;
+            let body = response.bytes()?;
+            let mut archive = match ZipArchive::new(Cursor::new(body.clone())) {
+                Ok(archive) => archive,
+                Err(_) => {
+                    // The generator reports rejections as JSON, not archives;
+                    // surface its message when it has one.
+                    let message = serde_json::from_slice::<GeneratorError>(&body)
+                        .ok()
+                        .and_then(|error| error.error)
+                        .unwrap_or_else(|| "AirVPN returned a non-Wireguard archive".to_string());
+                    return Err(anyhow!(
+                        "AirVPN generator rejected Wireguard request: {message}"
+                    ));
                 }
+            };
 
-                let filename = format!(
-                    "{}-{}.conf",
-                    server.country_code.to_ascii_lowercase(),
-                    sanitize_filename(&server.public_name)
-                );
-                let config_path = staging_dir.join(&filename);
-                let mut file = File::create(&config_path)?;
-                file.write_all(config.as_bytes())?;
+            for i in 0..archive.len() {
+                let mut file = archive.by_index(i)?;
+                if file.enclosed_name().is_none() {
+                    continue;
+                }
+                let original_name = file.name().to_string();
+                let filename = super::generator_filename(&original_name, "conf");
+                debug!("Writing Wireguard config: {filename}");
+                let mut contents = Vec::with_capacity(4096);
+                file.read_to_end(&mut contents)?;
+                let config_path = staging_dir.join(filename.to_lowercase().replace(' ', "_"));
+                let mut outfile = File::create(&config_path)?;
+                outfile.write_all(contents.as_slice())?;
             }
 
             let wireguard_dir = self.wireguard_dir()?;
@@ -203,33 +167,22 @@ impl WireguardProvider for AirVPN {
     }
 }
 
-fn sanitize_filename(name: &str) -> String {
-    let sanitized = name
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    if sanitized.is_empty() {
-        "server".to_string()
-    } else {
-        sanitized
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{WireguardConfigType, sanitize_filename};
+    use super::super::generator_filename;
+    use super::WireguardConfigType;
     use strum::IntoEnumIterator;
 
     #[test]
-    fn sanitizes_airvpn_server_names_for_config_files() {
-        assert_eq!(sanitize_filename("Some Server/1"), "some-server-1");
-        assert_eq!(sanitize_filename(""), "server");
+    fn archive_entry_names_reduce_to_stable_config_ids() {
+        assert_eq!(
+            generator_filename("AirVPN_NL-Alblasserdam_Alcyone_UDP-1637.conf", "conf"),
+            "nl-Alcyone.conf"
+        );
+        assert_eq!(
+            generator_filename("weird-entry.conf", "conf"),
+            "weird-entry.conf"
+        );
     }
 
     #[test]

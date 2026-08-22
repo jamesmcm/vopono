@@ -1073,13 +1073,18 @@ vopono daemon status --json
 ```
 
 Use `vopono stop application PID --json` or
-`vopono stop namespace NAMESPACE --json` for lifecycle control. The preferred
+`vopono stop namespace NAMESPACE --json` for lifecycle control. Stop requests
+are routed through the running root daemon when available (no sudo password
+prompt); otherwise vopono falls back to local execution. The preferred
 polling interface is `status --json`; its top-level `version` field is the
-schema version. Namespace status includes provider-managed forwarding, local
-`open_ports`, and host `forwarded_ports`.
+schema version, and error documents carry a stable machine-readable `code`
+alongside the message. Namespace status includes provider-managed forwarding,
+local `open_ports`, and host `forwarded_ports`.
 
 `status` is the canonical aggregate snapshot: it includes daemon health,
 namespaces, applications, selected server metadata, and port state. The
+daemon entry reports the daemon's own `version`, with `compatible` comparing
+major versions against this client. The
 `list namespaces` and `list applications` commands are smaller projections
 of that same snapshot for scripts that only need one collection; without a
 type, `list` defaults to applications. `servers` is separate discovery of

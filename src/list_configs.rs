@@ -7,8 +7,8 @@ use vopono_core::config::providers::VpnProvider;
 use vopono_core::config::vpn::Protocol;
 use vopono_core::util::get_configs_from_alias;
 
+use crate::api;
 use crate::errors::CliError;
-use crate::providers::SCHEMA_VERSION;
 use crate::server_metadata;
 
 #[derive(Debug, Serialize)]
@@ -26,7 +26,6 @@ pub struct ServerEntry {
     pub country: Option<String>,
     pub hostname: Option<String>,
     pub config_file: String,
-    pub active: bool,
     pub aliases: Vec<String>,
 }
 
@@ -48,7 +47,9 @@ pub fn print_configs(command: ServersCommand) -> anyhow::Result<()> {
             if !seen.insert(key) {
                 continue;
             }
-            let entry = server_entry(&path, &protocol)?;
+            // get_configs_from_alias only returns existing files, so every
+            // entry here is present on disk by construction.
+            let entry = server_entry(&path, &protocol);
             if country_filter
                 .as_ref()
                 .is_some_and(|filter| !entry_matches_country(&entry, filter))
@@ -74,28 +75,24 @@ pub fn print_configs(command: ServersCommand) -> anyhow::Result<()> {
     }
 
     if command.json {
+        return api::print_json(&ServersDocument {
+            version: api::SCHEMA_VERSION,
+            provider: provider.id().to_string(),
+            servers,
+        });
+    }
+
+    println!("id\tprotocol\tcountry_code\tcountry\thostname\tconfig_file");
+    for server in servers {
         println!(
-            "{}",
-            serde_json::to_string_pretty(&ServersDocument {
-                version: SCHEMA_VERSION,
-                provider: provider.id().to_string(),
-                servers,
-            })?
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            server.id,
+            server.protocol,
+            server.country_code.as_deref().unwrap_or(""),
+            server.country.as_deref().unwrap_or(""),
+            server.hostname.as_deref().unwrap_or(""),
+            server.config_file,
         );
-    } else if !servers.is_empty() {
-        println!("id\tprotocol\tcountry_code\tcountry\thostname\tconfig_file\tactive");
-        for server in servers {
-            println!(
-                "{}\t{}\t{}\t{}\t{}\t{}\t{}",
-                server.id,
-                server.protocol,
-                server.country_code.as_deref().unwrap_or(""),
-                server.country.as_deref().unwrap_or(""),
-                server.hostname.as_deref().unwrap_or(""),
-                server.config_file,
-                server.active,
-            );
-        }
     }
 
     Ok(())
@@ -115,29 +112,20 @@ fn protocols_to_list(
         );
     }
 
-    if let Some(protocol) = requested {
-        match protocol {
-            Protocol::OpenVpn if provider.get_dyn_openvpn_provider().is_ok() => {
-                Ok(vec![Protocol::OpenVpn])
+    match requested {
+        Some(protocol) => {
+            // Single source of truth for protocol support lives in vopono_core.
+            if provider.supported_sync_protocols().contains(&protocol) {
+                Ok(vec![protocol])
+            } else {
+                Err(CliError::ProtocolNotSupported {
+                    provider: provider.display_name().to_string(),
+                    protocol: protocol.id().to_string(),
+                }
+                .into())
             }
-            Protocol::Wireguard if provider.get_dyn_wireguard_provider().is_ok() => {
-                Ok(vec![Protocol::Wireguard])
-            }
-            protocol => Err(CliError::ProtocolNotSupported {
-                provider: provider.display_name().to_string(),
-                protocol: protocol.id().to_string(),
-            }
-            .into()),
         }
-    } else {
-        let mut protocols = Vec::new();
-        if provider.get_dyn_openvpn_provider().is_ok() {
-            protocols.push(Protocol::OpenVpn);
-        }
-        if provider.get_dyn_wireguard_provider().is_ok() {
-            protocols.push(Protocol::Wireguard);
-        }
-        Ok(protocols)
+        None => Ok(provider.supported_sync_protocols()),
     }
 }
 
@@ -153,39 +141,25 @@ fn config_directory(provider: &VpnProvider, protocol: &Protocol) -> anyhow::Resu
     }
 }
 
-fn server_entry(path: &Path, protocol: &Protocol) -> anyhow::Result<ServerEntry> {
+fn server_entry(path: &Path, protocol: &Protocol) -> ServerEntry {
     let id = path
         .file_stem()
         .and_then(|name| name.to_str())
         .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("Invalid server config filename: {}", path.display()))?;
-    let parts = server_metadata::id_parts(&id);
+        .unwrap_or_default();
     let (country_code, country) = server_metadata::country_from_id(&id);
-    let hostname = server_metadata::config_hostname(path, protocol)?;
-    let mut aliases = BTreeSet::new();
-    aliases.insert(id.clone());
-    for part in &parts {
-        aliases.insert(part.clone());
-    }
-    if let Some(code) = &country_code {
-        aliases.insert(code.clone());
-    }
-    if let Some(name) = &country {
-        aliases.insert(name.to_ascii_lowercase());
-    }
+    let aliases = server_metadata::aliases_for(&id, None);
 
-    let entry = ServerEntry {
+    ServerEntry {
         id,
         protocol: protocol.id().to_string(),
         country_code,
         country,
-        hostname,
+        // Best-effort: one unreadable config must not abort the listing.
+        hostname: server_metadata::config_hostname(path, protocol),
         config_file: path.display().to_string(),
-        active: path.is_file(),
         aliases: aliases.into_iter().collect(),
-    };
-
-    Ok(entry)
+    }
 }
 
 fn entry_matches_country(entry: &ServerEntry, filter: &str) -> bool {

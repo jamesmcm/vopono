@@ -8,8 +8,6 @@ use vopono_core::config::providers::VpnProvider;
 use vopono_core::config::vpn::Protocol;
 use vopono_core::util::get_configs_from_alias;
 
-pub const SCHEMA_VERSION: u8 = 1;
-
 #[derive(Clone, Debug, Serialize)]
 pub struct ProviderInfo {
     pub id: String,
@@ -60,22 +58,18 @@ struct SyncProtocolMetadata {
 pub fn print_providers(json: bool) -> anyhow::Result<()> {
     let providers = provider_infos()?;
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&ProvidersDocument {
-                version: SCHEMA_VERSION,
-                providers,
-            })?
-        );
-        return Ok(());
+        return crate::api::print_json(&ProvidersDocument {
+            version: crate::api::SCHEMA_VERSION,
+            providers,
+        });
     }
 
     println!(
-        "id	name	protocols	configured	last_sync	port_forwarding	automatic_port_forwarding	server_count"
+        "id\tname\tprotocols\tconfigured\tlast_sync\tport_forwarding\tautomatic_port_forwarding\tserver_count"
     );
     for provider in providers {
         println!(
-            "{}	{}	{}	{}	{}	{}	{}	{}",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
             provider.id,
             provider.name,
             provider.protocols.join(","),
@@ -92,13 +86,12 @@ pub fn print_providers(json: bool) -> anyhow::Result<()> {
 pub fn print_provider_status(provider: VpnProvider, json: bool) -> anyhow::Result<()> {
     let status = provider_status(provider)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&status)?);
-        return Ok(());
+        return crate::api::print_json(&status);
     }
 
-    println!("provider	configured	last_sync	server_count");
+    println!("provider\tconfigured\tlast_sync\tserver_count");
     println!(
-        "{}	{}	{}	{}",
+        "{}\t{}\t{}\t{}",
         status.provider.id,
         status.provider.configured,
         status.provider.last_sync.as_deref().unwrap_or("never"),
@@ -106,7 +99,7 @@ pub fn print_provider_status(provider: VpnProvider, json: bool) -> anyhow::Resul
     );
     for (protocol, info) in status.protocols {
         println!(
-            "  {protocol}	configured={}	last_sync={}	server_count={}",
+            "  {protocol}\tconfigured={}\tlast_sync={}\tserver_count={}",
             info.configured,
             info.last_sync.as_deref().unwrap_or("never"),
             info.server_count
@@ -119,7 +112,7 @@ pub fn provider_status(provider: VpnProvider) -> anyhow::Result<ProviderStatus> 
     let info = provider_info(&provider)?;
     let metadata = read_sync_metadata(&provider)?;
     let mut protocol_status = BTreeMap::new();
-    for protocol in supported_protocols(&provider) {
+    for protocol in provider.supported_sync_protocols() {
         let id = protocol.id().to_string();
         let server_count = config_count(&provider, protocol)?;
         let metadata_entry = metadata
@@ -136,7 +129,7 @@ pub fn provider_status(provider: VpnProvider) -> anyhow::Result<ProviderStatus> 
     }
 
     Ok(ProviderStatus {
-        version: SCHEMA_VERSION,
+        version: crate::api::SCHEMA_VERSION,
         provider: info,
         protocols: protocol_status,
     })
@@ -151,7 +144,10 @@ pub fn provider_infos() -> anyhow::Result<Vec<ProviderInfo>> {
 
 pub fn provider_info(provider: &VpnProvider) -> anyhow::Result<ProviderInfo> {
     let metadata = read_sync_metadata(provider)?;
-    let protocols = supported_protocols(provider);
+    // Capability facts come from vopono_core so new providers cannot be
+    // misreported by a stale CLI-side table.
+    let sync_supported = provider.supports_sync();
+    let protocols = provider.supported_sync_protocols();
     let mut server_count = 0;
     for protocol in &protocols {
         server_count += config_count(provider, protocol.clone())?;
@@ -173,25 +169,10 @@ pub fn provider_info(provider: &VpnProvider) -> anyhow::Result<ProviderInfo> {
             .iter()
             .map(|protocol| protocol.id().to_string())
             .collect(),
-        sync_supported: !matches!(
-            provider,
-            VpnProvider::Warp | VpnProvider::Custom | VpnProvider::None
-        ),
-        requires_auth: !matches!(
-            provider,
-            VpnProvider::Warp | VpnProvider::Custom | VpnProvider::None
-        ),
-        port_forwarding: matches!(
-            provider,
-            VpnProvider::PrivateInternetAccess
-                | VpnProvider::ProtonVPN
-                | VpnProvider::AzireVPN
-                | VpnProvider::AirVPN
-        ),
-        port_forwarding_automatic: matches!(
-            provider,
-            VpnProvider::PrivateInternetAccess | VpnProvider::ProtonVPN | VpnProvider::AzireVPN
-        ),
+        sync_supported,
+        requires_auth: sync_supported,
+        port_forwarding: provider.supports_port_forwarding(),
+        port_forwarding_automatic: provider.has_automatic_port_forwarding(),
         configured: server_count > 0,
         last_sync,
         server_count,
@@ -201,6 +182,8 @@ pub fn provider_info(provider: &VpnProvider) -> anyhow::Result<ProviderInfo> {
 pub fn record_sync(provider: &VpnProvider, protocol: Protocol) -> anyhow::Result<()> {
     let provider_dir = provider.get_dyn_provider().provider_dir()?;
     create_dir_all(&provider_dir)?;
+    // Co-located with the provider's configs; safe from clobbering because
+    // sync flows only wipe per-protocol subdirectories (openvpn/, wireguard/).
     let metadata_path = provider_dir.join(".sync.json");
     let mut metadata = read_sync_metadata(provider)?.unwrap_or_default();
     let timestamp = Utc::now().to_rfc3339();
@@ -233,20 +216,6 @@ fn read_sync_metadata(provider: &VpnProvider) -> anyhow::Result<Option<SyncMetad
         .map(Some)
 }
 
-fn supported_protocols(provider: &VpnProvider) -> Vec<Protocol> {
-    let mut protocols = Vec::new();
-    if provider.get_dyn_openvpn_provider().is_ok() {
-        protocols.push(Protocol::OpenVpn);
-    }
-    if provider.get_dyn_wireguard_provider().is_ok() {
-        protocols.push(Protocol::Wireguard);
-    }
-    if matches!(provider, VpnProvider::Warp) {
-        protocols.push(Protocol::Warp);
-    }
-    protocols
-}
-
 fn config_count(provider: &VpnProvider, protocol: Protocol) -> anyhow::Result<usize> {
     let directory = match protocol {
         Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir()?,
@@ -271,5 +240,21 @@ mod tests {
             "privateinternetaccess"
         );
         assert_eq!(Protocol::OpenVpn.id(), "openvpn");
+    }
+
+    #[test]
+    fn provider_capabilities_are_derived_from_core() {
+        let airvpn = provider_info(&VpnProvider::AirVPN).unwrap();
+        assert!(airvpn.port_forwarding);
+        assert!(!airvpn.port_forwarding_automatic);
+        assert!(airvpn.sync_supported);
+        assert_eq!(
+            airvpn.protocols,
+            vec!["openvpn".to_string(), "wireguard".to_string()]
+        );
+
+        let mullvad = provider_info(&VpnProvider::Mullvad).unwrap();
+        assert!(!mullvad.port_forwarding);
+        assert_eq!(mullvad.protocols, vec!["wireguard".to_string()]);
     }
 }

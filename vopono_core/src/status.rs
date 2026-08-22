@@ -15,13 +15,26 @@ pub struct LockNamespacesStatus {
     /// is not reported as an extra application. Without client locks, the
     /// primary lock is also the application record used by direct CLI runs.
     pub namespaces: LockNamespaces,
-    /// The authoritative numeric lock for each namespace is retained here for
+    /// The authoritative numeric lock for each namespace, retained for
     /// metadata such as creation time, provider, server, and port forwarding.
     /// Its on-disk form contains the full serialized NetworkNamespace needed
     /// to reconstruct an existing namespace; `client-*` locks are temporary,
     /// per-application status/reference locks and cannot do that.
-    pub primary_namespaces: LockNamespaces,
+    ///
+    /// Private on purpose: consumers should use [`Self::metadata_for`] instead
+    /// of deciding which map holds applications versus metadata.
+    primary_namespaces: LockNamespaces,
     pub errors: Vec<String>,
+}
+
+impl LockNamespacesStatus {
+    /// Namespace-state metadata (creation time, provider, server, ports) for a
+    /// namespace, taken from its primary lockfile when one exists.
+    pub fn metadata_for(&self, namespace: &str) -> Option<&LockfileStatus> {
+        self.primary_namespaces
+            .get(namespace)
+            .and_then(|locks| locks.first())
+    }
 }
 
 pub fn read_lock_namespaces() -> anyhow::Result<LockNamespacesStatus> {
@@ -62,13 +75,8 @@ pub fn read_lock_namespaces_from_dir(
                     let lock = if lock.application_pid.is_none()
                         && lockfile_kind == LockfileKind::Client
                     {
-                        match entry
-                            .path()
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .and_then(|name| name.strip_prefix("client-"))
-                            .and_then(|pid| pid.parse::<u32>().ok())
-                        {
+                        let filename = entry.path().file_name().and_then(|name| name.to_str());
+                        match filename.and_then(client_pid_from_lockfile_name) {
                             Some(pid) => LockfileStatus {
                                 application_pid: Some(pid),
                                 ..lock
@@ -139,6 +147,14 @@ struct LockGroup {
 pub enum LockfileKind {
     Primary,
     Client,
+}
+
+/// Extract the application PID encoded in a `client-<pid>` lockfile name.
+///
+/// Named so the naming convention shared with the daemon's client lockfile
+/// writer has a single, testable definition.
+fn client_pid_from_lockfile_name(filename: &str) -> Option<u32> {
+    filename.strip_prefix("client-")?.parse::<u32>().ok()
 }
 
 impl LockfileKind {
@@ -213,6 +229,37 @@ mod tests {
             LockfileKind::from_path(Path::new("provider-port-status")),
             None
         );
+    }
+
+    #[test]
+    fn extracts_client_pids_from_lockfile_names() {
+        assert_eq!(client_pid_from_lockfile_name("client-4242"), Some(4242));
+        assert_eq!(client_pid_from_lockfile_name("client-pid"), None);
+        assert_eq!(client_pid_from_lockfile_name("12345"), None);
+    }
+
+    #[test]
+    fn metadata_for_exposes_primary_lock_without_leaking_the_map() {
+        let dir = unique_temp_dir("metadata-for");
+        let ns_dir = dir.join("vo_m_se");
+        fs::create_dir_all(&ns_dir).expect("failed to create namespace dir");
+        fs::write(ns_dir.join("100"), status_lock("vo_m_se", "daemon-app", 1)).unwrap();
+        fs::write(
+            ns_dir.join("client-200"),
+            status_lock("vo_m_se", "firefox", 2),
+        )
+        .unwrap();
+
+        let status = read_lock_namespaces_from_dir(&dir).expect("status should read");
+        let metadata = status.metadata_for("vo_m_se").expect("metadata missing");
+        assert_eq!(metadata.start, 1);
+        assert_eq!(metadata.command, "daemon-app");
+        // The application view keeps only the client lock while client locks exist.
+        let applications = status.namespaces.get("vo_m_se").expect("namespace missing");
+        assert_eq!(applications.len(), 1);
+        assert_eq!(applications[0].command, "firefox");
+        assert!(status.metadata_for("missing").is_none());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

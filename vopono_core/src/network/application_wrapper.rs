@@ -23,15 +23,16 @@ use crate::util::{
     process_is_in_network_namespace,
 };
 
-// TODO: Completely block running known bad applications like gnome-terminal which will never
-// obey the netns
-// These are known single-instance clients. The list is deliberately limited
-// to warning candidates; arbitrary desktop launchers cannot be classified
-// reliably without application-specific integration.
+// NOTE: Known single-instance clients (browsers, and eventually launchers such
+// as gnome-terminal-server) are only *warned* about today; fully blocking them
+// would also block legitimate separate-profile launches. A blocking policy
+// would need per-application profile detection and is deliberately left as
+// future work.
 const SINGLE_INSTANCE_APPLICATIONS: &[&str] = &[
     "google-chrome-stable",
     "google-chrome-beta",
     "google-chrome",
+    "google-chrome-unstable",
     "chromium",
     "chromium-browser",
     "brave",
@@ -39,6 +40,12 @@ const SINGLE_INSTANCE_APPLICATIONS: &[&str] = &[
     "firefox",
     "firefox-developer-edition",
     "firefox-bin",
+    "librewolf",
+    "vivaldi",
+    "vivaldi-stable",
+    "opera",
+    "microsoft-edge",
+    "microsoft-edge-stable",
 ];
 
 pub struct ApplicationWrapper {
