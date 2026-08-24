@@ -52,6 +52,30 @@ pub fn server_from_config(config_file: &Path) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow!("OpenFortiVPN config has no host option"))
 }
 
+/// Apply the fail-closed tunnel-only killswitch for OpenFortiVPN.
+///
+/// openfortivpn does not implement a killswitch itself, so once the tunnel is
+/// up all input/output in the namespace is dropped except loopback, the
+/// tunnel interface, return traffic and the resolved VPN server endpoints
+/// (the client needs those to keep its session alive). Without this policy
+/// the namespace keeps a working default route through the host veth/NAT
+/// path, so any tunnel failure silently bypasses the VPN.
+pub fn apply_killswitch(
+    netns: &NetworkNamespace,
+    firewall: Firewall,
+    disable_ipv6: bool,
+    config_file: &Path,
+) -> anyhow::Result<()> {
+    let server = server_from_config(config_file)?;
+    super::firewall::apply_tunnel_only_killswitch_for_server(
+        netns,
+        firewall,
+        disable_ipv6,
+        &server,
+        &["ppp"],
+    )
+}
+
 impl OpenFortiVpn {
     #[allow(clippy::too_many_arguments)]
     pub fn run(

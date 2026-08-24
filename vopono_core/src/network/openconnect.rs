@@ -6,7 +6,7 @@ use anyhow::{Context, anyhow};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn validate_unprivileged_config(config_file: &std::path::Path) -> anyhow::Result<()> {
     const PRIVILEGED_DIRECTIVES: &[&str] = &[
@@ -166,6 +166,38 @@ fn request_creds(uiclient: &dyn UiClient) -> anyhow::Result<String> {
     })?;
     let password = password.trim();
     Ok(password.to_string())
+}
+
+/// Apply the fail-closed tunnel-only killswitch for OpenConnect.
+///
+/// openconnect does not implement a killswitch itself, so once the tunnel is
+/// up all input/output in the namespace is dropped except loopback, the
+/// tunnel interface, return traffic and the resolved VPN server endpoints
+/// (the client needs those to keep its session alive). Without this policy
+/// the namespace keeps a working default route through the host veth/NAT
+/// path, so any tunnel failure silently bypasses the VPN.
+///
+/// The server is taken from `server` when non-empty, otherwise derived from
+/// the config file.
+pub fn apply_killswitch(
+    netns: &NetworkNamespace,
+    firewall: Firewall,
+    disable_ipv6: bool,
+    server: &str,
+    config_file: Option<&Path>,
+) -> anyhow::Result<()> {
+    let server = if server.is_empty() {
+        server_from_config(config_file.context("No OpenConnect config file provided")?)?
+    } else {
+        server.to_string()
+    };
+    super::firewall::apply_tunnel_only_killswitch_for_server(
+        netns,
+        firewall,
+        disable_ipv6,
+        &server,
+        &["tun"],
+    )
 }
 
 impl Drop for OpenConnect {

@@ -1,14 +1,22 @@
 use std::path::Path;
 
+use crate::util::hostname_to_ip;
 use crate::util::unix::run_program_in_netns_with_path_redirect;
 
-use super::firewall::Firewall;
+use super::firewall::{Firewall, apply_tunnel_only_killswitch, wait_for_tunnel_interface};
 use super::netns::NetworkNamespace;
 use anyhow::{Context, anyhow};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 
 // Cloudflare Warp
+
+/// Cloudflare WARP control endpoint host used for killswitch endpoint allows.
+pub const WARP_ENDPOINT_HOST: &str = "engage.cloudflareclient.com";
+
+/// Tunnel interface names used by the WARP client (warp-svc), used to scope
+/// the killswitch accept rules to the tunnel device.
+const WARP_TUNNEL_INTERFACE_PREFIXES: &[&str] = &["CloudflareWARP", "warp"];
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Warp {
@@ -63,6 +71,42 @@ impl Warp {
         }
 
         Ok(Self { pid: id })
+    }
+
+    /// Apply the fail-closed tunnel-only killswitch for Warp.
+    ///
+    /// warp-svc does not implement a killswitch itself, so once the tunnel is
+    /// up all input/output in the namespace is dropped except loopback, the
+    /// tunnel interface, return traffic and the resolved WARP control
+    /// endpoints (the client needs those to keep its session alive). Without
+    /// this policy the namespace keeps a working default route through the
+    /// host veth/NAT path, so any tunnel failure silently bypasses the VPN.
+    ///
+    /// Waits briefly for the tunnel interface so its accept rules can be
+    /// scoped; on timeout an endpoint-only policy is applied anyway (fail
+    /// closed).
+    pub fn apply_killswitch(
+        netns: &NetworkNamespace,
+        firewall: Firewall,
+        disable_ipv6: bool,
+    ) -> anyhow::Result<()> {
+        let endpoints = hostname_to_ip(WARP_ENDPOINT_HOST).map_err(|e| {
+            anyhow!("Cannot resolve WARP control endpoint {WARP_ENDPOINT_HOST} for killswitch: {e}")
+        })?;
+        if endpoints.is_empty() {
+            anyhow::bail!(
+                "WARP control endpoint {WARP_ENDPOINT_HOST} resolved to no addresses for killswitch"
+            );
+        }
+        let tunnel_iface =
+            wait_for_tunnel_interface(&netns.name, WARP_TUNNEL_INTERFACE_PREFIXES, 20)?;
+        apply_tunnel_only_killswitch(
+            netns,
+            tunnel_iface.as_deref(),
+            &endpoints,
+            firewall,
+            disable_ipv6,
+        )
     }
 }
 

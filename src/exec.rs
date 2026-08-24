@@ -862,11 +862,10 @@ fn run_protocol_in_netns(
                 parsed_command.firewall,
             )?;
             if !parsed_command.no_killswitch {
-                apply_tunnel_only_killswitch_for(
-                    parsed_command,
+                vopono_core::network::warp::Warp::apply_killswitch(
                     ns,
-                    WARP_ENDPOINT_HOST,
-                    &["CloudflareWARP", "warp"],
+                    parsed_command.firewall,
+                    parsed_command.disable_ipv6,
                 )?;
             }
         }
@@ -1015,16 +1014,13 @@ fn run_protocol_in_netns(
                 uiclient,
             )?;
             if !parsed_command.no_killswitch {
-                let server = if parsed_command.server.is_empty() {
-                    vopono_core::network::openconnect::server_from_config(
-                        config_file
-                            .as_deref()
-                            .expect("No OpenConnect config file provided"),
-                    )?
-                } else {
-                    parsed_command.server.clone()
-                };
-                apply_tunnel_only_killswitch_for(parsed_command, ns, &server, &["tun"])?;
+                vopono_core::network::openconnect::apply_killswitch(
+                    ns,
+                    parsed_command.firewall,
+                    parsed_command.disable_ipv6,
+                    &parsed_command.server,
+                    config_file.as_deref(),
+                )?;
             }
         }
         Protocol::OpenFortiVpn => {
@@ -1039,12 +1035,14 @@ fn run_protocol_in_netns(
                 parsed_command.allow_host_access,
             )?;
             if !parsed_command.no_killswitch {
-                let server = vopono_core::network::openfortivpn::server_from_config(
+                vopono_core::network::openfortivpn::apply_killswitch(
+                    ns,
+                    parsed_command.firewall,
+                    parsed_command.disable_ipv6,
                     config_file
                         .as_deref()
                         .expect("No OpenFortiVPN config file provided"),
                 )?;
-                apply_tunnel_only_killswitch_for(parsed_command, ns, &server, &["ppp"])?;
             }
         }
         Protocol::Ssh => {
@@ -1072,81 +1070,6 @@ fn run_protocol_in_netns(
         }
     }
     Ok(config_file)
-}
-
-// TODO: Move Warp specifics to warp module in vopono_core
-/// Cloudflare WARP control endpoint host used for killswitch endpoint allows.
-const WARP_ENDPOINT_HOST: &str = "engage.cloudflareclient.com";
-
-/// Apply the fail-closed tunnel-only killswitch for protocols whose clients
-/// do not provide one (Warp, OpenConnect, OpenFortiVpn).
-///
-/// Waits briefly for the tunnel interface so its accept rules can be scoped;
-/// on timeout an endpoint-only policy is applied anyway (fail closed).
-fn apply_tunnel_only_killswitch_for(
-    parsed_command: &ArgsConfig,
-    ns: &NetworkNamespace,
-    server: &str,
-    tunnel_interface_prefixes: &[&str],
-) -> anyhow::Result<()> {
-    use vopono_core::network::firewall::apply_tunnel_only_killswitch;
-
-    let Some(host) = host_from_server_arg(server) else {
-        anyhow::bail!("Could not derive a VPN server host from '{server}' for the killswitch");
-    };
-    let endpoints = vopono_core::util::hostname_to_ip(&host)
-        .map_err(|e| anyhow!("Cannot resolve VPN server {host} for killswitch: {e}"))?;
-    if endpoints.is_empty() {
-        anyhow::bail!("VPN server {host} resolved to no addresses for killswitch");
-    }
-    let tunnel_iface = vopono_core::network::firewall::wait_for_tunnel_interface(
-        &ns.name,
-        tunnel_interface_prefixes,
-        20,
-    )?;
-    apply_tunnel_only_killswitch(
-        ns,
-        tunnel_iface.as_deref(),
-        &endpoints,
-        parsed_command.firewall,
-        parsed_command.disable_ipv6,
-    )
-}
-
-/// Extract a resolvable host from a user-supplied server argument which may
-/// include a scheme, userinfo, port or URL path.
-fn host_from_server_arg(server: &str) -> Option<String> {
-    let mut rest = server.trim();
-    if let Some((_, remainder)) = rest.split_once("://") {
-        rest = remainder;
-    }
-    rest = rest.split('/').next()?;
-    if let Some((_, remainder)) = rest.rsplit_once('@') {
-        rest = remainder;
-    }
-    if rest.starts_with('[') {
-        // Bracketed IPv6 literal, optionally followed by :port
-        let end = rest.find(']')?;
-        let host = rest.get(1..end)?;
-        return (!host.is_empty()).then(|| host.to_string());
-    }
-    match rest.rsplit_once(':') {
-        Some((host, port)) => {
-            if port.is_empty() {
-                return None;
-            }
-            match port.parse::<u16>() {
-                // host:port
-                Ok(_) if !host.contains(':') => (!host.is_empty()).then(|| host.to_string()),
-                // Unbracketed IPv6 literal whose last segment looks like a
-                // port (e.g. `2001:db8::1`) - keep the whole address.
-                Ok(_) => (!rest.is_empty()).then(|| rest.to_string()),
-                // Unbracketed IPv6 literal with a non-numeric tail.
-                Err(_) => (!rest.is_empty()).then(|| rest.to_string()),
-            }
-        }
-        None => (!rest.is_empty()).then(|| rest.to_string()),
-    }
 }
 
 fn config_alias_hint(parsed_command: &ArgsConfig) -> anyhow::Result<Option<String>> {
@@ -1343,36 +1266,5 @@ mod tests {
         assert_eq!(report["open_ports"], serde_json::json!([8080]));
         assert_eq!(report["host_forwarded_ports"], serde_json::json!([]));
         assert!(report["forwarded_port"].is_null());
-    }
-
-    #[test]
-    fn extracts_host_from_server_arguments() {
-        use super::host_from_server_arg;
-        assert_eq!(
-            host_from_server_arg("vpn.example.com").as_deref(),
-            Some("vpn.example.com")
-        );
-        assert_eq!(
-            host_from_server_arg("https://vpn.example.com:443/some/path").as_deref(),
-            Some("vpn.example.com")
-        );
-        assert_eq!(
-            host_from_server_arg("user@vpn.example.com").as_deref(),
-            Some("vpn.example.com")
-        );
-        assert_eq!(
-            host_from_server_arg("[2001:db8::1]:443").as_deref(),
-            Some("2001:db8::1")
-        );
-        assert_eq!(
-            host_from_server_arg("2001:db8::1").as_deref(),
-            Some("2001:db8::1")
-        );
-        assert_eq!(host_from_server_arg(""), None);
-        assert_eq!(host_from_server_arg("vpn.example.com:"), None);
-        assert_eq!(
-            host_from_server_arg("vpn.example.com:notaport").as_deref(),
-            Some("vpn.example.com:notaport")
-        );
     }
 }

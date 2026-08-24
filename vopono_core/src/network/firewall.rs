@@ -1,5 +1,5 @@
 use super::netns::NetworkNamespace;
-use anyhow::Context;
+use anyhow::{Context, anyhow, bail};
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
@@ -245,6 +245,73 @@ pub fn apply_tunnel_only_killswitch(
         crate::network::firewall::disable_ipv6(netns, firewall)?;
     }
     Ok(())
+}
+
+/// Resolve the host from a user-supplied VPN server string (which may include
+/// a scheme, userinfo, port or URL path) and apply the fail-closed
+/// tunnel-only killswitch for it.
+///
+/// Waits briefly for the tunnel interface so its accept rules can be scoped;
+/// on timeout an endpoint-only policy is applied anyway (fail closed).
+pub fn apply_tunnel_only_killswitch_for_server(
+    netns: &NetworkNamespace,
+    firewall: Firewall,
+    disable_ipv6: bool,
+    server: &str,
+    tunnel_interface_prefixes: &[&str],
+) -> anyhow::Result<()> {
+    let Some(host) = host_from_server_arg(server) else {
+        bail!("Could not derive a VPN server host from '{server}' for the killswitch");
+    };
+    let endpoints = crate::util::hostname_to_ip(&host)
+        .map_err(|e| anyhow!("Cannot resolve VPN server {host} for killswitch: {e}"))?;
+    if endpoints.is_empty() {
+        bail!("VPN server {host} resolved to no addresses for killswitch");
+    }
+    let tunnel_iface = wait_for_tunnel_interface(&netns.name, tunnel_interface_prefixes, 20)?;
+    apply_tunnel_only_killswitch(
+        netns,
+        tunnel_iface.as_deref(),
+        &endpoints,
+        firewall,
+        disable_ipv6,
+    )
+}
+
+/// Extract a resolvable host from a user-supplied server argument which may
+/// include a scheme, userinfo, port or URL path.
+fn host_from_server_arg(server: &str) -> Option<String> {
+    let mut rest = server.trim();
+    if let Some((_, remainder)) = rest.split_once("://") {
+        rest = remainder;
+    }
+    rest = rest.split('/').next()?;
+    if let Some((_, remainder)) = rest.rsplit_once('@') {
+        rest = remainder;
+    }
+    if rest.starts_with('[') {
+        // Bracketed IPv6 literal, optionally followed by :port
+        let end = rest.find(']')?;
+        let host = rest.get(1..end)?;
+        return (!host.is_empty()).then(|| host.to_string());
+    }
+    match rest.rsplit_once(':') {
+        Some((host, port)) => {
+            if port.is_empty() {
+                return None;
+            }
+            match port.parse::<u16>() {
+                // host:port
+                Ok(_) if !host.contains(':') => (!host.is_empty()).then(|| host.to_string()),
+                // Unbracketed IPv6 literal whose last segment looks like a
+                // port (e.g. `2001:db8::1`) - keep the whole address.
+                Ok(_) => (!rest.is_empty()).then(|| rest.to_string()),
+                // Unbracketed IPv6 literal with a non-numeric tail.
+                Err(_) => (!rest.is_empty()).then(|| rest.to_string()),
+            }
+        }
+        None => (!rest.is_empty()).then(|| rest.to_string()),
+    }
 }
 
 /// Parse `ip -o link` output, returning the first interface that is neither
@@ -532,5 +599,36 @@ mod tests {
         );
         assert_eq!(parse_tunnel_interface_from_ip_link(sample, &["ppp"]), None);
         assert_eq!(parse_tunnel_interface_from_ip_link("", &["tun"]), None);
+    }
+
+    #[test]
+    fn extracts_host_from_server_arguments() {
+        use super::host_from_server_arg;
+        assert_eq!(
+            host_from_server_arg("vpn.example.com").as_deref(),
+            Some("vpn.example.com")
+        );
+        assert_eq!(
+            host_from_server_arg("https://vpn.example.com:443/some/path").as_deref(),
+            Some("vpn.example.com")
+        );
+        assert_eq!(
+            host_from_server_arg("user@vpn.example.com").as_deref(),
+            Some("vpn.example.com")
+        );
+        assert_eq!(
+            host_from_server_arg("[2001:db8::1]:443").as_deref(),
+            Some("2001:db8::1")
+        );
+        assert_eq!(
+            host_from_server_arg("2001:db8::1").as_deref(),
+            Some("2001:db8::1")
+        );
+        assert_eq!(host_from_server_arg(""), None);
+        assert_eq!(host_from_server_arg("vpn.example.com:"), None);
+        assert_eq!(
+            host_from_server_arg("vpn.example.com:notaport").as_deref(),
+            Some("vpn.example.com:notaport")
+        );
     }
 }
