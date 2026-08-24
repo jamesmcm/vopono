@@ -14,7 +14,6 @@ use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
 use anyhow::Context;
 use ipnet::IpNet;
 use log::{debug, info};
-use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -288,7 +287,6 @@ impl WireguardProvider for AzireVPN {
         let locations: Vec<LocationResponse> = location_resp.locations;
 
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?, IpNet::from_str("::0/0")?];
-        let re = Regex::new(r"=\s\[(?P<value>[^\]]+)\]")?;
         for location in locations {
             // TODO: Can we avoid DNS lookup here?
             let host_lookup = dns_lookup::lookup_host(&location.pool);
@@ -322,14 +320,10 @@ impl WireguardProvider for AzireVPN {
 
             let path = wireguard_dir.join(format!("{country}-{location_name}.conf"));
 
-            let mut toml = toml::to_string(&wireguard_conf)?;
-            toml.retain(|c| c != '"');
-            let toml = toml.replace(", ", ",");
-            let toml = re.replace_all(&toml, "= $value").to_string();
-            // Create file, write TOML
+            // Create file, write WireGuard config
             {
                 let mut f = crate::util::create_private_file(&path)?;
-                write!(f, "{toml}")?;
+                write!(f, "{wireguard_conf}")?;
             }
         }
 

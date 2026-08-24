@@ -11,7 +11,6 @@ use crate::util::delete_all_files_in_dir;
 use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
 use ipnet::{IpNet, Ipv4Net};
 use log::info;
-use regex::Regex;
 use serde::Deserialize;
 use std::fmt::Display;
 use std::fs::create_dir_all;
@@ -181,8 +180,6 @@ impl WireguardProvider for IVPN {
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?];
 
         let code_map = crate::util::country_map::code_to_country_map();
-        // TODO: avoid hacky regex for TOML -> wireguard config conversion
-        let re = Regex::new(r"=\s\[(?P<value>[^\]]+)\]")?;
         for relay in relays.iter() {
             let wireguard_peer = WireguardPeer {
                 public_key: relay.pubkey.clone(),
@@ -205,14 +202,10 @@ impl WireguardProvider for IVPN {
 
             let path = wireguard_dir.join(format!("{country_name}-{country_code}-{city}.conf"));
 
-            let mut toml = toml::to_string(&wireguard_conf)?;
-            toml.retain(|c| c != '"');
-            let toml = toml.replace(", ", ",");
-            let toml = re.replace_all(&toml, "= $value").to_string();
-            // Create file, write TOML
+            // Create file, write WireGuard config
             {
                 let mut f = crate::util::create_private_file(&path)?;
-                write!(f, "{toml}")?;
+                write!(f, "{wireguard_conf}")?;
             }
         }
 

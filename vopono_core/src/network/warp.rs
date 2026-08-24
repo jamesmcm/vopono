@@ -31,8 +31,6 @@ impl Warp {
         forward_ports: Option<&Vec<u16>>,
         firewall: Firewall,
     ) -> anyhow::Result<Self> {
-        // TODO: Add Killswitch using - https://developers.cloudflare.com/cloudflare-one/connections/connect-devices/warp/deployment/firewall/
-
         if let Err(x) = which::which("warp-svc") {
             error!("Cloudflare Warp warp-svc not found. Is warp-svc installed and on PATH?");
             return Err(anyhow!(

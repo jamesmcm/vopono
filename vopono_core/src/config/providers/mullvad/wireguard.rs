@@ -17,7 +17,6 @@ use chrono::Utc;
 use ipnet::IpNet;
 use log::warn;
 use log::{debug, info};
-use regex::Regex;
 use reqwest::blocking::Client;
 use reqwest::header::AUTHORIZATION;
 use serde::Deserialize;
@@ -261,8 +260,6 @@ impl WireguardProvider for Mullvad {
 
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?, IpNet::from_str("::0/0")?];
 
-        // TODO: avoid hacky regex for TOML -> wireguard config conversion
-        let re = Regex::new(r"=\s\[(?P<value>[^\]]+)\]")?;
         for relay in relays.iter().filter(|x| x.active) {
             let wireguard_peer = WireguardPeer {
                 public_key: relay.pubkey.clone(),
@@ -297,14 +294,10 @@ impl WireguardProvider for Mullvad {
             let country = relay.country_name.to_lowercase().replace(' ', "_");
             let path = wireguard_dir.join(format!("{country}-{host}.conf"));
 
-            let mut toml = toml::to_string(&wireguard_conf)?;
-            toml.retain(|c| c != '"');
-            let toml = toml.replace(", ", ",");
-            let toml = re.replace_all(&toml, "= $value").to_string();
-            // Create file, write TOML
+            // Create file, write WireGuard config
             {
                 let mut f = crate::util::create_private_file(&path)?;
-                write!(f, "{toml}")?;
+                write!(f, "{wireguard_conf}")?;
             }
         }
 

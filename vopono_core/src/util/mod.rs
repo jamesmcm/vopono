@@ -104,18 +104,12 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
         })
         .or_else(|| {
             if let Ok(user) = std::env::var("SUDO_USER") {
-                // TODO: DRY
-                let confpath = format!("/home/{user}/.config");
-                let path = Path::new(&confpath);
+                let confpath = home_config_dir(&user);
                 debug!(
                     "Using config dir from $SUDO_USER config: {}",
-                    path.to_string_lossy()
+                    confpath.to_string_lossy()
                 );
-                if path.exists() {
-                    Some(path.into())
-                } else {
-                    None
-                }
+                confpath.exists().then_some(confpath)
             } else {
                 None
             }
@@ -134,21 +128,12 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
         .or_else(|| {
             if let Some(user) = get_user_by_uid(get_current_uid()) {
                 // Handles case when run as root directly
-                let confpath = if get_current_uid() == 0 {
-                    "/root/.config".to_string()
-                } else {
-                    format!("/home/{}/.config", user.name().to_str().unwrap())
-                };
-                let path = Path::new(&confpath);
+                let confpath = home_config_dir(user.name().to_str().unwrap());
                 debug!(
                     "Using config dir from current user config: {}",
-                    path.to_string_lossy()
+                    confpath.to_string_lossy()
                 );
-                if path.exists() {
-                    Some(path.into())
-                } else {
-                    None
-                }
+                confpath.exists().then_some(confpath)
             } else {
                 None
             }
@@ -161,17 +146,26 @@ pub fn vopono_dir() -> anyhow::Result<PathBuf> {
     Ok(config_dir()?.join("vopono"))
 }
 
-// TODO: DRY with above
-pub fn get_username() -> anyhow::Result<String> {
-    if let Ok(user) = std::env::var("SUDO_USER") {
-        Ok(user)
-    } else if let Some(user) = get_user_by_uid(get_current_uid()) {
-        Ok(String::from(
-            user.name().to_str().expect("Invalid username"),
-        ))
+/// Home `.config` directory for a user, handling the root account.
+fn home_config_dir(user_name: &str) -> PathBuf {
+    if user_name == "root" {
+        PathBuf::from("/root/.config")
     } else {
-        Err(anyhow!("No valid username!"))
+        PathBuf::from(format!("/home/{user_name}/.config"))
     }
+}
+
+/// Resolve the effective username, preferring `$SUDO_USER` over the current user.
+fn effective_username() -> Option<String> {
+    if let Ok(user) = std::env::var("SUDO_USER") {
+        Some(user)
+    } else {
+        get_user_by_uid(get_current_uid()).map(|user| user.name().to_string_lossy().to_string())
+    }
+}
+
+pub fn get_username() -> anyhow::Result<String> {
+    effective_username().ok_or_else(|| anyhow!("No valid username!"))
 }
 
 pub fn get_group(username: &str) -> anyhow::Result<String> {
@@ -419,7 +413,6 @@ pub fn sudo_command(command: &[&str]) -> anyhow::Result<()> {
     }
 }
 
-// TODO: Clean this up (can we combine maps and filters?)
 pub fn clean_dead_locks() -> anyhow::Result<()> {
     let running_processes = get_all_running_pids();
     let mut lockfile_path = config_dir()?;
@@ -433,22 +426,13 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
             .into_iter()
             .filter_map(|x| x.ok())
             .filter(|x| x.path().is_file())
-            .map(|x| {
-                (
-                    x.clone(),
-                    x.file_name()
-                        .to_str()
-                        .expect("Failed to parse file name")
-                        .parse::<u32>()
-                        .ok(),
-                )
+            .filter_map(|x| {
+                let pid = x.file_name().to_str()?.parse::<u32>().ok()?;
+                (!running_processes.contains(&pid)).then_some((x, pid))
             })
-            .filter(|x| x.1.is_some())
-            .map(|x| (x.0, running_processes.contains(&x.1.unwrap())))
-            .filter(|x| !x.1)
-            .try_for_each(|x| {
-                debug!("Removing lockfile: {}", x.0.path().display());
-                std::fs::remove_file(x.0.path())
+            .try_for_each(|(entry, _)| {
+                debug!("Removing lockfile: {}", entry.path().display());
+                std::fs::remove_file(entry.path())
             })?;
 
         // Delete auxiliary client-* lock files if their PIDs are no longer running

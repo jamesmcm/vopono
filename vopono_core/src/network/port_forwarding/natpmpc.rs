@@ -1,5 +1,6 @@
 use anyhow::Context;
 use regex::Regex;
+use std::sync::LazyLock;
 use std::sync::mpsc;
 use std::{
     net::{IpAddr, Ipv4Addr},
@@ -12,6 +13,11 @@ use crate::network::netns::NetworkNamespace;
 
 // TODO: Move this to ProtonVPN provider
 pub const PROTONVPN_GATEWAY: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 2, 0, 1));
+
+static MAPPED_PORT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Mapped public port (?P<port>\d{1,5}) protocol")
+        .expect("Invalid natpmpc mapped port regex")
+});
 
 /// Used to provide port forwarding for ProtonVPN
 pub struct Natpmpc {
@@ -143,8 +149,7 @@ impl ThreadLoopForwarder for Natpmpc {
 
     fn refresh_port(params: &Self::ThreadParams) -> anyhow::Result<u16> {
         let gateway_str = PROTONVPN_GATEWAY.to_string();
-        // TODO: Cache regex
-        let re = Regex::new(r"Mapped public port (?P<port>\d{1,5}) protocol").unwrap();
+        let re = &MAPPED_PORT_RE;
         // Read Mapped public port 61057 protocol UDP
         let udp_output = NetworkNamespace::exec_with_output(
             &params.netns_name,

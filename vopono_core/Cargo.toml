@@ -35,7 +35,6 @@ walkdir = "2"
 rand = "0.10.0-rc.8"
 chacha20 = "0.10.0-rc.10"
 rand_core = { version = "0.10" }
-toml = "1"
 ipnet = { version = "2", features = ["serde"] }
 reqwest = { default-features = false, version = "0.13", features = [
     "blocking",

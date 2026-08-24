@@ -16,7 +16,6 @@ use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
 use anyhow::anyhow;
 use ipnet::IpNet;
 use log::{debug, info};
-use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::fs::create_dir_all;
@@ -189,9 +188,6 @@ impl WireguardProvider for MozillaVPN {
         // Note we tunnel both IPv4 and IPv6
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?, IpNet::from_str("::0/0")?];
 
-        // Regex to convert TOML array syntax to WireGuard config format
-        // TOML: key = [val1, val2] -> WireGuard: key = val1,val2
-        let re = Regex::new(r"=\s\[(?P<value>[^\]]+)\]")?;
         for relay in relays.iter().filter(|x| x.active) {
             let wireguard_peer = WireguardPeer {
                 public_key: relay.pubkey.clone(),
@@ -217,14 +213,10 @@ impl WireguardProvider for MozillaVPN {
             let country = relay.country_name.to_lowercase().replace(' ', "_");
             let path = wireguard_dir.join(format!("{country}-{host}.conf"));
 
-            let mut toml = toml::to_string(&wireguard_conf)?;
-            toml.retain(|c| c != '"');
-            let toml = toml.replace(", ", ",");
-            let toml = re.replace_all(&toml, "= $value").to_string();
-            // Create file, write TOML
+            // Create file, write WireGuard config
             {
                 let mut f = crate::util::create_private_file(&path)?;
-                write!(f, "{toml}")?;
+                write!(f, "{wireguard_conf}")?;
             }
         }
 
