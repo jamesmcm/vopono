@@ -8,6 +8,35 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
 
+fn validate_unprivileged_config(config_file: &std::path::Path) -> anyhow::Result<()> {
+    const PRIVILEGED_DIRECTIVES: &[&str] = &[
+        "script",
+        "script-tun",
+        "csd-wrapper",
+        "external-browser",
+        "pid-file",
+    ];
+    let contents = std::fs::read_to_string(config_file)
+        .with_context(|| format!("Failed to read {}", config_file.display()))?;
+    for (line_number, line) in contents.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let key = line
+            .split_once('=')
+            .or_else(|| line.split_once(char::is_whitespace))
+            .map_or(line, |(key, _)| key)
+            .trim();
+        anyhow::ensure!(
+            !PRIVILEGED_DIRECTIVES.contains(&key),
+            "OpenConnect directive '{key}' is not allowed in daemon mode (line {})",
+            line_number + 1
+        );
+    }
+    Ok(())
+}
+
 pub fn server_from_config(config_file: &std::path::Path) -> anyhow::Result<String> {
     let contents = std::fs::read_to_string(config_file)
         .with_context(|| format!("Failed to read {}", config_file.display()))?;
@@ -49,6 +78,10 @@ impl OpenConnect {
                 "OpenConnect not found. Is OpenConnect installed and on PATH?: {:?}",
                 x
             ));
+        }
+
+        if crate::util::is_daemon_mode() {
+            validate_unprivileged_config(&config_file)?;
         }
 
         let pass = request_creds(uiclient);
@@ -126,7 +159,7 @@ impl Drop for OpenConnect {
 
 #[cfg(test)]
 mod tests {
-    use super::server_from_config;
+    use super::{server_from_config, validate_unprivileged_config};
     use std::io::Write;
 
     #[test]
@@ -141,5 +174,34 @@ mod tests {
             server_from_config(config.path()).unwrap(),
             "https://vpn.example.com:443/path"
         );
+    }
+
+    #[test]
+    fn daemon_config_rejects_privileged_directives() {
+        for directive in [
+            "script",
+            "script-tun",
+            "csd-wrapper",
+            "external-browser",
+            "pid-file",
+        ] {
+            let mut config = tempfile::NamedTempFile::new().unwrap();
+            writeln!(config, "server=vpn.example.com\n{directive}=/tmp/evil").unwrap();
+            let error = validate_unprivileged_config(config.path())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(directive));
+        }
+    }
+
+    #[test]
+    fn daemon_config_accepts_connection_directives() {
+        let mut config = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            config,
+            "server vpn.example.com\nprotocol=anyconnect\n# script=/tmp/ignored"
+        )
+        .unwrap();
+        validate_unprivileged_config(config.path()).unwrap();
     }
 }
