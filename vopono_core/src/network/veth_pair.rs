@@ -227,16 +227,41 @@ impl Drop for NetworkManagerUnmanaged {
             let nm_path = PathBuf::from_str("/etc/NetworkManager/conf.d/unmanaged.conf")
                 .expect("Failed to build path");
             if let Some(backup_file) = self.backup_file.as_ref() {
-                std::fs::copy(backup_file, &nm_path)
-                    .expect("Failed to restore backup of NetworkManager unmanaged.conf");
-                std::fs::remove_file(backup_file)
-                    .expect("Failed to delete backup of NetworkManager unmanaged.conf");
-            } else {
-                std::fs::remove_file(&nm_path)
-                    .expect("Failed to delete NetworkManager unmanaged.conf");
+                // Concurrent teardowns (e.g. `vopono stop` racing the owning
+                // session) may already have restored and removed the backup;
+                // cleanup must never panic inside Drop.
+                match std::fs::copy(backup_file, &nm_path) {
+                    Ok(_) => {
+                        if let Err(error) = std::fs::remove_file(backup_file)
+                            && error.kind() != std::io::ErrorKind::NotFound
+                        {
+                            log::warn!(
+                                "Failed to delete NetworkManager unmanaged.conf backup {}: {error}",
+                                backup_file.display()
+                            );
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        debug!(
+                            "NetworkManager unmanaged.conf backup {} already consumed by another teardown",
+                            backup_file.display()
+                        );
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "Failed to restore NetworkManager unmanaged.conf from {}: {error}",
+                            backup_file.display()
+                        );
+                    }
+                }
+            } else if let Err(error) = std::fs::remove_file(&nm_path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                log::warn!("Failed to delete NetworkManager unmanaged.conf: {error}");
             }
-            sudo_command(&["nmcli", "connection", "reload"])
-                .expect("Failed to reload NetworkManager configuration");
+            if let Err(error) = sudo_command(&["nmcli", "connection", "reload"]) {
+                log::warn!("Failed to reload NetworkManager configuration: {error}");
+            }
         }
     }
 }
