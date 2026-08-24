@@ -2777,7 +2777,7 @@ dependencies = [
 
 [[package]]
 name = "vopono"
-version = "0.10.23"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "basic_tcp_proxy",
@@ -2809,7 +2809,7 @@ dependencies = [
 
 [[package]]
 name = "vopono_core"
-version = "0.1.23"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
