@@ -6,7 +6,7 @@ use interprocess::TryClone;
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{ListenerOptions, ToFsName};
 use interprocess::os::unix::local_socket::FilesystemUdSocket;
-use log::{error, info};
+use log::{error, info, warn};
 use nix::pty::openpty;
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::unistd::isatty as nix_isatty;
@@ -330,8 +330,6 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
         user.name, uid, group.name, gid
     );
 
-    // Note: Do not set config override yet; we may adopt client's XDG_CONFIG_HOME.
-
     // Read a framed request (length-prefixed u32 then payload)
     let request: DaemonRequest = {
         let mut len_bytes = [0u8; 4];
@@ -342,7 +340,6 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
         conn.read_exact(&mut buffer)?;
         wincode::deserialize(&buffer)?
     };
-
     match request {
         DaemonRequest::Execute {
             cmd,
@@ -354,16 +351,6 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
 
             // Decode the command payload from the JSON bytes carried by `DaemonRequest::Execute`.
             let mut exec_command: ExecCommand = serde_json::from_slice(&cmd)?;
-            // Set config override from client's XDG_CONFIG_HOME if present, falling back to ~/.config
-            let override_base = forwarded_env
-                .get("XDG_CONFIG_HOME")
-                .and_then(|p| {
-                    let pb = std::path::PathBuf::from(p);
-                    if pb.exists() { Some(pb) } else { None }
-                })
-                .unwrap_or_else(|| user.dir.join(".config"));
-            vopono_core::util::set_config_dir_override(Some(override_base));
-            vopono_core::util::set_config_owner_override(Some((uid, gid)));
             exec_command.user = Some(user.name);
             exec_command.group = Some(group.name);
             let requested_application = exec_command.application.clone();
@@ -593,16 +580,9 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             conn.write_all(&bytes)?;
         }
         DaemonRequest::Stop(stop_request) => {
-            // Adopt the caller's config root so lockfile operations hit the
-            // same state the client sees, then run the privileged control op.
-            let override_base = stop_request
-                .config_home
-                .map(PathBuf::from)
-                .filter(|path| path.exists())
-                .unwrap_or_else(|| user.dir.join(".config"));
-            vopono_core::util::set_config_dir_override(Some(override_base));
-            vopono_core::util::set_config_owner_override(Some((uid, gid)));
-
+            // The config base was already adopted and validated for this
+            // connection; lockfile operations hit the same state the client
+            // sees. Run the privileged control op.
             let outcome = match stop_request.target {
                 DaemonStopTarget::Application(id) => crate::control::stop_application(&id),
                 DaemonStopTarget::Namespace(id) => crate::control::stop_namespace(&id),
@@ -652,7 +632,68 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
     // Clear any thread-local override before exiting the handler
     vopono_core::util::set_config_dir_override(None);
     vopono_core::util::set_config_owner_override(None);
+    vopono_core::util::set_helper_exe_override(None);
     Ok(())
+}
+
+/// Extract the client-supplied config-home candidate from the request.
+///
+/// Both relevant request types carry one: the Execute environment
+/// (`XDG_CONFIG_HOME`) and the Stop request (`config_home`). The value is
+/// only a candidate - [`adopt_client_config_base`] validates it against the
+/// authenticated peer before it is used.
+fn request_client_config_home(request: &DaemonRequest) -> Option<String> {
+    match request {
+        DaemonRequest::Execute { env, .. } => env.get("XDG_CONFIG_HOME").cloned(),
+        DaemonRequest::Stop(stop_request) => stop_request.config_home.clone(),
+        _ => None,
+    }
+}
+
+/// Adopt the base directory for this client's vopono config tree.
+///
+/// The client-supplied candidate (from the Execute environment or the Stop
+/// request) is only honoured when it canonically resolves to a directory
+/// owned by the authenticated peer - symlinks into root- or foreign-owned
+/// locations are rejected. Otherwise the peer's passwd home `.config` is
+/// used, creating it via the dropped-privilege helper if needed. Fails
+/// closed when neither candidate works so the daemon never writes lockfiles
+/// on behalf of one user into a directory another principal controls.
+fn adopt_client_config_base(
+    provided: Option<String>,
+    user: &User,
+    uid: Uid,
+) -> anyhow::Result<PathBuf> {
+    let home_candidate = user.dir.join(".config");
+    let provided_candidate = provided.map(PathBuf::from);
+    let candidates = [provided_candidate.as_ref(), Some(&home_candidate)];
+
+    for candidate in candidates.into_iter().flatten() {
+        match vopono_core::util::validated_user_owned_dir(candidate, uid) {
+            Ok(dir) => return Ok(dir),
+            Err(error) => warn!(
+                "Ignoring client config dir {}: {}",
+                candidate.display(),
+                error
+            ),
+        }
+    }
+
+    // Missing (rather than invalid) candidates: try to create them as the
+    // client before giving up.
+    for candidate in candidates.into_iter().flatten() {
+        if !candidate.exists()
+            && vopono_core::util::ensure_dir_as_config_owner(candidate, None)?
+            && let Ok(dir) = vopono_core::util::validated_user_owned_dir(candidate, uid)
+        {
+            return Ok(dir);
+        }
+    }
+
+    anyhow::bail!(
+        "Client config directory could not be validated for uid {}",
+        uid.as_raw()
+    )
 }
 
 fn fd_readable(fd: RawFd, timeout_ms: i32) -> bool {
@@ -713,5 +754,134 @@ mod tests {
         assert!(!versions_compatible("1.0.0", "0.10.20"));
         // An empty/garbage daemon answer is never treated as compatible.
         assert!(!versions_compatible("", "0.10.20"));
+    }
+
+    mod config_adoption {
+        use super::super::{adopt_client_config_base, request_client_config_home};
+        use crate::daemon::DaemonRequest;
+        use nix::unistd::{Gid, Uid, User};
+        use std::path::{Path, PathBuf};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        fn unique_temp_base(name: &str) -> std::path::PathBuf {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let base = std::env::temp_dir().join(format!("vopono-daemon-test-{name}-{nanos}"));
+            std::fs::create_dir_all(&base).unwrap();
+            base
+        }
+
+        fn current_user(home: &Path) -> User {
+            User {
+                uid: Uid::current(),
+                gid: Gid::current(),
+                name: "testuser".to_string(),
+                gecos: std::ffi::CString::new("").unwrap(),
+                passwd: std::ffi::CString::new("").unwrap(),
+                dir: home.to_path_buf(),
+                shell: std::path::PathBuf::new(),
+            }
+        }
+
+        fn skip_when_root() -> bool {
+            // Ownership-based assertions assume the test runner's own uid.
+            nix::unistd::Uid::current().is_root()
+        }
+
+        #[test]
+        fn adopts_provided_directory_owned_by_peer() {
+            if skip_when_root() {
+                return;
+            }
+            let base = unique_temp_base("owned");
+            let provided = base.join("xdg");
+            std::fs::create_dir_all(&provided).unwrap();
+            let home = base.join("home");
+            std::fs::create_dir_all(&home).unwrap();
+
+            let adopted = adopt_client_config_base(
+                Some(provided.display().to_string()),
+                &current_user(&home),
+                Uid::current(),
+            )
+            .unwrap();
+            assert_eq!(adopted, provided.canonicalize().unwrap());
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        #[test]
+        fn rejects_symlink_into_foreign_owned_directory_and_falls_back_to_home() {
+            if skip_when_root() {
+                return;
+            }
+            let base = unique_temp_base("symlink");
+            let link = base.join("evil");
+            std::os::unix::fs::symlink("/etc", &link).unwrap();
+            let home = base.join("home");
+            let home_config = home.join(".config");
+            std::fs::create_dir_all(&home_config).unwrap();
+
+            let adopted = adopt_client_config_base(
+                Some(link.display().to_string()),
+                &current_user(&home),
+                Uid::current(),
+            )
+            .unwrap();
+            assert_eq!(adopted, home_config.canonicalize().unwrap());
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        #[test]
+        fn fails_closed_when_no_candidate_is_valid() {
+            if skip_when_root() {
+                return;
+            }
+            let base = unique_temp_base("invalid");
+            // A system directory owned by root: rejected by the ownership
+            // check for any non-root requester.
+            let foreign = PathBuf::from("/etc");
+            // Home `.config` exists but is a file: neither usable nor
+            // creatable, so adoption must fail rather than pick anything.
+            let home = base.join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join(".config"), "not a directory").unwrap();
+
+            assert!(
+                adopt_client_config_base(
+                    Some(foreign.display().to_string()),
+                    &current_user(&home),
+                    Uid::current()
+                )
+                .is_err()
+            );
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        #[test]
+        fn extracts_candidate_from_both_request_types() {
+            let mut env = std::collections::HashMap::new();
+            env.insert("XDG_CONFIG_HOME".to_string(), "/tmp/some-xdg".to_string());
+            assert_eq!(
+                request_client_config_home(&DaemonRequest::Execute {
+                    cmd: Vec::new(),
+                    env: env.clone()
+                })
+                .as_deref(),
+                Some("/tmp/some-xdg")
+            );
+            assert_eq!(
+                request_client_config_home(&DaemonRequest::Stop(
+                    crate::daemon::DaemonStopRequest {
+                        target: crate::daemon::DaemonStopTarget::Namespace("vo_x".to_string()),
+                        config_home: Some("/tmp/stop-xdg".to_string()),
+                    }
+                ))
+                .as_deref(),
+                Some("/tmp/stop-xdg")
+            );
+            assert!(request_client_config_home(&DaemonRequest::Version).is_none());
+        }
     }
 }

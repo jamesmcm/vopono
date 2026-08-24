@@ -18,7 +18,8 @@ use crate::config::vpn::Protocol;
 use crate::network::host_masquerade::FirewallException;
 use crate::network::wireguard_config::WireguardPeer;
 use crate::util::{
-    config_dir, get_existing_namespaces, parse_command_str, set_config_permissions, sudo_command,
+    chown_to_config_owner, config_dir, ensure_dir_as_config_owner, get_existing_namespaces,
+    parse_command_str, set_config_permissions, sudo_command, write_file_as_config_owner,
 };
 use anyhow::{Context, anyhow};
 use log::{debug, info, warn};
@@ -117,7 +118,9 @@ impl NetworkNamespace {
         let mut lockfile_path = config_dir()?;
         lockfile_path.push(format!("vopono/locks/{name}"));
 
-        std::fs::create_dir_all(&lockfile_path)?;
+        if !ensure_dir_as_config_owner(&lockfile_path, Some(0o750))? {
+            std::fs::create_dir_all(&lockfile_path)?;
+        }
         debug!("Trying to read lockfile: {}", lockfile_path.display());
         // Find a real RON lockfile (numeric filename = creator PID). Skip auxiliary client-* locks.
         let mut parsed_ns: Option<NetworkNamespace> = None;
@@ -852,11 +855,9 @@ impl NetworkNamespace {
             // Unmanaged namespaces are not vopono's to track or clean up.
             return Ok(self);
         }
-        let mut lockfile_path = config_dir()?;
-        lockfile_path.push(format!("vopono/locks/{}", self.name));
-        std::fs::create_dir_all(&lockfile_path)?;
-        debug!("Writing lockfile: {}", lockfile_path.display());
-        lockfile_path.push(format!("{}", unistd::getpid()));
+        let mut lock_dir = config_dir()?;
+        lock_dir.push(format!("vopono/locks/{}", self.name));
+        debug!("Writing lockfile: {}", lock_dir.display());
         let since_the_epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
@@ -868,11 +869,27 @@ impl NetworkNamespace {
             application_started_at: None,
         };
         let lock_string = ron::ser::to_string(&lock)?;
-        let mut f = File::create(&lockfile_path)?;
-        write!(f, "{lock_string}")?;
-        debug!("Lockfile written: {}", lockfile_path.display());
+        let mut lockfile_path = lock_dir;
+        lockfile_path.push(format!("{}", unistd::getpid()));
+        let lock_dir = lockfile_path
+            .parent()
+            .with_context(|| format!("No parent directory for {}", lockfile_path.display()))?
+            .to_path_buf();
 
-        set_config_permissions()?;
+        if ensure_dir_as_config_owner(&lock_dir, Some(0o750))? {
+            write_file_as_config_owner(&lockfile_path, &lock_string, Some(0o640))?;
+            debug!(
+                "Lockfile written with dropped privileges: {}",
+                lockfile_path.display()
+            );
+        } else {
+            std::fs::create_dir_all(&lock_dir)?;
+            let mut f = File::create(&lockfile_path)?;
+            write!(f, "{lock_string}")?;
+            debug!("Lockfile written: {}", lockfile_path.display());
+
+            set_config_permissions()?;
+        }
         Ok(lock.ns)
     }
 
@@ -926,14 +943,19 @@ impl NetworkNamespace {
             ),
         };
         let lock_string = ron::ser::to_string(&view)?;
-        // Write to a sibling temporary file first so readers never observe a
-        // partially written lockfile, then atomically move it into place.
-        let temporary_path = lockfile_path.with_extension("tmp");
-        {
-            let mut file = File::create(&temporary_path)?;
-            write!(file, "{lock_string}")?;
+        if !write_file_as_config_owner(&lockfile_path, &lock_string, Some(0o640))? {
+            // Write to a sibling temporary file first so readers never observe a
+            // partially written lockfile, then atomically move it into place.
+            let temporary_path = lockfile_path.with_extension("tmp");
+            {
+                let mut file = File::create(&temporary_path)?;
+                write!(file, "{lock_string}")?;
+            }
+            std::fs::rename(&temporary_path, &lockfile_path)?;
+            // The rename replaced the inode, discarding any earlier ownership
+            // fixup: reapply it so the invoking user owns the final file.
+            chown_to_config_owner(&lockfile_path)?;
         }
-        std::fs::rename(&temporary_path, &lockfile_path)?;
         Ok(())
     }
 
@@ -946,11 +968,9 @@ impl NetworkNamespace {
             // Unmanaged namespaces are not vopono's to track or clean up.
             return Ok(None);
         }
-        let mut lockfile_path = config_dir()?;
-        lockfile_path.push(format!("vopono/locks/{}", self.name));
-        std::fs::create_dir_all(&lockfile_path)?;
-        debug!("Writing client lockfile: {}", lockfile_path.display());
-        lockfile_path.push(format!("client-{pid}"));
+        let mut lock_dir = config_dir()?;
+        lock_dir.push(format!("vopono/locks/{}", self.name));
+        debug!("Writing client lockfile: {}", lock_dir.display());
         let since_the_epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
@@ -968,11 +988,27 @@ impl NetworkNamespace {
             application_started_at: Some(since_the_epoch.as_secs()),
         };
         let lock_string = ron::ser::to_string(&lock)?;
-        let mut f = File::create(&lockfile_path)?;
-        write!(f, "{lock_string}")?;
-        debug!("Client lockfile written: {}", lockfile_path.display());
+        let mut lockfile_path = lock_dir;
+        lockfile_path.push(format!("client-{pid}"));
+        let lock_dir = lockfile_path
+            .parent()
+            .with_context(|| format!("No parent directory for {}", lockfile_path.display()))?
+            .to_path_buf();
 
-        set_config_permissions()?;
+        if ensure_dir_as_config_owner(&lock_dir, Some(0o750))? {
+            write_file_as_config_owner(&lockfile_path, &lock_string, Some(0o640))?;
+            debug!(
+                "Client lockfile written with dropped privileges: {}",
+                lockfile_path.display()
+            );
+        } else {
+            std::fs::create_dir_all(&lock_dir)?;
+            let mut f = File::create(&lockfile_path)?;
+            write!(f, "{lock_string}")?;
+            debug!("Client lockfile written: {}", lockfile_path.display());
+
+            set_config_permissions()?;
+        }
         Ok(Some(lockfile_path))
     }
 

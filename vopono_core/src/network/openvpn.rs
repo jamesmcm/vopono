@@ -1,7 +1,10 @@
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use crate::config::vpn::OpenVpnProtocol;
-use crate::util::{check_process_running, set_config_permissions, vopono_dir};
+use crate::util::{
+    check_process_running, ensure_dir_as_config_owner, set_config_permissions, vopono_dir,
+    write_file_as_config_owner,
+};
 use anyhow::{Context, anyhow};
 use log::{debug, error, info};
 use regex::Regex;
@@ -46,11 +49,15 @@ impl OpenVpn {
             ));
         }
 
-        std::fs::create_dir_all(vopono_dir()?.join("logs"))?;
-        let log_file_path = vopono_dir()?.join(format!("logs/{}_openvpn.log", netns.name));
+        let logs_dir = vopono_dir()?.join("logs");
+        if !ensure_dir_as_config_owner(&logs_dir, Some(0o750))? {
+            std::fs::create_dir_all(&logs_dir)?;
+        }
+        let log_file_path = logs_dir.join(format!("{}_openvpn.log", netns.name));
         let log_file_str: String = log_file_path.as_os_str().to_string_lossy().to_string();
-        {
+        if !write_file_as_config_owner(&log_file_path, "", Some(0o640))? {
             File::create(&log_file_str)?;
+            set_config_permissions()?;
         }
 
         let config_file_path = config_file.canonicalize().context("Invalid path given")?;
@@ -96,16 +103,6 @@ impl OpenVpn {
         command_vec.push("--pull-filter");
         command_vec.push("ignore");
         command_vec.push("block-outside-dns");
-
-        if disable_ipv6 || ipv6_disabled {
-            debug!("IPv6 disabled, will pass pull-filter ignore to OpenVPN");
-            command_vec.push("--pull-filter");
-            command_vec.push("ignore");
-            command_vec.push("ifconfig-ipv6");
-            command_vec.push("--pull-filter");
-            command_vec.push("ignore");
-            command_vec.push("route-ipv6");
-        }
 
         let remotes = get_remotes_from_config(&config_file)?;
         debug!("Found remotes: {:?}", remotes);

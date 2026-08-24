@@ -135,8 +135,17 @@ pub fn verify_auth(
 
             // Write OpenVPN credentials file
             let (user, pass) = provider.prompt_for_auth(uiclient)?;
-            let mut outfile = File::create(provider.auth_file_path()?.unwrap())?;
-            write!(outfile, "{user}\n{pass}")?;
+            let contents = format!("{user}\n{pass}");
+            if !crate::util::write_file_as_config_owner(&auth_file, &contents, Some(0o600))? {
+                let mut outfile = File::create(&auth_file)?;
+                write!(outfile, "{contents}")?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    // Credentials file: restrict to the owning user.
+                    std::fs::set_permissions(&auth_file, std::fs::Permissions::from_mode(0o600))?;
+                }
+            }
 
             info!("Credentials written to: {}", auth_file.to_string_lossy());
             Ok(Some(auth_file))

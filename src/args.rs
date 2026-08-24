@@ -130,6 +130,12 @@ pub enum Command {
     )]
     Probe(ProbeCommand),
     #[clap(
+        name = "__write-user-file",
+        about = "Internal dropped-privilege filesystem write helper",
+        hide = true
+    )]
+    WriteUserFile,
+    #[clap(
         name = "list",
         about = "List running vopono namespaces and applications"
     )]

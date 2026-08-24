@@ -2,9 +2,16 @@ pub mod country_map;
 pub mod env_vars;
 pub mod open_hosts;
 pub mod open_ports;
+pub mod owner_write;
 pub mod pulseaudio;
 pub mod unix;
 pub mod wireguard;
+
+pub use owner_write::{
+    ensure_dir_as_config_owner, perform_owner_write, run_owner_write_from_stdin,
+    set_helper_exe_override, validate_netns_name, validated_user_owned_dir,
+    write_file_as_config_owner,
+};
 
 extern crate shell_words as shellwords;
 use crate::config::vpn::Protocol;
@@ -55,6 +62,11 @@ pub fn set_config_dir_override(path: Option<PathBuf>) {
 
 pub fn set_config_owner_override(owner: Option<(Uid, Gid)>) {
     CONFIG_OWNER_OVERRIDE.with(|ov| *ov.borrow_mut() = owner);
+}
+
+/// The per-thread config owner override, if any (daemon client threads).
+pub fn config_owner_override() -> Option<(Uid, Gid)> {
+    CONFIG_OWNER_OVERRIDE.with(|ov| *ov.borrow())
 }
 
 pub fn config_dir() -> anyhow::Result<PathBuf> {
@@ -176,12 +188,11 @@ pub fn get_group(username: &str) -> anyhow::Result<String> {
     }
 }
 
-pub fn set_config_permissions() -> anyhow::Result<()> {
-    use std::fs::Permissions;
-    use std::os::unix::fs::PermissionsExt;
-
-    let check_dir = vopono_dir()?;
-    let (user, group) = CONFIG_OWNER_OVERRIDE.with(|ov| *ov.borrow()).map_or_else(
+/// Resolve the (uid, gid) that files under the vopono config tree belong to:
+/// the daemon client override when set, otherwise derived from the invoking
+/// user (SUDO_USER / current uid).
+pub fn resolve_config_owner() -> anyhow::Result<(Option<Uid>, Option<Gid>)> {
+    CONFIG_OWNER_OVERRIDE.with(|ov| *ov.borrow()).map_or_else(
         || -> anyhow::Result<(Option<Uid>, Option<Gid>)> {
             let username = get_username()?;
             let group_name = get_group(&username)?;
@@ -194,7 +205,15 @@ pub fn set_config_permissions() -> anyhow::Result<()> {
             Ok((Some(user), Some(group)))
         },
         |(uid, gid)| Ok((Some(uid), Some(gid))),
-    )?;
+    )
+}
+
+pub fn set_config_permissions() -> anyhow::Result<()> {
+    use std::fs::Permissions;
+    use std::os::unix::fs::PermissionsExt;
+
+    let check_dir = vopono_dir()?;
+    let (user, group) = resolve_config_owner()?;
 
     debug!(
         "Setting config permissions in {} to user: {:?}, group: {:?}",
@@ -215,6 +234,24 @@ pub fn set_config_permissions() -> anyhow::Result<()> {
             std::fs::set_permissions(path, dir_permissions.clone())?;
         }
     }
+    Ok(())
+}
+
+/// Assign a freshly written file back to the config owner.
+///
+/// Used on the legacy (sudo/CLI) path where root writes into the invoking
+/// user's config tree: an atomic rename replaces the inode, so ownership
+/// must be reapplied after the replacement - not just once at directory
+/// setup time.
+pub fn chown_to_config_owner(path: &Path) -> anyhow::Result<()> {
+    let (user, group) = resolve_config_owner()?;
+    debug!(
+        "Setting ownership of {} to user: {:?}, group: {:?}",
+        path.display(),
+        user,
+        group
+    );
+    nix::unistd::chown(path, user, group)?;
     Ok(())
 }
 

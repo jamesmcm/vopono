@@ -120,6 +120,12 @@ fn main() -> anyhow::Result<()> {
             // inside the target namespace); never forward or escalate.
             check::run_probe(probe)?;
         }
+        args::Command::WriteUserFile => {
+            // Hidden helper spawned by the daemon with the connecting user's
+            // credentials. It performs exactly one validated write request
+            // from stdin and must never run as root.
+            vopono_core::util::run_owner_write_from_stdin()?;
+        }
         args::Command::Providers(providerscmd) => {
             handle_result(
                 providers::print_providers(providerscmd.json),
