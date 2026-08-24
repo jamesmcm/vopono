@@ -20,11 +20,14 @@ pub struct NetworkManagerUnmanaged {
     pub backup_file: Option<PathBuf>,
 }
 
-// ifname must be less <= 15 chars
+// Linux interface names must be <= 15 bytes (excluding the trailing NUL).
 impl VethPair {
     pub fn new(source: String, dest: String, netns: &NetworkNamespace) -> anyhow::Result<Self> {
-        assert!(source.len() <= 15, "ifname must be <= 15 chars: {source}");
-        assert!(dest.len() <= 15, "ifname must be <= 15 chars: {dest}");
+        // Return an error rather than panicking: in the daemon this must
+        // surface as a per-client error response instead of aborting the
+        // connection thread.
+        anyhow::ensure!(source.len() <= 15, "ifname must be <= 15 chars: {source}");
+        anyhow::ensure!(dest.len() <= 15, "ifname must be <= 15 chars: {dest}");
 
         // NetworkManager device management
         // If NetworkManager used, add destination veth to unmanaged devices
@@ -166,6 +169,27 @@ impl VethPair {
             dest,
             nm_unmanaged,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VethPair;
+    use crate::network::netns::NetworkNamespace;
+
+    #[test]
+    fn overlong_interface_names_return_errors() {
+        let namespace = NetworkNamespace::attach_unmanaged("vo_test".to_string()).unwrap();
+
+        let source_error = VethPair::new("s".repeat(16), "dest".to_string(), &namespace)
+            .unwrap_err()
+            .to_string();
+        assert!(source_error.contains("ifname must be <= 15 chars"));
+
+        let dest_error = VethPair::new("source".to_string(), "d".repeat(16), &namespace)
+            .unwrap_err()
+            .to_string();
+        assert!(dest_error.contains("ifname must be <= 15 chars"));
     }
 }
 

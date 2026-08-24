@@ -919,6 +919,7 @@ fn run_protocol_in_netns(
     Ok(config_file)
 }
 
+// TODO: Move Warp specifics to warp module in vopono_core
 /// Cloudflare WARP control endpoint host used for killswitch endpoint allows.
 const WARP_ENDPOINT_HOST: &str = "engage.cloudflareclient.com";
 

@@ -25,6 +25,7 @@ use anyhow::{Context, anyhow};
 use log::{debug, info, warn};
 use nix::unistd;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::Write;
 use std::net::IpAddr;
@@ -131,6 +132,26 @@ pub fn validate_netns_name(name: &str) -> anyhow::Result<()> {
         "Invalid network namespace name '{name}': must be 1-64 ASCII alphanumeric characters, dots, underscores or hyphens, starting alphanumerically"
     );
     Ok(())
+}
+
+/// Derive a stable interface-name prefix without imposing Linux's 15-byte
+/// interface limit on the namespace name itself. Six digest bytes make
+/// collisions between long namespace names extremely unlikely while leaving
+/// room for the `v` marker and `_s`/`_d` peer suffixes.
+fn veth_interface_base(namespace_name: &str) -> anyhow::Result<String> {
+    const MAX_BASE_LEN: usize = 13;
+
+    validate_netns_name(namespace_name)?;
+    if namespace_name.len() <= MAX_BASE_LEN {
+        return Ok(namespace_name.to_string());
+    }
+
+    let digest = Sha256::digest(namespace_name.as_bytes());
+    let digest_prefix = digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!("v{digest_prefix}"))
 }
 
 /// Atomically write a namespace lockfile with the ownership and modes used by
@@ -422,8 +443,9 @@ impl NetworkNamespace {
 
     pub fn add_veth_pair(&mut self) -> anyhow::Result<()> {
         // TODO: Handle if name taken?
-        let source = format!("{}_s", self.name);
-        let dest = format!("{}_d", self.name);
+        let interface_base = veth_interface_base(&self.name)?;
+        let source = format!("{interface_base}_s");
+        let dest = format!("{interface_base}_d");
         self.veth_pair = Some(VethPair::new(source, dest, self)?);
         Ok(())
     }
@@ -1274,7 +1296,7 @@ impl NetworkNamespace {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_netns_name;
+    use super::{validate_netns_name, veth_interface_base};
 
     #[test]
     fn netns_names_are_constrained() {
@@ -1293,5 +1315,18 @@ mod tests {
             assert!(validate_netns_name(invalid).is_err());
         }
         assert!(validate_netns_name(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn veth_names_are_stable_distinct_and_within_kernel_limit() {
+        assert_eq!(veth_interface_base("vo_m_se").unwrap(), "vo_m_se");
+
+        let first = veth_interface_base("vo_c_MdXZGNg-u1000").unwrap();
+        let second = veth_interface_base("vo_c_MdXZGNh-u1000").unwrap();
+        assert_eq!(first, veth_interface_base("vo_c_MdXZGNg-u1000").unwrap());
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 13);
+        assert!(format!("{first}_s").len() <= 15);
+        assert!(format!("{first}_d").len() <= 15);
     }
 }

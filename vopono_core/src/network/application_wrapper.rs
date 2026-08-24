@@ -195,7 +195,7 @@ impl ApplicationWrapper {
         // another process layer.
         let use_direct_setns = nix::unistd::getuid().is_root()
             && (stdio_fds.is_some() || (capture_output && capture_input));
-        let mut etc_overlay = None;
+        let etc_overlay;
 
         if use_direct_setns {
             handle = Command::new(prog);
@@ -369,9 +369,68 @@ impl ApplicationWrapper {
                 });
             }
         } else {
-            // This non-daemon path remains unchanged
             handle = Command::new("ip");
             handle.args(["netns", "exec", netns.name.as_str()]);
+
+            // `ip netns exec` bind-mounts namespace-specific resolver files,
+            // but its mount namespace can still receive host-side unmounts.
+            // Tailscale replaces /etc/resolv.conf this way, causing a
+            // long-running application to fall back to MagicDNS, which is not
+            // reachable through the VPN namespace. Put the sudo path in a
+            // private mount namespace and stable /etc overlay before `ip`
+            // performs its namespace-specific mounts.
+            let etc_ns_dir = format!("/etc/netns/{}", netns.name);
+            let overlay = tempfile::Builder::new()
+                .prefix("vopono-etc-")
+                .tempdir()
+                .context("Failed to create private /etc overlay directory")?;
+            let upper_dir = overlay.path().join("upper");
+            let work_dir = overlay.path().join("work");
+            std::fs::create_dir(&upper_dir)?;
+            std::fs::create_dir(&work_dir)?;
+            for name in ["resolv.conf", "hosts", "nsswitch.conf"] {
+                let source = PathBuf::from(&etc_ns_dir).join(name);
+                if source.is_file() {
+                    std::fs::copy(&source, upper_dir.join(name)).with_context(|| {
+                        format!(
+                            "Failed to stage {} for namespace {}",
+                            source.display(),
+                            netns.name
+                        )
+                    })?;
+                }
+            }
+            let overlay_options = CString::new(format!(
+                "lowerdir=/etc,upperdir={},workdir={}",
+                upper_dir.display(),
+                work_dir.display()
+            ))?;
+            let overlay_source = CString::new("vopono-etc").unwrap();
+            let overlay_type = CString::new("overlay").unwrap();
+            let root_c = CString::new("/").unwrap();
+            let etc_c = CString::new("/etc").unwrap();
+            etc_overlay = Some(overlay);
+
+            unsafe {
+                handle.pre_exec(move || {
+                    unshare(CloneFlags::CLONE_NEWNS)?;
+                    mount::<std::ffi::CStr, std::ffi::CStr, std::ffi::CStr, std::ffi::CStr>(
+                        None,
+                        root_c.as_c_str(),
+                        None,
+                        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+                        None,
+                    )?;
+                    mount(
+                        Some(overlay_source.as_c_str()),
+                        etc_c.as_c_str(),
+                        Some(overlay_type.as_c_str()),
+                        MsFlags::empty(),
+                        Some(overlay_options.as_c_str()),
+                    )?;
+                    Ok(())
+                });
+            }
 
             let mut sudo_args: Vec<String> = vec![
                 "sudo".to_string(),
