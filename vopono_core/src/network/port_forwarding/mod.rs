@@ -13,6 +13,15 @@ pub trait Forwarder {
 /// ThreadParams must implement these methods
 pub trait ThreadParameters {
     fn get_callback_command(&self) -> Option<String>;
+    /// Session user for callback execution (de-elevation). `None` keeps the
+    /// historical behaviour of running as the current user in CLI sessions.
+    fn get_callback_user(&self) -> Option<String> {
+        None
+    }
+    /// Session group for callback execution.
+    fn get_callback_group(&self) -> Option<String> {
+        None
+    }
     fn get_loop_delay(&self) -> u64;
     fn get_netns_name(&self) -> String;
     /// Resolved vopono locks directory. Captured on the creating thread
@@ -61,27 +70,40 @@ pub trait ThreadLoopForwarder: Forwarder {
     }
 
     fn callback_command(params: &Self::ThreadParams, port: u16) -> Option<anyhow::Result<String>> {
-        params.get_callback_command().map(|callback_command|
-             {
-        let refresh_response = NetworkNamespace::exec_with_output(
-            &params.get_netns_name(),
-            &[&callback_command, &port.to_string()],
-        )?;
-        if !refresh_response.status.success() {
-            log::error!(
+        params.get_callback_command().map(|callback_command| {
+            // The callback is attacker-controllable input relative to this
+            // process: de-elevate it to the session user (network namespaces
+            // are not a privilege boundary).
+            let mut command_vec: Vec<String> = Vec::new();
+            if let Some(user) = params.get_callback_user() {
+                command_vec.push("sudo".to_string());
+                command_vec.push("--preserve-env".to_string());
+                if let Some(group) = params.get_callback_group() {
+                    command_vec.push("--group".to_string());
+                    command_vec.push(group);
+                }
+                command_vec.push("--user".to_string());
+                command_vec.push(user);
+            }
+            command_vec.push(callback_command);
+            command_vec.push(port.to_string());
+            let argv: Vec<&str> = command_vec.iter().map(|s| s.as_str()).collect();
+            let refresh_response =
+                NetworkNamespace::exec_with_output(&params.get_netns_name(), &argv)?;
+            if !refresh_response.status.success() {
+                log::error!(
                     "Port forwarding callback script was unsuccessful!: stdout: {:?}, stderr: {:?}, exit code: {}",
                     String::from_utf8(refresh_response.stdout),
                     String::from_utf8(refresh_response.stderr),
                     refresh_response.status
                 );
-            Err(anyhow::anyhow!("Port forwarding callback script failed"))
-        } else if let Ok(out) = String::from_utf8(refresh_response.stdout) {
-            println!("{out}");
-            Ok(out)
-        } else {
-            Ok("Callback script succeeded but stdout was not valid UTF8".to_string())
-        }
-    }
-    )
+                Err(anyhow::anyhow!("Port forwarding callback script failed"))
+            } else if let Ok(out) = String::from_utf8(refresh_response.stdout) {
+                println!("{out}");
+                Ok(out)
+            } else {
+                Ok("Callback script succeeded but stdout was not valid UTF8".to_string())
+            }
+        })
     }
 }

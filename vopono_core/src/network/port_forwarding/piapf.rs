@@ -28,11 +28,21 @@ pub struct ThreadParamsImpl {
     pub gateway: String,
     pub pia_cert_path: String,
     pub callback: Option<String>,
+    pub user: Option<String>,
+    pub group: Option<String>,
 }
 
 impl ThreadParameters for ThreadParamsImpl {
     fn get_callback_command(&self) -> Option<String> {
         self.callback.clone()
+    }
+
+    fn get_callback_user(&self) -> Option<String> {
+        self.user.clone()
+    }
+
+    fn get_callback_group(&self) -> Option<String> {
+        self.group.clone()
     }
 
     fn get_loop_delay(&self) -> u64 {
@@ -180,6 +190,8 @@ impl Piapf {
             payload,
             port,
             callback: callback.cloned(),
+            user: ns.predown_user.clone(),
+            group: ns.predown_group.clone(),
         };
         let port = Self::refresh_port(&params)?;
         Self::callback_command(&params, port);
@@ -227,23 +239,6 @@ impl ThreadLoopForwarder for Piapf {
         if parsed["status"] != "OK" {
             log::error!("Bind for port forward from PIA API not OK");
             anyhow::bail!("Bind for port forward from PIA API not OK");
-        }
-
-        if let Some(cb) = &params.callback {
-            let refresh_response = NetworkNamespace::exec_with_output(
-                &params.netns_name,
-                &[cb, &params.port.to_string()],
-            )?;
-            if !refresh_response.status.success() {
-                log::error!(
-                    "Port forwarding callback script was unsuccessful!: stdout: {:?}, stderr: {:?}, exit code: {}",
-                    String::from_utf8(refresh_response.stdout),
-                    String::from_utf8(refresh_response.stderr),
-                    refresh_response.status
-                );
-            } else if let Ok(out) = String::from_utf8(refresh_response.stdout) {
-                println!("{out}");
-            }
         }
 
         log::info!("Successfully updated claim to port {}", params.port);

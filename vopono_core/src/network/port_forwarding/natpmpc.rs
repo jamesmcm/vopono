@@ -24,11 +24,19 @@ pub struct ThreadParamsImpl {
     pub netns_name: String,
     pub locks_dir: std::path::PathBuf,
     pub callback: Option<String>,
+    pub user: Option<String>,
+    pub group: Option<String>,
 }
 
 impl ThreadParameters for ThreadParamsImpl {
     fn get_callback_command(&self) -> Option<String> {
         self.callback.clone()
+    }
+    fn get_callback_user(&self) -> Option<String> {
+        self.user.clone()
+    }
+    fn get_callback_group(&self) -> Option<String> {
+        self.group.clone()
     }
     fn get_loop_delay(&self) -> u64 {
         45
@@ -116,6 +124,8 @@ impl Natpmpc {
             netns_name: ns.name.clone(),
             locks_dir: crate::util::config_dir()?.join("vopono").join("locks"),
             callback: callback.cloned(),
+            user: ns.predown_user.clone(),
+            group: ns.predown_group.clone(),
         };
 
         let port = Self::refresh_port(&params)?;
