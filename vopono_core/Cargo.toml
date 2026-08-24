@@ -15,7 +15,7 @@ anyhow = "1"
 directories-next = "2"
 log = "0.4"
 which = "8"
-users = "0.11"
+uzers = "0.12"
 nix = { version = "0.31", features = [
     "user",
     "signal",
