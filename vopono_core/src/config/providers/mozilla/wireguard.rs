@@ -148,7 +148,10 @@ impl WireguardProvider for MozillaVPN {
             .json()?;
 
         let login = self.get_login(&client)?;
-        debug!("Received user info: {:?}", login);
+        debug!(
+            "Received MozillaVPN account info with {} registered device(s)",
+            login.user.devices.len()
+        );
 
         let (_device, keypair) = self.prompt_for_wg_key(&client, &login, uiclient)?;
 

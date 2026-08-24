@@ -55,8 +55,6 @@ impl ProtonVPN {
                 ))
              })?.into_boxed_str());
 
-        debug!("Using AUTH cookie: {}", raw_auth_cookie);
-
         // Extract the key and value parts and standardize to AUTH-xxx=yyy format
         let maybe_captures = auth_pattern.captures(raw_auth_cookie);
         let uid = maybe_captures
@@ -64,11 +62,7 @@ impl ProtonVPN {
             .and_then(|c| c.get(1))
             .ok_or(anyhow!("Failed to parse uid from auth cookie"))?;
 
-        info!(
-            "x-pm-uid should be {} according to AUTH cookie: {}",
-            uid.as_str(),
-            raw_auth_cookie
-        );
+        info!("Using ProtonVPN account uid {}", uid.as_str());
         let value = maybe_captures
             .and_then(|c| c.get(2))
             .ok_or(anyhow!("Failed to parse cookie value from auth cookie"))?;
@@ -78,7 +72,6 @@ impl ProtonVPN {
         // Create the standardized form
         let auth_cookie =
             Box::leak(format!("AUTH-{}={}", uid.as_str(), value.as_str()).into_boxed_str());
-        debug!("Parsed AUTH cookie: {}", auth_cookie);
         Ok((auth_cookie, leaked_uid))
     }
 }
