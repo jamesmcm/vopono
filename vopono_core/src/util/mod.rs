@@ -219,8 +219,11 @@ pub fn set_config_permissions() -> anyhow::Result<()> {
         group
     );
 
-    let file_permissions = Permissions::from_mode(0o640);
-    let dir_permissions = Permissions::from_mode(0o750);
+    // Provider trees contain plaintext passwords, API tokens, and WireGuard
+    // private keys. They are consumed by the owning user and root only; no
+    // group access is required.
+    let file_permissions = Permissions::from_mode(0o600);
+    let dir_permissions = Permissions::from_mode(0o700);
 
     for entry in WalkDir::new(check_dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
@@ -232,6 +235,18 @@ pub fn set_config_permissions() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Create or truncate a secret-bearing configuration file with owner-only
+/// permissions from the instant the inode is created.
+pub fn create_private_file(path: &Path) -> anyhow::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    Ok(std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?)
 }
 
 /// Assign a freshly written file back to the config owner.
@@ -738,6 +753,17 @@ mod tests {
     #[test]
     fn rejects_unknown_custom_config_format() {
         assert!(detect_config_protocol("this is not a VPN config").is_err());
+    }
+
+    #[test]
+    fn private_files_are_owner_only_at_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("secret");
+        create_private_file(&path).unwrap();
+        let mode = std::fs::metadata(path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]

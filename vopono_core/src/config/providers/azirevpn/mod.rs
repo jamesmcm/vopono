@@ -254,7 +254,7 @@ impl AzireVPN {
         }?;
 
         // log::debug!("auth_response: {:?}", &auth_response);
-        let mut outfile = std::fs::File::create(self.token_file_path())?;
+        let mut outfile = crate::util::create_private_file(&self.token_file_path())?;
         write!(outfile, "{}", auth_response_data.key)?;
         log::debug!(
             "AzireVPN Auth Token written to {}",

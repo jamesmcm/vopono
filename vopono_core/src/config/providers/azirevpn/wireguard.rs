@@ -265,7 +265,7 @@ impl WireguardProvider for AzireVPN {
         if let Ok(det) = details {
             let path = self.wireguard_dir()?.join("wireguard_device.json");
             {
-                let mut f = std::fs::File::create(path.clone())?;
+                let mut f = crate::util::create_private_file(&path)?;
                 write!(
                     f,
                     "{}",
@@ -328,7 +328,7 @@ impl WireguardProvider for AzireVPN {
             let toml = re.replace_all(&toml, "= $value").to_string();
             // Create file, write TOML
             {
-                let mut f = std::fs::File::create(path)?;
+                let mut f = crate::util::create_private_file(&path)?;
                 write!(f, "{toml}")?;
             }
         }

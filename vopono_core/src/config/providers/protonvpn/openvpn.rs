@@ -228,7 +228,7 @@ impl OpenVpnProvider for ProtonVPN {
         // Write OpenVPN credentials file
         let (user, pass) = self.prompt_for_auth(uiclient)?;
         if let Some(auth_file) = self.auth_file_path()? {
-            let mut outfile = File::create(auth_file)?;
+            let mut outfile = crate::util::create_private_file(&auth_file)?;
             write!(outfile, "{user}\n{pass}")?;
             info!(
                 "ProtonVPN OpenVPN config written to {}",

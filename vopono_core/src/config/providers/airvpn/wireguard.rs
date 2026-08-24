@@ -3,7 +3,7 @@ use crate::config::providers::{ConfigurationChoice, Provider, UiClient, Wireguar
 use anyhow::{Context, anyhow};
 use log::debug;
 use serde::Deserialize;
-use std::fs::{File, create_dir_all, read_dir, remove_dir_all, rename};
+use std::fs::{create_dir_all, read_dir, remove_dir_all, rename};
 use std::io::{Cursor, Read, Write};
 use strum::IntoEnumIterator;
 use strum_macros::{Display, EnumIter};
@@ -136,7 +136,7 @@ impl WireguardProvider for AirVPN {
                 let mut contents = Vec::with_capacity(4096);
                 file.read_to_end(&mut contents)?;
                 let config_path = staging_dir.join(filename.to_lowercase().replace(' ', "_"));
-                let mut outfile = File::create(&config_path)?;
+                let mut outfile = crate::util::create_private_file(&config_path)?;
                 outfile.write_all(contents.as_slice())?;
             }
 

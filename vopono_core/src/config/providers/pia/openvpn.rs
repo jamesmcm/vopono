@@ -141,7 +141,7 @@ impl OpenVpnProvider for PrivateInternetAccess {
         let (user, pass) = self.prompt_for_auth(uiclient)?;
         let auth_file = self.auth_file_path()?;
         if let Some(auth_file) = auth_file {
-            let mut outfile = File::create(auth_file)?;
+            let mut outfile = crate::util::create_private_file(&auth_file)?;
             write!(outfile, "{user}\n{pass}")?;
         }
 

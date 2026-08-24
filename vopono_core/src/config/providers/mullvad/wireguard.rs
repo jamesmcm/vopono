@@ -137,7 +137,7 @@ impl Mullvad {
             // Save keypair
             let path = self.wireguard_dir()?.join("wireguard_device.json");
             {
-                let mut f = std::fs::File::create(path.clone())?;
+                let mut f = crate::util::create_private_file(&path)?;
                 write!(f, "{}", serde_json::to_string(&PrivateDevice::from_device(&dev, &keypair.private))?)?;
             }
             info!("Saved Wireguard keypair details to {}", path.to_string_lossy());
@@ -172,7 +172,7 @@ impl Mullvad {
             // Save keypair
             let path = self.wireguard_dir()?.join("wireguard_device.json");
             {
-                let mut f = std::fs::File::create(path.clone())?;
+                let mut f = crate::util::create_private_file(&path)?;
                 write!(f, "{}", serde_json::to_string(&PrivateDevice::from_device(&dev, &private_key))?)?;
             }
             info!("Saved Wireguard keypair details to {}", path.to_string_lossy());
@@ -197,7 +197,7 @@ impl Mullvad {
            // Save keypair
             let path = self.wireguard_dir()?.join("wireguard_device.json");
             {
-                let mut f = std::fs::File::create(path.clone())?;
+                let mut f = crate::util::create_private_file(&path)?;
                 write!(f, "{}", serde_json::to_string(&PrivateDevice::from_device(&dev, &keypair.private))?)?;
             }
             info!("Saved Wireguard keypair details to {}", path.to_string_lossy());
@@ -211,7 +211,7 @@ impl Mullvad {
             // Save keypair
             let path = self.wireguard_dir()?.join("wireguard_device.json");
             {
-                let mut f = std::fs::File::create(path.clone())?;
+                let mut f = crate::util::create_private_file(&path)?;
                 write!(
                     f,
                     "{}",
@@ -303,7 +303,7 @@ impl WireguardProvider for Mullvad {
             let toml = re.replace_all(&toml, "= $value").to_string();
             // Create file, write TOML
             {
-                let mut f = std::fs::File::create(path)?;
+                let mut f = crate::util::create_private_file(&path)?;
                 write!(f, "{toml}")?;
             }
         }

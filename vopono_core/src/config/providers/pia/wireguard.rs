@@ -256,7 +256,7 @@ impl WireguardProvider for PrivateInternetAccess {
                 // Create file, write TOML
                 let path = wireguard_dir.join(format!("{id}.conf"));
                 let wireguard_conf: String = wireguard_conf.to_string();
-                let mut f = File::create(path)?;
+                let mut f = crate::util::create_private_file(&path)?;
                 f.write_all(wireguard_conf.as_bytes())?;
 
                 config.cn_lookup.insert(wg_server.ip, wg_server.cn.clone());
@@ -269,7 +269,8 @@ impl WireguardProvider for PrivateInternetAccess {
         );
 
         // Write PrivateInternetAccess wireguard config file
-        let pia_config_file = File::create(self.wireguard_config_file_path()?)?;
+        let pia_config_file =
+            crate::util::create_private_file(&self.wireguard_config_file_path()?)?;
         serde_json::to_writer(pia_config_file, &config)?;
 
         // Write PIA certificate
@@ -330,7 +331,7 @@ impl WireguardProvider for PrivateInternetAccess {
 
         // Overwrite the existing invalid wg config with a new one that is now valid
         let new_wg_config: String = wg_config.to_string();
-        let mut f = File::create(wg_config_file)?;
+        let mut f = crate::util::create_private_file(wg_config_file)?;
         f.write_all(new_wg_config.as_bytes())?;
 
         Ok(())

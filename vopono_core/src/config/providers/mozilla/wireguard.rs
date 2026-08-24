@@ -223,7 +223,7 @@ impl WireguardProvider for MozillaVPN {
             let toml = re.replace_all(&toml, "= $value").to_string();
             // Create file, write TOML
             {
-                let mut f = std::fs::File::create(path)?;
+                let mut f = crate::util::create_private_file(&path)?;
                 write!(f, "{toml}")?;
             }
         }

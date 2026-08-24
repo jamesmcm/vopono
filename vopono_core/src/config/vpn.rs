@@ -137,7 +137,7 @@ pub fn verify_auth(
             let (user, pass) = provider.prompt_for_auth(uiclient)?;
             let contents = format!("{user}\n{pass}");
             if !crate::util::write_file_as_config_owner(&auth_file, &contents, Some(0o600))? {
-                let mut outfile = File::create(&auth_file)?;
+                let mut outfile = crate::util::create_private_file(&auth_file)?;
                 write!(outfile, "{contents}")?;
                 #[cfg(unix)]
                 {
