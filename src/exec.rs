@@ -4,7 +4,7 @@ use crate::cli_client::CliClient;
 use super::args::ExecCommand;
 use super::args::WrappedArg;
 use super::sync::synch;
-use anyhow::{anyhow, bail};
+use anyhow::{Context, anyhow, bail};
 use log::{debug, error, info, warn};
 use signal_hook::iterator::SignalsInfo;
 use signal_hook::{consts::SIGINT, iterator::Signals};
@@ -30,7 +30,8 @@ use vopono_core::network::trojan::trojan_config::TrojanConfig;
 use vopono_core::network::wireguard::Wireguard;
 use vopono_core::util::env_vars::set_env_vars;
 use vopono_core::util::{
-    get_config_from_alias, get_configs_from_alias, get_existing_namespaces, get_target_subnet,
+    get_config_from_alias, get_configs_from_alias, get_existing_namespaces, get_pids_in_namespace,
+    get_target_subnet,
 };
 use vopono_core::util::{parse_command_str, vopono_dir};
 
@@ -288,6 +289,13 @@ fn setup_namespace(
     let forwarder;
 
     if get_existing_namespaces()?.contains(&ns_name) {
+        if vopono_core::util::is_daemon_mode() {
+            let user = parsed_command
+                .user
+                .as_deref()
+                .context("Daemon namespace attachment requires an authenticated user")?;
+            authorize_existing_namespace(&ns_name, user)?;
+        }
         if foreign_attach {
             info!(
                 "Attaching to unmanaged namespace {} - vopono will not modify it and will leave it running on exit",
@@ -470,6 +478,54 @@ fn setup_namespace(
         forwarder,
         host_env_vars,
     })
+}
+
+fn authorize_existing_namespace(namespace: &str, user_name: &str) -> anyhow::Result<()> {
+    let user = nix::unistd::User::from_name(user_name)?
+        .with_context(|| format!("Authenticated user '{user_name}' no longer exists"))?;
+    let processes = get_pids_in_namespace(namespace)?
+        .into_iter()
+        .filter(|pid| *pid > 1)
+        .map(|pid| {
+            let status =
+                std::fs::read_to_string(format!("/proc/{pid}/status")).with_context(|| {
+                    format!("Refusing namespace attachment: could not inspect PID {pid}")
+                })?;
+            let owner = status
+                .lines()
+                .find(|line| line.starts_with("Uid:"))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|uid| uid.parse::<u32>().ok())
+                .with_context(|| {
+                    format!("Refusing namespace attachment: invalid owner for PID {pid}")
+                })?;
+            Ok((pid, owner))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    validate_namespace_process_owners(namespace, user.uid.as_raw(), &processes)
+}
+
+fn validate_namespace_process_owners(
+    namespace: &str,
+    requester_uid: u32,
+    processes: &[(i32, u32)],
+) -> anyhow::Result<()> {
+    let mut found_requester = false;
+    for &(pid, owner) in processes {
+        if owner == 0 {
+            continue;
+        }
+        anyhow::ensure!(
+            owner == requester_uid,
+            "Refusing to attach to namespace {namespace}: PID {pid} belongs to uid {owner}, not authenticated uid {requester_uid}"
+        );
+        found_requester = true;
+    }
+    anyhow::ensure!(
+        found_requester,
+        "Refusing to attach to namespace {namespace}: no process owned by authenticated uid {requester_uid} was found"
+    );
+    Ok(())
 }
 
 fn run_application_and_wait(
@@ -1110,6 +1166,29 @@ fn provider_port_forwarding(
 
 #[cfg(test)]
 mod tests {
+    use super::validate_namespace_process_owners;
+
+    #[test]
+    fn daemon_namespace_reuse_allows_only_requester_and_root() {
+        assert!(validate_namespace_process_owners("vo_test", 1000, &[(10, 0), (11, 1000)]).is_ok());
+    }
+
+    #[test]
+    fn daemon_namespace_reuse_rejects_foreign_or_root_only_processes() {
+        assert!(
+            validate_namespace_process_owners("vo_test", 1000, &[(10, 0), (11, 1001)])
+                .unwrap_err()
+                .to_string()
+                .contains("belongs to uid 1001")
+        );
+        assert!(
+            validate_namespace_process_owners("vo_test", 1000, &[(10, 0)])
+                .unwrap_err()
+                .to_string()
+                .contains("no process owned by authenticated uid")
+        );
+    }
+
     #[test]
     fn extracts_host_from_server_arguments() {
         use super::host_from_server_arg;
