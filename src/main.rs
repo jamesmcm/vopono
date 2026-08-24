@@ -330,7 +330,7 @@ fn run_stop_locally(request: StopRequest, json: bool, askpass: bool) -> anyhow::
     }
     let result = match request {
         StopRequest::Application(id) => control::stop_application(&id, None),
-        StopRequest::Namespace(id) => control::stop_namespace(&id),
+        StopRequest::Namespace(id) => control::stop_namespace(&id, None),
     };
     match result {
         Ok(result) => control::print_result(&result, json),

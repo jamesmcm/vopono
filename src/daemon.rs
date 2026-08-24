@@ -712,7 +712,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 DaemonStopTarget::Application(id) => {
                     crate::control::stop_application(&id, Some(uid))
                 }
-                DaemonStopTarget::Namespace(id) => crate::control::stop_namespace(&id),
+                DaemonStopTarget::Namespace(id) => crate::control::stop_namespace(&id, Some(uid)),
             };
             let payload = match outcome {
                 Ok(result) => serde_json::to_vec(&result)?,
