@@ -347,6 +347,20 @@ impl Wireguard {
                 warn!("Found no DNS settings in Wireguard config, using 8.8.8.8");
                 vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]
             });
+        // Split-tunnel configs keep a working default route through the veth
+        // for destinations outside AllowedIPs: flag resolvers that would
+        // therefore receive queries outside the tunnel.
+        if use_killswitch && !(has_ipv4_default || has_ipv6_default) {
+            for server in dns
+                .iter()
+                .filter(|server| !allowed_ips_cover(&config.peer.allowed_ips, server))
+            {
+                warn!(
+                    "DNS server {server} is outside the WireGuard AllowedIPs - DNS queries to it will bypass the tunnel"
+                );
+            }
+        }
+
         // TODO: DNS suffixes?
         let dns_egress_interface =
             (use_killswitch && (has_ipv4_default || has_ipv6_default)).then_some(if_name.as_str());
@@ -585,6 +599,11 @@ impl Wireguard {
             interface_addresses,
         })
     }
+}
+
+/// Whether `address` falls inside any of `allowed_ips`.
+fn allowed_ips_cover(allowed_ips: &[IpNet], address: &IpAddr) -> bool {
+    allowed_ips.iter().any(|network| network.contains(address))
 }
 
 fn has_default_allowed_ip(allowed_ips: &[IpNet], ipv4: bool) -> bool {
@@ -1037,6 +1056,23 @@ mod tests {
         assert!(endpoint_needs_bypass_route(
             "2001:db8::10".parse().unwrap(),
             &default_allowed_ips
+        ));
+    }
+
+    #[test]
+    fn allowed_ips_coverage_check() {
+        let allowed = networks(&["10.0.0.0/8", "fd00::/8"]);
+        assert!(allowed_ips_cover(
+            &allowed,
+            &"10.1.2.3".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!allowed_ips_cover(
+            &allowed,
+            &"192.0.2.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(allowed_ips_cover(
+            &allowed,
+            &"fd00::1".parse::<IpAddr>().unwrap()
         ));
     }
 
