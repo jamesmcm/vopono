@@ -1,5 +1,7 @@
+use anyhow::Context;
 use base64::prelude::*;
 use regex::Regex;
+use serde::Deserialize;
 use std::sync::mpsc::{self};
 use std::{sync::mpsc::Sender, thread::JoinHandle};
 use which::which;
@@ -28,6 +30,23 @@ pub struct ThreadParamsImpl {
     pub gateway: String,
     pub pia_cert_path: String,
     pub callback: Option<CallbackCommand>,
+}
+
+#[derive(Deserialize)]
+struct SignatureResponse {
+    status: String,
+    signature: Option<String>,
+    payload: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SignaturePayload {
+    port: u16,
+}
+
+#[derive(Deserialize)]
+struct BindResponse {
+    status: String,
 }
 
 impl ThreadParameters for ThreadParamsImpl {
@@ -149,25 +168,23 @@ impl Piapf {
             anyhow::bail!("Could not obtain signature for port forward from PIA API")
         }
 
-        let parsed = json::parse(String::from_utf8_lossy(&get_response.stdout).as_ref())?;
-        if parsed["status"] != "OK" {
+        let parsed: SignatureResponse = serde_json::from_slice(&get_response.stdout)
+            .context("Invalid PIA getSignature response")?;
+        if parsed.status != "OK" {
             log::error!("Signature for port forward from PIA API not OK");
             anyhow::bail!("Signature for port forward from PIA API not OK");
         }
 
-        let signature = parsed["signature"]
-            .as_str()
-            .expect("getSignature response missing signature")
-            .to_string();
-        let payload = parsed["payload"]
-            .as_str()
-            .expect("getSignature response missing payload")
-            .to_string();
+        let signature = parsed
+            .signature
+            .context("getSignature response missing signature")?;
+        let payload = parsed
+            .payload
+            .context("getSignature response missing payload")?;
         let decoded = BASE64_STANDARD.decode(&payload)?;
-        let parsed = json::parse(String::from_utf8_lossy(&decoded).as_ref())?;
-        let port = parsed["port"]
-            .as_u16()
-            .expect("getSignature response missing port");
+        let parsed: SignaturePayload =
+            serde_json::from_slice(&decoded).context("Invalid PIA signature payload")?;
+        let port = parsed.port;
 
         let params = ThreadParamsImpl {
             netns_name: ns.name.clone(),
@@ -225,9 +242,10 @@ impl ThreadLoopForwarder for Piapf {
             anyhow::bail!("Could not bind port forward from PIA API")
         }
 
-        let parsed = json::parse(String::from_utf8_lossy(&bind_response.stdout).as_ref())?;
+        let parsed: BindResponse = serde_json::from_slice(&bind_response.stdout)
+            .context("Invalid PIA bindPort response")?;
 
-        if parsed["status"] != "OK" {
+        if parsed.status != "OK" {
             log::error!("Bind for port forward from PIA API not OK");
             anyhow::bail!("Bind for port forward from PIA API not OK");
         }
