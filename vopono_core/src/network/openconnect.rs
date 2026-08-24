@@ -37,6 +37,19 @@ fn validate_unprivileged_config(config_file: &std::path::Path) -> anyhow::Result
     Ok(())
 }
 
+fn append_csd_user<'a>(
+    command: &mut Vec<&'a str>,
+    daemon_mode: bool,
+    session_user: Option<&'a str>,
+) -> anyhow::Result<()> {
+    if daemon_mode {
+        let session_user =
+            session_user.context("Daemon OpenConnect session has no authenticated user")?;
+        command.extend(["--csd-user", session_user]);
+    }
+    Ok(())
+}
+
 pub fn server_from_config(config_file: &std::path::Path) -> anyhow::Result<String> {
     let contents = std::fs::read_to_string(config_file)
         .with_context(|| format!("Failed to read {}", config_file.display()))?;
@@ -96,6 +109,16 @@ impl OpenConnect {
             "--passwd-on-stdin",
         ]
         .to_vec();
+
+        // A VPN server may provide a CSD/host-scan program. OpenConnect runs
+        // it with its own privileges unless --csd-user is set, which would
+        // turn a client-selected server into root code execution in daemon
+        // mode. The session identity is authenticated by the daemon.
+        append_csd_user(
+            &mut command_vec,
+            crate::util::is_daemon_mode(),
+            netns.predown_user.as_deref(),
+        )?;
 
         if !server.is_empty() {
             command_vec.push(server.as_ref());
@@ -159,7 +182,7 @@ impl Drop for OpenConnect {
 
 #[cfg(test)]
 mod tests {
-    use super::{server_from_config, validate_unprivileged_config};
+    use super::{append_csd_user, server_from_config, validate_unprivileged_config};
     use std::io::Write;
 
     #[test]
@@ -203,5 +226,13 @@ mod tests {
         )
         .unwrap();
         validate_unprivileged_config(config.path()).unwrap();
+    }
+
+    #[test]
+    fn daemon_forces_csd_to_authenticated_user() {
+        let mut command = vec!["openconnect"];
+        append_csd_user(&mut command, true, Some("alice")).unwrap();
+        assert_eq!(command, ["openconnect", "--csd-user", "alice"]);
+        assert!(append_csd_user(&mut command, true, None).is_err());
     }
 }
