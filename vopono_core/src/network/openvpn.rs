@@ -104,6 +104,25 @@ impl OpenVpn {
         command_vec.push("ignore");
         command_vec.push("block-outside-dns");
 
+        // In daemon mode the config file is client-controlled input, so
+        // script hooks (up/down/iproute/...) must never run as root: cap
+        // script-security after --config so a config-file directive cannot
+        // raise it again (later options win).
+        if crate::util::is_daemon_mode() {
+            command_vec.push("--script-security");
+            command_vec.push("1");
+        }
+
+        if disable_ipv6 || ipv6_disabled {
+            debug!("IPv6 disabled, will pass pull-filter ignore to OpenVPN");
+            command_vec.push("--pull-filter");
+            command_vec.push("ignore");
+            command_vec.push("ifconfig-ipv6");
+            command_vec.push("--pull-filter");
+            command_vec.push("ignore");
+            command_vec.push("route-ipv6");
+        }
+
         let remotes = get_remotes_from_config(&config_file)?;
         debug!("Found remotes: {:?}", remotes);
         let working_dir = PathBuf::from(config_file_path.parent().unwrap());
