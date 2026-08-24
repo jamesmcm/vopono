@@ -677,7 +677,12 @@ fn run_protocol_in_netns(
                 parsed_command.firewall,
             )?;
             if !parsed_command.no_killswitch {
-                apply_tunnel_only_killswitch_for(parsed_command, ns, WARP_ENDPOINT_HOST)?;
+                apply_tunnel_only_killswitch_for(
+                    parsed_command,
+                    ns,
+                    WARP_ENDPOINT_HOST,
+                    &["CloudflareWARP", "warp"],
+                )?;
             }
         }
         Protocol::OpenVpn => {
@@ -825,7 +830,16 @@ fn run_protocol_in_netns(
                 uiclient,
             )?;
             if !parsed_command.no_killswitch {
-                apply_tunnel_only_killswitch_for(parsed_command, ns, &parsed_command.server)?;
+                let server = if parsed_command.server.is_empty() {
+                    vopono_core::network::openconnect::server_from_config(
+                        config_file
+                            .as_deref()
+                            .expect("No OpenConnect config file provided"),
+                    )?
+                } else {
+                    parsed_command.server.clone()
+                };
+                apply_tunnel_only_killswitch_for(parsed_command, ns, &server, &["tun"])?;
             }
         }
         Protocol::OpenFortiVpn => {
@@ -840,7 +854,12 @@ fn run_protocol_in_netns(
                 parsed_command.allow_host_access,
             )?;
             if !parsed_command.no_killswitch {
-                apply_tunnel_only_killswitch_for(parsed_command, ns, &parsed_command.server)?;
+                let server = vopono_core::network::openfortivpn::server_from_config(
+                    config_file
+                        .as_deref()
+                        .expect("No OpenFortiVPN config file provided"),
+                )?;
+                apply_tunnel_only_killswitch_for(parsed_command, ns, &server, &["ppp"])?;
             }
         }
         Protocol::Ssh => {
@@ -882,21 +901,23 @@ fn apply_tunnel_only_killswitch_for(
     parsed_command: &ArgsConfig,
     ns: &NetworkNamespace,
     server: &str,
+    tunnel_interface_prefixes: &[&str],
 ) -> anyhow::Result<()> {
     use vopono_core::network::firewall::apply_tunnel_only_killswitch;
 
     let Some(host) = host_from_server_arg(server) else {
-        log::warn!(
-            "Could not derive a VPN server host from '{server}' for the killswitch; skipping tunnel-only policy"
-        );
-        return Ok(());
+        anyhow::bail!("Could not derive a VPN server host from '{server}' for the killswitch");
     };
     let endpoints = vopono_core::util::hostname_to_ip(&host)
         .map_err(|e| anyhow!("Cannot resolve VPN server {host} for killswitch: {e}"))?;
     if endpoints.is_empty() {
         anyhow::bail!("VPN server {host} resolved to no addresses for killswitch");
     }
-    let tunnel_iface = vopono_core::network::firewall::wait_for_tunnel_interface(&ns.name, 20)?;
+    let tunnel_iface = vopono_core::network::firewall::wait_for_tunnel_interface(
+        &ns.name,
+        tunnel_interface_prefixes,
+        20,
+    )?;
     apply_tunnel_only_killswitch(
         ns,
         tunnel_iface.as_deref(),

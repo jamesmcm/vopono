@@ -255,29 +255,6 @@ pub fn validated_user_owned_dir(path: &Path, uid: Uid) -> anyhow::Result<PathBuf
     Ok(canonical)
 }
 
-/// Validate a network namespace name supplied by a caller.
-///
-/// Namespace names end up as argv elements for `ip netns ...` (option
-/// injection via leading `-`) and as path components under `/etc/netns/<name>`
-/// and `/run/netns/<name>` (traversal). Restrict to a conservative charset.
-pub fn validate_netns_name(name: &str) -> anyhow::Result<()> {
-    let valid = !name.is_empty()
-        && name.len() <= 64
-        && name
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-        && !name.ends_with('.');
-    anyhow::ensure!(
-        valid,
-        "Invalid network namespace name '{name}': must be 1-64 ASCII alphanumeric characters, dots, underscores or hyphens, starting alphanumerically"
-    );
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,20 +344,5 @@ mod tests {
         assert!(validated_user_owned_dir(&base.join("plain"), uid).is_err());
 
         let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn netns_names_are_constrained() {
-        assert!(validate_netns_name("vo_mu_se").is_ok());
-        assert!(validate_netns_name("vo_p_se-sth").is_ok());
-        assert!(validate_netns_name("a.b_c-d").is_ok());
-        assert!(validate_netns_name("").is_err());
-        assert!(validate_netns_name("-flag").is_err());
-        assert!(validate_netns_name(".hidden").is_err());
-        assert!(validate_netns_name("trailing.").is_err());
-        assert!(validate_netns_name("has space").is_err());
-        assert!(validate_netns_name("../etc").is_err());
-        assert!(validate_netns_name("slash/es").is_err());
-        assert!(validate_netns_name(&"x".repeat(65)).is_err());
     }
 }

@@ -8,6 +8,25 @@ use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::PathBuf;
 
+pub fn server_from_config(config_file: &std::path::Path) -> anyhow::Result<String> {
+    let contents = std::fs::read_to_string(config_file)
+        .with_context(|| format!("Failed to read {}", config_file.display()))?;
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .find_map(|line| {
+            let (option, value) = line
+                .split_once('=')
+                .or_else(|| line.split_once(char::is_whitespace))?;
+            (option.trim() == "server")
+                .then(|| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| anyhow!("OpenConnect config has no server option"))
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenConnect {
     pid: u32,
@@ -102,5 +121,25 @@ impl Drop for OpenConnect {
             Ok(_) => debug!("Killed OpenConnect (pid: {})", self.pid),
             Err(e) => error!("Failed to kill OpenConnect (pid: {}): {:?}", self.pid, e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_from_config;
+    use std::io::Write;
+
+    #[test]
+    fn reads_server_from_config() {
+        let mut config = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            config,
+            "# comment\nserver = https://vpn.example.com:443/path"
+        )
+        .unwrap();
+        assert_eq!(
+            server_from_config(config.path()).unwrap(),
+            "https://vpn.example.com:443/path"
+        );
     }
 }

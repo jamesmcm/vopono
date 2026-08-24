@@ -10,18 +10,44 @@ pub trait Forwarder {
     fn forwarded_port(&self) -> u16;
 }
 
+/// A port-forwarding callback and the identity it must run as.
+#[derive(Clone, Debug)]
+pub struct CallbackCommand {
+    command: String,
+    user: Option<String>,
+    group: Option<String>,
+}
+
+impl CallbackCommand {
+    pub fn for_session(
+        command: Option<&String>,
+        user: Option<String>,
+        group: Option<String>,
+    ) -> Option<Self> {
+        command.cloned().map(|command| Self {
+            command,
+            user,
+            group,
+        })
+    }
+
+    fn argv(&self, port: u16) -> Vec<String> {
+        let mut argv = Vec::new();
+        if let Some(user) = &self.user {
+            argv.extend(["sudo".to_string(), "--preserve-env".to_string()]);
+            if let Some(group) = &self.group {
+                argv.extend(["--group".to_string(), group.clone()]);
+            }
+            argv.extend(["--user".to_string(), user.clone()]);
+        }
+        argv.extend([self.command.clone(), port.to_string()]);
+        argv
+    }
+}
+
 /// ThreadParams must implement these methods
 pub trait ThreadParameters {
-    fn get_callback_command(&self) -> Option<String>;
-    /// Session user for callback execution (de-elevation). `None` keeps the
-    /// historical behaviour of running as the current user in CLI sessions.
-    fn get_callback_user(&self) -> Option<String> {
-        None
-    }
-    /// Session group for callback execution.
-    fn get_callback_group(&self) -> Option<String> {
-        None
-    }
+    fn get_callback(&self) -> Option<&CallbackCommand>;
     fn get_loop_delay(&self) -> u64;
     fn get_netns_name(&self) -> String;
     /// Resolved vopono locks directory. Captured on the creating thread
@@ -70,23 +96,11 @@ pub trait ThreadLoopForwarder: Forwarder {
     }
 
     fn callback_command(params: &Self::ThreadParams, port: u16) -> Option<anyhow::Result<String>> {
-        params.get_callback_command().map(|callback_command| {
+        params.get_callback().map(|callback| {
             // The callback is attacker-controllable input relative to this
             // process: de-elevate it to the session user (network namespaces
             // are not a privilege boundary).
-            let mut command_vec: Vec<String> = Vec::new();
-            if let Some(user) = params.get_callback_user() {
-                command_vec.push("sudo".to_string());
-                command_vec.push("--preserve-env".to_string());
-                if let Some(group) = params.get_callback_group() {
-                    command_vec.push("--group".to_string());
-                    command_vec.push(group);
-                }
-                command_vec.push("--user".to_string());
-                command_vec.push(user);
-            }
-            command_vec.push(callback_command);
-            command_vec.push(port.to_string());
+            let command_vec = callback.argv(port);
             let argv: Vec<&str> = command_vec.iter().map(|s| s.as_str()).collect();
             let refresh_response =
                 NetworkNamespace::exec_with_output(&params.get_netns_name(), &argv)?;

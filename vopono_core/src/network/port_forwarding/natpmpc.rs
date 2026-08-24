@@ -7,7 +7,7 @@ use std::{
     thread::JoinHandle,
 };
 
-use super::{Forwarder, ThreadLoopForwarder, ThreadParameters};
+use super::{CallbackCommand, Forwarder, ThreadLoopForwarder, ThreadParameters};
 use crate::network::netns::NetworkNamespace;
 
 // TODO: Move this to ProtonVPN provider
@@ -23,20 +23,12 @@ pub struct Natpmpc {
 pub struct ThreadParamsImpl {
     pub netns_name: String,
     pub locks_dir: std::path::PathBuf,
-    pub callback: Option<String>,
-    pub user: Option<String>,
-    pub group: Option<String>,
+    pub callback: Option<CallbackCommand>,
 }
 
 impl ThreadParameters for ThreadParamsImpl {
-    fn get_callback_command(&self) -> Option<String> {
-        self.callback.clone()
-    }
-    fn get_callback_user(&self) -> Option<String> {
-        self.user.clone()
-    }
-    fn get_callback_group(&self) -> Option<String> {
-        self.group.clone()
+    fn get_callback(&self) -> Option<&CallbackCommand> {
+        self.callback.as_ref()
     }
     fn get_loop_delay(&self) -> u64 {
         45
@@ -123,9 +115,11 @@ impl Natpmpc {
         let params = ThreadParamsImpl {
             netns_name: ns.name.clone(),
             locks_dir: crate::util::config_dir()?.join("vopono").join("locks"),
-            callback: callback.cloned(),
-            user: ns.predown_user.clone(),
-            group: ns.predown_group.clone(),
+            callback: CallbackCommand::for_session(
+                callback,
+                ns.predown_user.clone(),
+                ns.predown_group.clone(),
+            ),
         };
 
         let port = Self::refresh_port(&params)?;

@@ -252,7 +252,7 @@ pub fn probe_namespace(
 ) -> ConnectivityStatus {
     // The namespace id reaches `ip netns exec` as argv (and would reach
     // /run/netns/<id> elsewhere); reject injection or traversal shapes.
-    if let Err(error) = vopono_core::util::validate_netns_name(id) {
+    if let Err(error) = vopono_core::network::netns::validate_netns_name(id) {
         return ConnectivityStatus {
             id: id.to_string(),
             connected: false,

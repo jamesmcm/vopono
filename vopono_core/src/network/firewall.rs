@@ -195,6 +195,16 @@ pub fn tunnel_only_killswitch_rules(
                 "rule".into(),
                 "inet".into(),
                 ns_name.into(),
+                "forward".into(),
+                "counter".into(),
+                "drop".into(),
+            ]);
+            rules.push(vec![
+                "nft".into(),
+                "add".into(),
+                "rule".into(),
+                "inet".into(),
+                ns_name.into(),
                 "output".into(),
                 "counter".into(),
                 "reject".into(),
@@ -239,15 +249,23 @@ pub fn apply_tunnel_only_killswitch(
 
 /// Parse `ip -o link` output, returning the first interface that is neither
 /// loopback nor a vopono-created veth (names prefixed `vo_`).
-pub fn parse_tunnel_interface_from_ip_link(output: &str) -> Option<String> {
+pub fn parse_tunnel_interface_from_ip_link(
+    output: &str,
+    expected_prefixes: &[&str],
+) -> Option<String> {
     for line in output.lines() {
         let mut parts = line.split(':');
         let _index = parts.next()?;
-        let name = parts.next()?.trim();
-        if name == "lo" || name.starts_with("vo_") || name.starts_with("@") {
+        let name = parts.next()?.trim().split('@').next()?;
+        if name == "lo" || name.starts_with("vo_") {
             continue;
         }
-        return Some(name.to_string());
+        if expected_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            return Some(name.to_string());
+        }
     }
     None
 }
@@ -259,14 +277,17 @@ pub fn parse_tunnel_interface_from_ip_link(output: &str) -> Option<String> {
 /// endpoint-only policy instead of failing open.
 pub fn wait_for_tunnel_interface(
     netns_name: &str,
+    expected_prefixes: &[&str],
     timeout_secs: u64,
 ) -> anyhow::Result<Option<String>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     while std::time::Instant::now() < deadline {
         let output = NetworkNamespace::exec_with_output(netns_name, &["ip", "-o", "link"])?;
         if output.status.success()
-            && let Some(iface) =
-                parse_tunnel_interface_from_ip_link(&String::from_utf8_lossy(&output.stdout))
+            && let Some(iface) = parse_tunnel_interface_from_ip_link(
+                &String::from_utf8_lossy(&output.stdout),
+                expected_prefixes,
+            )
         {
             info!("Detected tunnel interface {iface} in {netns_name}");
             return Ok(Some(iface));
@@ -495,15 +516,21 @@ mod tests {
             last_output.ends_with("admin-prohibited"),
             "output must end in reject: {last_output}"
         );
+        assert!(
+            joined
+                .iter()
+                .any(|r| r == "nft add rule inet vo_t forward counter drop")
+        );
     }
 
     #[test]
     fn parses_tunnel_interface_from_ip_link_output() {
         let sample = "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN \\    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00\n2: vo_x_s@vo_x_d: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 ...\n5: tun0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP> mtu 1400 ...";
         assert_eq!(
-            parse_tunnel_interface_from_ip_link(sample),
+            parse_tunnel_interface_from_ip_link(sample, &["tun"]),
             Some("tun0".to_string())
         );
-        assert_eq!(parse_tunnel_interface_from_ip_link(""), None);
+        assert_eq!(parse_tunnel_interface_from_ip_link(sample, &["ppp"]), None);
+        assert_eq!(parse_tunnel_interface_from_ip_link("", &["tun"]), None);
     }
 }

@@ -14,6 +14,23 @@ pub struct OpenFortiVpn {
     pid: u32,
 }
 
+pub fn server_from_config(config_file: &Path) -> anyhow::Result<String> {
+    let contents = std::fs::read_to_string(config_file)
+        .with_context(|| format!("Failed to read {}", config_file.display()))?;
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .find_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            (key.trim() == "host")
+                .then(|| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| anyhow!("OpenFortiVPN config has no host option"))
+}
+
 impl OpenFortiVpn {
     #[allow(clippy::too_many_arguments)]
     pub fn run(
@@ -203,4 +220,20 @@ pub fn get_dns(stdout: &str) -> anyhow::Result<(Vec<IpAddr>, Vec<String>)> {
         ips, suffixes
     );
     Ok((ips, suffixes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_from_config;
+    use std::io::Write;
+
+    #[test]
+    fn reads_host_from_config() {
+        let mut config = tempfile::NamedTempFile::new().unwrap();
+        writeln!(config, "# comment\nhost = vpn.company.example\nport = 443").unwrap();
+        assert_eq!(
+            server_from_config(config.path()).unwrap(),
+            "vpn.company.example"
+        );
+    }
 }

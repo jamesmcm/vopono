@@ -19,8 +19,7 @@ use crate::network::host_masquerade::FirewallException;
 use crate::network::wireguard_config::WireguardPeer;
 use crate::util::{
     chown_to_config_owner, config_dir, ensure_dir_as_config_owner, get_existing_namespaces,
-    parse_command_str, set_config_permissions, sudo_command, validate_netns_name,
-    write_file_as_config_owner,
+    parse_command_str, sudo_command, write_file_as_config_owner,
 };
 use anyhow::{Context, anyhow};
 use log::{debug, info, warn};
@@ -112,6 +111,61 @@ pub struct IpPair {
 pub struct VethPairIPs {
     pub ipv4: Option<IpPair>,
     pub ipv6: Option<IpPair>, // None if IPv6 disabled
+}
+
+/// Validate a network namespace name before it is used as an `ip netns`
+/// argument or as a component below `/etc/netns` and `/run/netns`.
+pub fn validate_netns_name(name: &str) -> anyhow::Result<()> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && !name.ends_with('.');
+    anyhow::ensure!(
+        valid,
+        "Invalid network namespace name '{name}': must be 1-64 ASCII alphanumeric characters, dots, underscores or hyphens, starting alphanumerically"
+    );
+    Ok(())
+}
+
+/// Atomically write a namespace lockfile with the ownership and modes used by
+/// both daemon and sudo/CLI sessions.
+fn write_lockfile_data(path: &Path, contents: &str) -> anyhow::Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("No parent directory for {}", path.display()))?;
+    if ensure_dir_as_config_owner(parent, Some(0o750))? {
+        anyhow::ensure!(
+            write_file_as_config_owner(path, contents, Some(0o640))?,
+            "Config-owner writer unexpectedly unavailable"
+        );
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))?;
+    }
+    chown_to_config_owner(parent)?;
+    let temporary_path = path.with_extension(format!("tmp-{}", unistd::getpid()));
+    {
+        let mut file = File::create(&temporary_path)?;
+        write!(file, "{contents}")?;
+    }
+    std::fs::rename(&temporary_path, path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))?;
+    }
+    chown_to_config_owner(path)
 }
 
 impl NetworkNamespace {
@@ -875,25 +929,8 @@ impl NetworkNamespace {
         let lock_string = ron::ser::to_string(&lock)?;
         let mut lockfile_path = lock_dir;
         lockfile_path.push(format!("{}", unistd::getpid()));
-        let lock_dir = lockfile_path
-            .parent()
-            .with_context(|| format!("No parent directory for {}", lockfile_path.display()))?
-            .to_path_buf();
-
-        if ensure_dir_as_config_owner(&lock_dir, Some(0o750))? {
-            write_file_as_config_owner(&lockfile_path, &lock_string, Some(0o640))?;
-            debug!(
-                "Lockfile written with dropped privileges: {}",
-                lockfile_path.display()
-            );
-        } else {
-            std::fs::create_dir_all(&lock_dir)?;
-            let mut f = File::create(&lockfile_path)?;
-            write!(f, "{lock_string}")?;
-            debug!("Lockfile written: {}", lockfile_path.display());
-
-            set_config_permissions()?;
-        }
+        write_lockfile_data(&lockfile_path, &lock_string)?;
+        debug!("Lockfile written: {}", lockfile_path.display());
         Ok(lock.ns)
     }
 
@@ -947,19 +984,7 @@ impl NetworkNamespace {
             ),
         };
         let lock_string = ron::ser::to_string(&view)?;
-        if !write_file_as_config_owner(&lockfile_path, &lock_string, Some(0o640))? {
-            // Write to a sibling temporary file first so readers never observe a
-            // partially written lockfile, then atomically move it into place.
-            let temporary_path = lockfile_path.with_extension("tmp");
-            {
-                let mut file = File::create(&temporary_path)?;
-                write!(file, "{lock_string}")?;
-            }
-            std::fs::rename(&temporary_path, &lockfile_path)?;
-            // The rename replaced the inode, discarding any earlier ownership
-            // fixup: reapply it so the invoking user owns the final file.
-            chown_to_config_owner(&lockfile_path)?;
-        }
+        write_lockfile_data(&lockfile_path, &lock_string)?;
         Ok(())
     }
 
@@ -994,25 +1019,8 @@ impl NetworkNamespace {
         let lock_string = ron::ser::to_string(&lock)?;
         let mut lockfile_path = lock_dir;
         lockfile_path.push(format!("client-{pid}"));
-        let lock_dir = lockfile_path
-            .parent()
-            .with_context(|| format!("No parent directory for {}", lockfile_path.display()))?
-            .to_path_buf();
-
-        if ensure_dir_as_config_owner(&lock_dir, Some(0o750))? {
-            write_file_as_config_owner(&lockfile_path, &lock_string, Some(0o640))?;
-            debug!(
-                "Client lockfile written with dropped privileges: {}",
-                lockfile_path.display()
-            );
-        } else {
-            std::fs::create_dir_all(&lock_dir)?;
-            let mut f = File::create(&lockfile_path)?;
-            write!(f, "{lock_string}")?;
-            debug!("Client lockfile written: {}", lockfile_path.display());
-
-            set_config_permissions()?;
-        }
+        write_lockfile_data(&lockfile_path, &lock_string)?;
+        debug!("Client lockfile written: {}", lockfile_path.display());
         Ok(Some(lockfile_path))
     }
 
@@ -1265,5 +1273,29 @@ impl NetworkNamespace {
     /// visible at the call site instead of relying on an implicit drop.
     pub fn teardown(self) {
         drop(self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_netns_name;
+
+    #[test]
+    fn netns_names_are_constrained() {
+        for valid in ["vo_mu_se", "vo_p_se-sth", "a.b_c-d"] {
+            assert!(validate_netns_name(valid).is_ok());
+        }
+        for invalid in [
+            "",
+            "-flag",
+            ".hidden",
+            "trailing.",
+            "has space",
+            "../etc",
+            "slash/es",
+        ] {
+            assert!(validate_netns_name(invalid).is_err());
+        }
+        assert!(validate_netns_name(&"x".repeat(65)).is_err());
     }
 }

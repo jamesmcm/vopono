@@ -9,8 +9,7 @@ pub mod wireguard;
 
 pub use owner_write::{
     ensure_dir_as_config_owner, perform_owner_write, run_owner_write_from_stdin,
-    set_helper_exe_override, validate_netns_name, validated_user_owned_dir,
-    write_file_as_config_owner,
+    set_helper_exe_override, validated_user_owned_dir, write_file_as_config_owner,
 };
 
 extern crate shell_words as shellwords;
@@ -71,9 +70,7 @@ pub fn config_owner_override() -> Option<(Uid, Gid)> {
 
 pub fn config_dir() -> anyhow::Result<PathBuf> {
     // Respect thread-local override first (used by daemon to select the connecting user's config).
-    if let Some(override_path) = CONFIG_DIR_OVERRIDE.with(|ov| ov.borrow().clone())
-        && override_path.exists()
-    {
+    if let Some(override_path) = CONFIG_DIR_OVERRIDE.with(|ov| ov.borrow().clone()) {
         debug!(
             "Using config dir from override: {}",
             override_path.to_string_lossy()

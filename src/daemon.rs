@@ -112,9 +112,18 @@ pub fn status() -> DaemonStatus {
 
 /// Compatible means an identical major version (breaking-change proxy).
 fn versions_compatible(daemon_version: &str, client_version: &str) -> bool {
-    let daemon_major = daemon_version.split('.').next().unwrap_or_default();
-    let client_major = client_version.split('.').next().unwrap_or_default();
-    !daemon_major.is_empty() && daemon_major == client_major
+    fn major(version: &str) -> Option<u64> {
+        let core = version.split(['-', '+']).next()?;
+        let mut components = core.split('.');
+        let major = components.next()?.parse().ok()?;
+        components.next()?.parse::<u64>().ok()?;
+        components.next()?.parse::<u64>().ok()?;
+        components.next().is_none().then_some(major)
+    }
+
+    major(daemon_version)
+        .zip(major(client_version))
+        .is_some_and(|(daemon_major, client_major)| daemon_major == client_major)
 }
 
 /// Outcome of comparing a peer's version against ours.
@@ -261,6 +270,14 @@ pub(crate) fn read_framed(
     let mut buffer = vec![0u8; len];
     stream.read_exact(&mut buffer)?;
     Ok(buffer)
+}
+
+fn read_request(stream: &mut LocalSocketStream) -> anyhow::Result<DaemonRequest> {
+    Ok(wincode::deserialize(&read_framed(stream, MAX_FRAME_LEN)?)?)
+}
+
+fn write_response(stream: &mut LocalSocketStream, response: &DaemonResponse) -> anyhow::Result<()> {
+    write_framed(stream, &wincode::serialize(response)?)
 }
 
 pub fn print_status(json: bool) -> anyhow::Result<()> {
@@ -425,46 +442,31 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
 
     // Read a framed request (length-prefixed u32 then payload). Newer
     // clients announce their version first so skew can be flagged here.
-    let mut request: DaemonRequest = {
-        let mut len_bytes = [0u8; 4];
-        conn.read_exact(&mut len_bytes)?;
-        let len = u32::from_be_bytes(len_bytes) as usize;
-        anyhow::ensure!(len <= MAX_FRAME_LEN, "Client frame too large: {len}");
-        let mut buffer = vec![0u8; len];
-        conn.read_exact(&mut buffer)?;
-        wincode::deserialize(&buffer)?
-    };
+    let mut request = read_request(&mut conn)?;
     if let DaemonRequest::ClientVersion(client_version) = &request {
         // Handshake: flag skew on our side, tell the client ours, then read
         // the actual request frame.
         warn_on_client_version_mismatch(client_version);
         let response = DaemonResponse::Version(env!("CARGO_PKG_VERSION").to_string());
-        if let Ok(bytes) = wincode::serialize(&response) {
-            let _ = conn.write_all(&(bytes.len() as u32).to_be_bytes());
-            let _ = conn.write_all(&bytes);
-        }
-        request = {
-            let mut len_bytes = [0u8; 4];
-            conn.read_exact(&mut len_bytes)?;
-            let len = u32::from_be_bytes(len_bytes) as usize;
-            anyhow::ensure!(len <= MAX_FRAME_LEN, "Client frame too large: {len}");
-            let mut buffer = vec![0u8; len];
-            conn.read_exact(&mut buffer)?;
-            wincode::deserialize(&buffer)?
-        };
+        let _ = write_response(&mut conn, &response);
+        request = read_request(&mut conn)?;
     }
 
-    // All writes into the client's config tree are performed by a
-    // dropped-privilege subprocess so the kernel - not a post-hoc chown -
-    // enforces ownership. Configure both overrides up front, then adopt the
-    // client-supplied base directory only after validating it against this
-    // connection's authenticated peer.
-    vopono_core::util::set_helper_exe_override(std::env::current_exe().ok());
-    vopono_core::util::set_config_owner_override(Some((uid, gid)));
-    let provided_config_home = request_client_config_home(&request);
-    let config_base = adopt_client_config_base(provided_config_home, &user, uid)
-        .context("No usable config directory for client")?;
-    vopono_core::util::set_config_dir_override(Some(config_base));
+    // Only execute/stop requests access the client's config tree. Version
+    // and connectivity requests must not create or require ~/.config.
+    if matches!(
+        &request,
+        DaemonRequest::Execute { .. } | DaemonRequest::Stop(_)
+    ) {
+        // Writes use a dropped-privilege subprocess so the kernel, rather
+        // than a post-hoc chown, enforces ownership.
+        vopono_core::util::set_helper_exe_override(std::env::current_exe().ok());
+        vopono_core::util::set_config_owner_override(Some((uid, gid)));
+        let provided_config_home = request_client_config_home(&request);
+        let config_base = adopt_client_config_base(provided_config_home, &user, uid)
+            .context("No usable config directory for client")?;
+        vopono_core::util::set_config_dir_override(Some(config_base));
+    }
 
     match request {
         DaemonRequest::Execute {
@@ -694,16 +696,13 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             drop(port_forward_keepalive);
 
             let response_code = status.code().unwrap_or(1);
-            let bytes = wincode::serialize(&DaemonResponse::Exit(response_code))?;
-            conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
-            conn.write_all(&bytes)?;
+            write_response(&mut conn, &DaemonResponse::Exit(response_code))?;
         }
         DaemonRequest::Version => {
-            let bytes = wincode::serialize(&DaemonResponse::Version(
-                env!("CARGO_PKG_VERSION").to_string(),
-            ))?;
-            conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
-            conn.write_all(&bytes)?;
+            write_response(
+                &mut conn,
+                &DaemonResponse::Version(env!("CARGO_PKG_VERSION").to_string()),
+            )?;
         }
         DaemonRequest::Stop(stop_request) => {
             // The config base was already adopted and validated for this
@@ -719,9 +718,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 Ok(result) => serde_json::to_vec(&result)?,
                 Err(error) => serde_json::to_vec(&crate::errors::error_json_value(&error))?,
             };
-            let bytes = wincode::serialize(&DaemonResponse::Json(payload))?;
-            conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
-            conn.write_all(&bytes)?;
+            write_response(&mut conn, &DaemonResponse::Json(payload))?;
         }
         DaemonRequest::CheckNamespace(request) => {
             // The probe needs root to enter the namespace, so it can only run
@@ -749,9 +746,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 request.skip_dns.unwrap_or(false),
             );
             let payload = serde_json::to_vec(&status)?;
-            let bytes = wincode::serialize(&DaemonResponse::Json(payload))?;
-            conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
-            conn.write_all(&bytes)?;
+            write_response(&mut conn, &DaemonResponse::Json(payload))?;
         }
         DaemonRequest::Control(_) => {
             // Ignore unexpected control frame sent as the first message
@@ -912,6 +907,10 @@ mod tests {
             classify_version_skew("", "0.10.22"),
             VersionSkew::MajorMismatch,
             "unparsable peer versions are treated as incompatible"
+        );
+        assert_eq!(
+            classify_version_skew("garbage.10.22", "0.10.22"),
+            VersionSkew::MajorMismatch
         );
     }
 
