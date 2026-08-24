@@ -13,6 +13,7 @@ mod errors;
 mod exec;
 mod list;
 mod list_configs;
+mod namespace_ownership;
 mod providers;
 mod server_metadata;
 mod sync;

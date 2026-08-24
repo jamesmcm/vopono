@@ -30,8 +30,7 @@ use vopono_core::network::trojan::trojan_config::TrojanConfig;
 use vopono_core::network::wireguard::Wireguard;
 use vopono_core::util::env_vars::set_env_vars;
 use vopono_core::util::{
-    get_config_from_alias, get_configs_from_alias, get_existing_namespaces, get_pids_in_namespace,
-    get_target_subnet,
+    get_config_from_alias, get_configs_from_alias, get_existing_namespaces, get_target_subnet,
 };
 use vopono_core::util::{parse_command_str, vopono_dir};
 
@@ -203,6 +202,7 @@ fn setup_namespace(
     // namespace that already exists. Provider None also satisfies the
     // provider/protocol pairing validation without bringing up any service.
     let mut command = command;
+    let explicit_existing = command.existing_netns.is_some();
     let mut foreign_attach = false;
     if let Some(netns) = command.existing_netns.clone() {
         ensure_namespace_exists(&netns)?;
@@ -273,7 +273,7 @@ fn setup_namespace(
         _ => parsed_command.provider.get_dyn_provider().alias_2char(),
     };
 
-    let ns_name = if let Some(c_ns_name) = parsed_command.custom_netns_name.clone() {
+    let base_ns_name = if let Some(c_ns_name) = parsed_command.custom_netns_name.clone() {
         c_ns_name
     } else {
         let short_name = if parsed_command.server.len() > 7 {
@@ -283,18 +283,34 @@ fn setup_namespace(
         };
         format!("vo_{alias}_{short_name}")
     };
+    let daemon_uid = if vopono_core::util::is_daemon_mode() {
+        let user_name = parsed_command
+            .user
+            .as_deref()
+            .context("Daemon namespace setup requires an authenticated user")?;
+        Some(
+            nix::unistd::User::from_name(user_name)?
+                .with_context(|| format!("Authenticated user '{user_name}' no longer exists"))?
+                .uid,
+        )
+    } else {
+        None
+    };
+    let ns_name = if let Some(uid) = daemon_uid
+        && !explicit_existing
+    {
+        crate::namespace_ownership::name_for_uid(&base_ns_name, uid)?
+    } else {
+        base_ns_name
+    };
 
     let mut ns;
     let _sysctl;
     let forwarder;
 
     if get_existing_namespaces()?.contains(&ns_name) {
-        if vopono_core::util::is_daemon_mode() {
-            let user = parsed_command
-                .user
-                .as_deref()
-                .context("Daemon namespace attachment requires an authenticated user")?;
-            authorize_existing_namespace(&ns_name, user)?;
+        if let Some(uid) = daemon_uid {
+            crate::namespace_ownership::authorize(&ns_name, uid)?;
         }
         if foreign_attach {
             info!(
@@ -332,6 +348,9 @@ fn setup_namespace(
             parsed_command.user.clone(),
             parsed_command.group.clone(),
         )?;
+        if let Some(uid) = daemon_uid {
+            crate::namespace_ownership::tag(&ns_name, uid)?;
+        }
         ns.set_server(Some(parsed_command.server.clone()));
         ns.set_port_configuration(
             parsed_command.open_ports.as_deref(),
@@ -478,54 +497,6 @@ fn setup_namespace(
         forwarder,
         host_env_vars,
     })
-}
-
-fn authorize_existing_namespace(namespace: &str, user_name: &str) -> anyhow::Result<()> {
-    let user = nix::unistd::User::from_name(user_name)?
-        .with_context(|| format!("Authenticated user '{user_name}' no longer exists"))?;
-    let processes = get_pids_in_namespace(namespace)?
-        .into_iter()
-        .filter(|pid| *pid > 1)
-        .map(|pid| {
-            let status =
-                std::fs::read_to_string(format!("/proc/{pid}/status")).with_context(|| {
-                    format!("Refusing namespace attachment: could not inspect PID {pid}")
-                })?;
-            let owner = status
-                .lines()
-                .find(|line| line.starts_with("Uid:"))
-                .and_then(|line| line.split_whitespace().nth(1))
-                .and_then(|uid| uid.parse::<u32>().ok())
-                .with_context(|| {
-                    format!("Refusing namespace attachment: invalid owner for PID {pid}")
-                })?;
-            Ok((pid, owner))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    validate_namespace_process_owners(namespace, user.uid.as_raw(), &processes)
-}
-
-fn validate_namespace_process_owners(
-    namespace: &str,
-    requester_uid: u32,
-    processes: &[(i32, u32)],
-) -> anyhow::Result<()> {
-    let mut found_requester = false;
-    for &(pid, owner) in processes {
-        if owner == 0 {
-            continue;
-        }
-        anyhow::ensure!(
-            owner == requester_uid,
-            "Refusing to attach to namespace {namespace}: PID {pid} belongs to uid {owner}, not authenticated uid {requester_uid}"
-        );
-        found_requester = true;
-    }
-    anyhow::ensure!(
-        found_requester,
-        "Refusing to attach to namespace {namespace}: no process owned by authenticated uid {requester_uid} was found"
-    );
-    Ok(())
 }
 
 fn run_application_and_wait(
@@ -1166,29 +1137,6 @@ fn provider_port_forwarding(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_namespace_process_owners;
-
-    #[test]
-    fn daemon_namespace_reuse_allows_only_requester_and_root() {
-        assert!(validate_namespace_process_owners("vo_test", 1000, &[(10, 0), (11, 1000)]).is_ok());
-    }
-
-    #[test]
-    fn daemon_namespace_reuse_rejects_foreign_or_root_only_processes() {
-        assert!(
-            validate_namespace_process_owners("vo_test", 1000, &[(10, 0), (11, 1001)])
-                .unwrap_err()
-                .to_string()
-                .contains("belongs to uid 1001")
-        );
-        assert!(
-            validate_namespace_process_owners("vo_test", 1000, &[(10, 0)])
-                .unwrap_err()
-                .to_string()
-                .contains("no process owned by authenticated uid")
-        );
-    }
-
     #[test]
     fn extracts_host_from_server_arguments() {
         use super::host_from_server_arg;

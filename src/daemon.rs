@@ -757,6 +757,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
         DaemonRequest::CheckNamespace(request) => {
             // The probe needs root to enter the namespace, so it can only run
             // here (or in the sudo fallback path of the CLI).
+            crate::namespace_ownership::authorize(&request.id, uid)?;
             let status = crate::check::probe_namespace(
                 &request.id,
                 request

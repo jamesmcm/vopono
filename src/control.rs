@@ -111,7 +111,7 @@ pub fn stop_namespace(
     }
 
     if let Some(uid) = requester_uid {
-        authorize_namespace_owner(namespace_id, uid)?;
+        crate::namespace_ownership::authorize(namespace_id, uid)?;
     }
 
     let namespace = NetworkNamespace::from_existing(namespace_id.to_string())?;
@@ -132,6 +132,9 @@ pub fn stop_namespace(
         }
         .into());
     }
+    if requester_uid.is_some() {
+        crate::namespace_ownership::remove(namespace_id);
+    }
 
     Ok(StopResult {
         version: SCHEMA_VERSION,
@@ -140,53 +143,6 @@ pub fn stop_namespace(
         namespace_id: namespace_id.to_string(),
         namespace_removed,
     })
-}
-
-/// Require every non-root process in a namespace to belong to the caller.
-///
-/// VPN helpers legitimately run as root, so they cannot establish ownership.
-/// At least one caller-owned process must still be present; otherwise a local
-/// user could forge a lockfile naming a root-only namespace and tear it down.
-fn authorize_namespace_owner(
-    namespace_id: &str,
-    requester_uid: nix::unistd::Uid,
-) -> anyhow::Result<()> {
-    let processes = namespace_processes(namespace_id)?
-        .into_iter()
-        .map(|pid| {
-            let owner = process_real_uid(pid as u32).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Refusing to stop namespace {namespace_id}: could not verify owner of PID {pid}"
-                )
-            })?;
-            Ok((pid, owner))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    validate_namespace_owners(namespace_id, requester_uid.as_raw(), &processes)
-}
-
-fn validate_namespace_owners(
-    namespace_id: &str,
-    requester_uid: u32,
-    processes: &[(i32, u32)],
-) -> anyhow::Result<()> {
-    let mut found_requester = false;
-    for &(pid, owner) in processes {
-        if owner == 0 {
-            continue;
-        }
-        if owner != requester_uid {
-            anyhow::bail!(
-                "Refusing to stop namespace {namespace_id}: PID {pid} is owned by uid {owner}, not requesting uid {requester_uid}"
-            );
-        }
-        found_requester = true;
-    }
-    anyhow::ensure!(
-        found_requester,
-        "Refusing to stop namespace {namespace_id}: no process owned by requesting uid {requester_uid} was found"
-    );
-    Ok(())
 }
 
 pub fn print_result(result: &StopResult, json: bool) -> anyhow::Result<()> {
@@ -311,30 +267,4 @@ fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
         std::thread::sleep(Duration::from_millis(100));
     }
     condition()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_namespace_owners;
-
-    #[test]
-    fn namespace_stop_allows_root_helpers_and_requester_processes() {
-        assert!(validate_namespace_owners("vo_test", 1000, &[(10, 0), (11, 1000)]).is_ok());
-    }
-
-    #[test]
-    fn namespace_stop_rejects_foreign_processes() {
-        let error = validate_namespace_owners("vo_test", 1000, &[(10, 0), (11, 1001)])
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("owned by uid 1001"));
-    }
-
-    #[test]
-    fn namespace_stop_rejects_root_only_namespaces() {
-        let error = validate_namespace_owners("vo_test", 1000, &[(10, 0)])
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("no process owned by requesting uid 1000"));
-    }
 }
