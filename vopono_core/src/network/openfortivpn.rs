@@ -12,6 +12,27 @@ use std::str::FromStr;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenFortiVpn {
     pid: u32,
+    #[serde(skip)]
+    _runtime_dir: Option<tempfile::TempDir>,
+}
+
+fn validate_unprivileged_config(config_file: &Path) -> anyhow::Result<()> {
+    const EXECUTION_DIRECTIVES: &[&str] = &["pinentry", "pppd-plugin", "pppd-call", "ppp-system"];
+    let contents = std::fs::read_to_string(config_file)
+        .with_context(|| format!("Failed to read {}", config_file.display()))?;
+    for (line_number, line) in contents.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let key = line.split_once('=').map_or(line, |(key, _)| key).trim();
+        anyhow::ensure!(
+            !EXECUTION_DIRECTIVES.contains(&key),
+            "OpenFortiVPN directive '{key}' is not allowed in daemon mode (line {})",
+            line_number + 1
+        );
+    }
+    Ok(())
 }
 
 pub fn server_from_config(config_file: &Path) -> anyhow::Result<String> {
@@ -50,19 +71,26 @@ impl OpenFortiVpn {
             ));
         }
 
+        if crate::util::is_daemon_mode() {
+            validate_unprivileged_config(&config_file)?;
+        }
+
         info!("Launching OpenFortiVPN...");
+        let runtime_dir = tempfile::Builder::new()
+            .prefix("vopono-openfortivpn-")
+            .tempdir()
+            .context("Failed to create private OpenFortiVPN runtime directory")?;
+        let pppd_log = runtime_dir.path().join("pppd.log");
         // Must run as root - https://github.com/adrienverge/openfortivpn/issues/650
         let command_vec = ([
             "openfortivpn",
             "-c",
             config_file.to_str().expect("Invalid config path"),
+            "--no-dns",
+            "--pppd-log",
+            pppd_log.to_str().context("Invalid PPP log path")?,
         ])
         .to_vec();
-
-        // TODO: Remove need for log file (and hardcoded path!)
-        // Delete log file if exists
-        let pppd_log = std::path::PathBuf::from_str("/tmp/pppd.log")?;
-        std::fs::remove_file(&pppd_log).ok();
 
         // TODO - better handle forwarding output when blocking on password entry (no newline!)
         let mut handle = NetworkNamespace::exec_no_block(
@@ -142,7 +170,10 @@ impl OpenFortiVpn {
             crate::util::open_ports(netns, forwards.as_slice(), firewall)?;
         }
 
-        Ok(Self { pid: id })
+        Ok(Self {
+            pid: id,
+            _runtime_dir: Some(runtime_dir),
+        })
     }
 }
 
@@ -224,7 +255,7 @@ pub fn get_dns(stdout: &str) -> anyhow::Result<(Vec<IpAddr>, Vec<String>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::server_from_config;
+    use super::{server_from_config, validate_unprivileged_config};
     use std::io::Write;
 
     #[test]
@@ -235,5 +266,28 @@ mod tests {
             server_from_config(config.path()).unwrap(),
             "vpn.company.example"
         );
+    }
+
+    #[test]
+    fn daemon_config_rejects_execution_directives() {
+        for directive in ["pinentry", "pppd-plugin", "pppd-call", "ppp-system"] {
+            let mut config = tempfile::NamedTempFile::new().unwrap();
+            writeln!(config, "host = vpn.example.com\n{directive} = /tmp/evil").unwrap();
+            let error = validate_unprivileged_config(config.path())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(directive));
+        }
+    }
+
+    #[test]
+    fn daemon_config_accepts_non_execution_directives() {
+        let mut config = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            config,
+            "host = vpn.example.com\nusername = alice\n# pinentry = ignored"
+        )
+        .unwrap();
+        validate_unprivileged_config(config.path()).unwrap();
     }
 }
