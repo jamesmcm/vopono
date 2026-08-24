@@ -584,7 +584,9 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             // connection; lockfile operations hit the same state the client
             // sees. Run the privileged control op.
             let outcome = match stop_request.target {
-                DaemonStopTarget::Application(id) => crate::control::stop_application(&id),
+                DaemonStopTarget::Application(id) => {
+                    crate::control::stop_application(&id, Some(uid))
+                }
                 DaemonStopTarget::Namespace(id) => crate::control::stop_namespace(&id),
             };
             let payload = match outcome {

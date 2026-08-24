@@ -328,7 +328,7 @@ fn run_stop_locally(request: StopRequest, json: bool, askpass: bool) -> anyhow::
         clean_dead_locks()?;
     }
     let result = match request {
-        StopRequest::Application(id) => control::stop_application(&id),
+        StopRequest::Application(id) => control::stop_application(&id, None),
         StopRequest::Namespace(id) => control::stop_namespace(&id),
     };
     match result {

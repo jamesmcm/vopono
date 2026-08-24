@@ -29,7 +29,10 @@ pub struct StopResult {
     pub namespace_removed: bool,
 }
 
-pub fn stop_application(application_id: &str) -> Result<StopResult> {
+pub fn stop_application(
+    application_id: &str,
+    requester_uid: Option<nix::unistd::Uid>,
+) -> Result<StopResult> {
     let pid = application_id
         .parse::<u32>()
         .map_err(|_| CliError::InvalidApplicationId {
@@ -47,6 +50,22 @@ pub fn stop_application(application_id: &str) -> Result<StopResult> {
         }
         .into());
     };
+
+    // Lockfiles live in a user-writable directory and PIDs can be recycled:
+    // in daemon mode the request may come from any local user, so only
+    // signal processes owned by the authenticated requester.
+    if let Some(uid) = requester_uid {
+        match process_real_uid(pid) {
+            Some(owner) if owner == uid.as_raw() => {}
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Refusing to stop PID {pid} in namespace {namespace_id}: process owner {:?} does not match requesting uid {}",
+                    other,
+                    uid.as_raw()
+                ));
+            }
+        }
+    }
 
     // Lockfiles may be stale and PIDs can be recycled; never signal a process
     // that is not verifiably attached to the recorded network namespace.
@@ -154,6 +173,15 @@ fn send_signal(pid: u32, signal: Signal) -> Result<(), CliError> {
             source: anyhow::Error::new(error),
         }),
     }
+}
+
+/// Real UID of `pid` from /proc, if the process exists and is inspectable.
+fn process_real_uid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let line = status.lines().find(|line| line.starts_with("Uid:"))?;
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|real_uid| real_uid.parse::<u32>().ok())
 }
 
 fn wait_for_process(pid: u32) -> Result<(), CliError> {
