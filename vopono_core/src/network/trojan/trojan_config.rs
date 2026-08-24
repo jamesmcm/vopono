@@ -2,6 +2,7 @@ use anyhow::Context;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::{
+    io::Write,
     net::{IpAddr, SocketAddr},
     path::Path,
     str::FromStr,
@@ -88,13 +89,14 @@ impl TrojanConfig {
         self.password = vec![password.to_string()];
     }
 
-    pub fn set_cert(&mut self, cert: &str) -> anyhow::Result<()> {
-        // Write to temp file
-        let cert_path = std::env::temp_dir().join("trojan_cert.pem");
-        std::fs::write(&cert_path, cert)
-            .with_context(|| format!("Failed to write cert to {:?}", cert_path))?;
-        self.ssl.cert = cert_path.as_os_str().to_string_lossy().to_string();
-        Ok(())
+    pub fn set_cert(&mut self, cert: &str) -> anyhow::Result<tempfile::NamedTempFile> {
+        let mut cert_file = tempfile::NamedTempFile::new()
+            .context("Failed to create temporary Trojan certificate")?;
+        cert_file
+            .write_all(cert.as_bytes())
+            .context("Failed to write temporary Trojan certificate")?;
+        self.ssl.cert = cert_file.path().to_string_lossy().to_string();
+        Ok(cert_file)
     }
 }
 

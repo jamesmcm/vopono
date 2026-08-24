@@ -1049,12 +1049,13 @@ impl NetworkNamespace {
             ns_name = self.name
         );
 
-        // Write the ruleset to a temporary file
-        let temp_filename = format!("vopono-nft-base-{}.conf", self.name);
-        let temp_path = std::env::temp_dir().join(temp_filename);
-
-        std::fs::write(&temp_path, ruleset.as_bytes())
-            .with_context(|| format!("Failed to write nft ruleset to {:?}", temp_path))?;
+        // Use an atomically created private file: namespace names are public,
+        // so a predictable /tmp path would permit symlink replacement.
+        let mut rules_file = tempfile::NamedTempFile::new()
+            .context("Failed to create temporary nftables rules file")?;
+        use std::io::Write as _;
+        rules_file.write_all(ruleset.as_bytes())?;
+        let temp_path = rules_file.path();
 
         // Execute the ruleset file
         let temp_path_str = temp_path.to_str().ok_or_else(|| {
@@ -1064,11 +1065,6 @@ impl NetworkNamespace {
             )
         })?;
         let exec_result = Self::exec(&self.name, &["nft", "-f", temp_path_str]);
-
-        // Clean up the temporary file, logging any error
-        if let Err(e) = std::fs::remove_file(&temp_path) {
-            debug!("Failed to remove temporary file {:?}: {}", temp_path, e);
-        }
 
         exec_result.context("Failed to apply base nftables ruleset")?;
 
