@@ -8,8 +8,8 @@ use anyhow::{Context, anyhow, bail};
 use log::{debug, error, info, warn};
 use signal_hook::iterator::SignalsInfo;
 use signal_hook::{consts::SIGINT, iterator::Signals};
-use std::net::{IpAddr, Ipv4Addr};
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::os::fd::{OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::{
     fs::create_dir_all,
@@ -81,8 +81,9 @@ pub fn execute_as_daemon_with_stdio(
     stdio_fds: Option<(RawFd, RawFd, RawFd)>,
     take_controlling_tty: bool,
     forwarded_env: Option<std::collections::HashMap<String, String>>,
-) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace)> {
+) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace, Vec<HostForwardProxy>)> {
     let uiclient = CliClient {};
+    let silent = command.silent;
     let NamespaceConfig {
         ns,
         parsed_command,
@@ -113,14 +114,27 @@ pub fn execute_as_daemon_with_stdio(
     }
 
     // Machine-readable launch summary for frontend integrations, written to
-    // the client's stdout before any application output. Take ownership of
-    // the descriptor up-front: ApplicationWrapper hands it to the spawned
-    // child via Stdio::from_raw_fd, which closes it on drop.
+    // the client's stdout before any application output. Duplicate the
+    // descriptor up-front because ApplicationWrapper transfers the original
+    // descriptor to the spawned child.
     let report_out: Option<OwnedFd> = if parsed_command.json {
-        stdio_fds.map(|(_, stdout_fd, _)| unsafe { OwnedFd::from_raw_fd(stdout_fd) })
+        stdio_fds
+            .map(|(_, stdout_fd, _)| {
+                nix::unistd::dup(unsafe { std::os::fd::BorrowedFd::borrow_raw(stdout_fd) })
+            })
+            .transpose()?
     } else {
         None
     };
+
+    // Bind the host-side --forward relays before spawning the application so a
+    // bind failure aborts the request instead of orphaning a running process.
+    let host_proxies = host_forward_proxies(
+        &ns,
+        parsed_command.forward.as_deref(),
+        parsed_command.no_proxy,
+        false,
+    )?;
 
     let ns = ns.write_lockfile(&parsed_command.application)?;
     let application = ApplicationWrapper::new(
@@ -130,7 +144,7 @@ pub fn execute_as_daemon_with_stdio(
         parsed_command.group.clone(),
         parsed_command.working_directory.clone().map(PathBuf::from),
         forwarder,
-        true, // Always silent on daemon side
+        silent,
         &host_env_vars,
         pipe_io,
         stdio_fds,
@@ -146,19 +160,64 @@ pub fn execute_as_daemon_with_stdio(
         let _ = out.flush();
     }
 
-    Ok((application, ns))
+    Ok((application, ns, host_proxies))
+}
+
+/// Daemon entry for `--create-netns-only`: bring up the namespace and leave it
+/// alive without spawning an application. The returned handle is detached from
+/// teardown (marked unmanaged) so the namespace survives the request handler;
+/// it stays visible to `vopono list` / `vopono stop` until stopped explicitly.
+pub fn create_daemon_namespace_only(
+    command: ExecCommand,
+    uid: nix::unistd::Uid,
+) -> anyhow::Result<NetworkNamespace> {
+    let uiclient = CliClient {};
+    let NamespaceConfig {
+        ns,
+        parsed_command,
+        forwarder,
+        host_env_vars: _,
+    } = setup_namespace(command, &uiclient, true, false)?; // daemon: do not auto-sync
+    let ns = ns.write_lockfile(&parsed_command.application)?;
+    // No application runs in this session, so the provider forwarder has nothing
+    // to serve and is torn down immediately (mirroring the CLI path).
+    drop(forwarder);
+    let mut ns = ns;
+    crate::namespace_ownership::mark_persistent(&ns.name, uid)?;
+    ns.unmanaged = true;
+    Ok(ns)
 }
 
 /// Single-line machine-readable launch summary for `exec --json`.
 fn launch_report(ns: &NetworkNamespace, pid: u32, forwarder: Option<&dyn Forwarder>) -> String {
+    launch_report_value(
+        &ns.name,
+        pid,
+        &ns.state.open_ports,
+        &ns.state.host_forwarded_ports,
+        forwarder.map(|f| f.forwarded_port()),
+    )
+    .to_string()
+}
+
+/// Value builder for the `exec --json` launch summary, kept separate from
+/// `launch_report` so the port fields can be tested without a live namespace.
+fn launch_report_value(
+    namespace: &str,
+    pid: u32,
+    open_ports: &[u16],
+    host_forwarded_ports: &[u16],
+    forwarded_port: Option<u16>,
+) -> serde_json::Value {
     serde_json::json!({
         "version": crate::api::SCHEMA_VERSION,
         "event": "launched",
-        "namespace": ns.name,
+        "namespace": namespace,
         "pid": pid,
-        "forwarded_port": forwarder.map(|f| f.forwarded_port()),
+        "open_ports": open_ports,
+        "host_forwarded_ports": host_forwarded_ports,
+        "forwarded_port": forwarded_port,
     })
-    .to_string()
 }
 
 /// The main entry point for the non-daemon (sudo-based fallback) execution path.
@@ -502,6 +561,126 @@ fn setup_namespace(
     })
 }
 
+/// Host-side forwarder for a `--forward` port. Binds a host port and relays TCP
+/// traffic into the namespace. The nonblocking accept loop observes a stop flag
+/// on drop, so a long-lived daemon does not leak bound ports between sessions.
+pub struct HostForwardProxy {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl HostForwardProxy {
+    pub fn new(listen_port: u16, proxy_to: SocketAddr, local_only: bool) -> anyhow::Result<Self> {
+        let ip = if local_only {
+            Ipv6Addr::LOCALHOST
+        } else {
+            Ipv6Addr::UNSPECIFIED
+        };
+        let listener = std::net::TcpListener::bind(SocketAddr::new(IpAddr::V6(ip), listen_port))?;
+        listener.set_nonblocking(true)?;
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_stop = std::sync::Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            while !thread_stop.load(std::sync::atomic::Ordering::Acquire) {
+                let client = match listener.accept() {
+                    Ok((client, _)) => client,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                let Ok(upstream) = std::net::TcpStream::connect_timeout(
+                    &proxy_to,
+                    std::time::Duration::from_secs(1),
+                ) else {
+                    continue;
+                };
+                let mut client_to_upstream = match client.try_clone() {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                let mut upstream_to_upstream = match upstream.try_clone() {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                let mut upstream_to_client = match upstream.try_clone() {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
+                let mut client_to_client = match client.try_clone() {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+                std::thread::spawn(move || {
+                    let _ = io::copy(&mut client_to_upstream, &mut upstream_to_upstream);
+                });
+                std::thread::spawn(move || {
+                    let _ = io::copy(&mut upstream_to_client, &mut client_to_client);
+                });
+            }
+        });
+        Ok(Self {
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for HostForwardProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Create host-side forwarders for `--forward` ports. Shared by the CLI and
+/// daemon execution paths so the two cannot drift. Ports are opened inside the
+/// namespace by the protocol setup; this starts the host->namespace relay.
+fn host_forward_proxies(
+    ns: &NetworkNamespace,
+    forward: Option<&[u16]>,
+    no_proxy: bool,
+    allow_privileged_ports: bool,
+) -> anyhow::Result<Vec<HostForwardProxy>> {
+    if no_proxy {
+        return Ok(Vec::new());
+    }
+    let Some(f) = forward.filter(|f| !f.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let namespace_ip = ns
+        .veth_pair_ips
+        .as_ref()
+        .context("No veth pair IPs available for --forward")?
+        .ipv4
+        .as_ref()
+        .context("No IPv4 veth pair IP available for --forward")?
+        .namespace_ip;
+    let mut proxies = Vec::new();
+    for p in f {
+        validate_host_forward_port(*p, allow_privileged_ports)?;
+        debug!("Forwarding port: {}, {}", p, namespace_ip);
+        proxies.push(HostForwardProxy::new(
+            *p,
+            SocketAddr::new(namespace_ip, *p),
+            false,
+        )?);
+    }
+    Ok(proxies)
+}
+
+fn validate_host_forward_port(port: u16, allow_privileged_ports: bool) -> anyhow::Result<()> {
+    if !allow_privileged_ports && port < 1024 {
+        bail!(
+            "Daemon forwarding to privileged host port {port} is not allowed; use a port of 1024 or higher"
+        );
+    }
+    Ok(())
+}
+
 fn run_application_and_wait(
     parsed_command: &ArgsConfig,
     forwarder: Option<Box<dyn Forwarder>>,
@@ -510,38 +689,14 @@ fn run_application_and_wait(
     silent: bool,
     host_env_vars: &std::collections::HashMap<String, String>,
 ) -> anyhow::Result<i32> {
-    let mut proxy = Vec::new();
-    if let Some(f) = &parsed_command.forward
-        && !(parsed_command.no_proxy || f.is_empty())
-    {
-        for p in f {
-            debug!(
-                "Forwarding port: {}, {:?}",
-                p,
-                ns.veth_pair_ips
-                    .as_ref()
-                    .unwrap()
-                    .ipv4
-                    .as_ref()
-                    .unwrap()
-                    .namespace_ip
-            );
-            proxy.push(basic_tcp_proxy::TcpProxy::new(
-                *p,
-                std::net::SocketAddr::new(
-                    ns.veth_pair_ips
-                        .as_ref()
-                        .unwrap()
-                        .ipv4
-                        .as_ref()
-                        .unwrap()
-                        .namespace_ip,
-                    *p,
-                ),
-                false,
-            ));
-        }
-    }
+    // Kept alive for the lifetime of the application so forwarded ports stay
+    // reachable from the host; dropped (stopping the relays) at function exit.
+    let _proxy = host_forward_proxies(
+        ns,
+        parsed_command.forward.as_deref(),
+        parsed_command.no_proxy,
+        true,
+    )?;
 
     if !parsed_command.create_netns_only {
         let application = ApplicationWrapper::new(
@@ -1141,6 +1296,55 @@ fn provider_port_forwarding(
 
 #[cfg(test)]
 mod tests {
+    use super::{HostForwardProxy, launch_report_value, validate_host_forward_port};
+
+    #[test]
+    fn host_forward_proxy_drop_stops_accept_thread() {
+        let Ok(reservation) = std::net::TcpListener::bind("[::1]:0") else {
+            // The production proxy is IPv6-based; skip on kernels where IPv6
+            // has been disabled entirely.
+            return;
+        };
+        let port = reservation.local_addr().unwrap().port();
+        drop(reservation);
+
+        let proxy = HostForwardProxy::new(port, "[::1]:9".parse().unwrap(), true).unwrap();
+        let started = std::time::Instant::now();
+        drop(proxy);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn daemon_forwarding_rejects_privileged_host_ports() {
+        assert!(validate_host_forward_port(22, false).is_err());
+        assert!(validate_host_forward_port(1023, false).is_err());
+        assert!(validate_host_forward_port(1024, false).is_ok());
+        assert!(validate_host_forward_port(22, true).is_ok());
+    }
+
+    #[test]
+    fn launch_report_includes_open_and_host_forwarded_ports() {
+        let report = launch_report_value("vo_test_abc", 42, &[8080, 8443], &[9000], Some(51820));
+        assert_eq!(
+            report["version"],
+            serde_json::json!(crate::api::SCHEMA_VERSION)
+        );
+        assert_eq!(report["event"], "launched");
+        assert_eq!(report["namespace"], "vo_test_abc");
+        assert_eq!(report["pid"], 42);
+        assert_eq!(report["open_ports"], serde_json::json!([8080, 8443]));
+        assert_eq!(report["host_forwarded_ports"], serde_json::json!([9000]));
+        assert_eq!(report["forwarded_port"], 51820);
+    }
+
+    #[test]
+    fn launch_report_reports_absent_forwarding_as_null() {
+        let report = launch_report_value("vo_test_abc", 42, &[8080], &[], None);
+        assert_eq!(report["open_ports"], serde_json::json!([8080]));
+        assert_eq!(report["host_forwarded_ports"], serde_json::json!([]));
+        assert!(report["forwarded_port"].is_null());
+    }
+
     #[test]
     fn extracts_host_from_server_arguments() {
         use super::host_from_server_arg;

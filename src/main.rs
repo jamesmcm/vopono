@@ -44,16 +44,29 @@ pub const SOCKET_PATH: &str = "/run/vopono.sock";
 
 fn main() -> anyhow::Result<()> {
     let app = args::App::parse();
+    // The daemon process itself must keep logging to journald even when it is
+    // launched with --silent; only forwarded client requests honour it.
+    let daemon_start = matches!(
+        &app.cmd,
+        Some(args::Command::Daemon(d))
+            if d.command.is_none() || matches!(d.command, Some(args::DaemonSubcommand::Start))
+    );
     let mut builder = pretty_env_logger::formatted_timed_builder();
     builder.parse_default_env();
     if app.verbose {
         builder.filter_level(LevelFilter::Debug);
     }
     if app.silent {
-        if app.verbose {
-            warn!("Verbose and silent flags are mutually exclusive, ignoring verbose flag");
+        if daemon_start {
+            if !app.verbose {
+                builder.filter_level(LevelFilter::Info);
+            }
+        } else {
+            if app.verbose {
+                warn!("Verbose and silent flags are mutually exclusive, ignoring verbose flag");
+            }
+            builder.filter_level(LevelFilter::Off);
         }
-        builder.filter_level(LevelFilter::Off);
     }
     builder.init();
 
@@ -81,7 +94,7 @@ fn main() -> anyhow::Result<()> {
         args::Command::Exec(cmd) => {
             // If we're not root, try to forward the command to the running daemon.
             if !nix::unistd::getuid().is_root() {
-                match forward_to_daemon(&cmd) {
+                match forward_to_daemon(&cmd, app.silent) {
                     Ok(DaemonForward::Exit(exit_code)) => {
                         std::process::exit(exit_code);
                     }
@@ -420,7 +433,7 @@ enum DaemonForward {
     ExecutionError(String),
 }
 
-fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<DaemonForward> {
+fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonForward> {
     let name = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?;
     let mut conn = match LocalSocketStream::connect(name) {
         Ok(c) => c,
@@ -428,34 +441,35 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<DaemonForward> {
     };
 
     debug!("Connected to daemon, forwarding command.");
+    if let Some(user) = &cmd.user {
+        warn!(
+            "--user '{user}' is ignored when forwarding to the daemon; \
+             the application will run as the connecting user"
+        );
+    }
+    if let Some(group) = &cmd.group {
+        warn!(
+            "--group '{group}' is ignored when forwarding to the daemon; \
+             the application will run as the connecting group"
+        );
+    }
     daemon::exchange_versions_with_daemon(&mut conn);
     let mut daemon_cmd = cmd.clone();
-    resolve_custom_path_for_daemon(&mut daemon_cmd, &std::env::current_dir()?);
-
-    // Collect a small set of environment variables from the client session
-    // that are relevant for GUI/desktop integration.
-    let mut fwd_env: std::collections::HashMap<String, String> = Default::default();
-    for key in [
-        // X/Wayland basics
-        "DISPLAY",
-        "WAYLAND_DISPLAY",
-        "XAUTHORITY",
-        // Runtime/config roots for per-user sockets and configs
-        "XDG_RUNTIME_DIR",
-        "XDG_CONFIG_HOME",
-        // Toolkit/session hints (safe to forward)
-        "XDG_SESSION_TYPE",
-        "MOZ_ENABLE_WAYLAND",
-        "QT_QPA_PLATFORM",
-        "GTK_MODULES",
-        "GTK3_MODULES",
-        // Window manager IPC socket
-        "I3SOCK",
-    ] {
-        if let Ok(val) = std::env::var(key) {
-            fwd_env.insert(key.to_string(), val);
-        }
+    let client_working_dir = std::env::current_dir()?;
+    resolve_custom_path_for_daemon(&mut daemon_cmd, &client_working_dir);
+    // Match the sudo/CLI path, where the application inherits the client's
+    // working directory when --working-directory is not given.
+    if daemon_cmd.working_directory.is_none() {
+        daemon_cmd.working_directory = Some(client_working_dir.to_string_lossy().into_owned());
     }
+    daemon_cmd.silent = silent;
+
+    // Forward the client's environment so daemon-launched applications match the
+    // sudo/CLI path, where the child inherits the invoking user's environment.
+    // The daemon only applies these to the child process (which runs as the
+    // authenticated connecting user) and re-applies its own VOPONO_* variables
+    // afterwards, so nothing here affects the daemon's own execution.
+    let fwd_env: std::collections::HashMap<String, String> = std::env::vars().collect();
     let request = daemon::DaemonRequest::Execute {
         // Encode `ExecCommand` as JSON bytes carried inside the wincode daemon frame.
         cmd: serde_json::to_vec(&daemon_cmd)?,
@@ -504,10 +518,13 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<DaemonForward> {
 }
 
 fn resolve_custom_path_for_daemon(cmd: &mut ExecCommand, client_working_dir: &std::path::Path) {
-    if let Some(custom) = cmd.custom.as_mut()
-        && custom.is_relative()
+    for path in [&mut cmd.custom, &mut cmd.vopono_config]
+        .into_iter()
+        .flatten()
     {
-        *custom = client_working_dir.join(&*custom);
+        if path.is_relative() {
+            *path = client_working_dir.join(&*path);
+        }
     }
 }
 

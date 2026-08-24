@@ -164,15 +164,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
-name = "basic_tcp_proxy"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57ba54f791d8eb8d9cdc45b668bf9cbd4262f6154c4a5ae7c983cf1bc8f71718"
-dependencies = [
- "log",
-]
-
-[[package]]
 name = "bitflags"
 version = "2.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2780,7 +2771,6 @@ name = "vopono"
 version = "1.0.0"
 dependencies = [
  "anyhow",
- "basic_tcp_proxy",
  "bs58",
  "chrono",
  "clap",

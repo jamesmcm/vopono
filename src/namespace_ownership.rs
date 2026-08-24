@@ -3,9 +3,11 @@ use nix::unistd::Uid;
 use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use vopono_core::network::netns::NetworkNamespace;
 
 const OWNER_DIR: &str = "/run/vopono/namespace-owners";
+static OWNER_RECORD_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Serialize, Deserialize)]
 struct OwnerRecord {
@@ -13,6 +15,27 @@ struct OwnerRecord {
     device: u64,
     inode: u64,
     namespace: String,
+    #[serde(default)]
+    persistent: bool,
+    #[serde(default)]
+    stopping: bool,
+}
+
+impl OwnerRecord {
+    fn is_persistent(&self) -> bool {
+        self.persistent && !self.stopping
+    }
+
+    fn mark_persistent(&mut self, name: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(!self.stopping, "Namespace {name} is being stopped");
+        self.persistent = true;
+        Ok(())
+    }
+
+    fn mark_stopping(&mut self) {
+        self.persistent = false;
+        self.stopping = true;
+    }
 }
 
 fn namespace_path(name: &str) -> PathBuf {
@@ -38,6 +61,9 @@ pub fn name_for_uid(base: &str, uid: Uid) -> anyhow::Result<String> {
 /// Persist ownership outside the user-writable config tree. Device/inode bind
 /// the record to this exact namespace rather than merely its reusable name.
 pub fn tag(namespace_state: &NetworkNamespace, uid: Uid) -> anyhow::Result<()> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
     let name = &namespace_state.name;
     vopono_core::network::netns::validate_netns_name(name)?;
     let namespace = std::fs::metadata(namespace_path(name))
@@ -45,15 +71,27 @@ pub fn tag(namespace_state: &NetworkNamespace, uid: Uid) -> anyhow::Result<()> {
     std::fs::create_dir_all(OWNER_DIR)?;
     std::fs::set_permissions(OWNER_DIR, std::fs::Permissions::from_mode(0o700))?;
 
+    // Re-tagging happens whenever an existing namespace is reused. Preserve a
+    // previous keep-alive/create-only decision rather than silently reverting
+    // it to ordinary last-client teardown semantics.
+    let (persistent, stopping) = validated_record(name, uid)
+        .map(|record| (record.persistent, record.stopping))
+        .unwrap_or((false, false));
     let record = OwnerRecord {
         uid: uid.as_raw(),
         device: namespace.dev(),
         inode: namespace.ino(),
         namespace: serde_json::to_string(namespace_state)?,
+        persistent,
+        stopping,
     };
+    persist_record(name, &record)
+}
+
+fn persist_record(name: &str, record: &OwnerRecord) -> anyhow::Result<()> {
     let path = record_path(name);
     let mut file = tempfile::NamedTempFile::new_in(OWNER_DIR)?;
-    serde_json::to_writer(&mut file, &record)?;
+    serde_json::to_writer(&mut file, record)?;
     file.as_file().sync_all()?;
     file.persist(&path)
         .map_err(|error| error.error)
@@ -62,15 +100,47 @@ pub fn tag(namespace_state: &NetworkNamespace, uid: Uid) -> anyhow::Result<()> {
 }
 
 pub fn authorize(name: &str, uid: Uid) -> anyhow::Result<()> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
     validated_record(name, uid).map(|_| ())
 }
 
 pub fn load(name: &str, uid: Uid) -> anyhow::Result<NetworkNamespace> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
     let record = validated_record(name, uid)?;
     let namespace: NetworkNamespace = serde_json::from_str(&record.namespace)
         .context("Invalid root-owned namespace state snapshot")?;
     anyhow::ensure!(namespace.name == name, "Namespace snapshot name mismatch");
     Ok(namespace)
+}
+
+pub fn is_persistent(name: &str, uid: Uid) -> anyhow::Result<bool> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
+    let record = validated_record(name, uid)?;
+    Ok(record.is_persistent())
+}
+
+pub fn mark_persistent(name: &str, uid: Uid) -> anyhow::Result<()> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
+    let mut record = validated_record(name, uid)?;
+    record.mark_persistent(name)?;
+    persist_record(name, &record)
+}
+
+pub fn mark_stopping(name: &str, uid: Uid) -> anyhow::Result<()> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
+    let mut record = validated_record(name, uid)?;
+    record.mark_stopping();
+    persist_record(name, &record)
 }
 
 fn validated_record(name: &str, uid: Uid) -> anyhow::Result<OwnerRecord> {
@@ -110,6 +180,9 @@ fn validate_record(
 }
 
 pub fn remove(name: &str) {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
     let _ = std::fs::remove_file(record_path(name));
 }
 
@@ -139,6 +212,8 @@ mod tests {
             device: 7,
             inode: 11,
             namespace: "snapshot".to_string(),
+            persistent: false,
+            stopping: false,
         };
         assert!(validate_record("vo_test", &record, Uid::from_raw(1000), 7, 11).is_ok());
         assert!(
@@ -153,6 +228,32 @@ mod tests {
                 .to_string()
                 .contains("stale")
         );
+    }
+
+    #[test]
+    fn old_owner_records_default_to_non_persistent() {
+        let record: OwnerRecord =
+            serde_json::from_str(r#"{"uid":1000,"device":7,"inode":11,"namespace":"snapshot"}"#)
+                .unwrap();
+        assert!(!record.persistent);
+        assert!(!record.stopping);
+    }
+
+    #[test]
+    fn stopping_state_cannot_be_reversed_by_keep_alive() {
+        let mut record = OwnerRecord {
+            uid: 1000,
+            device: 7,
+            inode: 11,
+            namespace: "snapshot".to_string(),
+            persistent: false,
+            stopping: false,
+        };
+        record.mark_persistent("vo_test").unwrap();
+        assert!(record.is_persistent());
+        record.mark_stopping();
+        assert!(!record.is_persistent());
+        assert!(record.mark_persistent("vo_test").is_err());
     }
 
     #[test]

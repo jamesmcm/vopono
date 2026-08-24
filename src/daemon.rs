@@ -522,6 +522,33 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             exec_command.user = Some(user.name);
             exec_command.group = Some(group.name);
             let requested_application = exec_command.application.clone();
+            let silent = exec_command.silent;
+            let keep_alive = exec_command.keep_alive;
+            let client_report_out = if silent {
+                None
+            } else {
+                Some(nix::unistd::dup(unsafe {
+                    BorrowedFd::borrow_raw(client_stdout_fd)
+                })?)
+            };
+
+            // `--create-netns-only`: bring up the namespace and leave it alive
+            // without spawning an application. The client learns the namespace
+            // name and exits; `vopono stop --namespace` tears it down later.
+            if exec_command.create_netns_only {
+                let ns = crate::exec::create_daemon_namespace_only(exec_command, uid)?;
+                // No child will consume the received SCM_RIGHTS descriptors in
+                // this branch, so take ownership and close all three locally.
+                let _client_stdin = unsafe { OwnedFd::from_raw_fd(client_stdin_fd) };
+                let client_stdout = unsafe { OwnedFd::from_raw_fd(client_stdout_fd) };
+                let _client_stderr = unsafe { OwnedFd::from_raw_fd(client_stderr_fd) };
+                let mut out = std::fs::File::from(client_stdout);
+                let _ = writeln!(out, "Created namespace {}", ns.name);
+                let _ = out.flush();
+                drop(ns);
+                write_response(&mut conn, &DaemonResponse::Exit(0))?;
+                return Ok(());
+            }
 
             // Take ownership of the NetworkNamespace object (`_ns`).
             // It will now be dropped only when `handle_client` finishes,
@@ -530,9 +557,10 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             // This preserves job control and avoids stealing the user's controlling TTY.
             let client_has_tty =
                 nix_isatty(unsafe { BorrowedFd::borrow_raw(client_stdin_fd) }).unwrap_or(false);
-            let (application, ns): (
+            let (application, ns, host_proxies): (
                 vopono_core::network::application_wrapper::ApplicationWrapper,
                 vopono_core::network::netns::NetworkNamespace,
+                Vec<crate::exec::HostForwardProxy>,
             );
             let mut pty_master: Option<std::os::fd::RawFd> = None;
             if client_has_tty {
@@ -540,7 +568,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 let master = p.master.into_raw_fd();
                 let slave = p.slave.into_raw_fd();
                 // Spawn child with PTY slave as stdio, and let it take controlling TTY in pre_exec
-                (application, ns) = execute_as_daemon_with_stdio(
+                (application, ns, host_proxies) = execute_as_daemon_with_stdio(
                     exec_command,
                     false,
                     Some((slave, slave, slave)),
@@ -551,7 +579,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 // and will be closed by the child/OS when appropriate.
                 pty_master = Some(master);
             } else {
-                (application, ns) = execute_as_daemon_with_stdio(
+                (application, ns, host_proxies) = execute_as_daemon_with_stdio(
                     exec_command,
                     false,
                     Some((client_stdin_fd, client_stdout_fd, client_stderr_fd)),
@@ -562,10 +590,11 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
 
             // Keep port-forwarding alive for the lifetime of this handler
             let port_forward_keepalive = application.port_forwarding;
-            // Inform the client about the forwarded port too (not only daemon logs)
-            if let Some(ref fwd) = port_forward_keepalive
-                && let Ok(dup_fd) =
-                    nix::unistd::dup(unsafe { BorrowedFd::borrow_raw(client_stdout_fd) })
+            // Inform the client about the forwarded port too (not only daemon logs);
+            // suppressed by --silent along with the rest of the app output.
+            if !silent
+                && let Some(ref fwd) = port_forward_keepalive
+                && let Some(dup_fd) = client_report_out
             {
                 let mut out = std::fs::File::from(dup_fd);
                 let _ = writeln!(out, "Port Forwarding on port {}", fwd.forwarded_port());
@@ -575,7 +604,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             let mut child = application.handle;
 
             // Keep the namespace alive while the child runs
-            let _ns_guard = ns;
+            let mut _ns_guard = ns;
 
             // Create a per-client RON lock file under ~/.config/vopono/locks/<ns>/client-<pid>
             // so status readers can report daemon-launched applications and Drop can see
@@ -728,6 +757,31 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
 
             // Ensure port forwarder is dropped before namespace teardown
             drop(port_forward_keepalive);
+            // Stop the host-side --forward relays before the namespace is torn down.
+            drop(host_proxies);
+
+            if keep_alive {
+                info!(
+                    "Keep-alive flag active - leaving network namespace {} alive",
+                    _ns_guard.name
+                );
+                crate::namespace_ownership::mark_persistent(&_ns_guard.name, uid)?;
+            }
+            let persistent = match crate::namespace_ownership::is_persistent(&_ns_guard.name, uid) {
+                Ok(persistent) => persistent,
+                Err(error) => {
+                    warn!(
+                        "Could not read persistent state for namespace {}: {error}; preserving it to avoid destructive teardown",
+                        _ns_guard.name
+                    );
+                    true
+                }
+            };
+            if keep_alive || persistent {
+                // Detach the handle so its Drop does not tear the namespace down;
+                // it stays visible to `vopono list` / `vopono stop` until stopped.
+                _ns_guard.unmanaged = true;
+            }
 
             let response_code = status.code().unwrap_or(1);
             write_response(&mut conn, &DaemonResponse::Exit(response_code))?;

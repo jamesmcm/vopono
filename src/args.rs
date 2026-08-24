@@ -433,6 +433,12 @@ pub struct ExecCommand {
     /// as the first line on stdout.
     #[clap(long = "json")]
     pub json: bool,
+
+    /// Suppress the application's output when executed through the daemon.
+    /// Set client-side in `forward_to_daemon`; not a CLI flag of its own.
+    #[clap(skip)]
+    #[serde(default)]
+    pub silent: bool,
 }
 
 #[derive(Parser, Debug)]

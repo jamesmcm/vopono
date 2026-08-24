@@ -469,21 +469,38 @@ impl ApplicationWrapper {
             (Some((fd_in, fd_out_orig, fd_err_orig)), _, _) => unsafe {
                 // Ensure each Stdio gets a unique owned fd to avoid double-closing.
                 let in_fd = fd_in;
-                let mut out_fd = fd_out_orig;
-                let mut err_fd = fd_err_orig;
-                if out_fd == in_fd {
-                    out_fd = nix::unistd::dup(BorrowedFd::borrow_raw(out_fd))
-                        .map_err(|e| std::io::Error::other(format!("dup stdout failed: {e}")))?
-                        .into_raw_fd();
+                if silent {
+                    // --silent: keep stdin wired to the client but discard the
+                    // application's output, even when stdio FDs were provided.
+                    handle.stdin(Stdio::from_raw_fd(in_fd));
+                    handle.stdout(Stdio::null());
+                    handle.stderr(Stdio::null());
+                    // SCM_RIGHTS gave the daemon ownership of all three FDs.
+                    // Close the output descriptors that were not transferred
+                    // into Stdio, taking care with the shared PTY descriptor.
+                    if fd_out_orig != in_fd {
+                        drop(std::os::fd::OwnedFd::from_raw_fd(fd_out_orig));
+                    }
+                    if fd_err_orig != in_fd && fd_err_orig != fd_out_orig {
+                        drop(std::os::fd::OwnedFd::from_raw_fd(fd_err_orig));
+                    }
+                } else {
+                    let mut out_fd = fd_out_orig;
+                    let mut err_fd = fd_err_orig;
+                    if out_fd == in_fd {
+                        out_fd = nix::unistd::dup(BorrowedFd::borrow_raw(out_fd))
+                            .map_err(|e| std::io::Error::other(format!("dup stdout failed: {e}")))?
+                            .into_raw_fd();
+                    }
+                    if err_fd == in_fd || err_fd == out_fd {
+                        err_fd = nix::unistd::dup(BorrowedFd::borrow_raw(err_fd))
+                            .map_err(|e| std::io::Error::other(format!("dup stderr failed: {e}")))?
+                            .into_raw_fd();
+                    }
+                    handle.stdin(Stdio::from_raw_fd(in_fd));
+                    handle.stdout(Stdio::from_raw_fd(out_fd));
+                    handle.stderr(Stdio::from_raw_fd(err_fd));
                 }
-                if err_fd == in_fd || err_fd == out_fd {
-                    err_fd = nix::unistd::dup(BorrowedFd::borrow_raw(err_fd))
-                        .map_err(|e| std::io::Error::other(format!("dup stderr failed: {e}")))?
-                        .into_raw_fd();
-                }
-                handle.stdin(Stdio::from_raw_fd(in_fd));
-                handle.stdout(Stdio::from_raw_fd(out_fd));
-                handle.stderr(Stdio::from_raw_fd(err_fd));
             },
             (None, true, true) => {
                 handle.stdin(Stdio::piped());
@@ -507,13 +524,17 @@ impl ApplicationWrapper {
 
 fn report_warning(message: String, silent: bool, stdio_fds: Option<(RawFd, RawFd, RawFd)>) {
     if silent {
-        if let Some((_, _, stderr_fd)) = stdio_fds
-            && let Ok(dup_fd) = nix::unistd::dup(unsafe { BorrowedFd::borrow_raw(stderr_fd) })
-        {
-            let mut stderr = std::fs::File::from(dup_fd);
-            let _ = writeln!(stderr, "warning: {message}");
-            let _ = stderr.flush();
-        }
+        // --silent suppresses warnings as well as application output.
+        return;
+    }
+    if let Some((_, _, stderr_fd)) = stdio_fds
+        && let Ok(dup_fd) = nix::unistd::dup(unsafe { BorrowedFd::borrow_raw(stderr_fd) })
+    {
+        // Daemon path: the application runs in the daemon, so route warnings
+        // back to the client's stderr instead of the daemon's journal.
+        let mut stderr = std::fs::File::from(dup_fd);
+        let _ = writeln!(stderr, "warning: {message}");
+        let _ = stderr.flush();
     } else {
         log::warn!("{message}");
     }

@@ -87,9 +87,9 @@ pub struct NamespaceState {
     /// Ports opened inside the namespace by --open-ports.
     #[serde(default)]
     pub open_ports: Vec<u16>,
-    /// Ports proxied from the host into the namespace by --forward.
-    #[serde(default)]
-    pub forwarded_ports: Vec<u16>,
+    /// Host ports proxied into the namespace by --forward.
+    #[serde(default, alias = "forwarded_ports")]
+    pub host_forwarded_ports: Vec<u16>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -337,10 +337,10 @@ impl NetworkNamespace {
     pub fn set_port_configuration(
         &mut self,
         open_ports: Option<&[u16]>,
-        forwarded_ports: Option<&[u16]>,
+        host_forwarded_ports: Option<&[u16]>,
     ) {
         self.state.open_ports = open_ports.unwrap_or_default().to_vec();
-        self.state.forwarded_ports = forwarded_ports.unwrap_or_default().to_vec();
+        self.state.host_forwarded_ports = host_forwarded_ports.unwrap_or_default().to_vec();
     }
 
     pub fn set_port_forwarding(&mut self, status: Option<PortForwardingStatus>) {
@@ -1296,7 +1296,7 @@ impl NetworkNamespace {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_netns_name, veth_interface_base};
+    use super::{NetworkNamespace, validate_netns_name, veth_interface_base};
 
     #[test]
     fn netns_names_are_constrained() {
@@ -1328,5 +1328,39 @@ mod tests {
         assert_eq!(first.len(), 13);
         assert!(format!("{first}_s").len() <= 15);
         assert!(format!("{first}_d").len() <= 15);
+    }
+
+    #[test]
+    fn legacy_forwarded_ports_key_reads_into_host_forwarded_ports() {
+        let raw = r#"(
+            name: "vo_test_abc",
+            veth_pair: None,
+            dns_config: None,
+            openvpn: None,
+            wireguard: None,
+            host_masquerade: None,
+            firewall_exception: None,
+            shadowsocks: None,
+            veth_pair_ips: None,
+            openconnect: None,
+            openfortivpn: None,
+            warp: None,
+            provider: None,
+            protocol: None,
+            firewall: NfTables,
+            predown: None,
+            predown_user: None,
+            predown_group: None,
+            config_file: None,
+            trojan: None,
+            state: (
+                open_ports: [8080],
+                forwarded_ports: [9000],
+            ),
+        )"#;
+
+        let ns: NetworkNamespace = ron::from_str(raw).expect("legacy lockfile should parse");
+        assert_eq!(ns.state.open_ports, vec![8080]);
+        assert_eq!(ns.state.host_forwarded_ports, vec![9000]);
     }
 }

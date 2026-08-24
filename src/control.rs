@@ -112,7 +112,24 @@ pub fn stop_namespace(
 
     if let Some(uid) = requester_uid {
         crate::namespace_ownership::authorize(namespace_id, uid)?;
+        // Make an explicit stop authoritative over a previous keep-alive or
+        // create-only request. A live handler will observe this after its child
+        // exits and perform normal teardown; an idle namespace is handled below.
+        crate::namespace_ownership::mark_stopping(namespace_id, uid)?;
         terminate_namespace_user_processes(namespace_id, uid)?;
+        // A live daemon session holding this namespace writes a client lockfile
+        // and tears the namespace down itself on exit. Namespaces left alive by
+        // --keep-alive / --create-netns-only have no such session, so tear them
+        // down explicitly from the root-owned snapshot.
+        let lock_dir = vopono_core::util::config_dir()?
+            .join("vopono")
+            .join("locks")
+            .join(namespace_id);
+        if !vopono_core::status::has_client_lockfiles(&lock_dir)
+            && let Ok(namespace) = crate::namespace_ownership::load(namespace_id, uid)
+        {
+            namespace.teardown();
+        }
         let namespace_removed = wait_for_namespace_removal(namespace_id)?;
         if !namespace_removed {
             return Err(CliError::NamespaceTeardownFailed {
