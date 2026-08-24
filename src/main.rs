@@ -281,6 +281,7 @@ fn forward_check_to_daemon(
     let mut conn =
         LocalSocketStream::connect(name).map_err(|e| anyhow!("Daemon not running: {e}"))?;
     daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_STOP_TIMEOUT_SECONDS)?;
+    daemon::exchange_versions_with_daemon(&mut conn);
 
     let request = daemon::DaemonRequest::CheckNamespace(daemon::CheckNamespaceRequest {
         id: command.id.clone(),
@@ -358,6 +359,7 @@ fn forward_stop_to_daemon(request: StopRequest, json: bool) -> Result<i32, StopF
         .map_err(|_| StopForwardError::Retry(anyhow!("Daemon not running")))?;
     daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_STOP_TIMEOUT_SECONDS)
         .map_err(StopForwardError::Retry)?;
+    daemon::exchange_versions_with_daemon(&mut conn);
 
     let daemon_request = daemon::DaemonRequest::Stop(daemon::DaemonStopRequest {
         target: request.daemon_target(),
@@ -425,6 +427,7 @@ fn forward_to_daemon(cmd: &ExecCommand) -> anyhow::Result<DaemonForward> {
     };
 
     debug!("Connected to daemon, forwarding command.");
+    daemon::exchange_versions_with_daemon(&mut conn);
     let mut daemon_cmd = cmd.clone();
     resolve_custom_path_for_daemon(&mut daemon_cmd, &std::env::current_dir()?);
 

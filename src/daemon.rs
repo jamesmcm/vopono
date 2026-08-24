@@ -117,6 +117,94 @@ fn versions_compatible(daemon_version: &str, client_version: &str) -> bool {
     !daemon_major.is_empty() && daemon_major == client_major
 }
 
+/// Outcome of comparing a peer's version against ours.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum VersionSkew {
+    /// Identical version strings.
+    Match,
+    /// Same major, different minor/patch: feature skew only.
+    MinorMismatch,
+    /// Different major (or unparsable): protocol incompatibility is likely.
+    MajorMismatch,
+}
+
+fn classify_version_skew(peer: &str, own: &str) -> VersionSkew {
+    if peer == own {
+        VersionSkew::Match
+    } else if versions_compatible(peer, own) && versions_compatible(own, peer) {
+        VersionSkew::MinorMismatch
+    } else {
+        VersionSkew::MajorMismatch
+    }
+}
+
+/// Daemon side: warn when a client's version differs from this daemon's.
+fn warn_on_client_version_mismatch(client_version: &str) {
+    let own = env!("CARGO_PKG_VERSION");
+    match classify_version_skew(client_version, own) {
+        VersionSkew::Match => {}
+        VersionSkew::MinorMismatch => warn!(
+            "Client vopono version {client_version} differs from daemon version {own}; consider restarting the daemon ('sudo systemctl restart vopono') to match."
+        ),
+        VersionSkew::MajorMismatch => error!(
+            "Client vopono version {client_version} is incompatible with daemon version {own}; requests may fail unexpectedly. Update vopono and restart the daemon."
+        ),
+    }
+}
+
+/// Client side: announce our version and warn when the daemon's differs.
+///
+/// Best-effort and time-bounded: a wedged daemon must not hang the client,
+/// and a daemon too old to understand `ClientVersion` simply drops the
+/// connection so the caller falls back to sudo; the local warning below
+/// still fires whenever the daemon's reported version can be read.
+pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) {
+    let own = env!("CARGO_PKG_VERSION");
+    if set_socket_timeouts_for(conn, DAEMON_HANDSHAKE_TIMEOUT_SECONDS).is_err() {
+        return;
+    }
+    let sent = wincode::serialize(&DaemonRequest::ClientVersion(own.to_string()))
+        .ok()
+        .and_then(|bytes| write_framed(conn, &bytes).ok());
+    // The daemon answers the handshake with its own version directly.
+    let daemon_version = sent.and_then(|_| {
+        read_framed(conn, MAX_FRAME_LEN)
+            .ok()
+            .and_then(|response| wincode::deserialize::<DaemonResponse>(&response).ok())
+            .and_then(|parsed| match parsed {
+                DaemonResponse::Version(version) => Some(version),
+                _ => None,
+            })
+    });
+    // Restore blocking mode for the long-lived session that follows.
+    let _ = clear_socket_timeouts(conn);
+    let Some(daemon_version) = daemon_version else {
+        return;
+    };
+    match classify_version_skew(&daemon_version, own) {
+        VersionSkew::Match => {}
+        VersionSkew::MinorMismatch => log::warn!(
+            "Daemon vopono version {daemon_version} differs from client version {own}; restart the daemon ('sudo systemctl restart vopono') to align them."
+        ),
+        VersionSkew::MajorMismatch => log::error!(
+            "Daemon vopono version {daemon_version} is incompatible with client version {own}; update vopono and restart the daemon."
+        ),
+    }
+}
+
+/// Clear send/receive timeouts (value 0 = block indefinitely).
+pub(crate) fn clear_socket_timeouts(stream: &LocalSocketStream) -> anyhow::Result<()> {
+    use nix::sys::socket::sockopt::{ReceiveTimeout, SendTimeout};
+    use nix::sys::time::TimeValLike;
+    let zero = nix::sys::time::TimeVal::seconds(0);
+    let LocalSocketStream::UdSocket(socket) = stream;
+    nix::sys::socket::setsockopt(&socket.as_fd(), ReceiveTimeout, &zero)
+        .context("Failed to clear daemon receive timeout")?;
+    nix::sys::socket::setsockopt(&socket.as_fd(), SendTimeout, &zero)
+        .context("Failed to clear daemon send timeout")?;
+    Ok(())
+}
+
 pub(crate) const DAEMON_HANDSHAKE_TIMEOUT_SECONDS: i64 = 2;
 pub(crate) const DAEMON_STOP_TIMEOUT_SECONDS: i64 = 30;
 
@@ -200,6 +288,11 @@ pub enum DaemonRequest {
     Stop(DaemonStopRequest),
     /// Probe connectivity of an existing network namespace (requires root).
     CheckNamespace(CheckNamespaceRequest),
+    /// First frame sent by every client: its own crate version, so the
+    /// daemon can warn about client/daemon version skew. Must stay the
+    /// LAST variant - older clients never send it, and appended variants
+    /// preserve the wire indices of all earlier ones.
+    ClientVersion(String),
 }
 
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug, Clone)]
@@ -330,8 +423,9 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
         user.name, uid, group.name, gid
     );
 
-    // Read a framed request (length-prefixed u32 then payload)
-    let request: DaemonRequest = {
+    // Read a framed request (length-prefixed u32 then payload). Newer
+    // clients announce their version first so skew can be flagged here.
+    let mut request: DaemonRequest = {
         let mut len_bytes = [0u8; 4];
         conn.read_exact(&mut len_bytes)?;
         let len = u32::from_be_bytes(len_bytes) as usize;
@@ -340,6 +434,38 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
         conn.read_exact(&mut buffer)?;
         wincode::deserialize(&buffer)?
     };
+    if let DaemonRequest::ClientVersion(client_version) = &request {
+        // Handshake: flag skew on our side, tell the client ours, then read
+        // the actual request frame.
+        warn_on_client_version_mismatch(client_version);
+        let response = DaemonResponse::Version(env!("CARGO_PKG_VERSION").to_string());
+        if let Ok(bytes) = wincode::serialize(&response) {
+            let _ = conn.write_all(&(bytes.len() as u32).to_be_bytes());
+            let _ = conn.write_all(&bytes);
+        }
+        request = {
+            let mut len_bytes = [0u8; 4];
+            conn.read_exact(&mut len_bytes)?;
+            let len = u32::from_be_bytes(len_bytes) as usize;
+            anyhow::ensure!(len <= MAX_FRAME_LEN, "Client frame too large: {len}");
+            let mut buffer = vec![0u8; len];
+            conn.read_exact(&mut buffer)?;
+            wincode::deserialize(&buffer)?
+        };
+    }
+
+    // All writes into the client's config tree are performed by a
+    // dropped-privilege subprocess so the kernel - not a post-hoc chown -
+    // enforces ownership. Configure both overrides up front, then adopt the
+    // client-supplied base directory only after validating it against this
+    // connection's authenticated peer.
+    vopono_core::util::set_helper_exe_override(std::env::current_exe().ok());
+    vopono_core::util::set_config_owner_override(Some((uid, gid)));
+    let provided_config_home = request_client_config_home(&request);
+    let config_base = adopt_client_config_base(provided_config_home, &user, uid)
+        .context("No usable config directory for client")?;
+    vopono_core::util::set_config_dir_override(Some(config_base));
+
     match request {
         DaemonRequest::Execute {
             cmd,
@@ -630,6 +756,9 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
         DaemonRequest::Control(_) => {
             // Ignore unexpected control frame sent as the first message
         }
+        DaemonRequest::ClientVersion(_) => {
+            // Handshake-only frame; a bare one carries no request payload.
+        }
     }
     // Clear any thread-local override before exiting the handler
     vopono_core::util::set_config_dir_override(None);
@@ -756,6 +885,34 @@ mod tests {
         assert!(!versions_compatible("1.0.0", "0.10.20"));
         // An empty/garbage daemon answer is never treated as compatible.
         assert!(!versions_compatible("", "0.10.20"));
+    }
+
+    use super::{VersionSkew, classify_version_skew};
+
+    #[test]
+    fn version_skew_classification() {
+        assert_eq!(
+            classify_version_skew("0.10.22", "0.10.22"),
+            VersionSkew::Match
+        );
+        assert_eq!(
+            classify_version_skew("0.10.21", "0.10.22"),
+            VersionSkew::MinorMismatch
+        );
+        assert_eq!(
+            classify_version_skew("0.11.0", "0.10.22"),
+            VersionSkew::MinorMismatch,
+            "same major stays a minor mismatch"
+        );
+        assert_eq!(
+            classify_version_skew("1.0.0", "0.10.22"),
+            VersionSkew::MajorMismatch
+        );
+        assert_eq!(
+            classify_version_skew("", "0.10.22"),
+            VersionSkew::MajorMismatch,
+            "unparsable peer versions are treated as incompatible"
+        );
     }
 
     mod config_adoption {
