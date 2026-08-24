@@ -29,7 +29,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::thread;
 
@@ -252,6 +252,28 @@ fn query_daemon_version(stream: &mut LocalSocketStream) -> Option<String> {
 }
 
 pub(crate) const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+const MAX_CONTROL_FRAME_LEN: usize = 64 * 1024;
+const MAX_CONCURRENT_CLIENTS: usize = 128;
+static ACTIVE_CLIENTS: AtomicUsize = AtomicUsize::new(0);
+
+struct ClientSlot;
+
+impl ClientSlot {
+    fn acquire() -> Option<Self> {
+        ACTIVE_CLIENTS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_CONCURRENT_CLIENTS).then_some(active + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for ClientSlot {
+    fn drop(&mut self) {
+        ACTIVE_CLIENTS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 pub(crate) fn write_framed(stream: &mut LocalSocketStream, payload: &[u8]) -> anyhow::Result<()> {
     stream.write_all(&(payload.len() as u32).to_be_bytes())?;
@@ -265,11 +287,16 @@ pub(crate) fn read_framed(
 ) -> anyhow::Result<Vec<u8>> {
     let mut len_bytes = [0u8; 4];
     stream.read_exact(&mut len_bytes)?;
-    let len = u32::from_be_bytes(len_bytes) as usize;
-    anyhow::ensure!(len <= max_len, "Daemon frame too large: {len}");
+    let len = checked_frame_len(len_bytes, max_len)?;
     let mut buffer = vec![0u8; len];
     stream.read_exact(&mut buffer)?;
     Ok(buffer)
+}
+
+fn checked_frame_len(len_bytes: [u8; 4], max_len: usize) -> anyhow::Result<usize> {
+    let len = u32::from_be_bytes(len_bytes) as usize;
+    anyhow::ensure!(len <= max_len, "Daemon frame too large: {len}");
+    Ok(len)
 }
 
 fn read_request(stream: &mut LocalSocketStream) -> anyhow::Result<DaemonRequest> {
@@ -393,7 +420,14 @@ pub fn start() -> anyhow::Result<()> {
     info!("Daemon listening on {}", SOCKET_PATH);
 
     for conn in listener.incoming().filter_map(handle_accept_error) {
+        let Some(client_slot) = ClientSlot::acquire() else {
+            warn!(
+                "Rejecting daemon connection: concurrent client limit ({MAX_CONCURRENT_CLIENTS}) reached"
+            );
+            continue;
+        };
         thread::spawn(move || {
+            let _client_slot = client_slot;
             let mut error_conn = conn.try_clone().ok();
             if let Err(e) = handle_client(conn) {
                 error!("Error handling client: {}", e);
@@ -432,6 +466,9 @@ fn get_peer_credentials(stream: &LocalSocketStream) -> anyhow::Result<(Uid, Gid)
 
 /// Handles a single client connection.
 fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
+    // An unauthenticated local peer must not be able to occupy a daemon
+    // worker indefinitely by connecting without sending a complete request.
+    set_socket_timeouts(&conn)?;
     let (uid, gid) = get_peer_credentials(&conn)?;
     let user = User::from_uid(uid)?.ok_or(anyhow!("Invalid UID"))?;
     let group = Group::from_gid(gid)?.ok_or(anyhow!("Invalid GID"))?;
@@ -476,6 +513,9 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             // Receive stdin, stdout, stderr FDs via SCM_RIGHTS (exec only)
             let [client_stdin_fd, client_stdout_fd, client_stderr_fd] =
                 recv_fds_over_unix_socket(&conn, 3)?;
+            // Execution sessions are intentionally long lived. The bounded
+            // timeout above is only for request and descriptor admission.
+            clear_socket_timeouts(&conn)?;
 
             // Decode the command payload from the JSON bytes carried by `DaemonRequest::Execute`.
             let mut exec_command: ExecCommand = serde_json::from_slice(&cmd)?;
@@ -573,15 +613,9 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 let child_pgid = nix::unistd::Pid::from_raw(-(child.id() as i32));
                 thread::spawn(move || {
                     loop {
-                        let mut len_bytes = [0u8; 4];
-                        if ctrl_conn.read_exact(&mut len_bytes).is_err() {
+                        let Ok(buf) = read_framed(&mut ctrl_conn, MAX_CONTROL_FRAME_LEN) else {
                             break;
-                        }
-                        let len = u32::from_be_bytes(len_bytes) as usize;
-                        let mut buf = vec![0u8; len];
-                        if ctrl_conn.read_exact(&mut buf).is_err() {
-                            break;
-                        }
+                        };
                         if let Ok(DaemonRequest::Control(ctrl)) =
                             wincode::deserialize::<DaemonRequest>(&buf)
                         {
@@ -871,7 +905,16 @@ fn recv_fds_over_unix_socket(
 
 #[cfg(test)]
 mod tests {
-    use super::versions_compatible;
+    use super::{checked_frame_len, versions_compatible};
+
+    #[test]
+    fn framed_messages_are_rejected_before_oversized_allocation() {
+        assert_eq!(checked_frame_len(16u32.to_be_bytes(), 16).unwrap(), 16);
+        let error = checked_frame_len(17u32.to_be_bytes(), 16)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("frame too large"));
+    }
 
     #[test]
     fn compatibility_requires_matching_major_version() {
