@@ -116,7 +116,6 @@ impl Piapf {
         let pia_token = PrivateInternetAccess::get_pia_token(&pia_user, &pia_pass)?;
         let pia_cert_path = pia.pia_cert_path()?.display().to_string();
 
-        log::info!("PIA pia_token: {pia_token}");
         log::info!("PIA pia_cert_path: {pia_cert_path}");
 
         if which("curl").is_err() {
