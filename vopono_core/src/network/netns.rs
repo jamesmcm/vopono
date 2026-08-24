@@ -19,7 +19,8 @@ use crate::network::host_masquerade::FirewallException;
 use crate::network::wireguard_config::WireguardPeer;
 use crate::util::{
     chown_to_config_owner, config_dir, ensure_dir_as_config_owner, get_existing_namespaces,
-    parse_command_str, set_config_permissions, sudo_command, write_file_as_config_owner,
+    parse_command_str, set_config_permissions, sudo_command, validate_netns_name,
+    write_file_as_config_owner,
 };
 use anyhow::{Context, anyhow};
 use log::{debug, info, warn};
@@ -115,6 +116,7 @@ pub struct VethPairIPs {
 
 impl NetworkNamespace {
     pub fn from_existing(name: String) -> anyhow::Result<Self> {
+        validate_netns_name(&name)?;
         let mut lockfile_path = config_dir()?;
         lockfile_path.push(format!("vopono/locks/{name}"));
 
@@ -180,6 +182,7 @@ impl NetworkNamespace {
     /// and [`Drop`] leaves the namespace and its firewall configuration
     /// untouched - its lifecycle belongs to whoever created it.
     pub fn attach_unmanaged(name: String) -> anyhow::Result<Self> {
+        validate_netns_name(&name)?;
         info!(
             "Attaching to existing unmanaged network namespace: {}",
             name
@@ -220,6 +223,7 @@ impl NetworkNamespace {
         predown_user: Option<String>,
         predown_group: Option<String>,
     ) -> anyhow::Result<Self> {
+        validate_netns_name(&name)?;
         sudo_command(&["ip", "netns", "add", name.as_str()])
             .with_context(|| format!("Failed to create network namespace: {}", name))?;
         info!("Created new network namespace: {}", name);

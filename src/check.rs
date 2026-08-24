@@ -250,6 +250,17 @@ pub fn probe_namespace(
     skip_ipv6: bool,
     skip_dns: bool,
 ) -> ConnectivityStatus {
+    // The namespace id reaches `ip netns exec` as argv (and would reach
+    // /run/netns/<id> elsewhere); reject injection or traversal shapes.
+    if let Err(error) = vopono_core::util::validate_netns_name(id) {
+        return ConnectivityStatus {
+            id: id.to_string(),
+            connected: false,
+            ipv4: (!skip_ipv4).then(|| FamilyStatus::failed(&format!("{v4_host}:{port}"), error)),
+            ipv6: None,
+            dns: None,
+        };
+    }
     let outcome = probe_namespace_inner(
         id, v4_host, v6_host, port, timeout_ms, dns_host, skip_ipv4, skip_ipv6, skip_dns,
     );
