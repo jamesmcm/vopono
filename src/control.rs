@@ -112,6 +112,22 @@ pub fn stop_namespace(
 
     if let Some(uid) = requester_uid {
         crate::namespace_ownership::authorize(namespace_id, uid)?;
+        terminate_namespace_user_processes(namespace_id, uid)?;
+        let namespace_removed = wait_for_namespace_removal(namespace_id)?;
+        if !namespace_removed {
+            return Err(CliError::NamespaceTeardownFailed {
+                namespace_id: namespace_id.to_string(),
+            }
+            .into());
+        }
+        crate::namespace_ownership::remove(namespace_id);
+        return Ok(StopResult {
+            version: SCHEMA_VERSION,
+            target: StopTargetKind::Namespace,
+            application_id: None,
+            namespace_id: namespace_id.to_string(),
+            namespace_removed,
+        });
     }
 
     let namespace = NetworkNamespace::from_existing(namespace_id.to_string())?;
@@ -132,10 +148,6 @@ pub fn stop_namespace(
         }
         .into());
     }
-    if requester_uid.is_some() {
-        crate::namespace_ownership::remove(namespace_id);
-    }
-
     Ok(StopResult {
         version: SCHEMA_VERSION,
         target: StopTargetKind::Namespace,
@@ -246,8 +258,47 @@ fn terminate_namespace_processes(namespace_id: &str) -> anyhow::Result<()> {
     .into())
 }
 
-fn wait_for_namespace_removal(namespace_id: &str) -> anyhow::Result<bool> {
+fn namespace_processes_for_uid(
+    namespace_id: &str,
+    uid: nix::unistd::Uid,
+) -> anyhow::Result<Vec<i32>> {
+    Ok(namespace_processes(namespace_id)?
+        .into_iter()
+        .filter(|pid| process_real_uid(*pid as u32) == Some(uid.as_raw()))
+        .collect())
+}
+
+fn terminate_namespace_user_processes(
+    namespace_id: &str,
+    uid: nix::unistd::Uid,
+) -> anyhow::Result<()> {
+    for pid in namespace_processes_for_uid(namespace_id, uid)? {
+        send_signal(pid as u32, Signal::SIGTERM)?;
+    }
     if wait_until(|| {
+        namespace_processes_for_uid(namespace_id, uid)
+            .map(|processes| processes.is_empty())
+            .unwrap_or(false)
+    }) {
+        return Ok(());
+    }
+    for pid in namespace_processes_for_uid(namespace_id, uid)? {
+        send_signal(pid as u32, Signal::SIGKILL)?;
+    }
+    anyhow::ensure!(
+        wait_until(|| {
+            namespace_processes_for_uid(namespace_id, uid)
+                .map(|processes| processes.is_empty())
+                .unwrap_or(false)
+        }),
+        "Processes owned by uid {} remain in namespace {namespace_id}",
+        uid.as_raw()
+    );
+    Ok(())
+}
+
+fn wait_for_namespace_removal(namespace_id: &str) -> anyhow::Result<bool> {
+    if wait_until_for(100, || {
         get_existing_namespaces()
             .map(|namespaces| !namespaces.iter().any(|name| name == namespace_id))
             .unwrap_or(false)
@@ -259,8 +310,12 @@ fn wait_for_namespace_removal(namespace_id: &str) -> anyhow::Result<bool> {
         .any(|name| name == namespace_id))
 }
 
-fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
-    for _ in 0..20 {
+fn wait_until(condition: impl FnMut() -> bool) -> bool {
+    wait_until_for(20, condition)
+}
+
+fn wait_until_for(attempts: usize, mut condition: impl FnMut() -> bool) -> bool {
+    for _ in 0..attempts {
         if condition() {
             return true;
         }

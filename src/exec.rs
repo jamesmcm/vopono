@@ -310,9 +310,10 @@ fn setup_namespace(
 
     if get_existing_namespaces()?.contains(&ns_name) {
         if let Some(uid) = daemon_uid {
-            crate::namespace_ownership::authorize(&ns_name, uid)?;
-        }
-        if foreign_attach {
+            ns = crate::namespace_ownership::load(&ns_name, uid)?;
+            info!("Using root-owned state for existing namespace: {}", ns_name);
+            forwarder = None;
+        } else if foreign_attach {
             info!(
                 "Attaching to unmanaged namespace {} - vopono will not modify it and will leave it running on exit",
                 ns_name
@@ -325,19 +326,20 @@ fn setup_namespace(
                 forwarder,
                 host_env_vars,
             });
+        } else {
+            info!(
+                "Using existing namespace: {}, will not modify firewall rules",
+                ns_name
+            );
+            ns = NetworkNamespace::from_existing(ns_name)?;
+            forwarder = None;
         }
-        info!(
-            "Using existing namespace: {}, will not modify firewall rules",
-            ns_name
-        );
-        ns = NetworkNamespace::from_existing(ns_name)?;
         if parsed_command.port_forwarding || parsed_command.custom_port_forwarding.is_some() {
             warn!(
                 "Re-using existing network namespace {} - will not run port forwarder, should be run when netns first created",
                 ns.name
             );
         }
-        forwarder = None;
     } else {
         ns = NetworkNamespace::new(
             ns_name.clone(),
@@ -348,9 +350,6 @@ fn setup_namespace(
             parsed_command.user.clone(),
             parsed_command.group.clone(),
         )?;
-        if let Some(uid) = daemon_uid {
-            crate::namespace_ownership::tag(&ns_name, uid)?;
-        }
         ns.set_server(Some(parsed_command.server.clone()));
         ns.set_port_configuration(
             parsed_command.open_ports.as_deref(),
@@ -489,6 +488,10 @@ fn setup_namespace(
             set_env_vars(&ns, forwarder.as_deref(), &mut cmd, &host_env_vars);
             cmd.spawn()?;
         }
+    }
+
+    if let Some(uid) = daemon_uid {
+        crate::namespace_ownership::tag(&ns, uid)?;
     }
 
     Ok(NamespaceConfig {

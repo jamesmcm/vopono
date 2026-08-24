@@ -1,8 +1,9 @@
 use anyhow::Context;
 use nix::unistd::Uid;
 use serde::{Deserialize, Serialize};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use vopono_core::network::netns::NetworkNamespace;
 
 const OWNER_DIR: &str = "/run/vopono/namespace-owners";
 
@@ -11,6 +12,7 @@ struct OwnerRecord {
     uid: u32,
     device: u64,
     inode: u64,
+    namespace: String,
 }
 
 fn namespace_path(name: &str) -> PathBuf {
@@ -35,7 +37,8 @@ pub fn name_for_uid(base: &str, uid: Uid) -> anyhow::Result<String> {
 
 /// Persist ownership outside the user-writable config tree. Device/inode bind
 /// the record to this exact namespace rather than merely its reusable name.
-pub fn tag(name: &str, uid: Uid) -> anyhow::Result<()> {
+pub fn tag(namespace_state: &NetworkNamespace, uid: Uid) -> anyhow::Result<()> {
+    let name = &namespace_state.name;
     vopono_core::network::netns::validate_netns_name(name)?;
     let namespace = std::fs::metadata(namespace_path(name))
         .with_context(|| format!("Failed to inspect namespace {name}"))?;
@@ -46,20 +49,31 @@ pub fn tag(name: &str, uid: Uid) -> anyhow::Result<()> {
         uid: uid.as_raw(),
         device: namespace.dev(),
         inode: namespace.ino(),
+        namespace: serde_json::to_string(namespace_state)?,
     };
     let path = record_path(name);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(&path)?;
+    let mut file = tempfile::NamedTempFile::new_in(OWNER_DIR)?;
     serde_json::to_writer(&mut file, &record)?;
-    file.sync_all()?;
+    file.as_file().sync_all()?;
+    file.persist(&path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("Failed to persist ownership tag for {name}"))?;
     Ok(())
 }
 
 pub fn authorize(name: &str, uid: Uid) -> anyhow::Result<()> {
+    validated_record(name, uid).map(|_| ())
+}
+
+pub fn load(name: &str, uid: Uid) -> anyhow::Result<NetworkNamespace> {
+    let record = validated_record(name, uid)?;
+    let namespace: NetworkNamespace = serde_json::from_str(&record.namespace)
+        .context("Invalid root-owned namespace state snapshot")?;
+    anyhow::ensure!(namespace.name == name, "Namespace snapshot name mismatch");
+    Ok(namespace)
+}
+
+fn validated_record(name: &str, uid: Uid) -> anyhow::Result<OwnerRecord> {
     vopono_core::network::netns::validate_netns_name(name)?;
     let record_path = record_path(name);
     let record_meta = std::fs::symlink_metadata(&record_path)
@@ -71,7 +85,8 @@ pub fn authorize(name: &str, uid: Uid) -> anyhow::Result<()> {
     let record: OwnerRecord = serde_json::from_reader(std::fs::File::open(&record_path)?)?;
     let namespace = std::fs::metadata(namespace_path(name))
         .with_context(|| format!("Failed to inspect namespace {name}"))?;
-    validate_record(name, &record, uid, namespace.dev(), namespace.ino())
+    validate_record(name, &record, uid, namespace.dev(), namespace.ino())?;
+    Ok(record)
 }
 
 fn validate_record(
@@ -100,7 +115,7 @@ pub fn remove(name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{OwnerRecord, name_for_uid, validate_record};
+    use super::{NetworkNamespace, OwnerRecord, name_for_uid, validate_record};
     use nix::unistd::Uid;
 
     #[test]
@@ -123,6 +138,7 @@ mod tests {
             uid: 1000,
             device: 7,
             inode: 11,
+            namespace: "snapshot".to_string(),
         };
         assert!(validate_record("vo_test", &record, Uid::from_raw(1000), 7, 11).is_ok());
         assert!(
@@ -137,5 +153,14 @@ mod tests {
                 .to_string()
                 .contains("stale")
         );
+    }
+
+    #[test]
+    fn namespace_snapshots_round_trip_without_user_lockfiles() {
+        let namespace = NetworkNamespace::attach_unmanaged("vo_test".to_string()).unwrap();
+        let snapshot = serde_json::to_string(&namespace).unwrap();
+        let restored: NetworkNamespace = serde_json::from_str(&snapshot).unwrap();
+        assert_eq!(restored.name, "vo_test");
+        assert!(restored.unmanaged);
     }
 }

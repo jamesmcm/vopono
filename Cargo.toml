@@ -41,6 +41,7 @@ shellexpand = { version = "3", features = ["full"] }
 shell-words = "1"
 interprocess = "2"
 wincode = { version = "0.6", features = ["derive", "std"] }
+tempfile = "3"
 
 [package.metadata.deb]
 maintainer = "James McMurray <jamesmcm03@gmail.com>"
