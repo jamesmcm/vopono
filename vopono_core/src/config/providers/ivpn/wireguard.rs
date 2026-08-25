@@ -8,7 +8,7 @@ use crate::network::wireguard_config::{
     WireguardConfig, WireguardEndpoint, WireguardInterface, WireguardPeer,
 };
 use crate::util::delete_all_files_in_dir;
-use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
+use crate::util::wireguard::{WgKey, generate_keypair, prompt_for_private_key};
 use ipnet::{IpNet, Ipv4Net};
 use log::info;
 use serde::Deserialize;
@@ -221,29 +221,11 @@ fn prompt_for_wg_key(uiclient: &dyn UiClient) -> anyhow::Result<WgKey> {
         })),
     })?;
 
-    let pubkey_clone = public_key.clone();
-    let private_key = uiclient.get_input(Input {
-        prompt: format!("Private key for {}", public_key),
-        validator: Some(Box::new(
-            move |private_key: &String| -> Result<(), String> {
-                let private_key = private_key.trim();
-
-                if private_key.len() != 44 {
-                    return Err("Expected private key length of 44 characters".to_string());
-                }
-
-                match generate_public_key(private_key) {
-                    Ok(pubkey) => {
-                        if pubkey != pubkey_clone {
-                            return Err("Private key does not match public key".to_string());
-                        }
-                        Ok(())
-                    }
-                    Err(_) => Err("Failed to generate public key".to_string()),
-                }
-            },
-        )),
-    })?;
+    let private_key = prompt_for_private_key(
+        uiclient,
+        &public_key,
+        format!("Private key for {public_key}"),
+    )?;
 
     Ok(WgKey {
         public: public_key,

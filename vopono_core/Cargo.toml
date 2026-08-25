@@ -54,7 +54,6 @@ sha2 = "0.11"
 tiny_http = "0.12"
 chrono = "0.4"
 shell-words = "1"
-dns-lookup = "3"
 libc = "0.2"
 pem = "4"
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

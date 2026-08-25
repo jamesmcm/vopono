@@ -1,6 +1,6 @@
 use super::ProtonVPN;
 use super::{ConfigurationChoice, OpenVpnProvider};
-use crate::config::providers::{Input, Password, UiClient};
+use crate::config::providers::{Input, Password, UiClient, enum_default_index};
 use crate::config::vpn::OpenVpnProtocol;
 use crate::util::delete_all_files_in_dir;
 use anyhow::anyhow;
@@ -279,6 +279,10 @@ impl ConfigurationChoice for Tier {
             .to_string(),
         )
     }
+
+    fn default_index(&self) -> usize {
+        enum_default_index::<Self>()
+    }
 }
 
 #[derive(EnumIter, EnumString, FromRepr, PartialEq, Default, Display, Copy, Clone, Debug)]
@@ -321,6 +325,10 @@ impl ConfigurationChoice for ConfigType {
             }
             .to_string(),
         )
+    }
+
+    fn default_index(&self) -> usize {
+        enum_default_index::<Self>()
     }
 }
 
@@ -623,6 +631,9 @@ mod tests {
 
     #[test]
     fn tiers_and_config_types_support_from_repr_and_roundtrip() {
+        assert_eq!(Tier::default_index(&Tier::default()), 1);
+        assert_eq!(ConfigType::default_index(&ConfigType::default()), 1);
+
         for (index, tier) in Tier::iter().enumerate() {
             assert_eq!(Tier::from_repr(index), Some(tier));
             assert_eq!(tier.to_string().parse::<Tier>().unwrap(), tier);

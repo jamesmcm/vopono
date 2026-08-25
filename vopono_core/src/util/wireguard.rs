@@ -3,8 +3,12 @@ use base64::{
     engine::{GeneralPurpose, general_purpose},
 };
 
-use serde::Deserialize;
+use crate::config::providers::{Password, UiClient};
+use log::info;
+use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use std::io::Write;
+use std::path::Path;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 const B64_ENGINE: GeneralPurpose = general_purpose::STANDARD;
@@ -67,6 +71,56 @@ pub fn generate_public_key(private_key: &str) -> anyhow::Result<String> {
     let public = PublicKey::from(&private);
     let public_key = B64_ENGINE.encode(public.as_bytes());
     Ok(public_key)
+}
+
+/// Prompt the user for a private key and validate that it is a well-formed
+/// key matching the given expected public key
+pub fn prompt_for_private_key(
+    uiclient: &dyn UiClient,
+    expected_public_key: &str,
+    prompt: String,
+) -> anyhow::Result<String> {
+    let private_key = prompt_for_well_formed_private_key(uiclient, prompt)?;
+    let public_key = generate_public_key(&private_key)?;
+    if public_key != expected_public_key {
+        anyhow::bail!("Private key does not match public key");
+    }
+
+    Ok(private_key)
+}
+
+/// Prompt for a Wireguard private key without displaying the entered secret.
+pub fn prompt_for_well_formed_private_key(
+    uiclient: &dyn UiClient,
+    prompt: String,
+) -> anyhow::Result<String> {
+    let private_key = uiclient.get_password(Password {
+        prompt,
+        confirm: false,
+    })?;
+    let private_key = private_key.trim();
+
+    if private_key.len() != 44 {
+        anyhow::bail!("Expected private key length of 44 characters");
+    }
+
+    generate_public_key(private_key)
+        .map_err(|_| anyhow::anyhow!("Invalid Wireguard private key"))?;
+
+    Ok(private_key.to_owned())
+}
+
+/// Serialize the given device details and write them to `wireguard_device.json`
+/// in the given directory, with private-file permissions
+pub fn save_wireguard_device_json(dir: &Path, details: &impl Serialize) -> anyhow::Result<()> {
+    let path = dir.join("wireguard_device.json");
+    let mut f = crate::util::create_private_file(&path)?;
+    write!(f, "{}", serde_json::to_string(details)?)?;
+    info!(
+        "Saved Wireguard keypair details to {}",
+        path.to_string_lossy()
+    );
+    Ok(())
 }
 
 #[cfg(test)]

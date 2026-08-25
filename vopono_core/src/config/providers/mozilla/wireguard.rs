@@ -12,7 +12,7 @@ use crate::network::wireguard_config::{
     WireguardConfig, WireguardEndpoint, WireguardInterface, WireguardPeer,
 };
 use crate::util::delete_all_files_in_dir;
-use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
+use crate::util::wireguard::{WgKey, generate_keypair, prompt_for_private_key};
 use anyhow::anyhow;
 use ipnet::IpNet;
 use log::{debug, info};
@@ -85,28 +85,11 @@ impl MozillaVPN {
             self.upload_new_device(&device, client, login)?;
             Ok((device, keypair))
         } else {
-            let pubkey_clone = devices[selection].pubkey.clone();
-            let private_key = uiclient.get_input(Input {
-               prompt:format!(
-                    "Private key for {}",
-                    devices[selection].pubkey
-                ),
-        validator: Some(Box::new( move |private_key: &String| -> Result<(), String> {
-            let private_key = private_key.trim();
-            if private_key.len() != 44 {
-                return Err("Expected private key length of 44 characters".to_string()
-                );
-            }
-
-            match generate_public_key(private_key) {
-                Ok(public_key) => {
-            if public_key.as_str() != pubkey_clone {
-                return Err("Private key does not match public key".to_string());
-            }
-            Ok(())
-                }
-                Err(_) => Err("Failed to generate public key".to_string())
-        }}))})?;
+            let private_key = prompt_for_private_key(
+                uiclient,
+                &devices[selection].pubkey,
+                format!("Private key for {}", devices[selection].pubkey),
+            )?;
             let device = devices[selection].clone();
             Ok((NewDevice { name: device.name.clone(), pubkey: device.pubkey.clone()},
             WgKey {public: device.pubkey, private: private_key  } ))
