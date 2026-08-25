@@ -20,7 +20,7 @@ const WARP_TUNNEL_INTERFACE_PREFIXES: &[&str] = &["CloudflareWARP", "warp"];
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Warp {
-    pid: u32,
+    pub(crate) pid: u32,
 }
 
 impl Warp {

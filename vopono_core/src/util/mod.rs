@@ -285,16 +285,26 @@ pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
 pub fn get_pids_in_namespace(ns_name: &str) -> anyhow::Result<Vec<i32>> {
     let output = Command::new("ip")
         .args(["netns", "pids", ns_name])
-        .output()?
-        .stdout;
-    let output = std::str::from_utf8(&output)?
-        .split('\n')
-        .filter_map(|x| x.split_whitespace().next())
-        .filter_map(|x| x.parse::<i32>().ok())
-        .collect();
-    debug!("PIDs active in {}: {:?}", ns_name, output);
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "ip netns pids {ns_name} failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let pids = std::str::from_utf8(&output.stdout)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.parse::<i32>()
+                .with_context(|| format!("Invalid PID from `ip netns pids {ns_name}`: {line}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    debug!("PIDs active in {}: {:?}", ns_name, pids);
 
-    Ok(output)
+    Ok(pids)
 }
 
 pub fn check_process_running(pid: u32) -> bool {
@@ -478,8 +488,19 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
 
     existing_namespaces
         .into_iter()
-        .filter(|x| {
-            !lock_namespaces.contains_key(x) && get_pids_in_namespace(x).unwrap().is_empty()
+        .filter(|namespace| {
+            if lock_namespaces.contains_key(namespace) {
+                return false;
+            }
+            match get_pids_in_namespace(namespace) {
+                Ok(pids) => pids.is_empty(),
+                Err(e) => {
+                    warn!(
+                        "Could not inspect processes in namespace {namespace}: {e:?}; preserving namespace"
+                    );
+                    false
+                }
+            }
         })
         .try_for_each(|x| {
             debug!("Removing dead namespace: {x}");
@@ -506,7 +527,6 @@ pub fn elevate_privileges(askpass: bool) -> anyhow::Result<()> {
         flag::register(SIGINT, Arc::clone(&terminated))?;
 
         let sudo_flags = if askpass { "-AE" } else { "-E" };
-        // TODO: This isn't passing RUST_LOG ?
 
         debug!("Args: {:?}", args);
         // status blocks until the process has ended

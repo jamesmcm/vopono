@@ -23,7 +23,7 @@ use std::str::FromStr;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Shadowsocks {
-    pid: u32,
+    pub(crate) pid: u32,
 }
 
 impl Shadowsocks {

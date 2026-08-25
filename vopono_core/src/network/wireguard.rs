@@ -232,11 +232,7 @@ impl Wireguard {
             )?;
         }
 
-        // TODO: Use bs58 here?
-        let if_name = namespace.name
-            [((namespace.name.len() as i32) - 13).max(0) as usize..namespace.name.len()]
-            .to_string();
-        assert!(if_name.len() <= 15, "ifname must be <= 15 chars: {if_name}");
+        let if_name = super::netns::veth_interface_base(&namespace.name)?;
 
         NetworkNamespace::exec(
             &namespace.name,

@@ -71,7 +71,7 @@ pub fn server_from_config(config_file: &std::path::Path) -> anyhow::Result<Strin
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenConnect {
-    pid: u32,
+    pub(crate) pid: u32,
 }
 
 impl OpenConnect {

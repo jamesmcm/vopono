@@ -266,12 +266,10 @@ impl ArgsConfig {
             }
 
             server = command_else_config_option!(server, command, config)
-        // Work-around for providers which do not need a server - TODO: Clean this
-         .or_else(|| if provider == VpnProvider::Warp {Some("warp".to_owned())} else {None})
-         .or_else(|| if provider == VpnProvider::None {Some("none".to_owned())} else {None})
-            .ok_or_else(|| {
-                let msg = "VPN server prefix must be provided as a command-line argument or in the vopono config.toml file";
-                log::error!("{msg}"); anyhow!(msg)})?;
+                .or_else(|| provider.default_server())
+                .ok_or_else(|| {
+                    let msg = "VPN server prefix must be provided as a command-line argument or in the vopono config.toml file";
+                    log::error!("{msg}"); anyhow!(msg)})?;
 
             // `--provider None` launches an isolated namespace without any VPN
             // service; it overrides protocol settings from CLI args or the

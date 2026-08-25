@@ -12,7 +12,7 @@ use super::{TrojanHost, get_cert, trojan_config::TrojanConfig};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Trojan {
-    pid: u32,
+    pub(crate) pid: u32,
     pub config: TrojanConfig,
     #[serde(skip)]
     _temporary_files: Vec<tempfile::NamedTempFile>,

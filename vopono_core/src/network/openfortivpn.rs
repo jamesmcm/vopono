@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenFortiVpn {
-    pid: u32,
+    pub(crate) pid: u32,
     #[serde(skip)]
     _runtime_dir: Option<tempfile::TempDir>,
 }

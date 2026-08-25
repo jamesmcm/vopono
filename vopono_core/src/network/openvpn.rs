@@ -17,7 +17,7 @@ const OPENVPN_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenVpn {
-    pid: u32,
+    pub(crate) pid: u32,
     #[serde(default)]
     pub openvpn_dns_servers: Vec<IpAddr>,
     pub logfile: PathBuf,

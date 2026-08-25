@@ -19,19 +19,21 @@ use crate::network::host_masquerade::FirewallException;
 use crate::network::wireguard_config::WireguardPeer;
 use crate::util::{
     chown_to_config_owner, config_dir, ensure_dir_as_config_owner, get_existing_namespaces,
-    parse_command_str, sudo_command, write_file_as_config_owner,
+    get_pids_in_namespace, parse_command_str, sudo_command, write_file_as_config_owner,
 };
 use anyhow::{Context, anyhow};
 use log::{debug, info, warn};
 use nix::unistd;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
+use sysinfo::System;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NetworkNamespace {
@@ -138,7 +140,7 @@ pub fn validate_netns_name(name: &str) -> anyhow::Result<()> {
 /// interface limit on the namespace name itself. Six digest bytes make
 /// collisions between long namespace names extremely unlikely while leaving
 /// room for the `v` marker and `_s`/`_d` peer suffixes.
-fn veth_interface_base(namespace_name: &str) -> anyhow::Result<String> {
+pub(crate) fn veth_interface_base(namespace_name: &str) -> anyhow::Result<String> {
     const MAX_BASE_LEN: usize = 13;
 
     validate_netns_name(namespace_name)?;
@@ -152,6 +154,26 @@ fn veth_interface_base(namespace_name: &str) -> anyhow::Result<String> {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     Ok(format!("v{digest_prefix}"))
+}
+
+fn has_unaccounted_processes(
+    namespace_pids: &[i32],
+    managed_helper_pids: &[i32],
+    process_parents: &HashMap<i32, i32>,
+) -> bool {
+    namespace_pids.iter().any(|pid| {
+        let mut current = *pid;
+        for _ in 0..=namespace_pids.len() {
+            if managed_helper_pids.contains(&current) {
+                return false;
+            }
+            let Some(parent) = process_parents.get(&current) else {
+                return true;
+            };
+            current = *parent;
+        }
+        true
+    })
 }
 
 /// Atomically write a namespace lockfile with the ownership and modes used by
@@ -1128,12 +1150,63 @@ impl Drop for NetworkNamespace {
 
         let lockfile_path = lock_dir;
 
-        // Drop if lock directory doesn't exist, or it exists but is empty
-        // TODO: How can we make this check that no _other_ PIDs exist (aside from ones we have spawned)
-        if !lockfile_path.exists()
-            || (lockfile_path.read_dir().is_ok()
-                && lockfile_path.read_dir().unwrap().next().is_none())
-        {
+        // Tear down only if the lock directory is gone or empty (no other
+        // vopono instance uses this namespace) AND no unaccounted processes
+        // remain inside it. The lockfiles only track vopono-spawned sessions;
+        // detached or externally-started processes would lose connectivity if
+        // we deleted the namespace while they were still running.
+        let lock_dir_is_empty = if !lockfile_path.exists() {
+            true
+        } else {
+            match lockfile_path.read_dir() {
+                Ok(mut entries) => entries.next().is_none(),
+                Err(e) => {
+                    warn!(
+                        "Could not inspect locks directory {}: {e:?}; preserving namespace",
+                        lockfile_path.display()
+                    );
+                    false
+                }
+            }
+        };
+        let managed_helper_pids = [
+            self.openvpn.as_ref().map(|helper| helper.pid),
+            self.warp.as_ref().map(|helper| helper.pid),
+            self.shadowsocks.as_ref().map(|helper| helper.pid),
+            self.openconnect.as_ref().map(|helper| helper.pid),
+            self.openfortivpn.as_ref().map(|helper| helper.pid),
+            self.trojan.as_ref().map(|helper| helper.pid),
+            self.ssh.as_ref().map(|helper| helper.ssh_pid),
+            self.ssh.as_ref().map(|helper| helper.redsocks_pid),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|pid| pid as i32)
+        .collect::<Vec<_>>();
+        let has_unaccounted_processes = match get_pids_in_namespace(&self.name) {
+            Ok(pids) => {
+                let processes = System::new_all();
+                let process_parents = pids
+                    .iter()
+                    .filter_map(|pid| {
+                        processes
+                            .process(sysinfo::Pid::from_u32(*pid as u32))
+                            .and_then(|process| process.parent())
+                            .map(|parent| (*pid, parent.as_u32() as i32))
+                    })
+                    .collect::<HashMap<_, _>>();
+                has_unaccounted_processes(&pids, &managed_helper_pids, &process_parents)
+            }
+            Err(e) => {
+                warn!(
+                    "Could not inspect processes in namespace {}: {e:?}; preserving namespace",
+                    self.name
+                );
+                true
+            }
+        };
+
+        if lock_dir_is_empty && !has_unaccounted_processes {
             // Only try to delete if exists
             if lockfile_path.exists() {
                 match std::fs::remove_dir(&lockfile_path) {
@@ -1228,13 +1301,20 @@ impl Drop for NetworkNamespace {
             }
         } else {
             debug!("Skipping destructors since other vopono instance using this namespace!");
-            debug!(
-                "Existing lockfiles using this namespace: {:?}",
-                lockfile_path.read_dir().unwrap().collect::<Vec<_>>()
-            );
+            match lockfile_path.read_dir() {
+                Ok(entries) => debug!(
+                    "Existing lockfiles using this namespace: {:?}",
+                    entries.collect::<Vec<_>>()
+                ),
+                Err(e) => debug!(
+                    "Could not list lockfiles for preserved namespace {}: {e:?}",
+                    self.name
+                ),
+            }
             std::mem::forget(self.openvpn.take());
             std::mem::forget(self.warp.take());
             std::mem::forget(self.shadowsocks.take());
+            std::mem::forget(self.ssh.take());
             std::mem::forget(self.veth_pair.take());
             std::mem::forget(self.dns_config.take());
             std::mem::forget(self.wireguard.take());
@@ -1296,7 +1376,9 @@ impl NetworkNamespace {
 
 #[cfg(test)]
 mod tests {
-    use super::{NetworkNamespace, validate_netns_name, veth_interface_base};
+    use super::{
+        NetworkNamespace, has_unaccounted_processes, validate_netns_name, veth_interface_base,
+    };
 
     #[test]
     fn netns_names_are_constrained() {
@@ -1328,6 +1410,22 @@ mod tests {
         assert_eq!(first.len(), 13);
         assert!(format!("{first}_s").len() <= 15);
         assert!(format!("{first}_d").len() <= 15);
+    }
+
+    #[test]
+    fn managed_helpers_do_not_block_namespace_teardown() {
+        let parents = [(202, 101), (303, 202)].into_iter().collect();
+        assert!(!has_unaccounted_processes(
+            &[101, 202, 303],
+            &[101],
+            &parents
+        ));
+        assert!(!has_unaccounted_processes(&[], &[101], &parents));
+        assert!(has_unaccounted_processes(
+            &[101, 202, 303, 404],
+            &[101],
+            &parents
+        ));
     }
 
     #[test]

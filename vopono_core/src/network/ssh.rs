@@ -23,8 +23,8 @@ struct SshEndpoint {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SshProxy {
-    ssh_pid: u32,
-    redsocks_pid: u32,
+    pub(crate) ssh_pid: u32,
+    pub(crate) redsocks_pid: u32,
     pub listen_port: u16,
 }
 
