@@ -15,7 +15,6 @@ anyhow = "1"
 directories-next = "2"
 log = "0.4"
 which = "8"
-uzers = "0.12"
 nix = { version = "0.31", features = [
     "user",
     "signal",
@@ -34,7 +33,6 @@ walkdir = "2"
 # https://github.com/dalek-cryptography/curve25519-dalek/pull/729
 rand = "0.10.0-rc.8"
 chacha20 = "0.10.0-rc.10"
-rand_core = { version = "0.10" }
 ipnet = { version = "2", features = ["serde"] }
 reqwest = { default-features = false, version = "0.13", features = [
     "blocking",

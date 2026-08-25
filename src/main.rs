@@ -43,6 +43,9 @@ use vopono_core::util::elevate_privileges;
 pub const SOCKET_PATH: &str = "/run/vopono.sock";
 
 fn main() -> anyhow::Result<()> {
+    // Privileged config writes are delegated to a copy of this executable
+    // after it drops to the authenticated config owner.
+    vopono_core::util::set_helper_exe_override(std::env::current_exe().ok());
     let app = args::App::parse();
     // The daemon process itself must keep logging to journald even when it is
     // launched with --silent; only forwarded client requests honour it.

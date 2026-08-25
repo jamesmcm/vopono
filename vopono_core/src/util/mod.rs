@@ -9,7 +9,8 @@ pub mod wireguard;
 
 pub use owner_write::{
     ensure_dir_as_config_owner, perform_owner_write, run_owner_write_from_stdin,
-    set_helper_exe_override, validated_user_owned_dir, write_file_as_config_owner,
+    set_helper_exe_override, set_tree_permissions_as_config_owner, validated_user_owned_dir,
+    write_file_as_config_owner,
 };
 
 extern crate shell_words as shellwords;
@@ -32,7 +33,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 use sysinfo::{ProcessRefreshKind, RefreshKind, System};
-use uzers::{get_current_uid, get_user_by_uid};
 use walkdir::WalkDir;
 use which::which;
 
@@ -78,94 +78,55 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
         return Ok(override_path);
     }
 
-    let path: Option<PathBuf> = None
-        .or_else(|| {
-            if let Ok(home) = std::env::var("HOME") {
-                let confpath = format!("{home}/.config");
-                let path = Path::new(&confpath);
-                debug!(
-                    "Using config dir from $HOME config: {}",
-                    path.to_string_lossy()
-                );
-                if path.exists() {
-                    // Work-around for case when root $HOME is set but user's is not
-                    // It seems we cannot distinguish these cases
-                    if path.to_string_lossy().contains("/root") {
-                        None
-                    } else {
-                        Some(path.into())
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
+    if nix::unistd::geteuid().is_root() {
+        let user = effective_user()?;
+        if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
+            let candidate = PathBuf::from(xdg_config_home);
+            if let Ok(path) = validated_user_owned_dir(&candidate, user.uid) {
+                debug!("Using validated $XDG_CONFIG_HOME: {}", path.display());
+                return Ok(path);
             }
-        })
-        .or_else(|| {
-            if let Ok(user) = std::env::var("SUDO_USER") {
-                let confpath = home_config_dir(&user);
-                debug!(
-                    "Using config dir from $SUDO_USER config: {}",
-                    confpath.to_string_lossy()
-                );
-                confpath.exists().then_some(confpath)
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            if let Some(base_dirs) = BaseDirs::new() {
-                debug!(
-                    "Using config dir from XDG dirs: {}",
-                    base_dirs.config_dir().to_string_lossy()
-                );
-                Some(base_dirs.config_dir().into())
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            if let Some(user) = get_user_by_uid(get_current_uid()) {
-                // Handles case when run as root directly
-                let confpath = home_config_dir(user.name().to_str().unwrap());
-                debug!(
-                    "Using config dir from current user config: {}",
-                    confpath.to_string_lossy()
-                );
-                confpath.exists().then_some(confpath)
-            } else {
-                None
-            }
-        });
+            debug!(
+                "Ignoring untrusted $XDG_CONFIG_HOME while privileged: {}",
+                candidate.display()
+            );
+        }
+        let path = user.dir.join(".config");
+        debug!(
+            "Using config dir from passwd home for user '{}': {}",
+            user.name,
+            path.display()
+        );
+        return Ok(path);
+    }
 
-    path.ok_or_else(|| anyhow!("Could not find valid config directory!"))
+    BaseDirs::new()
+        .map(|dirs| dirs.config_dir().to_path_buf())
+        .ok_or_else(|| anyhow!("Could not find valid config directory!"))
 }
 
 pub fn vopono_dir() -> anyhow::Result<PathBuf> {
     Ok(config_dir()?.join("vopono"))
 }
 
-/// Home `.config` directory for a user, handling the root account.
-fn home_config_dir(user_name: &str) -> PathBuf {
-    if user_name == "root" {
-        PathBuf::from("/root/.config")
-    } else {
-        PathBuf::from(format!("/home/{user_name}/.config"))
+/// Resolve the user whose configuration is being handled. `$SUDO_USER` is
+/// consulted only in a privileged process, where sudo supplies it; an
+/// unprivileged caller cannot spoof its effective identity through the
+/// environment. Home and primary group come from NSS rather than `/home` path
+/// construction or a group-name round trip.
+fn effective_user() -> anyhow::Result<User> {
+    if nix::unistd::geteuid().is_root()
+        && let Ok(user_name) = std::env::var("SUDO_USER")
+    {
+        return User::from_name(&user_name)?
+            .ok_or_else(|| anyhow!("Failed to resolve sudo user '{user_name}'"));
     }
-}
-
-/// Resolve the effective username, preferring `$SUDO_USER` over the current user.
-fn effective_username() -> Option<String> {
-    if let Ok(user) = std::env::var("SUDO_USER") {
-        Some(user)
-    } else {
-        get_user_by_uid(get_current_uid()).map(|user| user.name().to_string_lossy().to_string())
-    }
+    let uid = nix::unistd::geteuid();
+    User::from_uid(uid)?.ok_or_else(|| anyhow!("Failed to resolve uid {uid}"))
 }
 
 pub fn get_username() -> anyhow::Result<String> {
-    effective_username().ok_or_else(|| anyhow!("No valid username!"))
+    Ok(effective_user()?.name)
 }
 
 pub fn get_group(username: &str) -> anyhow::Result<String> {
@@ -185,18 +146,26 @@ pub fn get_group(username: &str) -> anyhow::Result<String> {
 pub fn resolve_config_owner() -> anyhow::Result<(Option<Uid>, Option<Gid>)> {
     CONFIG_OWNER_OVERRIDE.with(|ov| *ov.borrow()).map_or_else(
         || -> anyhow::Result<(Option<Uid>, Option<Gid>)> {
-            let username = get_username()?;
-            let group_name = get_group(&username)?;
-            let user = User::from_name(&username)?
-                .map(|x| x.uid)
-                .ok_or_else(|| anyhow!("Failed to resolve uid for user '{username}'"))?;
-            let group = Group::from_name(&group_name)?
-                .map(|x| x.gid)
-                .ok_or_else(|| anyhow!("Failed to resolve gid for group '{group_name}'"))?;
-            Ok((Some(user), Some(group)))
+            let user = effective_user()?;
+            Ok((Some(user.uid), Some(user.gid)))
         },
         |(uid, gid)| Ok((Some(uid), Some(gid))),
     )
+}
+
+/// Owner used by dropped-privilege config writes. Daemon handlers provide an
+/// explicit override; the sudo path derives the invoking account from NSS.
+pub(crate) fn config_write_owner() -> anyhow::Result<Option<(Uid, Gid)>> {
+    if let Some(owner) = config_owner_override() {
+        return Ok(Some(owner));
+    }
+    if nix::unistd::geteuid().is_root() {
+        let user = effective_user()?;
+        if !user.uid.is_root() {
+            return Ok(Some((user.uid, user.gid)));
+        }
+    }
+    Ok(None)
 }
 
 pub fn set_config_permissions() -> anyhow::Result<()> {
@@ -216,13 +185,22 @@ pub fn set_config_permissions() -> anyhow::Result<()> {
     // Provider trees contain plaintext passwords, API tokens, and WireGuard
     // private keys. They are consumed by the owning user and root only; no
     // group access is required.
+    if set_tree_permissions_as_config_owner(&check_dir, 0o600, 0o700)? {
+        return Ok(());
+    }
+
     let file_permissions = Permissions::from_mode(0o600);
     let dir_permissions = Permissions::from_mode(0o700);
 
-    for entry in WalkDir::new(check_dir).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(check_dir) {
+        let entry = entry?;
         let path = entry.path();
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
         nix::unistd::chown(path, user, group)?;
-        if path.is_file() {
+        if metadata.is_file() {
             std::fs::set_permissions(path, file_permissions.clone())?;
         } else {
             std::fs::set_permissions(path, dir_permissions.clone())?;

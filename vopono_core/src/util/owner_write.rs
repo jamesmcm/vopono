@@ -60,6 +60,14 @@ pub enum OwnerWriteRequest {
         #[serde(default)]
         mode: Option<u32>,
     },
+    /// Apply permissions throughout an existing tree without following
+    /// symlinks. This runs as the config owner so a concurrent path swap can
+    /// never turn permission maintenance into a privileged write.
+    TreePermissions {
+        path: PathBuf,
+        file_mode: u32,
+        dir_mode: u32,
+    },
 }
 
 /// Child-side implementation of the hidden `vopono __write-user-file` verb.
@@ -106,6 +114,25 @@ pub fn perform_owner_write(request: &OwnerWriteRequest) -> anyhow::Result<()> {
                 .with_context(|| format!("Failed to create {}", path.display()))?;
             if let Some(mode) = mode {
                 std::fs::set_permissions(path, PermissionsExt::from_mode(*mode))?;
+            }
+        }
+        OwnerWriteRequest::TreePermissions {
+            path,
+            file_mode,
+            dir_mode,
+        } => {
+            for entry in walkdir::WalkDir::new(path) {
+                let entry = entry.with_context(|| format!("Failed to walk {}", path.display()))?;
+                let metadata = std::fs::symlink_metadata(entry.path())?;
+                if metadata.file_type().is_symlink() {
+                    continue;
+                }
+                let mode = if metadata.is_dir() {
+                    *dir_mode
+                } else {
+                    *file_mode
+                };
+                std::fs::set_permissions(entry.path(), PermissionsExt::from_mode(mode))?;
             }
         }
     }
@@ -174,17 +201,18 @@ fn spawn_owner_write(request: &OwnerWriteRequest, uid: Uid, gid: Gid) -> anyhow:
 
 /// Write `contents` to `path` as the configured config owner.
 ///
-/// Returns `Ok(false)` when no config-owner override is set (CLI/sudo
-/// context): callers should fall back to their legacy in-process write.
-/// Returns an error when the override is set but the dropped-privilege write
-/// fails - notably when the target is not writable by that user, which is
-/// the intended hard failure for attacker-influenced paths.
+/// The daemon uses its authenticated owner override; a privileged sudo process
+/// resolves the invoking account through NSS. Returns `Ok(false)` only when
+/// no privilege drop is needed (an unprivileged process or direct root use),
+/// allowing callers to perform their normal in-process write. A failed helper
+/// is a hard error, notably for attacker-influenced paths the owner cannot
+/// write.
 pub fn write_file_as_config_owner(
     path: &Path,
     contents: &str,
     mode: Option<u32>,
 ) -> anyhow::Result<bool> {
-    let Some((uid, gid)) = super::config_owner_override() else {
+    let Some((uid, gid)) = super::config_write_owner()? else {
         return Ok(false);
     };
     debug!(
@@ -205,10 +233,10 @@ pub fn write_file_as_config_owner(
 
 /// Ensure `dir` (and parents) exists, created as the configured config owner.
 ///
-/// Same contract as [`write_file_as_config_owner`]; `mode` applies to the
-/// leaf directory when provided.
+/// Same privilege-selection contract as [`write_file_as_config_owner`];
+/// `mode` applies to the leaf directory when provided.
 pub fn ensure_dir_as_config_owner(dir: &Path, mode: Option<u32>) -> anyhow::Result<bool> {
-    let Some((uid, gid)) = super::config_owner_override() else {
+    let Some((uid, gid)) = super::config_write_owner()? else {
         return Ok(false);
     };
     debug!("Dropped-privilege mkdir at {} for uid {uid}", dir.display());
@@ -216,6 +244,34 @@ pub fn ensure_dir_as_config_owner(dir: &Path, mode: Option<u32>) -> anyhow::Resu
         &OwnerWriteRequest::Dir {
             path: dir.to_path_buf(),
             mode,
+        },
+        uid,
+        gid,
+    )?;
+    Ok(true)
+}
+
+/// Apply file and directory modes recursively as the configured config owner.
+///
+/// Symlinks are skipped, and the helper runs without privilege. Consequently,
+/// even a path swapped after inspection cannot affect a root-owned target.
+pub fn set_tree_permissions_as_config_owner(
+    path: &Path,
+    file_mode: u32,
+    dir_mode: u32,
+) -> anyhow::Result<bool> {
+    let Some((uid, gid)) = super::config_write_owner()? else {
+        return Ok(false);
+    };
+    debug!(
+        "Dropped-privilege permission repair at {} for uid {uid}",
+        path.display()
+    );
+    spawn_owner_write(
+        &OwnerWriteRequest::TreePermissions {
+            path: path.to_path_buf(),
+            file_mode,
+            dir_mode,
         },
         uid,
         gid,
@@ -304,6 +360,40 @@ mod tests {
             assert_eq!(mode & 0o777, 0o750);
         }
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_permissions_skip_symlinks() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let base = tempdir("tree-permissions");
+        let target = base.with_extension("outside");
+        std::fs::write(&target, "outside").unwrap();
+        std::fs::set_permissions(&target, PermissionsExt::from_mode(0o644)).unwrap();
+        let nested = base.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let regular = nested.join("regular");
+        std::fs::write(&regular, "inside").unwrap();
+        symlink(&target, nested.join("link")).unwrap();
+
+        perform_owner_write(&OwnerWriteRequest::TreePermissions {
+            path: base.clone(),
+            file_mode: 0o600,
+            dir_mode: 0o700,
+        })
+        .unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&regular).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_file(&target);
     }
 
     #[test]

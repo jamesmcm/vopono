@@ -2749,16 +2749,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
-name = "uzers"
-version = "0.12.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b8275fb1afee25b4111d2dc8b5c505dbbc4afd0b990cb96deb2d88bff8be18d"
-dependencies = [
- "libc",
- "log",
-]
-
-[[package]]
 name = "vopono"
 version = "1.0.0"
 dependencies = [
@@ -2769,23 +2759,18 @@ dependencies = [
  "compound_duration",
  "config",
  "dialoguer",
- "directories-next",
  "interprocess",
  "log",
  "nix",
  "pretty_env_logger",
  "serde",
  "serde_json",
- "shell-words",
  "shellexpand",
  "signal-hook",
  "strum",
- "strum_macros",
  "tempfile",
  "thiserror 2.0.20",
  "vopono_core",
- "walkdir",
- "which",
  "wincode",
 ]
 
@@ -2808,7 +2793,6 @@ dependencies = [
  "nom",
  "pem",
  "rand",
- "rand_core",
  "regex",
  "reqwest",
  "ron",
@@ -2824,7 +2808,6 @@ dependencies = [
  "sysinfo",
  "tempfile",
  "tiny_http",
- "uzers",
  "walkdir",
  "webbrowser",
  "which",

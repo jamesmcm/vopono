@@ -626,6 +626,21 @@ Endpoint = 203.0.113.1:51820
         assert_eq!(dns_line_count, 2);
         assert!(output.contains("DNS = 8.8.8.8"));
         assert!(output.contains("DNS = 2001:4860:4860::8888"));
+
+        // Generated provider configs must contain only settings represented by
+        // the typed model. In particular, never introduce wg-quick routing or
+        // execution directives that vopono deliberately ignores when parsing
+        // custom configs.
+        for excluded_key in [
+            "Table",
+            "SaveConfig",
+            "PreUp",
+            "PostUp",
+            "PreDown",
+            "PostDown",
+        ] {
+            assert!(!output.lines().any(|line| line.starts_with(excluded_key)));
+        }
     }
 
     #[test]
