@@ -9,22 +9,14 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::str::FromStr;
 use strum::IntoEnumIterator;
-use strum_macros::Display;
-use strum_macros::EnumIter;
+use strum_macros::{Display, EnumIter, FromRepr};
 
-#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize, EnumIter, Default)]
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize, EnumIter, FromRepr, Default)]
+#[repr(usize)]
 pub enum OpenVpnProtocol {
     #[default]
     UDP,
     TCP,
-}
-
-impl OpenVpnProtocol {
-    pub fn index_to_variant(index: usize) -> Self {
-        Self::iter()
-            .nth(index)
-            .expect("Invalid index for OpenVPN Protocol enum")
-    }
 }
 
 impl ConfigurationChoice for OpenVpnProtocol {

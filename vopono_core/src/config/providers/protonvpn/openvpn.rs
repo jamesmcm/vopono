@@ -8,14 +8,13 @@ use log::{debug, info, warn};
 use regex::Regex;
 use reqwest::Url;
 use reqwest::header::{COOKIE, HeaderMap, HeaderName, HeaderValue};
-use std::fmt::Display;
 use std::fs::File;
 use std::fs::create_dir_all;
 use std::io::{Cursor, Read, Write};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
+use strum_macros::{Display, EnumIter, EnumString, FromRepr};
 use zip::ZipArchive;
 
 impl ProtonVPN {
@@ -124,16 +123,19 @@ impl OpenVpnProvider for ProtonVPN {
         let code_map = crate::util::country_map::code_to_country_map();
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
-        let tier = Tier::index_to_variant(uiclient.get_configuration_choice(&Tier::default())?);
+        let tier = Tier::from_repr(uiclient.get_configuration_choice(&Tier::default())?)
+            .expect("Invalid index");
         let config_choice = if tier != Tier::Free {
-            ConfigType::index_to_variant(uiclient.get_configuration_choice(&ConfigType::default())?)
+            ConfigType::from_repr(uiclient.get_configuration_choice(&ConfigType::default())?)
+                .expect("Invalid index")
         } else {
             // Dummy as not used for Free
             ConfigType::Standard
         };
-        let protocol = OpenVpnProtocol::index_to_variant(
+        let protocol = OpenVpnProtocol::from_repr(
             uiclient.get_configuration_choice(&OpenVpnProtocol::default())?,
-        );
+        )
+        .expect("Invalid index");
 
         // Create the standardized form
         let (auth_cookie, uid) = Self::parse_auth_cookie(uiclient)?;
@@ -239,7 +241,8 @@ impl OpenVpnProvider for ProtonVPN {
     }
 }
 
-#[derive(EnumIter, PartialEq, Default)]
+#[derive(EnumIter, EnumString, FromRepr, PartialEq, Default, Display, Copy, Clone, Debug)]
+#[repr(usize)]
 enum Tier {
     Plus,
     #[default]
@@ -252,19 +255,6 @@ impl Tier {
             Self::Plus => "2".to_string(),
             Self::Free => "0".to_string(),
         }
-    }
-    fn index_to_variant(index: usize) -> Self {
-        Self::iter().nth(index).expect("Invalid index")
-    }
-}
-
-impl Display for Tier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::Plus => "Plus",
-            Self::Free => "Free",
-        };
-        write!(f, "{s}")
     }
 }
 
@@ -291,7 +281,8 @@ impl ConfigurationChoice for Tier {
     }
 }
 
-#[derive(EnumIter, PartialEq, Default)]
+#[derive(EnumIter, EnumString, FromRepr, PartialEq, Default, Display, Copy, Clone, Debug)]
+#[repr(usize)]
 enum ConfigType {
     SecureCore,
     #[default]
@@ -304,19 +295,6 @@ impl ConfigType {
             Self::SecureCore => "SecureCore".to_string(),
             Self::Standard => "Country".to_string(),
         }
-    }
-    fn index_to_variant(index: usize) -> Self {
-        Self::iter().nth(index).expect("Invalid index")
-    }
-}
-
-impl Display for ConfigType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::SecureCore => "SecureCore",
-            Self::Standard => "Standard",
-        };
-        write!(f, "{s}")
     }
 }
 
@@ -641,5 +619,20 @@ mod tests {
     fn test_negative_no_separator() {
         let result = run_test("AUTH-uidvalue");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn tiers_and_config_types_support_from_repr_and_roundtrip() {
+        for (index, tier) in Tier::iter().enumerate() {
+            assert_eq!(Tier::from_repr(index), Some(tier));
+            assert_eq!(tier.to_string().parse::<Tier>().unwrap(), tier);
+        }
+        for (index, config_type) in ConfigType::iter().enumerate() {
+            assert_eq!(ConfigType::from_repr(index), Some(config_type));
+            assert_eq!(
+                config_type.to_string().parse::<ConfigType>().unwrap(),
+                config_type
+            );
+        }
     }
 }

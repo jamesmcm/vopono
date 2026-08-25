@@ -12,7 +12,7 @@ use std::io::{Cursor, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
+use strum_macros::{EnumIter, EnumString, FromRepr};
 use zip::ZipArchive;
 
 impl OpenVpnProvider for NordVPN {
@@ -46,9 +46,9 @@ impl OpenVpnProvider for NordVPN {
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
         let url = "https://downloads.nordcdn.com/configs/archives/servers/ovpn.zip";
-        let config_choice = ConfigType::index_to_variant(
-            uiclient.get_configuration_choice(&ConfigType::default())?,
-        );
+        let config_choice =
+            ConfigType::from_repr(uiclient.get_configuration_choice(&ConfigType::default())?)
+                .expect("Invalid index");
         let zipfile = reqwest::blocking::get(url)?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
         let protocol_dir = match config_choice.get_protocol() {
@@ -136,7 +136,8 @@ impl OpenVpnProvider for NordVPN {
     }
 }
 
-#[derive(EnumIter, PartialEq, Default)]
+#[derive(EnumIter, EnumString, FromRepr, PartialEq, Default)]
+#[repr(usize)]
 enum ConfigType {
     #[default]
     DefaultTcp,
@@ -165,9 +166,6 @@ impl ConfigType {
 
     fn is_double(&self) -> bool {
         matches!(self, Self::DoubleTcp | Self::DoubleUdp)
-    }
-    fn index_to_variant(index: usize) -> Self {
-        Self::iter().nth(index).expect("Invalid index")
     }
 }
 

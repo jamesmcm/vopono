@@ -11,7 +11,7 @@ use std::io::{Cursor, Read, Write};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
+use strum_macros::{EnumIter, EnumString, FromRepr};
 use zip::ZipArchive;
 
 impl OpenVpnProvider for AirVPN {
@@ -32,8 +32,7 @@ impl OpenVpnProvider for AirVPN {
 
     fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
         let config_choice = uiclient.get_configuration_choice(&ConfigType::default())?;
-        let config_type = ConfigType::iter()
-            .nth(config_choice)
+        let config_type = ConfigType::from_repr(config_choice)
             .ok_or_else(|| anyhow!("Invalid AirVPN OpenVPN configuration selection"))?;
         let client = super::http_client()?;
 
@@ -97,7 +96,8 @@ impl OpenVpnProvider for AirVPN {
     }
 }
 
-#[derive(EnumIter, PartialEq, Default)]
+#[derive(EnumIter, EnumString, FromRepr, PartialEq, Default, Copy, Clone, Debug)]
+#[repr(usize)]
 enum ConfigType {
     #[default]
     Udp443,
@@ -199,6 +199,18 @@ mod tests {
         assert_eq!(
             generator_filename("ca-Custom.ovpn", "ovpn"),
             "ca-Custom.ovpn"
+        );
+    }
+
+    #[test]
+    fn config_types_support_from_repr_and_from_str() {
+        for (index, variant) in ConfigType::iter().enumerate() {
+            assert_eq!(ConfigType::from_repr(index), Some(variant));
+        }
+        assert_eq!("Udp443".parse::<ConfigType>().unwrap(), ConfigType::Udp443);
+        assert_eq!(
+            "Tcp2018".parse::<ConfigType>().unwrap(),
+            ConfigType::Tcp2018
         );
     }
 }

@@ -49,7 +49,7 @@ impl OpenVpnProvider for IVPN {
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
         let protocol = uiclient.get_configuration_choice(&OpenVpnProtocol::default())?;
-        let url = self.build_url(&OpenVpnProtocol::index_to_variant(protocol))?;
+        let url = self.build_url(&OpenVpnProtocol::from_repr(protocol).expect("Invalid index"))?;
         let zipfile = reqwest::blocking::get(url)?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
         let openvpn_dir = self.openvpn_dir()?;
