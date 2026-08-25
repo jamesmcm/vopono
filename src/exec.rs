@@ -1149,7 +1149,7 @@ fn provider_port_forwarding(
             Some(VpnProvider::ProtonVPN) => {
                 vopono_core::util::open_hosts(
                     &ns.name,
-                    &[vopono_core::network::port_forwarding::natpmpc::PROTONVPN_GATEWAY],
+                    &[vopono_core::config::providers::protonvpn::PROTONVPN_GATEWAY],
                     parsed_command.firewall,
                 )?;
                 Some(Box::new(Natpmpc::new(

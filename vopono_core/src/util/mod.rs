@@ -189,6 +189,11 @@ pub fn set_config_permissions() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Legacy in-process fallback, reached only for direct root use where
+    // config_write_owner() returns None (no privilege drop is needed). This
+    // chowns the tree as root; it must never trust the tree when running for
+    // a remote/daemon client, hence the guard above. Symlinks are skipped so a
+    // link cannot redirect a root chown outside the tree.
     let file_permissions = Permissions::from_mode(0o600);
     let dir_permissions = Permissions::from_mode(0o700);
 

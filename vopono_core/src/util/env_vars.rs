@@ -62,8 +62,47 @@ pub fn set_env_vars(
 
     cmd.env("VOPONO_NS", &ns.name);
 
-    // TODO: Do we want to provide -o open ports too?
+    // Mirror the ports reported by `exec --json` so scripts inside the netns
+    // have the same visibility as the launch summary read outside. Empty
+    // lists are exported as the empty string so scripts can distinguish
+    // "no ports" from "not provided".
+    cmd.env("VOPONO_OPEN_PORTS", join_ports(&ns.state.open_ports));
+    cmd.env(
+        "VOPONO_HOST_FORWARDED_PORTS",
+        join_ports(&ns.state.host_forwarded_ports),
+    );
+
     if let Some(f) = forwarder.as_ref() {
         cmd.env("VOPONO_FORWARDED_PORT", f.forwarded_port().to_string());
+    }
+}
+
+/// Format a port list for a single env var, comma-separated and empty for no
+/// ports, matching the array serialization used by `exec --json`.
+fn join_ports(ports: &[u16]) -> String {
+    ports
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::join_ports;
+
+    #[test]
+    fn joins_ports_comma_separated() {
+        assert_eq!(join_ports(&[8080, 8443]), "8080,8443");
+    }
+
+    #[test]
+    fn empty_port_list_is_empty_string() {
+        assert_eq!(join_ports(&[]), "");
+    }
+
+    #[test]
+    fn single_port_has_no_separator() {
+        assert_eq!(join_ports(&[9000]), "9000");
     }
 }

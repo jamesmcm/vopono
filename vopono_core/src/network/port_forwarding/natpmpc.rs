@@ -2,17 +2,11 @@ use anyhow::Context;
 use regex::Regex;
 use std::sync::LazyLock;
 use std::sync::mpsc;
-use std::{
-    net::{IpAddr, Ipv4Addr},
-    sync::mpsc::Sender,
-    thread::JoinHandle,
-};
+use std::{sync::mpsc::Sender, thread::JoinHandle};
 
 use super::{CallbackCommand, Forwarder, ThreadLoopForwarder, ThreadParameters};
+use crate::config::providers::protonvpn::PROTONVPN_GATEWAY;
 use crate::network::netns::NetworkNamespace;
-
-// TODO: Move this to ProtonVPN provider
-pub const PROTONVPN_GATEWAY: IpAddr = IpAddr::V4(Ipv4Addr::new(10, 2, 0, 1));
 
 static MAPPED_PORT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"Mapped public port (?P<port>\d{1,5}) protocol")

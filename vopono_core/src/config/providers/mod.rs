@@ -5,7 +5,7 @@ mod mozilla;
 mod mullvad;
 mod nordvpn;
 pub mod pia;
-mod protonvpn;
+pub mod protonvpn;
 mod ui;
 mod warp;
 

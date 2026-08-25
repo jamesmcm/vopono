@@ -116,6 +116,10 @@ pub fn perform_owner_write(request: &OwnerWriteRequest) -> anyhow::Result<()> {
                 std::fs::set_permissions(path, PermissionsExt::from_mode(*mode))?;
             }
         }
+        // Only permissions are adjusted here, never ownership: under the
+        // dropped-privilege model every file is natively created by the config
+        // owner, so ownership is already correct. This does not repair
+        // pre-existing root-owned files left over from earlier versions.
         OwnerWriteRequest::TreePermissions {
             path,
             file_mode,

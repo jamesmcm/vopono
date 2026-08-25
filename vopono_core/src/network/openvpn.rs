@@ -1,10 +1,7 @@
 use super::firewall::Firewall;
 use super::netns::NetworkNamespace;
 use crate::config::vpn::OpenVpnProtocol;
-use crate::util::{
-    check_process_running, ensure_dir_as_config_owner, set_config_permissions, vopono_dir,
-    write_file_as_config_owner,
-};
+use crate::util::{check_process_running, set_config_permissions};
 use anyhow::{Context, anyhow};
 use log::{debug, error, info};
 use regex::Regex;
@@ -14,6 +11,9 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::{Duration, Instant};
+
+const OPENVPN_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenVpn {
@@ -21,6 +21,8 @@ pub struct OpenVpn {
     #[serde(default)]
     pub openvpn_dns_servers: Vec<IpAddr>,
     pub logfile: PathBuf,
+    #[serde(skip)]
+    _runtime_dir: Option<tempfile::TempDir>,
     // pub distinct_remotes: Vec<String>, // Unique IP Addresses or hostnames
 }
 
@@ -39,7 +41,6 @@ impl OpenVpn {
         verbose: bool,
     ) -> anyhow::Result<Self> {
         // TODO: Refactor this to separate functions
-        // TODO: --status flag
 
         if let Err(x) = which::which("openvpn") {
             error!("OpenVPN not found. Is OpenVPN installed and on PATH?");
@@ -49,16 +50,19 @@ impl OpenVpn {
             ));
         }
 
-        let logs_dir = vopono_dir()?.join("logs");
-        if !ensure_dir_as_config_owner(&logs_dir, Some(0o750))? {
-            std::fs::create_dir_all(&logs_dir)?;
-        }
-        let log_file_path = logs_dir.join(format!("{}_openvpn.log", netns.name));
+        // OpenVPN runs as root and opens its log path itself. Keep that path
+        // inside an unpredictable, root-owned runtime directory rather than
+        // the client's writable config tree, where a symlink swap could turn
+        // it into a privileged file write.
+        let runtime_dir = tempfile::Builder::new()
+            .prefix("vopono-openvpn-")
+            // Do not use the inherited TMPDIR after privilege escalation: its
+            // parent may be controlled by the invoking user.
+            .tempdir_in("/run")
+            .context("Failed to create private OpenVPN runtime directory")?;
+        let log_file_path = runtime_dir.path().join("openvpn.log");
         let log_file_str: String = log_file_path.as_os_str().to_string_lossy().to_string();
-        if !write_file_as_config_owner(&log_file_path, "", Some(0o640))? {
-            File::create(&log_file_str)?;
-            set_config_permissions()?;
-        }
+        File::create(&log_file_path)?;
 
         let config_file_path = config_file.canonicalize().context("Invalid path given")?;
         set_config_permissions()?;
@@ -127,7 +131,7 @@ impl OpenVpn {
         debug!("Found remotes: {:?}", remotes);
         let working_dir = PathBuf::from(config_file_path.parent().unwrap());
 
-        let handle = NetworkNamespace::exec_no_block(
+        let mut handle = NetworkNamespace::exec_no_block(
             &netns.name,
             &command_vec,
             None,
@@ -147,7 +151,11 @@ impl OpenVpn {
         // Parse DNS headers from OpenVPN response
         let dns_regex = Regex::new(r"dhcp-option (?:DNS6|DNS) ([^,\s']+)").unwrap();
         let mut openvpn_dns_servers = Vec::new();
-        // Tail OpenVPN log file
+        // `--machine-readable-output` adds timestamps and flags to ordinary
+        // log messages. `>STATE:` records belong to the management interface,
+        // so readiness must be detected from the log messages themselves.
+        let mut connect_state: Option<OpenVpnStartupState> = None;
+        let startup_deadline = Instant::now() + OPENVPN_STARTUP_TIMEOUT;
         loop {
             let start = pos;
             let x = logfile.read_line(&mut buffer)?;
@@ -167,41 +175,70 @@ impl OpenVpn {
                 }
             }
 
-            if buffer.contains("Initialization Sequence Completed")
-                || buffer.contains("AUTH_FAILED")
-                || buffer.contains("Options error")
-            {
+            if let Some(state) = parse_openvpn_startup_state(&buffer[start..pos]) {
+                debug!("OpenVPN startup state: {state:?}");
+                connect_state = Some(state);
+            }
+
+            if connect_state.is_some() {
                 break;
+            }
+
+            if let Some(status) = handle.try_wait()? {
+                return Err(anyhow!(
+                    "OpenVPN exited with {status} before the tunnel was established, use -v for full log output"
+                ));
+            }
+
+            if Instant::now() >= startup_deadline {
+                let _ = handle.kill();
+                let _ = handle.wait();
+                return Err(anyhow!(
+                    "OpenVPN did not establish the tunnel within {} seconds, use -v for full log output",
+                    OPENVPN_STARTUP_TIMEOUT.as_secs()
+                ));
+            }
+
+            if x == 0 {
+                std::thread::sleep(Duration::from_millis(50));
             }
 
             logfile.seek(SeekFrom::Start(pos as u64)).unwrap();
         }
 
-        if buffer.contains("AUTH_FAILED") {
-            let auth_path_display = auth_file
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "the auth file".to_string());
-            let provider_hint = auth_file
-                .as_ref()
-                .filter(|path| path.components().any(|part| part.as_os_str() == "pia"))
-                .map(|_| {
-                    " For PIA, use the VPN service username in the form p1234567 (not an email address), then rerun `vopono sync --protocol openvpn privateinternetaccess` to replace cached credentials."
-                })
-                .unwrap_or_default();
-            error!(
-                "OpenVPN server rejected the username/password in {}.{}",
-                auth_path_display, provider_hint
-            );
-            return Err(anyhow!(
-                "OpenVPN server rejected the username/password in {}. DNS and transport settings do not cause AUTH_FAILED.{}",
-                auth_path_display,
-                provider_hint
-            ));
-        }
-        if buffer.contains("Options error") {
-            error!("OpenVPN options error: {buffer}");
-            return Err(anyhow!("OpenVPN options error, use -v for full log output"));
+        match connect_state {
+            Some(OpenVpnStartupState::AuthFailed) => {
+                let _ = handle.kill();
+                let _ = handle.wait();
+                let auth_path_display = auth_file
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "the auth file".to_string());
+                let provider_hint = auth_file
+                    .as_ref()
+                    .filter(|path| path.components().any(|part| part.as_os_str() == "pia"))
+                    .map(|_| {
+                        " For PIA, use the VPN service username in the form p1234567 (not an email address), then rerun `vopono sync --protocol openvpn privateinternetaccess` to replace cached credentials."
+                    })
+                    .unwrap_or_default();
+                error!(
+                    "OpenVPN server rejected the username/password in {}.{}",
+                    auth_path_display, provider_hint
+                );
+                return Err(anyhow!(
+                    "OpenVPN server rejected the username/password in {}. DNS and transport settings do not cause AUTH_FAILED.{}",
+                    auth_path_display,
+                    provider_hint
+                ));
+            }
+            Some(OpenVpnStartupState::OptionsError) => {
+                let _ = handle.kill();
+                let _ = handle.wait();
+                error!("OpenVPN options error: {buffer}");
+                return Err(anyhow!("OpenVPN options error, use -v for full log output"));
+            }
+            Some(OpenVpnStartupState::Connected) => {}
+            None => unreachable!("startup loop only exits with a terminal state"),
         }
 
         // Allow input to and output from open ports (for port forwarding in tunnel)
@@ -222,6 +259,7 @@ impl OpenVpn {
             pid: id,
             openvpn_dns_servers,
             logfile: log_file_path,
+            _runtime_dir: Some(runtime_dir),
         })
     }
 
@@ -623,6 +661,28 @@ fn parse_openvpn_dns_servers(log: &str, dns_regex: &Regex) -> Vec<IpAddr> {
         })
 }
 
+/// Terminal startup outcomes detected from OpenVPN's ordinary log output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenVpnStartupState {
+    Connected,
+    AuthFailed,
+    OptionsError,
+}
+
+/// Match stable OpenVPN messages anywhere in a line because
+/// `--machine-readable-output` prefixes them with a timestamp and flags.
+fn parse_openvpn_startup_state(log: &str) -> Option<OpenVpnStartupState> {
+    if log.contains("AUTH_FAILED") {
+        Some(OpenVpnStartupState::AuthFailed)
+    } else if log.contains("Options error") {
+        Some(OpenVpnStartupState::OptionsError)
+    } else if log.contains("Initialization Sequence Completed") {
+        Some(OpenVpnStartupState::Connected)
+    } else {
+        None
+    }
+}
+
 pub fn warn_on_scripts_config(path: &Path) -> anyhow::Result<bool> {
     let mut out = false;
     let file_string =
@@ -779,5 +839,40 @@ mod tests {
         ];
 
         assert_eq!(resolve_remote_endpoints(&remotes, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn parses_prefixed_connected_log_message() {
+        let log = "1787685612.853245 0012 Initialization Sequence Completed";
+        assert_eq!(
+            parse_openvpn_startup_state(log),
+            Some(OpenVpnStartupState::Connected)
+        );
+    }
+
+    #[test]
+    fn parses_prefixed_auth_failed_log_message() {
+        let log = "1787685612.853245 0012 AUTH_FAILED";
+        assert_eq!(
+            parse_openvpn_startup_state(log),
+            Some(OpenVpnStartupState::AuthFailed)
+        );
+    }
+
+    #[test]
+    fn parses_prefixed_options_error_log_message() {
+        let log = "1787685612.853245 b000 Options error: Unrecognized option";
+        assert_eq!(
+            parse_openvpn_startup_state(log),
+            Some(OpenVpnStartupState::OptionsError)
+        );
+    }
+
+    #[test]
+    fn ignores_non_terminal_log_lines() {
+        assert_eq!(
+            parse_openvpn_startup_state("TCP connection established"),
+            None
+        );
     }
 }
