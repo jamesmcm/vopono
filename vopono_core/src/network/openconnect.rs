@@ -72,6 +72,8 @@ pub fn server_from_config(config_file: &std::path::Path) -> anyhow::Result<Strin
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenConnect {
     pub(crate) pid: u32,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 impl OpenConnect {
@@ -155,7 +157,10 @@ impl OpenConnect {
             crate::util::open_ports(netns, forwards.as_slice(), firewall)?;
         }
 
-        Ok(Self { pid: id })
+        Ok(Self {
+            pid: id,
+            cleanup_enabled: true,
+        })
     }
 }
 
@@ -202,6 +207,9 @@ pub fn apply_killswitch(
 
 impl Drop for OpenConnect {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         match nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(self.pid as i32),
             nix::sys::signal::Signal::SIGKILL,
@@ -209,6 +217,12 @@ impl Drop for OpenConnect {
             Ok(_) => debug!("Killed OpenConnect (pid: {})", self.pid),
             Err(e) => error!("Failed to kill OpenConnect (pid: {}): {:?}", self.pid, e),
         }
+    }
+}
+
+impl OpenConnect {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
     }
 }
 

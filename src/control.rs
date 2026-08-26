@@ -128,7 +128,7 @@ pub fn stop_namespace(
         if !vopono_core::status::has_client_lockfiles(&lock_dir)
             && let Ok(namespace) = crate::namespace_ownership::load(namespace_id, uid)
         {
-            namespace.teardown();
+            namespace.teardown()?;
         }
         let namespace_removed = wait_for_namespace_removal(namespace_id)?;
         if !namespace_removed {
@@ -157,7 +157,7 @@ pub fn stop_namespace(
     remove_lock_files(namespace_id)?;
     // Explicit (rather than implicit drop): removes firewall rules, veth pair,
     // runs predown, and deletes the network namespace.
-    namespace.teardown();
+    namespace.teardown()?;
     let namespace_removed = wait_for_namespace_removal(namespace_id)?;
     if !namespace_removed {
         return Err(CliError::NamespaceTeardownFailed {

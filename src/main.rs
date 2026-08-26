@@ -17,6 +17,7 @@ mod namespace_ownership;
 mod providers;
 mod server_metadata;
 mod sync;
+mod tcp_proxy;
 
 use crate::args::ExecCommand;
 use anyhow::anyhow;

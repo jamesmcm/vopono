@@ -21,6 +21,8 @@ const WIREGUARD_FWMARK: &str = "51820";
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Wireguard {
     pub executable_wg: String,
+    #[serde(skip)]
+    cleanup_enabled: bool,
     pub ip_link_type: String,
     pub ns_name: String,
     pub config_file: PathBuf,
@@ -587,6 +589,7 @@ impl Wireguard {
 
         Ok(Self {
             executable_wg,
+            cleanup_enabled: true,
             ip_link_type,
             config_file,
             ns_name: namespace.name.clone(),
@@ -966,6 +969,9 @@ pub fn killswitch(
 
 impl Drop for Wireguard {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         match sudo_command(&[
             "ip",
             "netns",
@@ -999,6 +1005,12 @@ impl Drop for Wireguard {
                 Err(e) => warn!("Failed to delete nft table: {}: {:?}", self.ns_name, e),
             };
         }
+    }
+}
+
+impl Wireguard {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
     }
 }
 

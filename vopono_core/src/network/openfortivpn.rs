@@ -4,16 +4,23 @@ use anyhow::{Context, anyhow};
 use log::{debug, error, info};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
+use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::{Duration, Instant};
+
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_STARTUP_OUTPUT: usize = 1024 * 1024;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenFortiVpn {
     pub(crate) pid: u32,
     #[serde(skip)]
     _runtime_dir: Option<tempfile::TempDir>,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 fn validate_unprivileged_config(config_file: &Path) -> anyhow::Result<()> {
@@ -100,10 +107,7 @@ impl OpenFortiVpn {
         }
 
         info!("Launching OpenFortiVPN...");
-        let runtime_dir = tempfile::Builder::new()
-            .prefix("vopono-openfortivpn-")
-            .tempdir()
-            .context("Failed to create private OpenFortiVPN runtime directory")?;
+        let runtime_dir = super::etc_overlay::trusted_runtime_dir("openfortivpn-")?;
         let pppd_log = runtime_dir.path().join("pppd.log");
         // Must run as root - https://github.com/adrienverge/openfortivpn/issues/650
         let command_vec = ([
@@ -128,79 +132,116 @@ impl OpenFortiVpn {
             None,
         )
         .context("Failed to launch OpenFortiVPN - is openfortivpn installed?")?;
-        let stdout = handle.stdout.take().unwrap();
+        let mut stdout = handle
+            .stdout
+            .take()
+            .context("OpenFortiVPN stdout was not piped")?;
         let id = handle.id();
 
         info!(
             "Waiting for OpenFortiVPN to establish connection - you may be prompted on your 2FA device"
         );
         info!("If your VPN password is not in the OpenFortiVPN config file then enter it here now");
-        let mut bufreader = BufReader::with_capacity(16000, stdout);
-        let mut buffer = String::with_capacity(16000);
-        let mut bufcount: usize = 0;
+        let setup_result = (|| -> anyhow::Result<()> {
+            use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
-        let newbytes = bufreader.read_line(&mut buffer)?;
-        if newbytes > 0 {
-            print!("{}", &buffer[bufcount..(bufcount + newbytes)]);
-            std::io::stdout().flush()?;
-            bufcount += newbytes;
-        }
+            let flags = fcntl(stdout.as_fd(), FcntlArg::F_GETFL)?;
+            fcntl(
+                stdout.as_fd(),
+                FcntlArg::F_SETFL(OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK),
+            )?;
+            let deadline = Instant::now() + STARTUP_TIMEOUT;
+            let mut bytes = Vec::with_capacity(16_000);
+            let mut chunk = [0_u8; 4096];
+            loop {
+                match stdout.read(&mut chunk) {
+                    Ok(0) => {
+                        let status = handle.try_wait()?;
+                        anyhow::bail!(
+                            "OpenFortiVPN closed its output before the tunnel became ready{}",
+                            status.map_or_else(String::new, |value| format!(" ({value})"))
+                        );
+                    }
+                    Ok(count) => {
+                        anyhow::ensure!(
+                            bytes.len() + count <= MAX_STARTUP_OUTPUT,
+                            "OpenFortiVPN startup output exceeded {} bytes",
+                            MAX_STARTUP_OUTPUT
+                        );
+                        std::io::stdout().write_all(&chunk[..count])?;
+                        std::io::stdout().flush()?;
+                        bytes.extend_from_slice(&chunk[..count]);
+                        if bytes
+                            .windows(b"Tunnel is up and running".len())
+                            .any(|window| window == b"Tunnel is up and running")
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error.into()),
+                }
 
-        while !buffer.contains("Tunnel is up and running") {
-            let newbytes = bufreader.read_line(&mut buffer)?;
-            if newbytes > 0 {
-                print!("{}", &buffer[bufcount..(bufcount + newbytes)]);
-                std::io::stdout().flush()?;
-                bufcount += newbytes;
+                if let Some(status) = handle.try_wait()? {
+                    anyhow::bail!("OpenFortiVPN exited before the tunnel became ready: {status}");
+                }
+                anyhow::ensure!(
+                    Instant::now() < deadline,
+                    "Timed out after {} seconds waiting for OpenFortiVPN",
+                    STARTUP_TIMEOUT.as_secs()
+                );
+                std::thread::sleep(Duration::from_millis(100));
             }
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
 
-        debug!("Full OpenFortiVPN stdout: {:?}", buffer);
+            let buffer = String::from_utf8(bytes).context("OpenFortiVPN emitted invalid UTF-8")?;
+            debug!("Full OpenFortiVPN stdout: {:?}", buffer);
+            let remote_peer = get_remote_peer(&pppd_log)?;
 
-        let remote_peer = get_remote_peer(&pppd_log)?;
+            debug!("Found OpenFortiVPN route: {remote_peer:?}");
+            NetworkNamespace::exec(&netns.name, &["ip", "route", "del", "default"])?;
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
+                    "ip",
+                    "route",
+                    "add",
+                    "default",
+                    "via",
+                    &remote_peer.to_string(),
+                ],
+            )?;
 
-        debug!("Found OpenFortiVPN route: {remote_peer:?}");
-        NetworkNamespace::exec(&netns.name, &["ip", "route", "del", "default"])?;
-        NetworkNamespace::exec(
-            &netns.name,
-            &[
-                "ip",
-                "route",
-                "add",
-                "default",
-                "via",
-                &remote_peer.to_string(),
-            ],
-        )?;
+            let dns = get_dns(&buffer)?;
+            let suffixes: Vec<&str> = dns.1.iter().map(|x| x.as_str()).collect();
+            netns.dns_config(&dns.0, &suffixes, hosts_entries, allow_host_access)?;
+            if let Some(opens) = open_ports {
+                crate::util::open_ports(netns, opens.as_slice(), firewall)?;
+            }
+            if let Some(forwards) = forward_ports {
+                crate::util::open_ports(netns, forwards.as_slice(), firewall)?;
+            }
+            Ok(())
+        })();
 
-        let dns = get_dns(&buffer)?;
-        let suffixes: Vec<&str> = dns.1.iter().map(|x| x.as_str()).collect();
-        netns.dns_config(
-            &dns.0,
-            suffixes.as_slice(),
-            hosts_entries,
-            allow_host_access,
-        )?;
-        // Allow input to and output from open ports (for port forwarding in tunnel)
-        if let Some(opens) = open_ports {
-            crate::util::open_ports(netns, opens.as_slice(), firewall)?;
-        }
-
-        // Allow input to and output from forwarded ports
-        if let Some(forwards) = forward_ports {
-            crate::util::open_ports(netns, forwards.as_slice(), firewall)?;
+        if let Err(error) = setup_result {
+            let _ = handle.kill();
+            let _ = handle.wait();
+            return Err(error);
         }
 
         Ok(Self {
             pid: id,
             _runtime_dir: Some(runtime_dir),
+            cleanup_enabled: true,
         })
     }
 }
 
 impl Drop for OpenFortiVpn {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         match nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(self.pid as i32),
             nix::sys::signal::Signal::SIGKILL,
@@ -208,6 +249,12 @@ impl Drop for OpenFortiVpn {
             Ok(_) => debug!("Killed OpenFortiVPN (pid: {})", self.pid),
             Err(e) => error!("Failed to kill OpenFortiVPN (pid: {}): {:?}", self.pid, e),
         }
+    }
+}
+
+impl OpenFortiVpn {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
     }
 }
 

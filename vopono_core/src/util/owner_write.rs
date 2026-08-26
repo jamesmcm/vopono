@@ -18,6 +18,7 @@ use log::debug;
 use nix::unistd::{Gid, Uid, User};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -46,8 +47,8 @@ fn helper_exe_override() -> Option<PathBuf> {
 pub enum OwnerWriteRequest {
     /// Create parent directories and atomically write `contents` to `path`.
     ///
-    /// `mode` (when set) is applied to the final file, e.g. `Some(0o640)` to
-    /// preserve the historic lockfile permissions.
+    /// `mode` (when set) is applied when the temporary inode is created and
+    /// preserved on the final file.
     File {
         path: PathBuf,
         contents: String,
@@ -76,7 +77,6 @@ pub enum OwnerWriteRequest {
 /// the connecting user's credentials, so a misconfigured spawn fails loudly
 /// instead of silently recreating the root-owned-write bug.
 pub fn perform_owner_write(request: &OwnerWriteRequest) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     if nix::unistd::geteuid().is_root() {
         anyhow::bail!("refusing privileged write helper invocation as root");
     }
@@ -94,12 +94,18 @@ pub fn perform_owner_write(request: &OwnerWriteRequest) -> anyhow::Result<()> {
             // Atomic replace so readers never observe a partial lockfile.
             let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
             {
-                let mut file = std::fs::File::create(&temporary)
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create(true).truncate(true);
+                if let Some(mode) = mode {
+                    options.mode(*mode);
+                }
+                let mut file = options
+                    .open(&temporary)
                     .with_context(|| format!("Failed to create {}", temporary.display()))?;
-                file.write_all(contents.as_bytes())?;
                 if let Some(mode) = mode {
                     file.set_permissions(PermissionsExt::from_mode(*mode))?;
                 }
+                file.write_all(contents.as_bytes())?;
             }
             std::fs::rename(&temporary, path).with_context(|| {
                 format!(
@@ -141,6 +147,30 @@ pub fn perform_owner_write(request: &OwnerWriteRequest) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Privilege-drop state captured before starting a background worker.
+///
+/// The daemon's authenticated config owner and helper path are thread-local,
+/// so workers that update user-owned state must explicitly inherit them.
+#[derive(Clone, Debug)]
+pub struct OwnerWriteContext {
+    owner: Option<(Uid, Gid)>,
+    helper_exe: Option<PathBuf>,
+}
+
+pub fn capture_owner_write_context() -> anyhow::Result<OwnerWriteContext> {
+    let owner = super::config_write_owner()?;
+    let helper_exe = match (owner, helper_exe_override()) {
+        (Some(_), None) => Some(std::env::current_exe().context("Failed to locate write helper")?),
+        (_, helper_exe) => helper_exe,
+    };
+    Ok(OwnerWriteContext { owner, helper_exe })
+}
+
+pub fn install_owner_write_context(context: &OwnerWriteContext) {
+    super::set_config_owner_override(context.owner);
+    set_helper_exe_override(context.helper_exe.clone());
 }
 
 /// Read and execute a helper request from stdin (bounded).
@@ -301,23 +331,20 @@ pub fn validated_user_owned_dir(path: &Path, uid: Uid) -> anyhow::Result<PathBuf
         "{} is not a directory",
         canonical.display()
     );
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        anyhow::ensure!(
-            metadata.uid() == uid.as_raw(),
-            "{} is owned by uid {}, not the authenticated uid {}",
-            canonical.display(),
-            metadata.uid(),
-            uid.as_raw()
-        );
-    }
+    anyhow::ensure!(
+        metadata.uid() == uid.as_raw(),
+        "{} is owned by uid {}, not the authenticated uid {}",
+        canonical.display(),
+        metadata.uid(),
+        uid.as_raw()
+    );
     Ok(canonical)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::symlink;
 
     fn tempdir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -339,11 +366,15 @@ mod tests {
         perform_owner_write(&OwnerWriteRequest::File {
             path: target.clone(),
             contents: "hello".into(),
-            mode: None,
+            mode: Some(0o600),
         })
         .unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello");
         assert!(target.is_file());
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -353,24 +384,17 @@ mod tests {
         let target = base.join("a").join("b");
         perform_owner_write(&OwnerWriteRequest::Dir {
             path: target.clone(),
-            mode: Some(0o750),
+            mode: Some(0o700),
         })
         .unwrap();
         assert!(target.is_dir());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&target).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o750);
-        }
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[cfg(unix)]
     #[test]
     fn tree_permissions_skip_symlinks() {
-        use std::os::unix::fs::{PermissionsExt, symlink};
-
         let base = tempdir("tree-permissions");
         let target = base.with_extension("outside");
         std::fs::write(&target, "outside").unwrap();
@@ -416,7 +440,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    #[cfg(unix)]
     #[test]
     fn validates_user_owned_dirs() {
         let uid = nix::unistd::getuid();

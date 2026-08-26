@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use strum::IntoEnumIterator;
@@ -131,12 +132,8 @@ pub fn verify_auth(
             if !crate::util::write_file_as_config_owner(&auth_file, &contents, Some(0o600))? {
                 let mut outfile = crate::util::create_private_file(&auth_file)?;
                 write!(outfile, "{contents}")?;
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    // Credentials file: restrict to the owning user.
-                    std::fs::set_permissions(&auth_file, std::fs::Permissions::from_mode(0o600))?;
-                }
+                // Credentials file: restrict to the owning user.
+                std::fs::set_permissions(&auth_file, std::fs::Permissions::from_mode(0o600))?;
             }
 
             info!("Credentials written to: {}", auth_file.to_string_lossy());

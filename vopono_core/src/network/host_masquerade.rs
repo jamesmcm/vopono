@@ -12,6 +12,8 @@ pub struct HostMasquerade {
     ipv6_mask: Option<String>,
     interface: NetworkInterface,
     firewall: Firewall,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 impl HostMasquerade {
@@ -141,12 +143,16 @@ impl HostMasquerade {
             ipv6_mask,
             interface,
             firewall,
+            cleanup_enabled: true,
         })
     }
 }
 
 impl Drop for HostMasquerade {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         let namespaces = crate::util::get_lock_namespaces();
         debug!("Remaining namespaces: {namespaces:?}");
         if namespaces.is_ok() && namespaces.unwrap().is_empty() {
@@ -196,6 +202,12 @@ impl Drop for HostMasquerade {
     }
 }
 
+impl HostMasquerade {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct FirewallException {
     host_interface: NetworkInterface,
@@ -210,6 +222,8 @@ pub struct FirewallException {
     ufw_forward_ipv4: bool,
     #[serde(default)]
     ufw_forward_ipv6: bool,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 impl FirewallException {
@@ -299,6 +313,7 @@ impl FirewallException {
                     docker_user_ipv6: false,
                     ufw_forward_ipv4,
                     ufw_forward_ipv6,
+                    cleanup_enabled: true,
                 })
             }
             Firewall::NfTables => {
@@ -390,6 +405,7 @@ impl FirewallException {
                     docker_user_ipv6,
                     ufw_forward_ipv4,
                     ufw_forward_ipv6,
+                    cleanup_enabled: true,
                 })
             }
         }
@@ -398,6 +414,9 @@ impl FirewallException {
 
 impl Drop for FirewallException {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         // DOCKER-USER rules are scoped to this namespace's veth interface pair.
         // Remove them with this instance even if other vopono namespaces are
         // still running; each namespace owns different interface-specific rules.
@@ -502,6 +521,12 @@ impl Drop for FirewallException {
                 }
             }
         }
+    }
+}
+
+impl FirewallException {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
     }
 }
 

@@ -1,5 +1,6 @@
 pub mod application_wrapper;
 pub mod dns_config;
+mod etc_overlay;
 pub mod firewall;
 pub mod host_masquerade;
 pub mod netns;

@@ -4,37 +4,89 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use vopono_core::network::netns::NetworkNamespace;
+use vopono_core::network::netns::{NamespaceSnapshot, NetworkNamespace};
 
 const OWNER_DIR: &str = "/run/vopono/namespace-owners";
 static OWNER_RECORD_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct OwnerRecord {
     uid: u32,
     device: u64,
     inode: u64,
-    namespace: String,
-    #[serde(default)]
-    persistent: bool,
-    #[serde(default)]
-    stopping: bool,
+    namespace: StoredNamespace,
+    lifecycle: NamespaceLifecycle,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum StoredNamespace {
+    Snapshot(NamespaceSnapshot),
+    LegacyJson(String),
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum NamespaceLifecycle {
+    #[default]
+    Active,
+    Persistent,
+    Stopping,
+}
+
+impl<'de> Deserialize<'de> for OwnerRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            uid: u32,
+            device: u64,
+            inode: u64,
+            namespace: StoredNamespace,
+            #[serde(default)]
+            lifecycle: Option<NamespaceLifecycle>,
+            #[serde(default)]
+            persistent: bool,
+            #[serde(default)]
+            stopping: bool,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        let lifecycle = if wire.stopping {
+            NamespaceLifecycle::Stopping
+        } else if wire.persistent {
+            NamespaceLifecycle::Persistent
+        } else {
+            wire.lifecycle.unwrap_or_default()
+        };
+        Ok(Self {
+            uid: wire.uid,
+            device: wire.device,
+            inode: wire.inode,
+            namespace: wire.namespace,
+            lifecycle,
+        })
+    }
 }
 
 impl OwnerRecord {
     fn is_persistent(&self) -> bool {
-        self.persistent && !self.stopping
+        self.lifecycle == NamespaceLifecycle::Persistent
     }
 
     fn mark_persistent(&mut self, name: &str) -> anyhow::Result<()> {
-        anyhow::ensure!(!self.stopping, "Namespace {name} is being stopped");
-        self.persistent = true;
+        anyhow::ensure!(
+            self.lifecycle != NamespaceLifecycle::Stopping,
+            "Namespace {name} is being stopped"
+        );
+        self.lifecycle = NamespaceLifecycle::Persistent;
         Ok(())
     }
 
     fn mark_stopping(&mut self) {
-        self.persistent = false;
-        self.stopping = true;
+        self.lifecycle = NamespaceLifecycle::Stopping;
     }
 }
 
@@ -74,16 +126,15 @@ pub fn tag(namespace_state: &NetworkNamespace, uid: Uid) -> anyhow::Result<()> {
     // Re-tagging happens whenever an existing namespace is reused. Preserve a
     // previous keep-alive/create-only decision rather than silently reverting
     // it to ordinary last-client teardown semantics.
-    let (persistent, stopping) = validated_record(name, uid)
-        .map(|record| (record.persistent, record.stopping))
-        .unwrap_or((false, false));
+    let lifecycle = validated_record(name, uid)
+        .map(|record| record.lifecycle)
+        .unwrap_or_default();
     let record = OwnerRecord {
         uid: uid.as_raw(),
         device: namespace.dev(),
         inode: namespace.ino(),
-        namespace: serde_json::to_string(namespace_state)?,
-        persistent,
-        stopping,
+        namespace: StoredNamespace::Snapshot(namespace_state.snapshot()?),
+        lifecycle,
     };
     persist_record(name, &record)
 }
@@ -111,8 +162,13 @@ pub fn load(name: &str, uid: Uid) -> anyhow::Result<NetworkNamespace> {
         .lock()
         .expect("owner record lock poisoned");
     let record = validated_record(name, uid)?;
-    let namespace: NetworkNamespace = serde_json::from_str(&record.namespace)
-        .context("Invalid root-owned namespace state snapshot")?;
+    let snapshot = match record.namespace {
+        StoredNamespace::Snapshot(snapshot) => snapshot,
+        StoredNamespace::LegacyJson(json) => {
+            serde_json::from_str(&json).context("Invalid root-owned namespace state snapshot")?
+        }
+    };
+    let namespace = snapshot.into_managed_guard();
     anyhow::ensure!(namespace.name == name, "Namespace snapshot name mismatch");
     Ok(namespace)
 }
@@ -188,7 +244,10 @@ pub fn remove(name: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{NetworkNamespace, OwnerRecord, name_for_uid, validate_record};
+    use super::{
+        NamespaceLifecycle, NetworkNamespace, OwnerRecord, StoredNamespace, name_for_uid,
+        validate_record,
+    };
     use nix::unistd::Uid;
 
     #[test]
@@ -211,9 +270,8 @@ mod tests {
             uid: 1000,
             device: 7,
             inode: 11,
-            namespace: "snapshot".to_string(),
-            persistent: false,
-            stopping: false,
+            namespace: StoredNamespace::LegacyJson("snapshot".to_string()),
+            lifecycle: NamespaceLifecycle::Active,
         };
         assert!(validate_record("vo_test", &record, Uid::from_raw(1000), 7, 11).is_ok());
         assert!(
@@ -235,8 +293,20 @@ mod tests {
         let record: OwnerRecord =
             serde_json::from_str(r#"{"uid":1000,"device":7,"inode":11,"namespace":"snapshot"}"#)
                 .unwrap();
-        assert!(!record.persistent);
-        assert!(!record.stopping);
+        assert_eq!(record.lifecycle, NamespaceLifecycle::Active);
+    }
+
+    #[test]
+    fn legacy_conflicting_flags_resolve_to_stopping() {
+        let record: OwnerRecord = serde_json::from_str(
+            r#"{"uid":1000,"device":7,"inode":11,"namespace":"snapshot","persistent":true,"stopping":true}"#,
+        )
+        .unwrap();
+        assert_eq!(record.lifecycle, NamespaceLifecycle::Stopping);
+        let serialized = serde_json::to_string(&record).unwrap();
+        let serialized: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert!(serialized.get("persistent").is_none());
+        assert!(serialized.get("stopping").is_none());
     }
 
     #[test]
@@ -245,23 +315,25 @@ mod tests {
             uid: 1000,
             device: 7,
             inode: 11,
-            namespace: "snapshot".to_string(),
-            persistent: false,
-            stopping: false,
+            namespace: StoredNamespace::LegacyJson("snapshot".to_string()),
+            lifecycle: NamespaceLifecycle::Active,
         };
         record.mark_persistent("vo_test").unwrap();
         assert!(record.is_persistent());
         record.mark_stopping();
         assert!(!record.is_persistent());
+        assert_eq!(record.lifecycle, NamespaceLifecycle::Stopping);
         assert!(record.mark_persistent("vo_test").is_err());
     }
 
     #[test]
     fn namespace_snapshots_round_trip_without_user_lockfiles() {
         let namespace = NetworkNamespace::attach_unmanaged("vo_test".to_string()).unwrap();
-        let snapshot = serde_json::to_string(&namespace).unwrap();
-        let restored: NetworkNamespace = serde_json::from_str(&snapshot).unwrap();
+        let snapshot = serde_json::to_string(&namespace.snapshot().unwrap()).unwrap();
+        let restored =
+            serde_json::from_str::<vopono_core::network::netns::NamespaceSnapshot>(&snapshot)
+                .unwrap()
+                .into_managed_guard();
         assert_eq!(restored.name, "vo_test");
-        assert!(restored.unmanaged);
     }
 }

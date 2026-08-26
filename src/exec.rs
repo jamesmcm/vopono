@@ -4,12 +4,13 @@ use crate::cli_client::CliClient;
 use super::args::ExecCommand;
 use super::args::WrappedArg;
 use super::sync::synch;
+use crate::tcp_proxy::TcpProxy;
 use anyhow::{Context, anyhow, bail};
 use log::{debug, error, info, warn};
 use signal_hook::iterator::SignalsInfo;
 use signal_hook::{consts::SIGINT, iterator::Signals};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::fd::{OwnedFd, RawFd};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::PathBuf;
 use std::{
     fs::create_dir_all,
@@ -78,10 +79,10 @@ pub fn execute_as_daemon(
 pub fn execute_as_daemon_with_stdio(
     command: ExecCommand,
     pipe_io: bool,
-    stdio_fds: Option<(RawFd, RawFd, RawFd)>,
+    stdio_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
     take_controlling_tty: bool,
     forwarded_env: Option<std::collections::HashMap<String, String>>,
-) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace, Vec<HostForwardProxy>)> {
+) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace, Vec<TcpProxy>)> {
     let uiclient = CliClient {};
     let silent = command.silent;
     let NamespaceConfig {
@@ -119,9 +120,8 @@ pub fn execute_as_daemon_with_stdio(
     // descriptor to the spawned child.
     let report_out: Option<OwnedFd> = if parsed_command.json {
         stdio_fds
-            .map(|(_, stdout_fd, _)| {
-                nix::unistd::dup(unsafe { std::os::fd::BorrowedFd::borrow_raw(stdout_fd) })
-            })
+            .as_ref()
+            .map(|(_, stdout_fd, _)| nix::unistd::dup(stdout_fd.as_fd()))
             .transpose()?
     } else {
         None
@@ -184,7 +184,7 @@ pub fn create_daemon_namespace_only(
     drop(forwarder);
     let mut ns = ns;
     crate::namespace_ownership::mark_persistent(&ns.name, uid)?;
-    ns.unmanaged = true;
+    ns.detach();
     Ok(ns)
 }
 
@@ -561,80 +561,8 @@ fn setup_namespace(
     })
 }
 
-/// Host-side forwarder for a `--forward` port. Binds a host port and relays TCP
-/// traffic into the namespace. The nonblocking accept loop observes a stop flag
-/// on drop, so a long-lived daemon does not leak bound ports between sessions.
-pub struct HostForwardProxy {
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl HostForwardProxy {
-    pub fn new(listen_port: u16, proxy_to: SocketAddr, local_only: bool) -> anyhow::Result<Self> {
-        let ip = if local_only {
-            Ipv6Addr::LOCALHOST
-        } else {
-            Ipv6Addr::UNSPECIFIED
-        };
-        let listener = std::net::TcpListener::bind(SocketAddr::new(IpAddr::V6(ip), listen_port))?;
-        listener.set_nonblocking(true)?;
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let thread_stop = std::sync::Arc::clone(&stop);
-        let thread = std::thread::spawn(move || {
-            while !thread_stop.load(std::sync::atomic::Ordering::Acquire) {
-                let client = match listener.accept() {
-                    Ok((client, _)) => client,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(std::time::Duration::from_millis(25));
-                        continue;
-                    }
-                    Err(_) => break,
-                };
-                let Ok(upstream) = std::net::TcpStream::connect_timeout(
-                    &proxy_to,
-                    std::time::Duration::from_secs(1),
-                ) else {
-                    continue;
-                };
-                let mut client_to_upstream = match client.try_clone() {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                let mut upstream_to_upstream = match upstream.try_clone() {
-                    Ok(u) => u,
-                    Err(_) => continue,
-                };
-                let mut upstream_to_client = match upstream.try_clone() {
-                    Ok(u) => u,
-                    Err(_) => continue,
-                };
-                let mut client_to_client = match client.try_clone() {
-                    Ok(c) => c,
-                    Err(_) => continue,
-                };
-                std::thread::spawn(move || {
-                    let _ = io::copy(&mut client_to_upstream, &mut upstream_to_upstream);
-                });
-                std::thread::spawn(move || {
-                    let _ = io::copy(&mut upstream_to_client, &mut client_to_client);
-                });
-            }
-        });
-        Ok(Self {
-            stop,
-            thread: Some(thread),
-        })
-    }
-}
-
-impl Drop for HostForwardProxy {
-    fn drop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Release);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-    }
-}
+/// Bound the number of listeners a single invocation may create.
+const MAX_HOST_FORWARD_PORTS: usize = 32;
 
 /// Create host-side forwarders for `--forward` ports. Shared by the CLI and
 /// daemon execution paths so the two cannot drift. Ports are opened inside the
@@ -644,13 +572,17 @@ fn host_forward_proxies(
     forward: Option<&[u16]>,
     no_proxy: bool,
     allow_privileged_ports: bool,
-) -> anyhow::Result<Vec<HostForwardProxy>> {
+) -> anyhow::Result<Vec<TcpProxy>> {
     if no_proxy {
         return Ok(Vec::new());
     }
     let Some(f) = forward.filter(|f| !f.is_empty()) else {
         return Ok(Vec::new());
     };
+    anyhow::ensure!(
+        f.len() <= MAX_HOST_FORWARD_PORTS,
+        "At most {MAX_HOST_FORWARD_PORTS} host-forwarded ports may be requested"
+    );
     let namespace_ip = ns
         .veth_pair_ips
         .as_ref()
@@ -663,11 +595,7 @@ fn host_forward_proxies(
     for p in f {
         validate_host_forward_port(*p, allow_privileged_ports)?;
         debug!("Forwarding port: {}, {}", p, namespace_ip);
-        proxies.push(HostForwardProxy::new(
-            *p,
-            SocketAddr::new(namespace_ip, *p),
-            false,
-        )?);
+        proxies.push(TcpProxy::new(*p, SocketAddr::new(namespace_ip, *p), false)?);
     }
     Ok(proxies)
 }
@@ -941,8 +869,7 @@ fn run_protocol_in_netns(
                     } else {
                         &dns
                     };
-                let old_dns = ns.dns_config.take();
-                std::mem::forget(old_dns);
+                ns.preserve_dns_files_for_reconfiguration();
                 ns.dns_config_with_interface(
                     effective_dns,
                     &[],
@@ -1219,23 +1146,7 @@ fn provider_port_forwarding(
 
 #[cfg(test)]
 mod tests {
-    use super::{HostForwardProxy, launch_report_value, validate_host_forward_port};
-
-    #[test]
-    fn host_forward_proxy_drop_stops_accept_thread() {
-        let Ok(reservation) = std::net::TcpListener::bind("[::1]:0") else {
-            // The production proxy is IPv6-based; skip on kernels where IPv6
-            // has been disabled entirely.
-            return;
-        };
-        let port = reservation.local_addr().unwrap().port();
-        drop(reservation);
-
-        let proxy = HostForwardProxy::new(port, "[::1]:9".parse().unwrap(), true).unwrap();
-        let started = std::time::Instant::now();
-        drop(proxy);
-        assert!(started.elapsed() < std::time::Duration::from_secs(2));
-    }
+    use super::{launch_report_value, validate_host_forward_port};
 
     #[test]
     fn daemon_forwarding_rejects_privileged_host_ports() {

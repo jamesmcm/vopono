@@ -16,6 +16,8 @@ pub struct Trojan {
     pub config: TrojanConfig,
     #[serde(skip)]
     _temporary_files: Vec<tempfile::NamedTempFile>,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 impl Trojan {
@@ -81,16 +83,26 @@ impl Trojan {
             pid: handle.id(),
             config,
             _temporary_files: temporary_files,
+            cleanup_enabled: true,
         })
     }
 }
 
 impl Drop for Trojan {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(self.pid as i32),
             nix::sys::signal::Signal::SIGTERM,
         )
         .expect("Failed to kill trojan process");
+    }
+}
+
+impl Trojan {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
     }
 }

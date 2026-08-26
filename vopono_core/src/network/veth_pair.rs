@@ -13,11 +13,15 @@ pub struct VethPair {
     pub source: String,
     pub dest: String,
     pub nm_unmanaged: Option<NetworkManagerUnmanaged>,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NetworkManagerUnmanaged {
     pub backup_file: Option<PathBuf>,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 // Linux interface names must be <= 15 bytes (excluding the trailing NUL).
@@ -96,7 +100,10 @@ impl VethPair {
                     "Tried but failed to reload NetworkManager configuration - is NetworkManager running? : {e}"
                 );
             }
-            Some(NetworkManagerUnmanaged { backup_file })
+            Some(NetworkManagerUnmanaged {
+                backup_file,
+                cleanup_enabled: true,
+            })
         } else {
             None
         };
@@ -168,6 +175,7 @@ impl VethPair {
             source,
             dest,
             nm_unmanaged,
+            cleanup_enabled: true,
         })
     }
 }
@@ -217,6 +225,9 @@ fn link_is_missing(name: &str) -> anyhow::Result<bool> {
 
 impl Drop for VethPair {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         // Concurrent teardowns (e.g. `vopono stop` racing the session that
         // owns the namespace) can legitimately delete this interface first;
         // a missing veth must not panic inside Drop, which would abort the
@@ -242,6 +253,9 @@ impl Drop for VethPair {
 
 impl Drop for NetworkManagerUnmanaged {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         // Only restore settings if there are no other active namespaces
         if let Ok(namespaces) = crate::util::get_lock_namespaces() {
             if !namespaces.is_empty() {
@@ -286,6 +300,15 @@ impl Drop for NetworkManagerUnmanaged {
             if let Err(error) = sudo_command(&["nmcli", "connection", "reload"]) {
                 log::warn!("Failed to reload NetworkManager configuration: {error}");
             }
+        }
+    }
+}
+
+impl VethPair {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
+        if let Some(network_manager) = &mut self.nm_unmanaged {
+            network_manager.cleanup_enabled = enabled;
         }
     }
 }

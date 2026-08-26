@@ -23,6 +23,8 @@ pub struct OpenVpn {
     pub logfile: PathBuf,
     #[serde(skip)]
     _runtime_dir: Option<tempfile::TempDir>,
+    #[serde(skip)]
+    cleanup_enabled: bool,
     // pub distinct_remotes: Vec<String>, // Unique IP Addresses or hostnames
 }
 
@@ -260,6 +262,7 @@ impl OpenVpn {
             openvpn_dns_servers,
             logfile: log_file_path,
             _runtime_dir: Some(runtime_dir),
+            cleanup_enabled: true,
         })
     }
 
@@ -270,6 +273,9 @@ impl OpenVpn {
 
 impl Drop for OpenVpn {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         match nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(self.pid as i32),
             nix::sys::signal::Signal::SIGKILL,
@@ -289,6 +295,12 @@ impl Drop for OpenVpn {
                 e
             ),
         }
+    }
+}
+
+impl OpenVpn {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
     }
 }
 

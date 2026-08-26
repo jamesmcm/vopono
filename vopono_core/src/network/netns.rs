@@ -30,13 +30,62 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::net::IpAddr;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 use sysinfo::System;
 
+/// Live owner of a vopono namespace and its cleanup resources.
+///
+/// This type is deliberately not serializable. Persisted state is represented
+/// by [`NamespaceSnapshot`], whose deserialized resources are disarmed until
+/// explicitly converted back into a managed guard.
+#[derive(Debug)]
+pub struct ManagedNamespaceGuard {
+    pub name: String,
+    pub veth_pair: Option<VethPair>,
+    pub dns_config: Option<DnsConfig>,
+    pub openvpn: Option<OpenVpn>,
+    pub wireguard: Option<Wireguard>,
+    pub host_masquerade: Option<HostMasquerade>,
+    pub firewall_exception: Option<FirewallException>,
+    pub shadowsocks: Option<Shadowsocks>,
+    pub ssh: Option<SshProxy>,
+    pub veth_pair_ips: Option<VethPairIPs>,
+    pub openconnect: Option<OpenConnect>,
+    pub openfortivpn: Option<OpenFortiVpn>,
+    pub warp: Option<Warp>,
+    pub provider: VpnProvider,
+    pub protocol: Protocol,
+    pub firewall: Firewall,
+    pub predown: Option<String>,
+    pub predown_user: Option<String>,
+    pub predown_group: Option<String>,
+    pub config_file: Option<PathBuf>, // Used to save config file path in lockfile
+    pub trojan: Option<Trojan>,
+    /// Runtime state shared with the status/lockfile projections.
+    pub state: NamespaceState,
+    disposition: GuardDisposition,
+}
+
+/// Backwards-compatible public name used throughout the core API.
+pub type NetworkNamespace = ManagedNamespaceGuard;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuardDisposition {
+    Managed,
+    Detached,
+    TornDown,
+}
+
+/// Inert, serializable description of a namespace.
+///
+/// Resource cleanup flags are skipped by serde, so deserializing this type can
+/// never kill processes or modify host networking. Only `into_managed_guard`
+/// arms those resources again.
 #[derive(Serialize, Deserialize, Debug)]
-pub struct NetworkNamespace {
+pub struct NamespaceSnapshot {
     pub name: String,
     pub veth_pair: Option<VethPair>,
     pub dns_config: Option<DnsConfig>,
@@ -57,16 +106,40 @@ pub struct NetworkNamespace {
     pub predown: Option<String>,
     pub predown_user: Option<String>,
     pub predown_group: Option<String>,
-    pub config_file: Option<PathBuf>, // Used to save config file path in lockfile
+    pub config_file: Option<PathBuf>,
     pub trojan: Option<Trojan>,
-    /// Runtime state shared with the status/lockfile projections.
     #[serde(default)]
     pub state: NamespaceState,
-    /// True when this handle wraps a namespace that was not created by vopono
-    /// (attached via `--existing-netns`). Such namespaces are never modified,
-    /// lockfile-tracked or torn down on drop.
-    #[serde(default)]
-    pub unmanaged: bool,
+    // Read legacy snapshots without carrying their lifecycle decision into the
+    // new guard. Ownership records are authoritative for persistence.
+    #[serde(default, rename = "unmanaged", skip_serializing)]
+    _legacy_unmanaged: bool,
+}
+
+#[derive(Serialize)]
+struct NamespaceSnapshotRef<'a> {
+    name: &'a str,
+    veth_pair: &'a Option<VethPair>,
+    dns_config: &'a Option<DnsConfig>,
+    openvpn: &'a Option<OpenVpn>,
+    wireguard: &'a Option<Wireguard>,
+    host_masquerade: &'a Option<HostMasquerade>,
+    firewall_exception: &'a Option<FirewallException>,
+    shadowsocks: &'a Option<Shadowsocks>,
+    ssh: &'a Option<SshProxy>,
+    veth_pair_ips: &'a Option<VethPairIPs>,
+    openconnect: &'a Option<OpenConnect>,
+    openfortivpn: &'a Option<OpenFortiVpn>,
+    warp: &'a Option<Warp>,
+    provider: &'a VpnProvider,
+    protocol: &'a Protocol,
+    firewall: Firewall,
+    predown: &'a Option<String>,
+    predown_user: &'a Option<String>,
+    predown_group: &'a Option<String>,
+    config_file: &'a Option<PathBuf>,
+    trojan: &'a Option<Trojan>,
+    state: &'a NamespaceState,
 }
 
 /// Server/port metadata mirrored into the lockfiles so read-only commands can
@@ -182,47 +255,166 @@ fn write_lockfile_data(path: &Path, contents: &str) -> anyhow::Result<()> {
     let parent = path
         .parent()
         .with_context(|| format!("No parent directory for {}", path.display()))?;
-    if ensure_dir_as_config_owner(parent, Some(0o750))? {
+    if ensure_dir_as_config_owner(parent, Some(0o700))? {
         anyhow::ensure!(
-            write_file_as_config_owner(path, contents, Some(0o640))?,
+            write_file_as_config_owner(path, contents, Some(0o600))?,
             "Config-owner writer unexpectedly unavailable"
         );
         return Ok(());
     }
 
     std::fs::create_dir_all(parent)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o750))?;
-    }
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     chown_to_config_owner(parent)?;
     let temporary_path = path.with_extension(format!("tmp-{}", unistd::getpid()));
     {
-        let mut file = File::create(&temporary_path)?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&temporary_path)?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         write!(file, "{contents}")?;
     }
     std::fs::rename(&temporary_path, path)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))?;
-    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     chown_to_config_owner(path)
 }
 
-impl NetworkNamespace {
+impl NamespaceSnapshot {
+    pub fn into_managed_guard(self) -> ManagedNamespaceGuard {
+        let mut guard = ManagedNamespaceGuard {
+            name: self.name,
+            veth_pair: self.veth_pair,
+            dns_config: self.dns_config,
+            openvpn: self.openvpn,
+            wireguard: self.wireguard,
+            host_masquerade: self.host_masquerade,
+            firewall_exception: self.firewall_exception,
+            shadowsocks: self.shadowsocks,
+            ssh: self.ssh,
+            veth_pair_ips: self.veth_pair_ips,
+            openconnect: self.openconnect,
+            openfortivpn: self.openfortivpn,
+            warp: self.warp,
+            provider: self.provider,
+            protocol: self.protocol,
+            firewall: self.firewall,
+            predown: self.predown,
+            predown_user: self.predown_user,
+            predown_group: self.predown_group,
+            config_file: self.config_file,
+            trojan: self.trojan,
+            state: self.state,
+            disposition: GuardDisposition::Managed,
+        };
+        guard.set_resource_cleanup(true);
+        guard
+    }
+}
+
+impl ManagedNamespaceGuard {
+    fn snapshot_ref(&self) -> NamespaceSnapshotRef<'_> {
+        NamespaceSnapshotRef {
+            name: &self.name,
+            veth_pair: &self.veth_pair,
+            dns_config: &self.dns_config,
+            openvpn: &self.openvpn,
+            wireguard: &self.wireguard,
+            host_masquerade: &self.host_masquerade,
+            firewall_exception: &self.firewall_exception,
+            shadowsocks: &self.shadowsocks,
+            ssh: &self.ssh,
+            veth_pair_ips: &self.veth_pair_ips,
+            openconnect: &self.openconnect,
+            openfortivpn: &self.openfortivpn,
+            warp: &self.warp,
+            provider: &self.provider,
+            protocol: &self.protocol,
+            firewall: self.firewall,
+            predown: &self.predown,
+            predown_user: &self.predown_user,
+            predown_group: &self.predown_group,
+            config_file: &self.config_file,
+            trojan: &self.trojan,
+            state: &self.state,
+        }
+    }
+
+    pub fn snapshot(&self) -> anyhow::Result<NamespaceSnapshot> {
+        Ok(serde_json::from_value(serde_json::to_value(
+            self.snapshot_ref(),
+        )?)?)
+    }
+
+    fn set_resource_cleanup(&mut self, enabled: bool) {
+        if let Some(resource) = &mut self.veth_pair {
+            resource.set_cleanup_enabled(enabled);
+        }
+        if let Some(resource) = &mut self.dns_config {
+            resource.set_cleanup_enabled(enabled);
+        }
+        if let Some(resource) = &mut self.openvpn {
+            resource.set_cleanup_enabled(enabled);
+        }
+        if let Some(resource) = &mut self.wireguard {
+            resource.set_cleanup_enabled(enabled);
+        }
+        if let Some(resource) = &mut self.host_masquerade {
+            resource.set_cleanup_enabled(enabled);
+        }
+        if let Some(resource) = &mut self.firewall_exception {
+            resource.set_cleanup_enabled(enabled);
+        }
+        if let Some(resource) = &mut self.shadowsocks {
+            resource.set_cleanup_enabled(enabled);
+        }
+        if let Some(resource) = &mut self.ssh {
+            resource.set_cleanup_enabled(enabled);
+        }
+        if let Some(resource) = &mut self.openconnect {
+            resource.set_cleanup_enabled(enabled);
+        }
+        if let Some(resource) = &mut self.openfortivpn {
+            resource.set_cleanup_enabled(enabled);
+        }
+        if let Some(resource) = &mut self.warp {
+            resource.set_cleanup_enabled(enabled);
+        }
+        if let Some(resource) = &mut self.trojan {
+            resource.set_cleanup_enabled(enabled);
+        }
+    }
+
+    /// Release this guard without tearing down the live namespace. Resource
+    /// wrappers are disarmed but still dropped normally, so their heap memory
+    /// is reclaimed without `mem::forget`.
+    pub fn detach(&mut self) {
+        self.set_resource_cleanup(false);
+        self.disposition = GuardDisposition::Detached;
+    }
+
+    /// Replace the DNS resource without deleting its on-disk files between
+    /// the old and new configurations.
+    pub fn preserve_dns_files_for_reconfiguration(&mut self) {
+        if let Some(dns_config) = &mut self.dns_config {
+            dns_config.set_cleanup_enabled(false);
+        }
+        self.dns_config = None;
+    }
+
     pub fn from_existing(name: String) -> anyhow::Result<Self> {
         validate_netns_name(&name)?;
         let mut lockfile_path = config_dir()?;
         lockfile_path.push(format!("vopono/locks/{name}"));
 
-        if !ensure_dir_as_config_owner(&lockfile_path, Some(0o750))? {
+        if !ensure_dir_as_config_owner(&lockfile_path, Some(0o700))? {
             std::fs::create_dir_all(&lockfile_path)?;
         }
         debug!("Trying to read lockfile: {}", lockfile_path.display());
         // Find a real RON lockfile (numeric filename = creator PID). Skip auxiliary client-* locks.
-        let mut parsed_ns: Option<NetworkNamespace> = None;
+        let mut parsed_ns: Option<ManagedNamespaceGuard> = None;
         for entry in std::fs::read_dir(&lockfile_path)? {
             let entry = match entry {
                 Ok(e) => e,
@@ -242,7 +434,7 @@ impl NetworkNamespace {
                 .and_then(|f| ron::de::from_reader::<_, Lockfile>(f).ok())
             {
                 Some(lock) => {
-                    parsed_ns = Some(lock.ns);
+                    parsed_ns = Some(lock.ns.into_managed_guard());
                     break;
                 }
                 None => {
@@ -307,7 +499,7 @@ impl NetworkNamespace {
             config_file: None,
             trojan: None,
             state: NamespaceState::default(),
-            unmanaged: true,
+            disposition: GuardDisposition::Detached,
         })
     }
 
@@ -348,7 +540,7 @@ impl NetworkNamespace {
             config_file: None,
             trojan: None,
             state: NamespaceState::default(),
-            unmanaged: false,
+            disposition: GuardDisposition::Managed,
         })
     }
 
@@ -953,7 +1145,7 @@ impl NetworkNamespace {
     }
 
     pub fn write_lockfile(self, command: &str) -> anyhow::Result<Self> {
-        if self.unmanaged {
+        if self.disposition != GuardDisposition::Managed {
             // Unmanaged namespaces are not vopono's to track or clean up.
             return Ok(self);
         }
@@ -963,9 +1155,17 @@ impl NetworkNamespace {
         let since_the_epoch = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("Time went backwards");
-        let lock: Lockfile = Lockfile {
-            ns: self,
-            command: command.to_string(),
+        #[derive(Serialize)]
+        struct LockfileRef<'a> {
+            ns: NamespaceSnapshotRef<'a>,
+            start: u64,
+            command: &'a str,
+            application_pid: Option<u32>,
+            application_started_at: Option<u64>,
+        }
+        let lock = LockfileRef {
+            ns: self.snapshot_ref(),
+            command,
             start: since_the_epoch.as_secs(),
             application_pid: None,
             application_started_at: None,
@@ -975,7 +1175,7 @@ impl NetworkNamespace {
         lockfile_path.push(format!("{}", unistd::getpid()));
         write_lockfile_data(&lockfile_path, &lock_string)?;
         debug!("Lockfile written: {}", lockfile_path.display());
-        Ok(lock.ns)
+        Ok(self)
     }
 
     /// Update the application PID in the primary lock after the child process
@@ -984,7 +1184,7 @@ impl NetworkNamespace {
     /// Best-effort: a missing lockfile is logged and ignored so daemon startup
     /// is not aborted by an already-torn-down namespace entry.
     pub fn update_lockfile_application_pid(&self, pid: u32) -> anyhow::Result<()> {
-        if self.unmanaged {
+        if self.disposition != GuardDisposition::Managed {
             return Ok(());
         }
         let mut lockfile_path = config_dir()?;
@@ -1008,7 +1208,7 @@ impl NetworkNamespace {
         }
         #[derive(serde::Serialize)]
         struct LockfileUpdateView<'a> {
-            ns: &'a NetworkNamespace,
+            ns: NamespaceSnapshotRef<'a>,
             start: u64,
             command: &'a str,
             application_pid: Option<u32>,
@@ -1016,7 +1216,7 @@ impl NetworkNamespace {
         }
         let meta: LockfileMeta = ron::de::from_reader(File::open(&lockfile_path)?)?;
         let view = LockfileUpdateView {
-            ns: self,
+            ns: self.snapshot_ref(),
             start: meta.start,
             command: &meta.command,
             application_pid: Some(pid),
@@ -1037,7 +1237,7 @@ impl NetworkNamespace {
         pid: u32,
         command: &str,
     ) -> anyhow::Result<Option<PathBuf>> {
-        if self.unmanaged {
+        if self.disposition != GuardDisposition::Managed {
             // Unmanaged namespaces are not vopono's to track or clean up.
             return Ok(None);
         }
@@ -1116,16 +1316,16 @@ impl NetworkNamespace {
     }
 }
 
-impl Drop for NetworkNamespace {
-    fn drop(&mut self) {
-        if self.unmanaged {
+impl ManagedNamespaceGuard {
+    fn perform_teardown(&mut self) -> anyhow::Result<()> {
+        if self.disposition != GuardDisposition::Managed {
             debug!(
                 "Namespace {} is not managed by vopono - leaving it untouched",
                 self.name
             );
-            return;
+            return Ok(());
         }
-        let mut lock_dir = config_dir().expect("Failed to get config dir");
+        let mut lock_dir = config_dir()?;
         lock_dir.push(format!("vopono/locks/{}", self.name));
         let mut lockfile_path = lock_dir.clone();
         // Each instance responsible for deleting their own lockfile
@@ -1207,18 +1407,18 @@ impl Drop for NetworkNamespace {
         };
 
         if lock_dir_is_empty && !has_unaccounted_processes {
+            // Commit to teardown before dropping any resource. A later error
+            // is returned to explicit callers and must not trigger a second,
+            // implicit teardown from Drop.
+            self.disposition = GuardDisposition::TornDown;
             // Only try to delete if exists
             if lockfile_path.exists() {
-                match std::fs::remove_dir(&lockfile_path) {
-                    Ok(_) => {}
-                    Err(e) => {
-                        warn!(
-                            "Could not remove locks directory: {}, {:?}",
-                            lockfile_path.display(),
-                            e
-                        );
-                    }
-                }
+                std::fs::remove_dir(&lockfile_path).with_context(|| {
+                    format!(
+                        "Could not remove locks directory {}",
+                        lockfile_path.display()
+                    )
+                })?;
             }
             info!("Shutting down vopono namespace - as there are no processes left running inside");
             // Run PreDown script (if any)
@@ -1274,6 +1474,10 @@ impl Drop for NetworkNamespace {
             self.wireguard = None;
             self.host_masquerade = None;
             self.firewall_exception = None;
+            self.openconnect = None;
+            self.openfortivpn = None;
+            self.ssh = None;
+            self.trojan = None;
             // A concurrent teardown (e.g. `vopono stop` racing the session
             // that owns this namespace) may have removed the handle already;
             // that is success, not an error worth retrying for 4 seconds.
@@ -1285,7 +1489,7 @@ impl Drop for NetworkNamespace {
                     "Network namespace {} already removed by another teardown",
                     self.name
                 );
-                return;
+                return Ok(());
             }
             let delete_result = sudo_command(&["ip", "netns", "delete", &self.name]);
             if delete_result.is_err() {
@@ -1295,9 +1499,8 @@ impl Drop for NetworkNamespace {
                 );
                 std::thread::sleep(std::time::Duration::from_secs(4));
 
-                sudo_command(&["ip", "netns", "delete", &self.name]).unwrap_or_else(|e| {
-                    log::error!("Failed to delete network namespace: {}: {:?}", self.name, e)
-                });
+                sudo_command(&["ip", "netns", "delete", &self.name])
+                    .with_context(|| format!("Failed to delete network namespace {}", self.name))?;
             }
         } else {
             debug!("Skipping destructors since other vopono instance using this namespace!");
@@ -1311,25 +1514,23 @@ impl Drop for NetworkNamespace {
                     self.name
                 ),
             }
-            std::mem::forget(self.openvpn.take());
-            std::mem::forget(self.warp.take());
-            std::mem::forget(self.shadowsocks.take());
-            std::mem::forget(self.ssh.take());
-            std::mem::forget(self.veth_pair.take());
-            std::mem::forget(self.dns_config.take());
-            std::mem::forget(self.wireguard.take());
-            std::mem::forget(self.firewall_exception.take());
-            std::mem::forget(self.host_masquerade.take());
-            std::mem::forget(self.openconnect.take());
-            std::mem::forget(self.openfortivpn.take());
-            std::mem::forget(self.trojan.take());
+            self.detach();
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ManagedNamespaceGuard {
+    fn drop(&mut self) {
+        if let Err(error) = self.perform_teardown() {
+            log::error!("Failed to tear down namespace {}: {error:#}", self.name);
         }
     }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Lockfile {
-    pub ns: NetworkNamespace,
+    pub ns: NamespaceSnapshot,
     pub start: u64,
     pub command: String,
     #[serde(default)]
@@ -1368,16 +1569,16 @@ impl NetworkNamespace {
     /// firewall, veth pair, DNS config, and VPN protocol processes, then
     /// removes the network namespace. Semantically identical to dropping the
     /// value (the `Drop` impl owns the cleanup), but makes the teardown
-    /// visible at the call site instead of relying on an implicit drop.
-    pub fn teardown(self) {
-        drop(self);
+    /// visible at the call site and permits cleanup failures to be handled.
+    pub fn teardown(mut self) -> anyhow::Result<()> {
+        self.perform_teardown()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        NetworkNamespace, has_unaccounted_processes, validate_netns_name, veth_interface_base,
+        NamespaceSnapshot, has_unaccounted_processes, validate_netns_name, veth_interface_base,
     };
 
     #[test]
@@ -1429,6 +1630,12 @@ mod tests {
     }
 
     #[test]
+    fn detached_namespace_teardown_is_a_noop() {
+        let namespace = super::NetworkNamespace::attach_unmanaged("vo_test".to_string()).unwrap();
+        namespace.teardown().unwrap();
+    }
+
+    #[test]
     fn legacy_forwarded_ports_key_reads_into_host_forwarded_ports() {
         let raw = r#"(
             name: "vo_test_abc",
@@ -1457,7 +1664,7 @@ mod tests {
             ),
         )"#;
 
-        let ns: NetworkNamespace = ron::from_str(raw).expect("legacy lockfile should parse");
+        let ns: NamespaceSnapshot = ron::from_str(raw).expect("legacy lockfile should parse");
         assert_eq!(ns.state.open_ports, vec![8080]);
         assert_eq!(ns.state.host_forwarded_ports, vec![9000]);
     }

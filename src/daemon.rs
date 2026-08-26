@@ -22,14 +22,13 @@ use signal_hook::{
 };
 use std::io::IoSliceMut;
 use std::io::{Read, Write};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
-use std::os::fd::{BorrowedFd, IntoRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, LazyLock, Mutex,
+    atomic::{AtomicBool, Ordering},
 };
 use std::thread;
 
@@ -251,27 +250,59 @@ fn query_daemon_version(stream: &mut LocalSocketStream) -> Option<String> {
     }
 }
 
-pub(crate) const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_FRAME_LEN: usize = 1024 * 1024;
 const MAX_CONTROL_FRAME_LEN: usize = 64 * 1024;
-const MAX_CONCURRENT_CLIENTS: usize = 128;
-static ACTIVE_CLIENTS: AtomicUsize = AtomicUsize::new(0);
+const MAX_CONCURRENT_CLIENTS: usize = 32;
+const MAX_CLIENTS_PER_UID: usize = 8;
+static CLIENT_ADMISSION: LazyLock<ClientAdmission> = LazyLock::new(ClientAdmission::default);
 
-struct ClientSlot;
+#[derive(Default)]
+struct ClientAdmission {
+    state: Mutex<ClientAdmissionState>,
+}
 
-impl ClientSlot {
-    fn acquire() -> Option<Self> {
-        ACTIVE_CLIENTS
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < MAX_CONCURRENT_CLIENTS).then_some(active + 1)
-            })
-            .ok()
-            .map(|_| Self)
+#[derive(Default)]
+struct ClientAdmissionState {
+    total: usize,
+    by_uid: std::collections::HashMap<u32, usize>,
+}
+
+struct ClientSlot<'a> {
+    admission: &'a ClientAdmission,
+    uid: u32,
+}
+
+impl ClientAdmission {
+    fn acquire(&self, uid: Uid) -> Option<ClientSlot<'_>> {
+        let mut state = self.state.lock().expect("client admission lock poisoned");
+        let uid = uid.as_raw();
+        let uid_count = state.by_uid.get(&uid).copied().unwrap_or_default();
+        if state.total >= MAX_CONCURRENT_CLIENTS || uid_count >= MAX_CLIENTS_PER_UID {
+            return None;
+        }
+        state.total += 1;
+        state.by_uid.insert(uid, uid_count + 1);
+        Some(ClientSlot {
+            admission: self,
+            uid,
+        })
     }
 }
 
-impl Drop for ClientSlot {
+impl Drop for ClientSlot<'_> {
     fn drop(&mut self) {
-        ACTIVE_CLIENTS.fetch_sub(1, Ordering::AcqRel);
+        let mut state = self
+            .admission
+            .state
+            .lock()
+            .expect("client admission lock poisoned");
+        state.total -= 1;
+        if let Some(count) = state.by_uid.get_mut(&self.uid) {
+            *count -= 1;
+            if *count == 0 {
+                state.by_uid.remove(&self.uid);
+            }
+        }
     }
 }
 
@@ -420,9 +451,19 @@ pub fn start() -> anyhow::Result<()> {
     info!("Daemon listening on {}", SOCKET_PATH);
 
     for conn in listener.incoming().filter_map(handle_accept_error) {
-        let Some(client_slot) = ClientSlot::acquire() else {
+        let (peer_uid, _) = match get_peer_credentials(&conn) {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                warn!("Rejecting daemon connection without peer credentials: {error}");
+                continue;
+            }
+        };
+        let Some(client_slot) = CLIENT_ADMISSION.acquire(peer_uid) else {
             warn!(
-                "Rejecting daemon connection: concurrent client limit ({MAX_CONCURRENT_CLIENTS}) reached"
+                "Rejecting daemon connection for uid {}: client limit reached (per uid {}, total {})",
+                peer_uid.as_raw(),
+                MAX_CLIENTS_PER_UID,
+                MAX_CONCURRENT_CLIENTS
             );
             continue;
         };
@@ -512,7 +553,8 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
         } => {
             // Receive stdin, stdout, stderr FDs via SCM_RIGHTS (exec only)
             let [client_stdin_fd, client_stdout_fd, client_stderr_fd] =
-                recv_fds_over_unix_socket(&conn, 3)?;
+                recv_fds_over_unix_socket(&conn)?;
+            let mut client_fds = Some((client_stdin_fd, client_stdout_fd, client_stderr_fd));
             // Execution sessions are intentionally long lived. The bounded
             // timeout above is only for request and descriptor admission.
             clear_socket_timeouts(&conn)?;
@@ -527,9 +569,9 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             let client_report_out = if silent {
                 None
             } else {
-                Some(nix::unistd::dup(unsafe {
-                    BorrowedFd::borrow_raw(client_stdout_fd)
-                })?)
+                Some(nix::unistd::dup(
+                    client_fds.as_ref().expect("client fds present").1.as_fd(),
+                )?)
             };
 
             // `--create-netns-only`: bring up the namespace and leave it alive
@@ -539,9 +581,8 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 let ns = crate::exec::create_daemon_namespace_only(exec_command, uid)?;
                 // No child will consume the received SCM_RIGHTS descriptors in
                 // this branch, so take ownership and close all three locally.
-                let _client_stdin = unsafe { OwnedFd::from_raw_fd(client_stdin_fd) };
-                let client_stdout = unsafe { OwnedFd::from_raw_fd(client_stdout_fd) };
-                let _client_stderr = unsafe { OwnedFd::from_raw_fd(client_stderr_fd) };
+                let (_client_stdin, client_stdout, _client_stderr) =
+                    client_fds.take().expect("client fds present");
                 let mut out = std::fs::File::from(client_stdout);
                 let _ = writeln!(out, "Created namespace {}", ns.name);
                 let _ = out.flush();
@@ -556,33 +597,32 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             // If the client stdin is a TTY, run the child on a dedicated PTY and bridge I/O.
             // This preserves job control and avoids stealing the user's controlling TTY.
             let client_has_tty =
-                nix_isatty(unsafe { BorrowedFd::borrow_raw(client_stdin_fd) }).unwrap_or(false);
+                nix_isatty(client_fds.as_ref().expect("client fds present").0.as_fd())
+                    .unwrap_or(false);
             let (application, ns, host_proxies): (
                 vopono_core::network::application_wrapper::ApplicationWrapper,
                 vopono_core::network::netns::NetworkNamespace,
-                Vec<crate::exec::HostForwardProxy>,
+                Vec<crate::tcp_proxy::TcpProxy>,
             );
-            let mut pty_master: Option<std::os::fd::RawFd> = None;
+            let mut pty_master: Option<OwnedFd> = None;
             if client_has_tty {
                 let p = openpty(None, None).map_err(|e| anyhow!("openpty failed: {e}"))?;
-                let master = p.master.into_raw_fd();
-                let slave = p.slave.into_raw_fd();
+                let slave_out = nix::unistd::dup(p.slave.as_fd())?;
+                let slave_err = nix::unistd::dup(p.slave.as_fd())?;
                 // Spawn child with PTY slave as stdio, and let it take controlling TTY in pre_exec
                 (application, ns, host_proxies) = execute_as_daemon_with_stdio(
                     exec_command,
                     false,
-                    Some((slave, slave, slave)),
+                    Some((p.slave, slave_out, slave_err)),
                     true,
                     Some(forwarded_env.clone()),
                 )?;
-                // Do not close the slave here: it's owned by the spawned child via Stdio::from_raw_fd
-                // and will be closed by the child/OS when appropriate.
-                pty_master = Some(master);
+                pty_master = Some(p.master);
             } else {
                 (application, ns, host_proxies) = execute_as_daemon_with_stdio(
                     exec_command,
                     false,
-                    Some((client_stdin_fd, client_stdout_fd, client_stderr_fd)),
+                    client_fds.take(),
                     false,
                     Some(forwarded_env.clone()),
                 )?;
@@ -623,15 +663,13 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             if let Some(master_fd) = pty_master {
                 use std::io::{Read as _, Write as _};
                 // Duplicate client FDs so we don't close the originals when Files drop
-                let client_stdin_dup: OwnedFd =
-                    nix::unistd::dup(unsafe { BorrowedFd::borrow_raw(client_stdin_fd) })?;
-                let client_stdout_dup: OwnedFd =
-                    nix::unistd::dup(unsafe { BorrowedFd::borrow_raw(client_stdout_fd) })?;
+                let (client_stdin_fd, client_stdout_fd, _) =
+                    client_fds.as_ref().expect("PTY client fds retained");
+                let client_stdin_dup: OwnedFd = nix::unistd::dup(client_stdin_fd.as_fd())?;
+                let client_stdout_dup: OwnedFd = nix::unistd::dup(client_stdout_fd.as_fd())?;
                 let client_stdin = std::fs::File::from(client_stdin_dup);
                 let client_stdout = std::fs::File::from(client_stdout_dup);
-                // We own master_fd; wrap in OwnedFd then File
-                let master_owned = unsafe { OwnedFd::from_raw_fd(master_fd) };
-                let pty_master_file_r = std::fs::File::from(master_owned);
+                let pty_master_file_r = std::fs::File::from(master_fd);
                 let pty_master_file_w = pty_master_file_r.try_clone()?;
 
                 // Do not change user terminal modes; inject control bytes into PTY on signals
@@ -780,7 +818,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             if keep_alive || persistent {
                 // Detach the handle so its Drop does not tear the namespace down;
                 // it stays visible to `vopono list` / `vopono stop` until stopped.
-                _ns_guard.unmanaged = true;
+                _ns_guard.detach();
             }
 
             let response_code = status.code().unwrap_or(1);
@@ -921,10 +959,7 @@ fn fd_readable(fd: RawFd, timeout_ms: i32) -> bool {
     unsafe { nix::libc::poll(&mut poll_fd, 1, timeout_ms) > 0 }
 }
 
-fn recv_fds_over_unix_socket(
-    conn: &LocalSocketStream,
-    expected: usize,
-) -> anyhow::Result<[RawFd; 3]> {
+fn recv_fds_over_unix_socket(conn: &LocalSocketStream) -> anyhow::Result<[OwnedFd; 3]> {
     let LocalSocketStream::UdSocket(sock) = conn;
     let fd = sock.as_fd();
 
@@ -935,32 +970,41 @@ fn recv_fds_over_unix_socket(
         fd.as_raw_fd(),
         &mut iov,
         Some(&mut cmsg_space),
-        MsgFlags::empty(),
+        MsgFlags::MSG_CMSG_CLOEXEC,
     )?;
+    anyhow::ensure!(
+        !msg.flags.contains(MsgFlags::MSG_CTRUNC),
+        "Received truncated descriptor control message"
+    );
 
-    let mut fds: Vec<RawFd> = Vec::new();
+    let mut fds: Vec<OwnedFd> = Vec::new();
     if let Ok(iter) = msg.cmsgs() {
         for c in iter {
             if let ControlMessageOwned::ScmRights(fdlist) = c {
                 for &f in fdlist.iter() {
-                    fds.push(f);
+                    // SCM_RIGHTS transfers ownership to this process. Wrap it
+                    // immediately so every later error path closes it.
+                    fds.push(unsafe { OwnedFd::from_raw_fd(f) });
                 }
             }
         }
     }
-    if fds.len() != expected {
+    if fds.len() != 3 {
         return Err(anyhow!(
             "Did not receive expected number of FDs: got {} expected {}",
             fds.len(),
-            expected
+            3
         ));
     }
-    Ok([fds[0], fds[1], fds[2]])
+    fds.try_into().map_err(|fds: Vec<OwnedFd>| {
+        anyhow!("Could not convert {} received descriptors", fds.len())
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{checked_frame_len, versions_compatible};
+    use super::{ClientAdmission, MAX_CLIENTS_PER_UID, checked_frame_len, versions_compatible};
+    use nix::unistd::Uid;
 
     #[test]
     fn framed_messages_are_rejected_before_oversized_allocation() {
@@ -969,6 +1013,19 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("frame too large"));
+    }
+
+    #[test]
+    fn daemon_admission_is_bounded_per_uid_and_released_on_drop() {
+        let admission = ClientAdmission::default();
+        let uid = Uid::from_raw(1000);
+        let slots = (0..MAX_CLIENTS_PER_UID)
+            .map(|_| admission.acquire(uid).expect("slot should be admitted"))
+            .collect::<Vec<_>>();
+        assert!(admission.acquire(uid).is_none());
+        assert!(admission.acquire(Uid::from_raw(1001)).is_some());
+        drop(slots);
+        assert!(admission.acquire(uid).is_some());
     }
 
     #[test]

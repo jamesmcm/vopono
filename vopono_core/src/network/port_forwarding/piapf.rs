@@ -204,7 +204,11 @@ impl Piapf {
         let port = Self::refresh_port(&params)?;
         Self::callback_command(&params, port);
         let (send, recv) = mpsc::channel::<bool>();
-        let handle = std::thread::spawn(move || Self::thread_loop(params, recv));
+        let owner_write_context = crate::util::capture_owner_write_context()?;
+        let handle = std::thread::spawn(move || {
+            crate::util::install_owner_write_context(&owner_write_context);
+            Self::thread_loop(params, recv);
+        });
 
         log::info!("PIA forwarded local port: {port}");
         Ok(Self {

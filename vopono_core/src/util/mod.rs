@@ -8,9 +8,9 @@ pub mod unix;
 pub mod wireguard;
 
 pub use owner_write::{
-    ensure_dir_as_config_owner, perform_owner_write, run_owner_write_from_stdin,
-    set_helper_exe_override, set_tree_permissions_as_config_owner, validated_user_owned_dir,
-    write_file_as_config_owner,
+    capture_owner_write_context, ensure_dir_as_config_owner, install_owner_write_context,
+    perform_owner_write, run_owner_write_from_stdin, set_helper_exe_override,
+    set_tree_permissions_as_config_owner, validated_user_owned_dir, write_file_as_config_owner,
 };
 
 extern crate shell_words as shellwords;

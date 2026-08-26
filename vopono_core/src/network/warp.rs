@@ -21,6 +21,8 @@ const WARP_TUNNEL_INTERFACE_PREFIXES: &[&str] = &["CloudflareWARP", "warp"];
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Warp {
     pub(crate) pid: u32,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 impl Warp {
@@ -68,7 +70,10 @@ impl Warp {
             crate::util::open_ports(netns, forwards.as_slice(), firewall)?;
         }
 
-        Ok(Self { pid: id })
+        Ok(Self {
+            pid: id,
+            cleanup_enabled: true,
+        })
     }
 
     /// Apply the fail-closed tunnel-only killswitch for Warp.
@@ -110,6 +115,9 @@ impl Warp {
 
 impl Drop for Warp {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         match nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(self.pid as i32),
             nix::sys::signal::Signal::SIGKILL,
@@ -117,5 +125,11 @@ impl Drop for Warp {
             Ok(_) => debug!("Killed warp-svc (pid: {})", self.pid),
             Err(e) => error!("Failed to kill warp-svc (pid: {}): {:?}", self.pid, e),
         }
+    }
+}
+
+impl Warp {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
     }
 }

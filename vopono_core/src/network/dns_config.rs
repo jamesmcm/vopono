@@ -15,6 +15,8 @@ use super::netns::{NetworkNamespace, VethPairIPs};
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DnsConfig {
     ns_name: String,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 pub(crate) struct DnsConfigOptions<'a> {
@@ -153,7 +155,10 @@ impl DnsConfig {
             )?;
         }
 
-        Ok(Self { ns_name })
+        Ok(Self {
+            ns_name,
+            cleanup_enabled: true,
+        })
     }
 }
 
@@ -220,6 +225,9 @@ fn open_dns_ports(
 
 impl Drop for DnsConfig {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         let path = format!("/etc/netns/{}", self.ns_name);
         match std::fs::remove_dir_all(&path) {
             Ok(_) => {}
@@ -228,5 +236,11 @@ impl Drop for DnsConfig {
                 path, e
             ),
         }
+    }
+}
+
+impl DnsConfig {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
     }
 }
