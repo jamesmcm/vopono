@@ -31,7 +31,7 @@ pub struct NamespaceEntry {
     pub applications: Vec<ApplicationEntry>,
     pub port_forwarding: Option<PortForwardingEntry>,
     pub open_ports: Vec<u16>,
-    pub forwarded_ports: Vec<u16>,
+    pub host_forwarded_ports: Vec<u16>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -194,7 +194,7 @@ fn namespace_entry(
             .as_ref()
             .map(port_forwarding_entry),
         open_ports: namespace.state.open_ports.clone(),
-        forwarded_ports: namespace.state.forwarded_ports.clone(),
+        host_forwarded_ports: namespace.state.host_forwarded_ports.clone(),
     })
 }
 

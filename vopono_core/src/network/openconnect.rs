@@ -6,11 +6,74 @@ use anyhow::{Context, anyhow};
 use log::{debug, error, info};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+fn validate_unprivileged_config(config_file: &std::path::Path) -> anyhow::Result<()> {
+    const PRIVILEGED_DIRECTIVES: &[&str] = &[
+        "script",
+        "script-tun",
+        "csd-wrapper",
+        "external-browser",
+        "pid-file",
+    ];
+    let contents = std::fs::read_to_string(config_file)
+        .with_context(|| format!("Failed to read {}", config_file.display()))?;
+    for (line_number, line) in contents.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let key = line
+            .split_once('=')
+            .or_else(|| line.split_once(char::is_whitespace))
+            .map_or(line, |(key, _)| key)
+            .trim();
+        anyhow::ensure!(
+            !PRIVILEGED_DIRECTIVES.contains(&key),
+            "OpenConnect directive '{key}' is not allowed in daemon mode (line {})",
+            line_number + 1
+        );
+    }
+    Ok(())
+}
+
+fn append_csd_user<'a>(
+    command: &mut Vec<&'a str>,
+    daemon_mode: bool,
+    session_user: Option<&'a str>,
+) -> anyhow::Result<()> {
+    if daemon_mode {
+        let session_user =
+            session_user.context("Daemon OpenConnect session has no authenticated user")?;
+        command.extend(["--csd-user", session_user]);
+    }
+    Ok(())
+}
+
+pub fn server_from_config(config_file: &std::path::Path) -> anyhow::Result<String> {
+    let contents = std::fs::read_to_string(config_file)
+        .with_context(|| format!("Failed to read {}", config_file.display()))?;
+    contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .find_map(|line| {
+            let (option, value) = line
+                .split_once('=')
+                .or_else(|| line.split_once(char::is_whitespace))?;
+            (option.trim() == "server")
+                .then(|| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| anyhow!("OpenConnect config has no server option"))
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenConnect {
-    pid: u32,
+    pub(crate) pid: u32,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 impl OpenConnect {
@@ -32,6 +95,10 @@ impl OpenConnect {
             ));
         }
 
+        if crate::util::is_daemon_mode() {
+            validate_unprivileged_config(&config_file)?;
+        }
+
         let pass = request_creds(uiclient);
 
         let password = pass.expect("Provide password via Stdin!");
@@ -44,6 +111,16 @@ impl OpenConnect {
             "--passwd-on-stdin",
         ]
         .to_vec();
+
+        // A VPN server may provide a CSD/host-scan program. OpenConnect runs
+        // it with its own privileges unless --csd-user is set, which would
+        // turn a client-selected server into root code execution in daemon
+        // mode. The session identity is authenticated by the daemon.
+        append_csd_user(
+            &mut command_vec,
+            crate::util::is_daemon_mode(),
+            netns.predown_user.as_deref(),
+        )?;
 
         if !server.is_empty() {
             command_vec.push(server.as_ref());
@@ -80,7 +157,10 @@ impl OpenConnect {
             crate::util::open_ports(netns, forwards.as_slice(), firewall)?;
         }
 
-        Ok(Self { pid: id })
+        Ok(Self {
+            pid: id,
+            cleanup_enabled: true,
+        })
     }
 }
 
@@ -93,8 +173,43 @@ fn request_creds(uiclient: &dyn UiClient) -> anyhow::Result<String> {
     Ok(password.to_string())
 }
 
+/// Apply the fail-closed tunnel-only killswitch for OpenConnect.
+///
+/// openconnect does not implement a killswitch itself, so once the tunnel is
+/// up all input/output in the namespace is dropped except loopback, the
+/// tunnel interface, return traffic and the resolved VPN server endpoints
+/// (the client needs those to keep its session alive). Without this policy
+/// the namespace keeps a working default route through the host veth/NAT
+/// path, so any tunnel failure silently bypasses the VPN.
+///
+/// The server is taken from `server` when non-empty, otherwise derived from
+/// the config file.
+pub fn apply_killswitch(
+    netns: &NetworkNamespace,
+    firewall: Firewall,
+    disable_ipv6: bool,
+    server: &str,
+    config_file: Option<&Path>,
+) -> anyhow::Result<()> {
+    let server = if server.is_empty() {
+        server_from_config(config_file.context("No OpenConnect config file provided")?)?
+    } else {
+        server.to_string()
+    };
+    super::firewall::apply_tunnel_only_killswitch_for_server(
+        netns,
+        firewall,
+        disable_ipv6,
+        &server,
+        &["tun"],
+    )
+}
+
 impl Drop for OpenConnect {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         match nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(self.pid as i32),
             nix::sys::signal::Signal::SIGKILL,
@@ -102,5 +217,68 @@ impl Drop for OpenConnect {
             Ok(_) => debug!("Killed OpenConnect (pid: {})", self.pid),
             Err(e) => error!("Failed to kill OpenConnect (pid: {}): {:?}", self.pid, e),
         }
+    }
+}
+
+impl OpenConnect {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{append_csd_user, server_from_config, validate_unprivileged_config};
+    use std::io::Write;
+
+    #[test]
+    fn reads_server_from_config() {
+        let mut config = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            config,
+            "# comment\nserver = https://vpn.example.com:443/path"
+        )
+        .unwrap();
+        assert_eq!(
+            server_from_config(config.path()).unwrap(),
+            "https://vpn.example.com:443/path"
+        );
+    }
+
+    #[test]
+    fn daemon_config_rejects_privileged_directives() {
+        for directive in [
+            "script",
+            "script-tun",
+            "csd-wrapper",
+            "external-browser",
+            "pid-file",
+        ] {
+            let mut config = tempfile::NamedTempFile::new().unwrap();
+            writeln!(config, "server=vpn.example.com\n{directive}=/tmp/evil").unwrap();
+            let error = validate_unprivileged_config(config.path())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(directive));
+        }
+    }
+
+    #[test]
+    fn daemon_config_accepts_connection_directives() {
+        let mut config = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            config,
+            "server vpn.example.com\nprotocol=anyconnect\n# script=/tmp/ignored"
+        )
+        .unwrap();
+        validate_unprivileged_config(config.path()).unwrap();
+    }
+
+    #[test]
+    fn daemon_forces_csd_to_authenticated_user() {
+        let mut command = vec!["openconnect"];
+        append_csd_user(&mut command, true, Some("alice")).unwrap();
+        assert_eq!(command, ["openconnect", "--csd-user", "alice"]);
+        assert!(append_csd_user(&mut command, true, None).is_err());
     }
 }

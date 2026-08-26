@@ -3,10 +3,10 @@ use crate::config::providers::{ConfigurationChoice, Provider, UiClient, Wireguar
 use anyhow::{Context, anyhow};
 use log::debug;
 use serde::Deserialize;
-use std::fs::{File, create_dir_all, read_dir, remove_dir_all, rename};
+use std::fs::{create_dir_all, read_dir, remove_dir_all, rename};
 use std::io::{Cursor, Read, Write};
 use strum::IntoEnumIterator;
-use strum_macros::{Display, EnumIter};
+use strum_macros::{Display, EnumIter, EnumString, FromRepr};
 use zip::ZipArchive;
 
 #[derive(Debug, Deserialize)]
@@ -14,7 +14,8 @@ struct GeneratorError {
     error: Option<String>,
 }
 
-#[derive(Debug, Display, EnumIter, PartialEq, Default)]
+#[derive(Debug, Display, EnumIter, EnumString, FromRepr, PartialEq, Default, Copy, Clone)]
+#[repr(usize)]
 enum WireguardConfigType {
     // Verified against the live AirVPN generator API (re-checked 2026-08-22):
     // UDP 1637 and 47107 return valid packages; 51820 plus the OpenVPN-style
@@ -63,8 +64,7 @@ impl WireguardProvider for AirVPN {
         let api_key = super::require_api_key(uiclient, "Wireguard")?;
 
         let config_choice = uiclient.get_configuration_choice(&WireguardConfigType::default())?;
-        let port = WireguardConfigType::iter()
-            .nth(config_choice)
+        let port = WireguardConfigType::from_repr(config_choice)
             .context("Invalid AirVPN Wireguard port selection")?
             .port();
         let client = super::http_client()?;
@@ -136,7 +136,7 @@ impl WireguardProvider for AirVPN {
                 let mut contents = Vec::with_capacity(4096);
                 file.read_to_end(&mut contents)?;
                 let config_path = staging_dir.join(filename.to_lowercase().replace(' ', "_"));
-                let mut outfile = File::create(&config_path)?;
+                let mut outfile = crate::util::create_private_file(&config_path)?;
                 outfile.write_all(contents.as_slice())?;
             }
 
@@ -193,5 +193,16 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1637, 47107]
         );
+    }
+
+    #[test]
+    fn config_types_support_from_repr_and_from_str() {
+        for (index, variant) in WireguardConfigType::iter().enumerate() {
+            assert_eq!(WireguardConfigType::from_repr(index), Some(variant));
+            assert_eq!(
+                variant.to_string().parse::<WireguardConfigType>().unwrap(),
+                variant
+            );
+        }
     }
 }

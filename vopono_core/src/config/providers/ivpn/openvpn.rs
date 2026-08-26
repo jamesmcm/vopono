@@ -49,7 +49,7 @@ impl OpenVpnProvider for IVPN {
         create_dir_all(&openvpn_dir)?;
         delete_all_files_in_dir(&openvpn_dir)?;
         let protocol = uiclient.get_configuration_choice(&OpenVpnProtocol::default())?;
-        let url = self.build_url(&OpenVpnProtocol::index_to_variant(protocol))?;
+        let url = self.build_url(&OpenVpnProtocol::from_repr(protocol).expect("Invalid index"))?;
         let zipfile = reqwest::blocking::get(url)?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
         let openvpn_dir = self.openvpn_dir()?;
@@ -115,7 +115,7 @@ impl OpenVpnProvider for IVPN {
         // Write OpenVPN credentials file
         let (user, pass) = self.prompt_for_auth(uiclient)?;
         if let Some(auth_file) = self.auth_file_path()? {
-            let mut outfile = File::create(auth_file)?;
+            let mut outfile = crate::util::create_private_file(&auth_file)?;
             write!(outfile, "{user}\n{pass}")?;
             info!("IVPN OpenVPN config written to {}", openvpn_dir.display());
         }

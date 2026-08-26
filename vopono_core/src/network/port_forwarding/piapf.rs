@@ -1,10 +1,12 @@
+use anyhow::Context;
 use base64::prelude::*;
 use regex::Regex;
+use serde::Deserialize;
 use std::sync::mpsc::{self};
 use std::{sync::mpsc::Sender, thread::JoinHandle};
 use which::which;
 
-use super::{Forwarder, ThreadLoopForwarder, ThreadParameters};
+use super::{CallbackCommand, Forwarder, ThreadLoopForwarder, ThreadParameters};
 use crate::network::netns::NetworkNamespace;
 
 use crate::config::providers::OpenVpnProvider;
@@ -27,12 +29,29 @@ pub struct ThreadParamsImpl {
     pub hostname: String,
     pub gateway: String,
     pub pia_cert_path: String,
-    pub callback: Option<String>,
+    pub callback: Option<CallbackCommand>,
+}
+
+#[derive(Deserialize)]
+struct SignatureResponse {
+    status: String,
+    signature: Option<String>,
+    payload: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SignaturePayload {
+    port: u16,
+}
+
+#[derive(Deserialize)]
+struct BindResponse {
+    status: String,
 }
 
 impl ThreadParameters for ThreadParamsImpl {
-    fn get_callback_command(&self) -> Option<String> {
-        self.callback.clone()
+    fn get_callback(&self) -> Option<&CallbackCommand> {
+        self.callback.as_ref()
     }
 
     fn get_loop_delay(&self) -> u64 {
@@ -116,7 +135,6 @@ impl Piapf {
         let pia_token = PrivateInternetAccess::get_pia_token(&pia_user, &pia_pass)?;
         let pia_cert_path = pia.pia_cert_path()?.display().to_string();
 
-        log::info!("PIA pia_token: {pia_token}");
         log::info!("PIA pia_cert_path: {pia_cert_path}");
 
         if which("curl").is_err() {
@@ -150,25 +168,23 @@ impl Piapf {
             anyhow::bail!("Could not obtain signature for port forward from PIA API")
         }
 
-        let parsed = json::parse(String::from_utf8_lossy(&get_response.stdout).as_ref())?;
-        if parsed["status"] != "OK" {
+        let parsed: SignatureResponse = serde_json::from_slice(&get_response.stdout)
+            .context("Invalid PIA getSignature response")?;
+        if parsed.status != "OK" {
             log::error!("Signature for port forward from PIA API not OK");
             anyhow::bail!("Signature for port forward from PIA API not OK");
         }
 
-        let signature = parsed["signature"]
-            .as_str()
-            .expect("getSignature response missing signature")
-            .to_string();
-        let payload = parsed["payload"]
-            .as_str()
-            .expect("getSignature response missing payload")
-            .to_string();
+        let signature = parsed
+            .signature
+            .context("getSignature response missing signature")?;
+        let payload = parsed
+            .payload
+            .context("getSignature response missing payload")?;
         let decoded = BASE64_STANDARD.decode(&payload)?;
-        let parsed = json::parse(String::from_utf8_lossy(&decoded).as_ref())?;
-        let port = parsed["port"]
-            .as_u16()
-            .expect("getSignature response missing port");
+        let parsed: SignaturePayload =
+            serde_json::from_slice(&decoded).context("Invalid PIA signature payload")?;
+        let port = parsed.port;
 
         let params = ThreadParamsImpl {
             netns_name: ns.name.clone(),
@@ -179,12 +195,20 @@ impl Piapf {
             signature,
             payload,
             port,
-            callback: callback.cloned(),
+            callback: CallbackCommand::for_session(
+                callback,
+                ns.predown_user.clone(),
+                ns.predown_group.clone(),
+            ),
         };
         let port = Self::refresh_port(&params)?;
         Self::callback_command(&params, port);
         let (send, recv) = mpsc::channel::<bool>();
-        let handle = std::thread::spawn(move || Self::thread_loop(params, recv));
+        let owner_write_context = crate::util::capture_owner_write_context()?;
+        let handle = std::thread::spawn(move || {
+            crate::util::install_owner_write_context(&owner_write_context);
+            Self::thread_loop(params, recv);
+        });
 
         log::info!("PIA forwarded local port: {port}");
         Ok(Self {
@@ -222,28 +246,12 @@ impl ThreadLoopForwarder for Piapf {
             anyhow::bail!("Could not bind port forward from PIA API")
         }
 
-        let parsed = json::parse(String::from_utf8_lossy(&bind_response.stdout).as_ref())?;
+        let parsed: BindResponse = serde_json::from_slice(&bind_response.stdout)
+            .context("Invalid PIA bindPort response")?;
 
-        if parsed["status"] != "OK" {
+        if parsed.status != "OK" {
             log::error!("Bind for port forward from PIA API not OK");
             anyhow::bail!("Bind for port forward from PIA API not OK");
-        }
-
-        if let Some(cb) = &params.callback {
-            let refresh_response = NetworkNamespace::exec_with_output(
-                &params.netns_name,
-                &[cb, &params.port.to_string()],
-            )?;
-            if !refresh_response.status.success() {
-                log::error!(
-                    "Port forwarding callback script was unsuccessful!: stdout: {:?}, stderr: {:?}, exit code: {}",
-                    String::from_utf8(refresh_response.stdout),
-                    String::from_utf8(refresh_response.stderr),
-                    refresh_response.status
-                );
-            } else if let Ok(out) = String::from_utf8(refresh_response.stdout) {
-                println!("{out}");
-            }
         }
 
         log::info!("Successfully updated claim to port {}", params.port);

@@ -17,7 +17,7 @@ struct User {
     devices: Vec<Device>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct Login {
     user: User,
     token: String,

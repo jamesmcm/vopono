@@ -1,6 +1,22 @@
+use strum::IntoEnumIterator;
+
+/// Find the position of an enum's `#[default]` variant in its iteration order.
+///
+/// Use this for a `ConfigurationChoice` whose default variant is not the first
+/// variant, so changing either the declaration order or `#[default]` cannot
+/// leave a hard-coded index stale.
+pub(crate) fn enum_default_index<T>() -> usize
+where
+    T: Default + PartialEq + IntoEnumIterator,
+{
+    let default = T::default();
+    T::iter()
+        .position(|variant| variant == default)
+        .expect("enum iteration must include its default variant")
+}
+
 /// Implement this trait for enums used as configuration choices e.g. when deciding which set of
 /// config files to generate
-/// The default option will be used if generated in non-interactive mode
 pub trait ConfigurationChoice {
     /// Prompt string for the selector (automatically terminates in ':')
     fn prompt(&self) -> String;
@@ -13,6 +29,12 @@ pub trait ConfigurationChoice {
 
     /// Get all enum variant names (this order will be used for other methods)
     fn all_names(&self) -> Vec<String>;
+
+    /// Index of the default option within `all_names()`. Used as the preselected
+    /// entry in interactive menus.
+    fn default_index(&self) -> usize {
+        0
+    }
 }
 // TODO: FromStr, ToString
 

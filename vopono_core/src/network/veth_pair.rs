@@ -13,18 +13,25 @@ pub struct VethPair {
     pub source: String,
     pub dest: String,
     pub nm_unmanaged: Option<NetworkManagerUnmanaged>,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NetworkManagerUnmanaged {
     pub backup_file: Option<PathBuf>,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
-// ifname must be less <= 15 chars
+// Linux interface names must be <= 15 bytes (excluding the trailing NUL).
 impl VethPair {
     pub fn new(source: String, dest: String, netns: &NetworkNamespace) -> anyhow::Result<Self> {
-        assert!(source.len() <= 15, "ifname must be <= 15 chars: {source}");
-        assert!(dest.len() <= 15, "ifname must be <= 15 chars: {dest}");
+        // Return an error rather than panicking: in the daemon this must
+        // surface as a per-client error response instead of aborting the
+        // connection thread.
+        anyhow::ensure!(source.len() <= 15, "ifname must be <= 15 chars: {source}");
+        anyhow::ensure!(dest.len() <= 15, "ifname must be <= 15 chars: {dest}");
 
         // NetworkManager device management
         // If NetworkManager used, add destination veth to unmanaged devices
@@ -93,7 +100,10 @@ impl VethPair {
                     "Tried but failed to reload NetworkManager configuration - is NetworkManager running? : {e}"
                 );
             }
-            Some(NetworkManagerUnmanaged { backup_file })
+            Some(NetworkManagerUnmanaged {
+                backup_file,
+                cleanup_enabled: true,
+            })
         } else {
             None
         };
@@ -165,7 +175,29 @@ impl VethPair {
             source,
             dest,
             nm_unmanaged,
+            cleanup_enabled: true,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VethPair;
+    use crate::network::netns::NetworkNamespace;
+
+    #[test]
+    fn overlong_interface_names_return_errors() {
+        let namespace = NetworkNamespace::attach_unmanaged("vo_test".to_string()).unwrap();
+
+        let source_error = VethPair::new("s".repeat(16), "dest".to_string(), &namespace)
+            .unwrap_err()
+            .to_string();
+        assert!(source_error.contains("ifname must be <= 15 chars"));
+
+        let dest_error = VethPair::new("source".to_string(), "d".repeat(16), &namespace)
+            .unwrap_err()
+            .to_string();
+        assert!(dest_error.contains("ifname must be <= 15 chars"));
     }
 }
 
@@ -193,6 +225,9 @@ fn link_is_missing(name: &str) -> anyhow::Result<bool> {
 
 impl Drop for VethPair {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         // Concurrent teardowns (e.g. `vopono stop` racing the session that
         // owns the namespace) can legitimately delete this interface first;
         // a missing veth must not panic inside Drop, which would abort the
@@ -218,6 +253,9 @@ impl Drop for VethPair {
 
 impl Drop for NetworkManagerUnmanaged {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         // Only restore settings if there are no other active namespaces
         if let Ok(namespaces) = crate::util::get_lock_namespaces() {
             if !namespaces.is_empty() {
@@ -227,16 +265,50 @@ impl Drop for NetworkManagerUnmanaged {
             let nm_path = PathBuf::from_str("/etc/NetworkManager/conf.d/unmanaged.conf")
                 .expect("Failed to build path");
             if let Some(backup_file) = self.backup_file.as_ref() {
-                std::fs::copy(backup_file, &nm_path)
-                    .expect("Failed to restore backup of NetworkManager unmanaged.conf");
-                std::fs::remove_file(backup_file)
-                    .expect("Failed to delete backup of NetworkManager unmanaged.conf");
-            } else {
-                std::fs::remove_file(&nm_path)
-                    .expect("Failed to delete NetworkManager unmanaged.conf");
+                // Concurrent teardowns (e.g. `vopono stop` racing the owning
+                // session) may already have restored and removed the backup;
+                // cleanup must never panic inside Drop.
+                match std::fs::copy(backup_file, &nm_path) {
+                    Ok(_) => {
+                        if let Err(error) = std::fs::remove_file(backup_file)
+                            && error.kind() != std::io::ErrorKind::NotFound
+                        {
+                            log::warn!(
+                                "Failed to delete NetworkManager unmanaged.conf backup {}: {error}",
+                                backup_file.display()
+                            );
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        debug!(
+                            "NetworkManager unmanaged.conf backup {} already consumed by another teardown",
+                            backup_file.display()
+                        );
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "Failed to restore NetworkManager unmanaged.conf from {}: {error}",
+                            backup_file.display()
+                        );
+                    }
+                }
+            } else if let Err(error) = std::fs::remove_file(&nm_path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                log::warn!("Failed to delete NetworkManager unmanaged.conf: {error}");
             }
-            sudo_command(&["nmcli", "connection", "reload"])
-                .expect("Failed to reload NetworkManager configuration");
+            if let Err(error) = sudo_command(&["nmcli", "connection", "reload"]) {
+                log::warn!("Failed to reload NetworkManager configuration: {error}");
+            }
+        }
+    }
+}
+
+impl VethPair {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
+        if let Some(network_manager) = &mut self.nm_unmanaged {
+            network_manager.cleanup_enabled = enabled;
         }
     }
 }

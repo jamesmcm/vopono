@@ -6,7 +6,7 @@ use interprocess::TryClone;
 use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{ListenerOptions, ToFsName};
 use interprocess::os::unix::local_socket::FilesystemUdSocket;
-use log::{error, info};
+use log::{error, info, warn};
 use nix::pty::openpty;
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::unistd::isatty as nix_isatty;
@@ -22,13 +22,12 @@ use signal_hook::{
 };
 use std::io::IoSliceMut;
 use std::io::{Read, Write};
-use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
-use std::os::fd::{BorrowedFd, IntoRawFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
-    Arc,
+    Arc, LazyLock, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 use std::thread;
@@ -112,9 +111,106 @@ pub fn status() -> DaemonStatus {
 
 /// Compatible means an identical major version (breaking-change proxy).
 fn versions_compatible(daemon_version: &str, client_version: &str) -> bool {
-    let daemon_major = daemon_version.split('.').next().unwrap_or_default();
-    let client_major = client_version.split('.').next().unwrap_or_default();
-    !daemon_major.is_empty() && daemon_major == client_major
+    fn major(version: &str) -> Option<u64> {
+        let core = version.split(['-', '+']).next()?;
+        let mut components = core.split('.');
+        let major = components.next()?.parse().ok()?;
+        components.next()?.parse::<u64>().ok()?;
+        components.next()?.parse::<u64>().ok()?;
+        components.next().is_none().then_some(major)
+    }
+
+    major(daemon_version)
+        .zip(major(client_version))
+        .is_some_and(|(daemon_major, client_major)| daemon_major == client_major)
+}
+
+/// Outcome of comparing a peer's version against ours.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum VersionSkew {
+    /// Identical version strings.
+    Match,
+    /// Same major, different minor/patch: feature skew only.
+    MinorMismatch,
+    /// Different major (or unparsable): protocol incompatibility is likely.
+    MajorMismatch,
+}
+
+fn classify_version_skew(peer: &str, own: &str) -> VersionSkew {
+    if peer == own {
+        VersionSkew::Match
+    } else if versions_compatible(peer, own) && versions_compatible(own, peer) {
+        VersionSkew::MinorMismatch
+    } else {
+        VersionSkew::MajorMismatch
+    }
+}
+
+/// Daemon side: warn when a client's version differs from this daemon's.
+fn warn_on_client_version_mismatch(client_version: &str) {
+    let own = env!("CARGO_PKG_VERSION");
+    match classify_version_skew(client_version, own) {
+        VersionSkew::Match => {}
+        VersionSkew::MinorMismatch => warn!(
+            "Client vopono version {client_version} differs from daemon version {own}; consider restarting the daemon ('sudo systemctl restart vopono') to match."
+        ),
+        VersionSkew::MajorMismatch => error!(
+            "Client vopono version {client_version} is incompatible with daemon version {own}; requests may fail unexpectedly. Update vopono and restart the daemon."
+        ),
+    }
+}
+
+/// Client side: announce our version and warn when the daemon's differs.
+///
+/// Best-effort and time-bounded: a wedged daemon must not hang the client,
+/// and a daemon too old to understand `ClientVersion` simply drops the
+/// connection so the caller falls back to sudo; the local warning below
+/// still fires whenever the daemon's reported version can be read.
+pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) {
+    let own = env!("CARGO_PKG_VERSION");
+    if set_socket_timeouts_for(conn, DAEMON_HANDSHAKE_TIMEOUT_SECONDS).is_err() {
+        return;
+    }
+    let sent = wincode::serialize(&DaemonRequest::ClientVersion(own.to_string()))
+        .ok()
+        .and_then(|bytes| write_framed(conn, &bytes).ok());
+    // The daemon answers the handshake with its own version directly.
+    let daemon_version = sent.and_then(|_| {
+        read_framed(conn, MAX_FRAME_LEN)
+            .ok()
+            .and_then(|response| wincode::deserialize::<DaemonResponse>(&response).ok())
+            .and_then(|parsed| match parsed {
+                DaemonResponse::Version(version) => Some(version),
+                _ => None,
+            })
+    });
+    // Restore blocking mode for the long-lived session that follows.
+    let _ = clear_socket_timeouts(conn);
+    let Some(daemon_version) = daemon_version else {
+        return;
+    };
+    match classify_version_skew(&daemon_version, own) {
+        VersionSkew::Match => {}
+        VersionSkew::MinorMismatch => log::warn!(
+            "Daemon vopono version {daemon_version} differs from client version {own}; restart the daemon ('sudo systemctl restart vopono') to align them."
+        ),
+        VersionSkew::MajorMismatch => log::error!(
+            "Daemon vopono version {daemon_version} is incompatible with client version {own}; update vopono and restart the daemon."
+        ),
+    }
+}
+
+/// Clear send/receive timeouts (value 0 = block indefinitely).
+pub(crate) fn clear_socket_timeouts(stream: &LocalSocketStream) -> anyhow::Result<()> {
+    use nix::sys::socket::sockopt::{ReceiveTimeout, SendTimeout};
+    use nix::sys::time::TimeValLike;
+    let zero = nix::sys::time::TimeVal::seconds(0);
+    let LocalSocketStream::UdSocket(socket) = stream;
+    nix::sys::socket::setsockopt(&socket.as_fd(), ReceiveTimeout, &zero)
+        .context("Failed to clear daemon receive timeout")?;
+    nix::sys::socket::setsockopt(&socket.as_fd(), SendTimeout, &zero)
+        .context("Failed to clear daemon send timeout")?;
+    Ok(())
 }
 
 pub(crate) const DAEMON_HANDSHAKE_TIMEOUT_SECONDS: i64 = 2;
@@ -154,7 +250,61 @@ fn query_daemon_version(stream: &mut LocalSocketStream) -> Option<String> {
     }
 }
 
-pub(crate) const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_FRAME_LEN: usize = 1024 * 1024;
+const MAX_CONTROL_FRAME_LEN: usize = 64 * 1024;
+const MAX_CONCURRENT_CLIENTS: usize = 32;
+const MAX_CLIENTS_PER_UID: usize = 8;
+static CLIENT_ADMISSION: LazyLock<ClientAdmission> = LazyLock::new(ClientAdmission::default);
+
+#[derive(Default)]
+struct ClientAdmission {
+    state: Mutex<ClientAdmissionState>,
+}
+
+#[derive(Default)]
+struct ClientAdmissionState {
+    total: usize,
+    by_uid: std::collections::HashMap<u32, usize>,
+}
+
+struct ClientSlot<'a> {
+    admission: &'a ClientAdmission,
+    uid: u32,
+}
+
+impl ClientAdmission {
+    fn acquire(&self, uid: Uid) -> Option<ClientSlot<'_>> {
+        let mut state = self.state.lock().expect("client admission lock poisoned");
+        let uid = uid.as_raw();
+        let uid_count = state.by_uid.get(&uid).copied().unwrap_or_default();
+        if state.total >= MAX_CONCURRENT_CLIENTS || uid_count >= MAX_CLIENTS_PER_UID {
+            return None;
+        }
+        state.total += 1;
+        state.by_uid.insert(uid, uid_count + 1);
+        Some(ClientSlot {
+            admission: self,
+            uid,
+        })
+    }
+}
+
+impl Drop for ClientSlot<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .admission
+            .state
+            .lock()
+            .expect("client admission lock poisoned");
+        state.total -= 1;
+        if let Some(count) = state.by_uid.get_mut(&self.uid) {
+            *count -= 1;
+            if *count == 0 {
+                state.by_uid.remove(&self.uid);
+            }
+        }
+    }
+}
 
 pub(crate) fn write_framed(stream: &mut LocalSocketStream, payload: &[u8]) -> anyhow::Result<()> {
     stream.write_all(&(payload.len() as u32).to_be_bytes())?;
@@ -168,11 +318,24 @@ pub(crate) fn read_framed(
 ) -> anyhow::Result<Vec<u8>> {
     let mut len_bytes = [0u8; 4];
     stream.read_exact(&mut len_bytes)?;
-    let len = u32::from_be_bytes(len_bytes) as usize;
-    anyhow::ensure!(len <= max_len, "Daemon frame too large: {len}");
+    let len = checked_frame_len(len_bytes, max_len)?;
     let mut buffer = vec![0u8; len];
     stream.read_exact(&mut buffer)?;
     Ok(buffer)
+}
+
+fn checked_frame_len(len_bytes: [u8; 4], max_len: usize) -> anyhow::Result<usize> {
+    let len = u32::from_be_bytes(len_bytes) as usize;
+    anyhow::ensure!(len <= max_len, "Daemon frame too large: {len}");
+    Ok(len)
+}
+
+fn read_request(stream: &mut LocalSocketStream) -> anyhow::Result<DaemonRequest> {
+    Ok(wincode::deserialize(&read_framed(stream, MAX_FRAME_LEN)?)?)
+}
+
+fn write_response(stream: &mut LocalSocketStream, response: &DaemonResponse) -> anyhow::Result<()> {
+    write_framed(stream, &wincode::serialize(response)?)
 }
 
 pub fn print_status(json: bool) -> anyhow::Result<()> {
@@ -200,6 +363,11 @@ pub enum DaemonRequest {
     Stop(DaemonStopRequest),
     /// Probe connectivity of an existing network namespace (requires root).
     CheckNamespace(CheckNamespaceRequest),
+    /// First frame sent by every client: its own crate version, so the
+    /// daemon can warn about client/daemon version skew. Must stay the
+    /// LAST variant - older clients never send it, and appended variants
+    /// preserve the wire indices of all earlier ones.
+    ClientVersion(String),
 }
 
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug, Clone)]
@@ -283,7 +451,24 @@ pub fn start() -> anyhow::Result<()> {
     info!("Daemon listening on {}", SOCKET_PATH);
 
     for conn in listener.incoming().filter_map(handle_accept_error) {
+        let (peer_uid, _) = match get_peer_credentials(&conn) {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                warn!("Rejecting daemon connection without peer credentials: {error}");
+                continue;
+            }
+        };
+        let Some(client_slot) = CLIENT_ADMISSION.acquire(peer_uid) else {
+            warn!(
+                "Rejecting daemon connection for uid {}: client limit reached (per uid {}, total {})",
+                peer_uid.as_raw(),
+                MAX_CLIENTS_PER_UID,
+                MAX_CONCURRENT_CLIENTS
+            );
+            continue;
+        };
         thread::spawn(move || {
+            let _client_slot = client_slot;
             let mut error_conn = conn.try_clone().ok();
             if let Err(e) = handle_client(conn) {
                 error!("Error handling client: {}", e);
@@ -322,6 +507,9 @@ fn get_peer_credentials(stream: &LocalSocketStream) -> anyhow::Result<(Uid, Gid)
 
 /// Handles a single client connection.
 fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
+    // An unauthenticated local peer must not be able to occupy a daemon
+    // worker indefinitely by connecting without sending a complete request.
+    set_socket_timeouts(&conn)?;
     let (uid, gid) = get_peer_credentials(&conn)?;
     let user = User::from_uid(uid)?.ok_or(anyhow!("Invalid UID"))?;
     let group = Group::from_gid(gid)?.ok_or(anyhow!("Invalid GID"))?;
@@ -330,18 +518,33 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
         user.name, uid, group.name, gid
     );
 
-    // Note: Do not set config override yet; we may adopt client's XDG_CONFIG_HOME.
+    // Read a framed request (length-prefixed u32 then payload). Newer
+    // clients announce their version first so skew can be flagged here.
+    let mut request = read_request(&mut conn)?;
+    if let DaemonRequest::ClientVersion(client_version) = &request {
+        // Handshake: flag skew on our side, tell the client ours, then read
+        // the actual request frame.
+        warn_on_client_version_mismatch(client_version);
+        let response = DaemonResponse::Version(env!("CARGO_PKG_VERSION").to_string());
+        let _ = write_response(&mut conn, &response);
+        request = read_request(&mut conn)?;
+    }
 
-    // Read a framed request (length-prefixed u32 then payload)
-    let request: DaemonRequest = {
-        let mut len_bytes = [0u8; 4];
-        conn.read_exact(&mut len_bytes)?;
-        let len = u32::from_be_bytes(len_bytes) as usize;
-        anyhow::ensure!(len <= MAX_FRAME_LEN, "Client frame too large: {len}");
-        let mut buffer = vec![0u8; len];
-        conn.read_exact(&mut buffer)?;
-        wincode::deserialize(&buffer)?
-    };
+    // Only execute/stop requests access the client's config tree. Version
+    // and connectivity requests must not create or require ~/.config.
+    if matches!(
+        &request,
+        DaemonRequest::Execute { .. } | DaemonRequest::Stop(_)
+    ) {
+        // Writes use a dropped-privilege subprocess so the kernel, rather
+        // than a post-hoc chown, enforces ownership.
+        vopono_core::util::set_helper_exe_override(std::env::current_exe().ok());
+        vopono_core::util::set_config_owner_override(Some((uid, gid)));
+        let provided_config_home = request_client_config_home(&request);
+        let config_base = adopt_client_config_base(provided_config_home, &user, uid)
+            .context("No usable config directory for client")?;
+        vopono_core::util::set_config_dir_override(Some(config_base));
+    }
 
     match request {
         DaemonRequest::Execute {
@@ -350,23 +553,43 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
         } => {
             // Receive stdin, stdout, stderr FDs via SCM_RIGHTS (exec only)
             let [client_stdin_fd, client_stdout_fd, client_stderr_fd] =
-                recv_fds_over_unix_socket(&conn, 3)?;
+                recv_fds_over_unix_socket(&conn)?;
+            let mut client_fds = Some((client_stdin_fd, client_stdout_fd, client_stderr_fd));
+            // Execution sessions are intentionally long lived. The bounded
+            // timeout above is only for request and descriptor admission.
+            clear_socket_timeouts(&conn)?;
 
             // Decode the command payload from the JSON bytes carried by `DaemonRequest::Execute`.
             let mut exec_command: ExecCommand = serde_json::from_slice(&cmd)?;
-            // Set config override from client's XDG_CONFIG_HOME if present, falling back to ~/.config
-            let override_base = forwarded_env
-                .get("XDG_CONFIG_HOME")
-                .and_then(|p| {
-                    let pb = std::path::PathBuf::from(p);
-                    if pb.exists() { Some(pb) } else { None }
-                })
-                .unwrap_or_else(|| user.dir.join(".config"));
-            vopono_core::util::set_config_dir_override(Some(override_base));
-            vopono_core::util::set_config_owner_override(Some((uid, gid)));
             exec_command.user = Some(user.name);
             exec_command.group = Some(group.name);
             let requested_application = exec_command.application.clone();
+            let silent = exec_command.silent;
+            let keep_alive = exec_command.keep_alive;
+            let client_report_out = if silent {
+                None
+            } else {
+                Some(nix::unistd::dup(
+                    client_fds.as_ref().expect("client fds present").1.as_fd(),
+                )?)
+            };
+
+            // `--create-netns-only`: bring up the namespace and leave it alive
+            // without spawning an application. The client learns the namespace
+            // name and exits; `vopono stop --namespace` tears it down later.
+            if exec_command.create_netns_only {
+                let ns = crate::exec::create_daemon_namespace_only(exec_command, uid)?;
+                // No child will consume the received SCM_RIGHTS descriptors in
+                // this branch, so take ownership and close all three locally.
+                let (_client_stdin, client_stdout, _client_stderr) =
+                    client_fds.take().expect("client fds present");
+                let mut out = std::fs::File::from(client_stdout);
+                let _ = writeln!(out, "Created namespace {}", ns.name);
+                let _ = out.flush();
+                drop(ns);
+                write_response(&mut conn, &DaemonResponse::Exit(0))?;
+                return Ok(());
+            }
 
             // Take ownership of the NetworkNamespace object (`_ns`).
             // It will now be dropped only when `handle_client` finishes,
@@ -374,32 +597,32 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             // If the client stdin is a TTY, run the child on a dedicated PTY and bridge I/O.
             // This preserves job control and avoids stealing the user's controlling TTY.
             let client_has_tty =
-                nix_isatty(unsafe { BorrowedFd::borrow_raw(client_stdin_fd) }).unwrap_or(false);
-            let (application, ns): (
+                nix_isatty(client_fds.as_ref().expect("client fds present").0.as_fd())
+                    .unwrap_or(false);
+            let (application, ns, host_proxies): (
                 vopono_core::network::application_wrapper::ApplicationWrapper,
                 vopono_core::network::netns::NetworkNamespace,
+                Vec<crate::tcp_proxy::TcpProxy>,
             );
-            let mut pty_master: Option<std::os::fd::RawFd> = None;
+            let mut pty_master: Option<OwnedFd> = None;
             if client_has_tty {
                 let p = openpty(None, None).map_err(|e| anyhow!("openpty failed: {e}"))?;
-                let master = p.master.into_raw_fd();
-                let slave = p.slave.into_raw_fd();
+                let slave_out = nix::unistd::dup(p.slave.as_fd())?;
+                let slave_err = nix::unistd::dup(p.slave.as_fd())?;
                 // Spawn child with PTY slave as stdio, and let it take controlling TTY in pre_exec
-                (application, ns) = execute_as_daemon_with_stdio(
+                (application, ns, host_proxies) = execute_as_daemon_with_stdio(
                     exec_command,
                     false,
-                    Some((slave, slave, slave)),
+                    Some((p.slave, slave_out, slave_err)),
                     true,
                     Some(forwarded_env.clone()),
                 )?;
-                // Do not close the slave here: it's owned by the spawned child via Stdio::from_raw_fd
-                // and will be closed by the child/OS when appropriate.
-                pty_master = Some(master);
+                pty_master = Some(p.master);
             } else {
-                (application, ns) = execute_as_daemon_with_stdio(
+                (application, ns, host_proxies) = execute_as_daemon_with_stdio(
                     exec_command,
                     false,
-                    Some((client_stdin_fd, client_stdout_fd, client_stderr_fd)),
+                    client_fds.take(),
                     false,
                     Some(forwarded_env.clone()),
                 )?;
@@ -407,10 +630,11 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
 
             // Keep port-forwarding alive for the lifetime of this handler
             let port_forward_keepalive = application.port_forwarding;
-            // Inform the client about the forwarded port too (not only daemon logs)
-            if let Some(ref fwd) = port_forward_keepalive
-                && let Ok(dup_fd) =
-                    nix::unistd::dup(unsafe { BorrowedFd::borrow_raw(client_stdout_fd) })
+            // Inform the client about the forwarded port too (not only daemon logs);
+            // suppressed by --silent along with the rest of the app output.
+            if !silent
+                && let Some(ref fwd) = port_forward_keepalive
+                && let Some(dup_fd) = client_report_out
             {
                 let mut out = std::fs::File::from(dup_fd);
                 let _ = writeln!(out, "Port Forwarding on port {}", fwd.forwarded_port());
@@ -420,7 +644,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             let mut child = application.handle;
 
             // Keep the namespace alive while the child runs
-            let _ns_guard = ns;
+            let mut _ns_guard = ns;
 
             // Create a per-client RON lock file under ~/.config/vopono/locks/<ns>/client-<pid>
             // so status readers can report daemon-launched applications and Drop can see
@@ -439,15 +663,13 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             if let Some(master_fd) = pty_master {
                 use std::io::{Read as _, Write as _};
                 // Duplicate client FDs so we don't close the originals when Files drop
-                let client_stdin_dup: OwnedFd =
-                    nix::unistd::dup(unsafe { BorrowedFd::borrow_raw(client_stdin_fd) })?;
-                let client_stdout_dup: OwnedFd =
-                    nix::unistd::dup(unsafe { BorrowedFd::borrow_raw(client_stdout_fd) })?;
+                let (client_stdin_fd, client_stdout_fd, _) =
+                    client_fds.as_ref().expect("PTY client fds retained");
+                let client_stdin_dup: OwnedFd = nix::unistd::dup(client_stdin_fd.as_fd())?;
+                let client_stdout_dup: OwnedFd = nix::unistd::dup(client_stdout_fd.as_fd())?;
                 let client_stdin = std::fs::File::from(client_stdin_dup);
                 let client_stdout = std::fs::File::from(client_stdout_dup);
-                // We own master_fd; wrap in OwnedFd then File
-                let master_owned = unsafe { OwnedFd::from_raw_fd(master_fd) };
-                let pty_master_file_r = std::fs::File::from(master_owned);
+                let pty_master_file_r = std::fs::File::from(master_fd);
                 let pty_master_file_w = pty_master_file_r.try_clone()?;
 
                 // Do not change user terminal modes; inject control bytes into PTY on signals
@@ -458,15 +680,9 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 let child_pgid = nix::unistd::Pid::from_raw(-(child.id() as i32));
                 thread::spawn(move || {
                     loop {
-                        let mut len_bytes = [0u8; 4];
-                        if ctrl_conn.read_exact(&mut len_bytes).is_err() {
+                        let Ok(buf) = read_framed(&mut ctrl_conn, MAX_CONTROL_FRAME_LEN) else {
                             break;
-                        }
-                        let len = u32::from_be_bytes(len_bytes) as usize;
-                        let mut buf = vec![0u8; len];
-                        if ctrl_conn.read_exact(&mut buf).is_err() {
-                            break;
-                        }
+                        };
                         if let Ok(DaemonRequest::Control(ctrl)) =
                             wincode::deserialize::<DaemonRequest>(&buf)
                         {
@@ -579,45 +795,61 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
 
             // Ensure port forwarder is dropped before namespace teardown
             drop(port_forward_keepalive);
+            // Stop the host-side --forward relays before the namespace is torn down.
+            drop(host_proxies);
+
+            if keep_alive {
+                info!(
+                    "Keep-alive flag active - leaving network namespace {} alive",
+                    _ns_guard.name
+                );
+                crate::namespace_ownership::mark_persistent(&_ns_guard.name, uid)?;
+            }
+            let persistent = match crate::namespace_ownership::is_persistent(&_ns_guard.name, uid) {
+                Ok(persistent) => persistent,
+                Err(error) => {
+                    warn!(
+                        "Could not read persistent state for namespace {}: {error}; preserving it to avoid destructive teardown",
+                        _ns_guard.name
+                    );
+                    true
+                }
+            };
+            if keep_alive || persistent {
+                // Detach the handle so its Drop does not tear the namespace down;
+                // it stays visible to `vopono list` / `vopono stop` until stopped.
+                _ns_guard.detach();
+            }
 
             let response_code = status.code().unwrap_or(1);
-            let bytes = wincode::serialize(&DaemonResponse::Exit(response_code))?;
-            conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
-            conn.write_all(&bytes)?;
+            write_response(&mut conn, &DaemonResponse::Exit(response_code))?;
         }
         DaemonRequest::Version => {
-            let bytes = wincode::serialize(&DaemonResponse::Version(
-                env!("CARGO_PKG_VERSION").to_string(),
-            ))?;
-            conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
-            conn.write_all(&bytes)?;
+            write_response(
+                &mut conn,
+                &DaemonResponse::Version(env!("CARGO_PKG_VERSION").to_string()),
+            )?;
         }
         DaemonRequest::Stop(stop_request) => {
-            // Adopt the caller's config root so lockfile operations hit the
-            // same state the client sees, then run the privileged control op.
-            let override_base = stop_request
-                .config_home
-                .map(PathBuf::from)
-                .filter(|path| path.exists())
-                .unwrap_or_else(|| user.dir.join(".config"));
-            vopono_core::util::set_config_dir_override(Some(override_base));
-            vopono_core::util::set_config_owner_override(Some((uid, gid)));
-
+            // The config base was already adopted and validated for this
+            // connection; lockfile operations hit the same state the client
+            // sees. Run the privileged control op.
             let outcome = match stop_request.target {
-                DaemonStopTarget::Application(id) => crate::control::stop_application(&id),
-                DaemonStopTarget::Namespace(id) => crate::control::stop_namespace(&id),
+                DaemonStopTarget::Application(id) => {
+                    crate::control::stop_application(&id, Some(uid))
+                }
+                DaemonStopTarget::Namespace(id) => crate::control::stop_namespace(&id, Some(uid)),
             };
             let payload = match outcome {
                 Ok(result) => serde_json::to_vec(&result)?,
                 Err(error) => serde_json::to_vec(&crate::errors::error_json_value(&error))?,
             };
-            let bytes = wincode::serialize(&DaemonResponse::Json(payload))?;
-            conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
-            conn.write_all(&bytes)?;
+            write_response(&mut conn, &DaemonResponse::Json(payload))?;
         }
         DaemonRequest::CheckNamespace(request) => {
             // The probe needs root to enter the namespace, so it can only run
             // here (or in the sudo fallback path of the CLI).
+            crate::namespace_ownership::authorize(&request.id, uid)?;
             let status = crate::check::probe_namespace(
                 &request.id,
                 request
@@ -641,18 +873,80 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 request.skip_dns.unwrap_or(false),
             );
             let payload = serde_json::to_vec(&status)?;
-            let bytes = wincode::serialize(&DaemonResponse::Json(payload))?;
-            conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
-            conn.write_all(&bytes)?;
+            write_response(&mut conn, &DaemonResponse::Json(payload))?;
         }
         DaemonRequest::Control(_) => {
             // Ignore unexpected control frame sent as the first message
+        }
+        DaemonRequest::ClientVersion(_) => {
+            // Handshake-only frame; a bare one carries no request payload.
         }
     }
     // Clear any thread-local override before exiting the handler
     vopono_core::util::set_config_dir_override(None);
     vopono_core::util::set_config_owner_override(None);
+    vopono_core::util::set_helper_exe_override(None);
     Ok(())
+}
+
+/// Extract the client-supplied config-home candidate from the request.
+///
+/// Both relevant request types carry one: the Execute environment
+/// (`XDG_CONFIG_HOME`) and the Stop request (`config_home`). The value is
+/// only a candidate - [`adopt_client_config_base`] validates it against the
+/// authenticated peer before it is used.
+fn request_client_config_home(request: &DaemonRequest) -> Option<String> {
+    match request {
+        DaemonRequest::Execute { env, .. } => env.get("XDG_CONFIG_HOME").cloned(),
+        DaemonRequest::Stop(stop_request) => stop_request.config_home.clone(),
+        _ => None,
+    }
+}
+
+/// Adopt the base directory for this client's vopono config tree.
+///
+/// The client-supplied candidate (from the Execute environment or the Stop
+/// request) is only honoured when it canonically resolves to a directory
+/// owned by the authenticated peer - symlinks into root- or foreign-owned
+/// locations are rejected. Otherwise the peer's passwd home `.config` is
+/// used, creating it via the dropped-privilege helper if needed. Fails
+/// closed when neither candidate works so the daemon never writes lockfiles
+/// on behalf of one user into a directory another principal controls.
+fn adopt_client_config_base(
+    provided: Option<String>,
+    user: &User,
+    uid: Uid,
+) -> anyhow::Result<PathBuf> {
+    let home_candidate = user.dir.join(".config");
+    let provided_candidate = provided.map(PathBuf::from);
+    let candidates = [provided_candidate.as_ref(), Some(&home_candidate)];
+
+    for candidate in candidates.into_iter().flatten() {
+        match vopono_core::util::validated_user_owned_dir(candidate, uid) {
+            Ok(dir) => return Ok(dir),
+            Err(error) => warn!(
+                "Ignoring client config dir {}: {}",
+                candidate.display(),
+                error
+            ),
+        }
+    }
+
+    // Missing (rather than invalid) candidates: try to create them as the
+    // client before giving up.
+    for candidate in candidates.into_iter().flatten() {
+        if !candidate.exists()
+            && vopono_core::util::ensure_dir_as_config_owner(candidate, None)?
+            && let Ok(dir) = vopono_core::util::validated_user_owned_dir(candidate, uid)
+        {
+            return Ok(dir);
+        }
+    }
+
+    anyhow::bail!(
+        "Client config directory could not be validated for uid {}",
+        uid.as_raw()
+    )
 }
 
 fn fd_readable(fd: RawFd, timeout_ms: i32) -> bool {
@@ -665,10 +959,7 @@ fn fd_readable(fd: RawFd, timeout_ms: i32) -> bool {
     unsafe { nix::libc::poll(&mut poll_fd, 1, timeout_ms) > 0 }
 }
 
-fn recv_fds_over_unix_socket(
-    conn: &LocalSocketStream,
-    expected: usize,
-) -> anyhow::Result<[RawFd; 3]> {
+fn recv_fds_over_unix_socket(conn: &LocalSocketStream) -> anyhow::Result<[OwnedFd; 3]> {
     let LocalSocketStream::UdSocket(sock) = conn;
     let fd = sock.as_fd();
 
@@ -679,32 +970,63 @@ fn recv_fds_over_unix_socket(
         fd.as_raw_fd(),
         &mut iov,
         Some(&mut cmsg_space),
-        MsgFlags::empty(),
+        MsgFlags::MSG_CMSG_CLOEXEC,
     )?;
+    anyhow::ensure!(
+        !msg.flags.contains(MsgFlags::MSG_CTRUNC),
+        "Received truncated descriptor control message"
+    );
 
-    let mut fds: Vec<RawFd> = Vec::new();
+    let mut fds: Vec<OwnedFd> = Vec::new();
     if let Ok(iter) = msg.cmsgs() {
         for c in iter {
             if let ControlMessageOwned::ScmRights(fdlist) = c {
                 for &f in fdlist.iter() {
-                    fds.push(f);
+                    // SCM_RIGHTS transfers ownership to this process. Wrap it
+                    // immediately so every later error path closes it.
+                    fds.push(unsafe { OwnedFd::from_raw_fd(f) });
                 }
             }
         }
     }
-    if fds.len() != expected {
+    if fds.len() != 3 {
         return Err(anyhow!(
             "Did not receive expected number of FDs: got {} expected {}",
             fds.len(),
-            expected
+            3
         ));
     }
-    Ok([fds[0], fds[1], fds[2]])
+    fds.try_into().map_err(|fds: Vec<OwnedFd>| {
+        anyhow!("Could not convert {} received descriptors", fds.len())
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::versions_compatible;
+    use super::{ClientAdmission, MAX_CLIENTS_PER_UID, checked_frame_len, versions_compatible};
+    use nix::unistd::Uid;
+
+    #[test]
+    fn framed_messages_are_rejected_before_oversized_allocation() {
+        assert_eq!(checked_frame_len(16u32.to_be_bytes(), 16).unwrap(), 16);
+        let error = checked_frame_len(17u32.to_be_bytes(), 16)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("frame too large"));
+    }
+
+    #[test]
+    fn daemon_admission_is_bounded_per_uid_and_released_on_drop() {
+        let admission = ClientAdmission::default();
+        let uid = Uid::from_raw(1000);
+        let slots = (0..MAX_CLIENTS_PER_UID)
+            .map(|_| admission.acquire(uid).expect("slot should be admitted"))
+            .collect::<Vec<_>>();
+        assert!(admission.acquire(uid).is_none());
+        assert!(admission.acquire(Uid::from_raw(1001)).is_some());
+        drop(slots);
+        assert!(admission.acquire(uid).is_some());
+    }
 
     #[test]
     fn compatibility_requires_matching_major_version() {
@@ -713,5 +1035,166 @@ mod tests {
         assert!(!versions_compatible("1.0.0", "0.10.20"));
         // An empty/garbage daemon answer is never treated as compatible.
         assert!(!versions_compatible("", "0.10.20"));
+    }
+
+    use super::{VersionSkew, classify_version_skew};
+
+    #[test]
+    fn version_skew_classification() {
+        assert_eq!(
+            classify_version_skew("0.10.22", "0.10.22"),
+            VersionSkew::Match
+        );
+        assert_eq!(
+            classify_version_skew("0.10.21", "0.10.22"),
+            VersionSkew::MinorMismatch
+        );
+        assert_eq!(
+            classify_version_skew("0.11.0", "0.10.22"),
+            VersionSkew::MinorMismatch,
+            "same major stays a minor mismatch"
+        );
+        assert_eq!(
+            classify_version_skew("1.0.0", "0.10.22"),
+            VersionSkew::MajorMismatch
+        );
+        assert_eq!(
+            classify_version_skew("", "0.10.22"),
+            VersionSkew::MajorMismatch,
+            "unparsable peer versions are treated as incompatible"
+        );
+        assert_eq!(
+            classify_version_skew("garbage.10.22", "0.10.22"),
+            VersionSkew::MajorMismatch
+        );
+    }
+
+    mod config_adoption {
+        use super::super::{adopt_client_config_base, request_client_config_home};
+        use crate::daemon::DaemonRequest;
+        use nix::unistd::{Gid, Uid, User};
+        use std::path::{Path, PathBuf};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        fn unique_temp_base(name: &str) -> std::path::PathBuf {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let base = std::env::temp_dir().join(format!("vopono-daemon-test-{name}-{nanos}"));
+            std::fs::create_dir_all(&base).unwrap();
+            base
+        }
+
+        fn current_user(home: &Path) -> User {
+            User {
+                uid: Uid::current(),
+                gid: Gid::current(),
+                name: "testuser".to_string(),
+                gecos: std::ffi::CString::new("").unwrap(),
+                passwd: std::ffi::CString::new("").unwrap(),
+                dir: home.to_path_buf(),
+                shell: std::path::PathBuf::new(),
+            }
+        }
+
+        fn skip_when_root() -> bool {
+            // Ownership-based assertions assume the test runner's own uid.
+            nix::unistd::Uid::current().is_root()
+        }
+
+        #[test]
+        fn adopts_provided_directory_owned_by_peer() {
+            if skip_when_root() {
+                return;
+            }
+            let base = unique_temp_base("owned");
+            let provided = base.join("xdg");
+            std::fs::create_dir_all(&provided).unwrap();
+            let home = base.join("home");
+            std::fs::create_dir_all(&home).unwrap();
+
+            let adopted = adopt_client_config_base(
+                Some(provided.display().to_string()),
+                &current_user(&home),
+                Uid::current(),
+            )
+            .unwrap();
+            assert_eq!(adopted, provided.canonicalize().unwrap());
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        #[test]
+        fn rejects_symlink_into_foreign_owned_directory_and_falls_back_to_home() {
+            if skip_when_root() {
+                return;
+            }
+            let base = unique_temp_base("symlink");
+            let link = base.join("evil");
+            std::os::unix::fs::symlink("/etc", &link).unwrap();
+            let home = base.join("home");
+            let home_config = home.join(".config");
+            std::fs::create_dir_all(&home_config).unwrap();
+
+            let adopted = adopt_client_config_base(
+                Some(link.display().to_string()),
+                &current_user(&home),
+                Uid::current(),
+            )
+            .unwrap();
+            assert_eq!(adopted, home_config.canonicalize().unwrap());
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        #[test]
+        fn fails_closed_when_no_candidate_is_valid() {
+            if skip_when_root() {
+                return;
+            }
+            let base = unique_temp_base("invalid");
+            // A system directory owned by root: rejected by the ownership
+            // check for any non-root requester.
+            let foreign = PathBuf::from("/etc");
+            // Home `.config` exists but is a file: neither usable nor
+            // creatable, so adoption must fail rather than pick anything.
+            let home = base.join("home");
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join(".config"), "not a directory").unwrap();
+
+            assert!(
+                adopt_client_config_base(
+                    Some(foreign.display().to_string()),
+                    &current_user(&home),
+                    Uid::current()
+                )
+                .is_err()
+            );
+            let _ = std::fs::remove_dir_all(base);
+        }
+
+        #[test]
+        fn extracts_candidate_from_both_request_types() {
+            let mut env = std::collections::HashMap::new();
+            env.insert("XDG_CONFIG_HOME".to_string(), "/tmp/some-xdg".to_string());
+            assert_eq!(
+                request_client_config_home(&DaemonRequest::Execute {
+                    cmd: Vec::new(),
+                    env: env.clone()
+                })
+                .as_deref(),
+                Some("/tmp/some-xdg")
+            );
+            assert_eq!(
+                request_client_config_home(&DaemonRequest::Stop(
+                    crate::daemon::DaemonStopRequest {
+                        target: crate::daemon::DaemonStopTarget::Namespace("vo_x".to_string()),
+                        config_home: Some("/tmp/stop-xdg".to_string()),
+                    }
+                ))
+                .as_deref(),
+                Some("/tmp/stop-xdg")
+            );
+            assert!(request_client_config_home(&DaemonRequest::Version).is_none());
+        }
     }
 }

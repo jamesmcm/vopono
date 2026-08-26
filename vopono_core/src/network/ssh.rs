@@ -23,9 +23,11 @@ struct SshEndpoint {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct SshProxy {
-    ssh_pid: u32,
-    redsocks_pid: u32,
+    pub(crate) ssh_pid: u32,
+    pub(crate) redsocks_pid: u32,
     pub listen_port: u16,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 impl SshProxy {
@@ -130,6 +132,7 @@ impl SshProxy {
             ssh_pid,
             redsocks_pid,
             listen_port,
+            cleanup_enabled: true,
         })
     }
 }
@@ -607,8 +610,17 @@ fn kill_process_group(pid: u32, name: &str) {
 
 impl Drop for SshProxy {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         kill_process_group(self.redsocks_pid, "redsocks");
         kill_process_group(self.ssh_pid, "SSH proxy");
+    }
+}
+
+impl SshProxy {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
     }
 }
 

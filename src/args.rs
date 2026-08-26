@@ -130,6 +130,12 @@ pub enum Command {
     )]
     Probe(ProbeCommand),
     #[clap(
+        name = "__write-user-file",
+        about = "Internal dropped-privilege filesystem write helper",
+        hide = true
+    )]
+    WriteUserFile,
+    #[clap(
         name = "list",
         about = "List running vopono namespaces and applications"
     )]
@@ -427,6 +433,12 @@ pub struct ExecCommand {
     /// as the first line on stdout.
     #[clap(long = "json")]
     pub json: bool,
+
+    /// Suppress the application's output when executed through the daemon.
+    /// Set client-side in `forward_to_daemon`; not a CLI flag of its own.
+    #[clap(skip)]
+    #[serde(default)]
+    pub silent: bool,
 }
 
 #[derive(Parser, Debug)]

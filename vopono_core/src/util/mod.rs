@@ -2,9 +2,16 @@ pub mod country_map;
 pub mod env_vars;
 pub mod open_hosts;
 pub mod open_ports;
+pub mod owner_write;
 pub mod pulseaudio;
 pub mod unix;
 pub mod wireguard;
+
+pub use owner_write::{
+    capture_owner_write_context, ensure_dir_as_config_owner, install_owner_write_context,
+    perform_owner_write, run_owner_write_from_stdin, set_helper_exe_override,
+    set_tree_permissions_as_config_owner, validated_user_owned_dir, write_file_as_config_owner,
+};
 
 extern crate shell_words as shellwords;
 use crate::config::vpn::Protocol;
@@ -26,7 +33,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 use sysinfo::{ProcessRefreshKind, RefreshKind, System};
-use users::{get_current_uid, get_user_by_uid};
 use walkdir::WalkDir;
 use which::which;
 
@@ -57,11 +63,14 @@ pub fn set_config_owner_override(owner: Option<(Uid, Gid)>) {
     CONFIG_OWNER_OVERRIDE.with(|ov| *ov.borrow_mut() = owner);
 }
 
+/// The per-thread config owner override, if any (daemon client threads).
+pub fn config_owner_override() -> Option<(Uid, Gid)> {
+    CONFIG_OWNER_OVERRIDE.with(|ov| *ov.borrow())
+}
+
 pub fn config_dir() -> anyhow::Result<PathBuf> {
     // Respect thread-local override first (used by daemon to select the connecting user's config).
-    if let Some(override_path) = CONFIG_DIR_OVERRIDE.with(|ov| ov.borrow().clone())
-        && override_path.exists()
-    {
+    if let Some(override_path) = CONFIG_DIR_OVERRIDE.with(|ov| ov.borrow().clone()) {
         debug!(
             "Using config dir from override: {}",
             override_path.to_string_lossy()
@@ -69,100 +78,55 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
         return Ok(override_path);
     }
 
-    let path: Option<PathBuf> = None
-        .or_else(|| {
-            if let Ok(home) = std::env::var("HOME") {
-                let confpath = format!("{home}/.config");
-                let path = Path::new(&confpath);
-                debug!(
-                    "Using config dir from $HOME config: {}",
-                    path.to_string_lossy()
-                );
-                if path.exists() {
-                    // Work-around for case when root $HOME is set but user's is not
-                    // It seems we cannot distinguish these cases
-                    if path.to_string_lossy().contains("/root") {
-                        None
-                    } else {
-                        Some(path.into())
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
+    if nix::unistd::geteuid().is_root() {
+        let user = effective_user()?;
+        if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
+            let candidate = PathBuf::from(xdg_config_home);
+            if let Ok(path) = validated_user_owned_dir(&candidate, user.uid) {
+                debug!("Using validated $XDG_CONFIG_HOME: {}", path.display());
+                return Ok(path);
             }
-        })
-        .or_else(|| {
-            if let Ok(user) = std::env::var("SUDO_USER") {
-                // TODO: DRY
-                let confpath = format!("/home/{user}/.config");
-                let path = Path::new(&confpath);
-                debug!(
-                    "Using config dir from $SUDO_USER config: {}",
-                    path.to_string_lossy()
-                );
-                if path.exists() {
-                    Some(path.into())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            if let Some(base_dirs) = BaseDirs::new() {
-                debug!(
-                    "Using config dir from XDG dirs: {}",
-                    base_dirs.config_dir().to_string_lossy()
-                );
-                Some(base_dirs.config_dir().into())
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            if let Some(user) = get_user_by_uid(get_current_uid()) {
-                // Handles case when run as root directly
-                let confpath = if get_current_uid() == 0 {
-                    "/root/.config".to_string()
-                } else {
-                    format!("/home/{}/.config", user.name().to_str().unwrap())
-                };
-                let path = Path::new(&confpath);
-                debug!(
-                    "Using config dir from current user config: {}",
-                    path.to_string_lossy()
-                );
-                if path.exists() {
-                    Some(path.into())
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        });
+            debug!(
+                "Ignoring untrusted $XDG_CONFIG_HOME while privileged: {}",
+                candidate.display()
+            );
+        }
+        let path = user.dir.join(".config");
+        debug!(
+            "Using config dir from passwd home for user '{}': {}",
+            user.name,
+            path.display()
+        );
+        return Ok(path);
+    }
 
-    path.ok_or_else(|| anyhow!("Could not find valid config directory!"))
+    BaseDirs::new()
+        .map(|dirs| dirs.config_dir().to_path_buf())
+        .ok_or_else(|| anyhow!("Could not find valid config directory!"))
 }
 
 pub fn vopono_dir() -> anyhow::Result<PathBuf> {
     Ok(config_dir()?.join("vopono"))
 }
 
-// TODO: DRY with above
-pub fn get_username() -> anyhow::Result<String> {
-    if let Ok(user) = std::env::var("SUDO_USER") {
-        Ok(user)
-    } else if let Some(user) = get_user_by_uid(get_current_uid()) {
-        Ok(String::from(
-            user.name().to_str().expect("Invalid username"),
-        ))
-    } else {
-        Err(anyhow!("No valid username!"))
+/// Resolve the user whose configuration is being handled. `$SUDO_USER` is
+/// consulted only in a privileged process, where sudo supplies it; an
+/// unprivileged caller cannot spoof its effective identity through the
+/// environment. Home and primary group come from NSS rather than `/home` path
+/// construction or a group-name round trip.
+fn effective_user() -> anyhow::Result<User> {
+    if nix::unistd::geteuid().is_root()
+        && let Ok(user_name) = std::env::var("SUDO_USER")
+    {
+        return User::from_name(&user_name)?
+            .ok_or_else(|| anyhow!("Failed to resolve sudo user '{user_name}'"));
     }
+    let uid = nix::unistd::geteuid();
+    User::from_uid(uid)?.ok_or_else(|| anyhow!("Failed to resolve uid {uid}"))
+}
+
+pub fn get_username() -> anyhow::Result<String> {
+    Ok(effective_user()?.name)
 }
 
 pub fn get_group(username: &str) -> anyhow::Result<String> {
@@ -176,25 +140,40 @@ pub fn get_group(username: &str) -> anyhow::Result<String> {
     }
 }
 
+/// Resolve the (uid, gid) that files under the vopono config tree belong to:
+/// the daemon client override when set, otherwise derived from the invoking
+/// user (SUDO_USER / current uid).
+pub fn resolve_config_owner() -> anyhow::Result<(Option<Uid>, Option<Gid>)> {
+    CONFIG_OWNER_OVERRIDE.with(|ov| *ov.borrow()).map_or_else(
+        || -> anyhow::Result<(Option<Uid>, Option<Gid>)> {
+            let user = effective_user()?;
+            Ok((Some(user.uid), Some(user.gid)))
+        },
+        |(uid, gid)| Ok((Some(uid), Some(gid))),
+    )
+}
+
+/// Owner used by dropped-privilege config writes. Daemon handlers provide an
+/// explicit override; the sudo path derives the invoking account from NSS.
+pub(crate) fn config_write_owner() -> anyhow::Result<Option<(Uid, Gid)>> {
+    if let Some(owner) = config_owner_override() {
+        return Ok(Some(owner));
+    }
+    if nix::unistd::geteuid().is_root() {
+        let user = effective_user()?;
+        if !user.uid.is_root() {
+            return Ok(Some((user.uid, user.gid)));
+        }
+    }
+    Ok(None)
+}
+
 pub fn set_config_permissions() -> anyhow::Result<()> {
     use std::fs::Permissions;
     use std::os::unix::fs::PermissionsExt;
 
     let check_dir = vopono_dir()?;
-    let (user, group) = CONFIG_OWNER_OVERRIDE.with(|ov| *ov.borrow()).map_or_else(
-        || -> anyhow::Result<(Option<Uid>, Option<Gid>)> {
-            let username = get_username()?;
-            let group_name = get_group(&username)?;
-            let user = User::from_name(&username)?
-                .map(|x| x.uid)
-                .ok_or_else(|| anyhow!("Failed to resolve uid for user '{username}'"))?;
-            let group = Group::from_name(&group_name)?
-                .map(|x| x.gid)
-                .ok_or_else(|| anyhow!("Failed to resolve gid for group '{group_name}'"))?;
-            Ok((Some(user), Some(group)))
-        },
-        |(uid, gid)| Ok((Some(uid), Some(gid))),
-    )?;
+    let (user, group) = resolve_config_owner()?;
 
     debug!(
         "Setting config permissions in {} to user: {:?}, group: {:?}",
@@ -203,18 +182,65 @@ pub fn set_config_permissions() -> anyhow::Result<()> {
         group
     );
 
-    let file_permissions = Permissions::from_mode(0o640);
-    let dir_permissions = Permissions::from_mode(0o750);
+    // Provider trees contain plaintext passwords, API tokens, and WireGuard
+    // private keys. They are consumed by the owning user and root only; no
+    // group access is required.
+    if set_tree_permissions_as_config_owner(&check_dir, 0o600, 0o700)? {
+        return Ok(());
+    }
 
-    for entry in WalkDir::new(check_dir).into_iter().filter_map(|e| e.ok()) {
+    // Legacy in-process fallback, reached only for direct root use where
+    // config_write_owner() returns None (no privilege drop is needed). This
+    // chowns the tree as root; it must never trust the tree when running for
+    // a remote/daemon client, hence the guard above. Symlinks are skipped so a
+    // link cannot redirect a root chown outside the tree.
+    let file_permissions = Permissions::from_mode(0o600);
+    let dir_permissions = Permissions::from_mode(0o700);
+
+    for entry in WalkDir::new(check_dir) {
+        let entry = entry?;
         let path = entry.path();
+        let metadata = std::fs::symlink_metadata(path)?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
         nix::unistd::chown(path, user, group)?;
-        if path.is_file() {
+        if metadata.is_file() {
             std::fs::set_permissions(path, file_permissions.clone())?;
         } else {
             std::fs::set_permissions(path, dir_permissions.clone())?;
         }
     }
+    Ok(())
+}
+
+/// Create or truncate a secret-bearing configuration file with owner-only
+/// permissions from the instant the inode is created.
+pub fn create_private_file(path: &Path) -> anyhow::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    Ok(std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?)
+}
+
+/// Assign a freshly written file back to the config owner.
+///
+/// Used on the legacy (sudo/CLI) path where root writes into the invoking
+/// user's config tree: an atomic rename replaces the inode, so ownership
+/// must be reapplied after the replacement - not just once at directory
+/// setup time.
+pub fn chown_to_config_owner(path: &Path) -> anyhow::Result<()> {
+    let (user, group) = resolve_config_owner()?;
+    debug!(
+        "Setting ownership of {} to user: {:?}, group: {:?}",
+        path.display(),
+        user,
+        group
+    );
+    nix::unistd::chown(path, user, group)?;
     Ok(())
 }
 
@@ -259,16 +285,26 @@ pub fn get_existing_namespaces() -> anyhow::Result<Vec<String>> {
 pub fn get_pids_in_namespace(ns_name: &str) -> anyhow::Result<Vec<i32>> {
     let output = Command::new("ip")
         .args(["netns", "pids", ns_name])
-        .output()?
-        .stdout;
-    let output = std::str::from_utf8(&output)?
-        .split('\n')
-        .filter_map(|x| x.split_whitespace().next())
-        .filter_map(|x| x.parse::<i32>().ok())
-        .collect();
-    debug!("PIDs active in {}: {:?}", ns_name, output);
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "ip netns pids {ns_name} failed with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let pids = std::str::from_utf8(&output.stdout)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            line.parse::<i32>()
+                .with_context(|| format!("Invalid PID from `ip netns pids {ns_name}`: {line}"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    debug!("PIDs active in {}: {:?}", ns_name, pids);
 
-    Ok(output)
+    Ok(pids)
 }
 
 pub fn check_process_running(pid: u32) -> bool {
@@ -370,7 +406,6 @@ pub fn sudo_command(command: &[&str]) -> anyhow::Result<()> {
     }
 }
 
-// TODO: Clean this up (can we combine maps and filters?)
 pub fn clean_dead_locks() -> anyhow::Result<()> {
     let running_processes = get_all_running_pids();
     let mut lockfile_path = config_dir()?;
@@ -384,22 +419,13 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
             .into_iter()
             .filter_map(|x| x.ok())
             .filter(|x| x.path().is_file())
-            .map(|x| {
-                (
-                    x.clone(),
-                    x.file_name()
-                        .to_str()
-                        .expect("Failed to parse file name")
-                        .parse::<u32>()
-                        .ok(),
-                )
+            .filter_map(|x| {
+                let pid = x.file_name().to_str()?.parse::<u32>().ok()?;
+                (!running_processes.contains(&pid)).then_some((x, pid))
             })
-            .filter(|x| x.1.is_some())
-            .map(|x| (x.0, running_processes.contains(&x.1.unwrap())))
-            .filter(|x| !x.1)
-            .try_for_each(|x| {
-                debug!("Removing lockfile: {}", x.0.path().display());
-                std::fs::remove_file(x.0.path())
+            .try_for_each(|(entry, _)| {
+                debug!("Removing lockfile: {}", entry.path().display());
+                std::fs::remove_file(entry.path())
             })?;
 
         // Delete auxiliary client-* lock files if their PIDs are no longer running
@@ -462,8 +488,19 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
 
     existing_namespaces
         .into_iter()
-        .filter(|x| {
-            !lock_namespaces.contains_key(x) && get_pids_in_namespace(x).unwrap().is_empty()
+        .filter(|namespace| {
+            if lock_namespaces.contains_key(namespace) {
+                return false;
+            }
+            match get_pids_in_namespace(namespace) {
+                Ok(pids) => pids.is_empty(),
+                Err(e) => {
+                    warn!(
+                        "Could not inspect processes in namespace {namespace}: {e:?}; preserving namespace"
+                    );
+                    false
+                }
+            }
         })
         .try_for_each(|x| {
             debug!("Removing dead namespace: {x}");
@@ -490,7 +527,6 @@ pub fn elevate_privileges(askpass: bool) -> anyhow::Result<()> {
         flag::register(SIGINT, Arc::clone(&terminated))?;
 
         let sudo_flags = if askpass { "-AE" } else { "-E" };
-        // TODO: This isn't passing RUST_LOG ?
 
         debug!("Args: {:?}", args);
         // status blocks until the process has ended
@@ -704,6 +740,17 @@ mod tests {
     #[test]
     fn rejects_unknown_custom_config_format() {
         assert!(detect_config_protocol("this is not a VPN config").is_err());
+    }
+
+    #[test]
+    fn private_files_are_owner_only_at_creation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("secret");
+        create_private_file(&path).unwrap();
+        let mode = std::fs::metadata(path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]

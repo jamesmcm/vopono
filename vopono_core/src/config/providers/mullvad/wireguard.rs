@@ -9,15 +9,16 @@ use crate::network::wireguard_config::{
     WireguardConfig, WireguardEndpoint, WireguardInterface, WireguardPeer,
 };
 use crate::util::delete_all_files_in_dir;
-use crate::util::wireguard::generate_keypair;
-use crate::util::wireguard::{WgKey, generate_public_key};
+use crate::util::wireguard::{
+    WgKey, generate_keypair, generate_public_key, prompt_for_private_key,
+    prompt_for_well_formed_private_key, save_wireguard_device_json,
+};
 use anyhow::{Context, anyhow};
 use chrono::DateTime;
 use chrono::Utc;
 use ipnet::IpNet;
 use log::warn;
 use log::{debug, info};
-use regex::Regex;
 use reqwest::blocking::Client;
 use reqwest::header::AUTHORIZATION;
 use serde::Deserialize;
@@ -135,48 +136,26 @@ impl Mullvad {
             let dev = Mullvad::upload_wg_key(&client, &auth.access_token, &keypair)?;
 
             // Save keypair
-            let path = self.wireguard_dir()?.join("wireguard_device.json");
-            {
-                let mut f = std::fs::File::create(path.clone())?;
-                write!(f, "{}", serde_json::to_string(&PrivateDevice::from_device(&dev, &keypair.private))?)?;
-            }
-            info!("Saved Wireguard keypair details to {}", path.to_string_lossy());
+            save_wireguard_device_json(
+                &self.wireguard_dir()?,
+                &PrivateDevice::from_device(&dev, &keypair.private),
+            )?;
 
             Ok((keypair, IpNet::from_str(&dev.ipv4_address).expect("Invalid IPv4 address"), IpNet::from_str(&dev.ipv6_address).expect("Invalid IPv6 address")))
         } else {
             let dev = existing_devices[selection].clone();
-            let pubkey_clone = dev.pubkey.clone();
 
-            let private_key = uiclient.get_input(Input{
-                    prompt: format!("Private key for {}",
-                    existing.devices[selection].pubkey
-                ),
-        validator: Some(Box::new(move |private_key: &String| -> Result<(), String> {
-
-            let private_key = private_key.trim();
-
-            if private_key.len() != 44 {
-                return Err("Expected private key length of 44 characters".to_string()
-                );
-            }
-
-            match generate_public_key(private_key) {
-                Ok(public_key) => {
-            if public_key != pubkey_clone {
-                return Err("Private key does not match public key".to_string());
-            }
-            Ok(())}
-                Err(_) => Err("Failed to generate public key".to_string())
- }}))})?;
+            let private_key = prompt_for_private_key(
+                uiclient,
+                &dev.pubkey,
+                format!("Private key for {}", existing.devices[selection].pubkey),
+            )?;
 
             // Save keypair
-            let path = self.wireguard_dir()?.join("wireguard_device.json");
-            {
-                let mut f = std::fs::File::create(path.clone())?;
-                write!(f, "{}", serde_json::to_string(&PrivateDevice::from_device(&dev, &private_key))?)?;
-            }
-            info!("Saved Wireguard keypair details to {}", path.to_string_lossy());
-
+            save_wireguard_device_json(
+                &self.wireguard_dir()?,
+                &PrivateDevice::from_device(&dev, &private_key),
+            )?;
 
  Ok((WgKey {
                 public: dev.pubkey.clone(),
@@ -195,12 +174,10 @@ impl Mullvad {
                 let dev = Mullvad::upload_wg_key(&client, &auth.access_token, &keypair)?;
 
            // Save keypair
-            let path = self.wireguard_dir()?.join("wireguard_device.json");
-            {
-                let mut f = std::fs::File::create(path.clone())?;
-                write!(f, "{}", serde_json::to_string(&PrivateDevice::from_device(&dev, &keypair.private))?)?;
-            }
-            info!("Saved Wireguard keypair details to {}", path.to_string_lossy());
+            save_wireguard_device_json(
+                &self.wireguard_dir()?,
+                &PrivateDevice::from_device(&dev, &keypair.private),
+            )?;
 
                 Ok((keypair, IpNet::from_str(&dev.ipv4_address).expect("Invalid IPv4 address"), IpNet::from_str(&dev.ipv6_address).expect("Invalid IPv6 address")))
         } else {
@@ -209,24 +186,15 @@ impl Mullvad {
         } else {
             let manual_dev = get_manually_entered_keypair(uiclient)?;
             // Save keypair
-            let path = self.wireguard_dir()?.join("wireguard_device.json");
-            {
-                let mut f = std::fs::File::create(path.clone())?;
-                write!(
-                    f,
-                    "{}",
-                    serde_json::to_string(&PrivateDevice {
-                        public_key: manual_dev.0.public.clone(),
-                        private_key: manual_dev.0.private.clone(),
-                        ipv4_address: manual_dev.1.to_string(),
-                        ipv6_address: manual_dev.2.to_string()
-                    })?
-                )?;
-            }
-            info!(
-                "Saved Wireguard keypair details to {}",
-                path.to_string_lossy()
-            );
+            save_wireguard_device_json(
+                &self.wireguard_dir()?,
+                &PrivateDevice {
+                    public_key: manual_dev.0.public.clone(),
+                    private_key: manual_dev.0.private.clone(),
+                    ipv4_address: manual_dev.1.to_string(),
+                    ipv6_address: manual_dev.2.to_string(),
+                },
+            )?;
             Ok(manual_dev)
         }
     }
@@ -261,8 +229,6 @@ impl WireguardProvider for Mullvad {
 
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?, IpNet::from_str("::0/0")?];
 
-        // TODO: avoid hacky regex for TOML -> wireguard config conversion
-        let re = Regex::new(r"=\s\[(?P<value>[^\]]+)\]")?;
         for relay in relays.iter().filter(|x| x.active) {
             let wireguard_peer = WireguardPeer {
                 public_key: relay.pubkey.clone(),
@@ -297,14 +263,10 @@ impl WireguardProvider for Mullvad {
             let country = relay.country_name.to_lowercase().replace(' ', "_");
             let path = wireguard_dir.join(format!("{country}-{host}.conf"));
 
-            let mut toml = toml::to_string(&wireguard_conf)?;
-            toml.retain(|c| c != '"');
-            let toml = toml.replace(", ", ",");
-            let toml = re.replace_all(&toml, "= $value").to_string();
-            // Create file, write TOML
+            // Create file, write WireGuard config
             {
-                let mut f = std::fs::File::create(path)?;
-                write!(f, "{toml}")?;
+                let mut f = crate::util::create_private_file(&path)?;
+                write!(f, "{wireguard_conf}")?;
             }
         }
 
@@ -358,41 +320,32 @@ impl ConfigurationChoice for Devices {
 }
 fn get_manually_entered_keypair(uiclient: &dyn UiClient) -> anyhow::Result<(WgKey, IpNet, IpNet)> {
     // Manual keypair entry
-    let private_key = uiclient.get_input(Input {
-        prompt: "Enter your Wireguard Private key and upload the Public Key as a Mullvad device"
-            .to_owned(),
-        validator: Some(Box::new(
-            move |private_key: &String| -> Result<(), String> {
-                let private_key = private_key.trim();
-
-                if private_key.len() != 44 {
-                    Err("Expected private key length of 44 characters".to_string())
-                } else {
-                    Ok(())
-                }
-            },
-        )),
-    })?;
+    let private_key = prompt_for_well_formed_private_key(
+        uiclient,
+        "Enter your Wireguard Private key and upload the Public Key as a Mullvad device".to_owned(),
+    )?;
 
     let ipv4_address = IpNet::from_str(&uiclient.get_input(Input {
         prompt: "Enter the IPv4 address range Mullvad returned after adding the device".to_owned(),
-        validator: Some(Box::new(move |_ip: &String| -> Result<(), String> {
-            // TODO: Ipv4 range validator
-            Ok(())
+        validator: Some(Box::new(move |ip: &String| -> Result<(), String> {
+            ip.parse::<IpNet>()
+                .map(|_| ())
+                .map_err(|e| format!("Invalid IPv4 range (expected format e.g. 10.64.0.0/32): {e}"))
         })),
     })?)?;
 
     let ipv6_address = IpNet::from_str(&uiclient.get_input(Input {
         prompt: "Enter the IPv6 address range Mullvad returned after adding the device".to_owned(),
-        validator: Some(Box::new(move |_ip: &String| -> Result<(), String> {
-            // TODO: Ipv4 range validator
-            Ok(())
+        validator: Some(Box::new(move |ip: &String| -> Result<(), String> {
+            ip.parse::<IpNet>().map(|_| ()).map_err(|e| {
+                format!("Invalid IPv6 range (expected format e.g. fc00:bbbb:bbbb:bb01::2/128): {e}")
+            })
         })),
     })?)?;
 
     Ok((
         WgKey {
-            public: generate_public_key(&private_key).expect("Failed to generate public key"),
+            public: generate_public_key(&private_key)?,
             private: private_key,
         },
         ipv4_address,

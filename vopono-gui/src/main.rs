@@ -8,6 +8,7 @@ mod tray;
 
 use app::VoponoGuiApp;
 use std::io::IsTerminal;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 
 fn main() -> eframe::Result<()> {
@@ -57,11 +58,7 @@ fn detach_from_terminal_if_needed() {
         command.current_dir(current_dir);
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    command.process_group(0);
 
     if command.spawn().is_ok() {
         std::process::exit(0);

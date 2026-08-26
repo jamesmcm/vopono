@@ -3,6 +3,7 @@ use crate::gui_config::{
 };
 use anyhow::{Context, anyhow};
 use std::io::{BufRead, BufReader};
+use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::Sender;
@@ -152,11 +153,7 @@ fn prepare_background_command(command: &mut Command, pipe_output: bool) {
         command.stdout(Stdio::null()).stderr(Stdio::null());
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    command.process_group(0);
 }
 
 fn find_vopono_binary() -> anyhow::Result<PathBuf> {

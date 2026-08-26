@@ -1,6 +1,7 @@
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -182,12 +183,8 @@ mv "$tmp" "$status_file"
     fs::write(&callback_path, script)
         .with_context(|| format!("Failed to write {}", callback_path.display()))?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&callback_path, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("Failed to make {} executable", callback_path.display()))?;
-    }
+    fs::set_permissions(&callback_path, fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("Failed to make {} executable", callback_path.display()))?;
 
     Ok(callback_path)
 }

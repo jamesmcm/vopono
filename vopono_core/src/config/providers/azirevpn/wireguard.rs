@@ -10,17 +10,19 @@ use crate::network::wireguard_config::{
 };
 use crate::util::country_map::code_to_country_map;
 use crate::util::delete_all_files_in_dir;
-use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
+use crate::util::wireguard::{
+    WgKey, generate_keypair, generate_public_key, prompt_for_private_key,
+    save_wireguard_device_json,
+};
 use anyhow::Context;
 use ipnet::IpNet;
 use log::{debug, info};
-use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::create_dir_all;
 use std::io::Write;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::str::FromStr;
 
 impl AzireVPN {
@@ -194,19 +196,17 @@ impl WireguardProvider for AzireVPN {
                     self.replace_wg_key(existing_device, &keypair, &token, &client)?
                 } else {
                     // Use existing device
-                    // TODO: Refactor common code between this and Mullvad key management
-
                     let pubkey = if existing_device.keys.len() > 1 {
                         let key_selection = uiclient.get_configuration_choice(existing_device)?;
                         existing_device.keys[key_selection].key.clone()
                     } else {
                         existing_device.keys[0].key.clone()
                     };
-                    let pubkey_clone = pubkey.clone();
 
-                    // Check number of public keys - if more than 1 prompt for key to use
-                    let private_key = uiclient.get_input(crate::config::providers::Input {
-                        prompt: format!(
+                    let private_key = prompt_for_private_key(
+                        uiclient,
+                        &pubkey,
+                        format!(
                             "Private key for {} - {}",
                             existing_device
                                 .device_name
@@ -214,30 +214,7 @@ impl WireguardProvider for AzireVPN {
                                 .expect("Null device name selected!"),
                             pubkey
                         ),
-                        validator: Some(Box::new(
-                            move |private_key: &String| -> Result<(), String> {
-                                let private_key = private_key.trim();
-
-                                if private_key.len() != 44 {
-                                    return Err(
-                                        "Expected private key length of 44 characters".to_string()
-                                    );
-                                }
-
-                                match generate_public_key(private_key) {
-                                    Ok(public_key) => {
-                                        if public_key != pubkey_clone {
-                                            return Err(
-                                                "Private key does not match public key".to_string()
-                                            );
-                                        }
-                                        Ok(())
-                                    }
-                                    Err(_) => Err("Failed to generate public key".to_string()),
-                                }
-                            },
-                        )),
-                    })?;
+                    )?;
 
                     let v4_net = IpNet::new(
                         IpAddr::V4(Ipv4Addr::from_str(&existing_device.ipv4_address)?),
@@ -263,20 +240,7 @@ impl WireguardProvider for AzireVPN {
         // Save keypair
         let details = WireguardDetails::from_interface(&interface);
         if let Ok(det) = details {
-            let path = self.wireguard_dir()?.join("wireguard_device.json");
-            {
-                let mut f = std::fs::File::create(path.clone())?;
-                write!(
-                    f,
-                    "{}",
-                    serde_json::to_string(&det)
-                        .expect("JSON serialisation of WireguardDetails failed")
-                )?;
-            }
-            info!(
-                "Saved Wireguard keypair details to {}",
-                path.to_string_lossy()
-            );
+            save_wireguard_device_json(&self.wireguard_dir()?, &det)?;
         } else {
             log::error!("Failed to save Wireguard keypair details: {details:?}");
         }
@@ -288,25 +252,11 @@ impl WireguardProvider for AzireVPN {
         let locations: Vec<LocationResponse> = location_resp.locations;
 
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?, IpNet::from_str("::0/0")?];
-        let re = Regex::new(r"=\s\[(?P<value>[^\]]+)\]")?;
         for location in locations {
-            // TODO: Can we avoid DNS lookup here?
-            let host_lookup = dns_lookup::lookup_host(&location.pool);
-            if host_lookup.is_err() {
-                log::error!("Could not resolve hostname: {}, skipping...", location.pool);
-                continue;
-            }
-
-            let host_ip = host_lookup?.next().context(format!(
-                "DNS lookup for host '{}' returned no IP addresses",
-                location.pool
-            ))?;
-            log::debug!("Resolved hostname: {} to IP: {}", location.pool, host_ip);
-            // TODO: avoid hacky regex for TOML -> wireguard config conversion
             let wireguard_peer = WireguardPeer {
                 public_key: location.pubkey.clone(),
                 allowed_ips: allowed_ips.clone(),
-                endpoint: WireguardEndpoint::IpWithPort(SocketAddr::new(host_ip, 51820)),
+                endpoint: WireguardEndpoint::HostnameWithPort(location.pool.clone(), 51820),
                 keepalive: None,
             };
 
@@ -322,14 +272,10 @@ impl WireguardProvider for AzireVPN {
 
             let path = wireguard_dir.join(format!("{country}-{location_name}.conf"));
 
-            let mut toml = toml::to_string(&wireguard_conf)?;
-            toml.retain(|c| c != '"');
-            let toml = toml.replace(", ", ",");
-            let toml = re.replace_all(&toml, "= $value").to_string();
-            // Create file, write TOML
+            // Create file, write WireGuard config
             {
-                let mut f = std::fs::File::create(path)?;
-                write!(f, "{toml}")?;
+                let mut f = crate::util::create_private_file(&path)?;
+                write!(f, "{wireguard_conf}")?;
             }
         }
 

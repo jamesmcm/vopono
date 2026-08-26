@@ -25,8 +25,7 @@ impl UiClient for CliClient {
         let index = dialoguer::Select::new()
             .with_prompt(config_choice.prompt())
             .items(&parsed)
-            // TODO: Is this good enough?
-            .default(0)
+            .default(config_choice.default_index())
             .interact()?;
         Ok(index)
     }

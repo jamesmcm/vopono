@@ -1,9 +1,14 @@
 use crate::network::netns::LockfileStatus;
-use crate::util::config_dir;
+use crate::util::{
+    chown_to_config_owner, config_dir, create_private_file, ensure_dir_as_config_owner,
+    write_file_as_config_owner,
+};
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use walkdir::WalkDir;
@@ -28,12 +33,27 @@ pub fn record_forwarded_port(locks_dir: &Path, ns_name: &str, port: u16) -> anyh
     let updated = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let sidecar = ForwardedPortSidecar { port, updated };
     let dir = locks_dir.join(ns_name);
-    std::fs::create_dir_all(&dir)?;
-    let tmp = dir.join(format!("{FORWARDED_PORT_SIDECAR}.tmp"));
     let path = dir.join(FORWARDED_PORT_SIDECAR);
-    std::fs::write(&tmp, serde_json::to_vec(&sidecar)?)?;
+    let contents = serde_json::to_string(&sidecar)?;
+    if ensure_dir_as_config_owner(&dir, Some(0o700))? {
+        anyhow::ensure!(
+            write_file_as_config_owner(&path, &contents, Some(0o600))?,
+            "Config-owner writer unexpectedly unavailable"
+        );
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&dir)?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    chown_to_config_owner(&dir)?;
+    let tmp = dir.join(format!("{FORWARDED_PORT_SIDECAR}.tmp"));
+    let mut file = create_private_file(&tmp)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    file.write_all(contents.as_bytes())?;
+    drop(file);
     std::fs::rename(&tmp, &path)?;
-    Ok(())
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    chown_to_config_owner(&path)
 }
 
 /// Replace the reported forwarded port with the sidecar value when present.
@@ -325,6 +345,18 @@ mod tests {
         );
 
         record_forwarded_port(&dir, "vo_p_se", 2222).unwrap();
+        assert_eq!(
+            fs::metadata(ns_dir.join(FORWARDED_PORT_SIDECAR))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&ns_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
         let status = read_lock_namespaces_from_dir(&dir).unwrap();
         let forwarding = status.namespaces["vo_p_se"][0]
             .ns

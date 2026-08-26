@@ -1,7 +1,7 @@
 [package]
 name = "vopono"
 description = "Launch applications via VPN tunnels using temporary network namespaces"
-version = "0.10.22"
+version = "1.0.0"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2024"
 license = "GPL-3.0-or-later"
@@ -18,29 +18,24 @@ exclude = ["vopono-gui"]
 [dependencies]
 vopono_core = { path = "vopono_core" }
 anyhow = "1"
-directories-next = "2"
 log = "0.4"
 pretty_env_logger = "0.5"
 clap = { version = "4", features = ["derive"] }
-which = "8"
 dialoguer = "0.12"
 compound_duration = "2"
 signal-hook = "0.4"
-walkdir = "2"
 chrono = "0.4"
 bs58 = "0.5"
 nix = { version = "0.31", features = ["signal", "process", "socket", "uio", "mount", "term"] }
 config = "0.15"
-basic_tcp_proxy = "0.3"
 serde = { version = "1", features = ["derive", "std"] }
 serde_json = "1"
 strum = "0.28"
-strum_macros = "0.28"
 thiserror = "2"
 shellexpand = { version = "3", features = ["full"] }
-shell-words = "1"
 interprocess = "2"
 wincode = { version = "0.6", features = ["derive", "std"] }
+tempfile = "3"
 
 [package.metadata.deb]
 maintainer = "James McMurray <jamesmcm03@gmail.com>"

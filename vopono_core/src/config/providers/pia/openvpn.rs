@@ -17,7 +17,7 @@ use std::io::{Cursor, Read, Write};
 use std::net::IpAddr;
 use std::path::PathBuf;
 use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
+use strum_macros::{EnumIter, EnumString, FromRepr};
 use zip::ZipArchive;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -67,9 +67,9 @@ impl OpenVpnProvider for PrivateInternetAccess {
     }
 
     fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
-        let config_choice = ConfigType::index_to_variant(
-            uiclient.get_configuration_choice(&ConfigType::default())?,
-        );
+        let config_choice =
+            ConfigType::from_repr(uiclient.get_configuration_choice(&ConfigType::default())?)
+                .expect("Invalid index");
         let zipfile = reqwest::blocking::get(config_choice.url()?)?;
         let mut zip = ZipArchive::new(Cursor::new(zipfile.bytes()?))?;
         let openvpn_dir = self.openvpn_dir()?;
@@ -141,7 +141,7 @@ impl OpenVpnProvider for PrivateInternetAccess {
         let (user, pass) = self.prompt_for_auth(uiclient)?;
         let auth_file = self.auth_file_path()?;
         if let Some(auth_file) = auth_file {
-            let mut outfile = File::create(auth_file)?;
+            let mut outfile = crate::util::create_private_file(&auth_file)?;
             write!(outfile, "{user}\n{pass}")?;
         }
 
@@ -156,7 +156,8 @@ impl OpenVpnProvider for PrivateInternetAccess {
     }
 }
 
-#[derive(EnumIter, PartialEq, Default)]
+#[derive(EnumIter, EnumString, FromRepr, PartialEq, Default)]
+#[repr(usize)]
 enum ConfigType {
     #[default]
     DefaultConf,
@@ -183,9 +184,6 @@ impl ConfigType {
         };
 
         Ok(s.parse()?)
-    }
-    fn index_to_variant(index: usize) -> Self {
-        Self::iter().nth(index).expect("Invalid index")
     }
 }
 

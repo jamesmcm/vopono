@@ -12,11 +12,10 @@ use crate::network::wireguard_config::{
     WireguardConfig, WireguardEndpoint, WireguardInterface, WireguardPeer,
 };
 use crate::util::delete_all_files_in_dir;
-use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
+use crate::util::wireguard::{WgKey, generate_keypair, prompt_for_private_key};
 use anyhow::anyhow;
 use ipnet::IpNet;
 use log::{debug, info};
-use regex::Regex;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::fs::create_dir_all;
@@ -86,28 +85,11 @@ impl MozillaVPN {
             self.upload_new_device(&device, client, login)?;
             Ok((device, keypair))
         } else {
-            let pubkey_clone = devices[selection].pubkey.clone();
-            let private_key = uiclient.get_input(Input {
-               prompt:format!(
-                    "Private key for {}",
-                    devices[selection].pubkey
-                ),
-        validator: Some(Box::new( move |private_key: &String| -> Result<(), String> {
-            let private_key = private_key.trim();
-            if private_key.len() != 44 {
-                return Err("Expected private key length of 44 characters".to_string()
-                );
-            }
-
-            match generate_public_key(private_key) {
-                Ok(public_key) => {
-            if public_key.as_str() != pubkey_clone {
-                return Err("Private key does not match public key".to_string());
-            }
-            Ok(())
-                }
-                Err(_) => Err("Failed to generate public key".to_string())
-        }}))})?;
+            let private_key = prompt_for_private_key(
+                uiclient,
+                &devices[selection].pubkey,
+                format!("Private key for {}", devices[selection].pubkey),
+            )?;
             let device = devices[selection].clone();
             Ok((NewDevice { name: device.name.clone(), pubkey: device.pubkey.clone()},
             WgKey {public: device.pubkey, private: private_key  } ))
@@ -148,7 +130,10 @@ impl WireguardProvider for MozillaVPN {
             .json()?;
 
         let login = self.get_login(&client)?;
-        debug!("Received user info: {:?}", login);
+        debug!(
+            "Received MozillaVPN account info with {} registered device(s)",
+            login.user.devices.len()
+        );
 
         let (_device, keypair) = self.prompt_for_wg_key(&client, &login, uiclient)?;
 
@@ -186,9 +171,6 @@ impl WireguardProvider for MozillaVPN {
         // Note we tunnel both IPv4 and IPv6
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?, IpNet::from_str("::0/0")?];
 
-        // Regex to convert TOML array syntax to WireGuard config format
-        // TOML: key = [val1, val2] -> WireGuard: key = val1,val2
-        let re = Regex::new(r"=\s\[(?P<value>[^\]]+)\]")?;
         for relay in relays.iter().filter(|x| x.active) {
             let wireguard_peer = WireguardPeer {
                 public_key: relay.pubkey.clone(),
@@ -214,14 +196,10 @@ impl WireguardProvider for MozillaVPN {
             let country = relay.country_name.to_lowercase().replace(' ', "_");
             let path = wireguard_dir.join(format!("{country}-{host}.conf"));
 
-            let mut toml = toml::to_string(&wireguard_conf)?;
-            toml.retain(|c| c != '"');
-            let toml = toml.replace(", ", ",");
-            let toml = re.replace_all(&toml, "= $value").to_string();
-            // Create file, write TOML
+            // Create file, write WireGuard config
             {
-                let mut f = std::fs::File::create(path)?;
-                write!(f, "{toml}")?;
+                let mut f = crate::util::create_private_file(&path)?;
+                write!(f, "{wireguard_conf}")?;
             }
         }
 

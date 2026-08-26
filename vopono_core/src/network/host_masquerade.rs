@@ -12,6 +12,8 @@ pub struct HostMasquerade {
     ipv6_mask: Option<String>,
     interface: NetworkInterface,
     firewall: Firewall,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 impl HostMasquerade {
@@ -141,12 +143,16 @@ impl HostMasquerade {
             ipv6_mask,
             interface,
             firewall,
+            cleanup_enabled: true,
         })
     }
 }
 
 impl Drop for HostMasquerade {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         let namespaces = crate::util::get_lock_namespaces();
         debug!("Remaining namespaces: {namespaces:?}");
         if namespaces.is_ok() && namespaces.unwrap().is_empty() {
@@ -196,6 +202,12 @@ impl Drop for HostMasquerade {
     }
 }
 
+impl HostMasquerade {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct FirewallException {
     host_interface: NetworkInterface,
@@ -210,6 +222,8 @@ pub struct FirewallException {
     ufw_forward_ipv4: bool,
     #[serde(default)]
     ufw_forward_ipv6: bool,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 impl FirewallException {
@@ -299,6 +313,7 @@ impl FirewallException {
                     docker_user_ipv6: false,
                     ufw_forward_ipv4,
                     ufw_forward_ipv6,
+                    cleanup_enabled: true,
                 })
             }
             Firewall::NfTables => {
@@ -390,6 +405,7 @@ impl FirewallException {
                     docker_user_ipv6,
                     ufw_forward_ipv4,
                     ufw_forward_ipv6,
+                    cleanup_enabled: true,
                 })
             }
         }
@@ -398,6 +414,9 @@ impl FirewallException {
 
 impl Drop for FirewallException {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         // DOCKER-USER rules are scoped to this namespace's veth interface pair.
         // Remove them with this instance even if other vopono namespaces are
         // still running; each namespace owns different interface-specific rules.
@@ -432,91 +451,112 @@ impl Drop for FirewallException {
         if namespaces.is_ok() && namespaces.unwrap().is_empty() {
             match self.firewall {
                 Firewall::IpTables => {
-                    sudo_command(&[
-                    "iptables",
-                    "-D",
-                    "FORWARD",
-                    "-o",
-                    &self.host_interface.name,
-                    "-i",
-                    &self.ns_interface.name,
-                    "-j",
-                    "ACCEPT",
-                ])
-                .unwrap_or_else(|_| {
-                    log::error!(
-                        "Failed to delete iptables host output rule, host interface: {}, namespace interface: {}",
-                        self.host_interface.name, self.ns_interface.name
-                    )
-                });
+                    delete_firewall_rule(
+                        &[
+                            "iptables",
+                            "-D",
+                            "FORWARD",
+                            "-o",
+                            &self.host_interface.name,
+                            "-i",
+                            &self.ns_interface.name,
+                            "-j",
+                            "ACCEPT",
+                        ],
+                        "iptables host output rule",
+                    );
 
-                    sudo_command(&[
-                    "iptables",
-                    "-D",
-                    "FORWARD",
-                    "-i",
-                    &self.host_interface.name,
-                    "-o",
-                    &self.ns_interface.name,
-                    "-j",
-                    "ACCEPT",
-                ])
-                .unwrap_or_else(|_| {
-                    log::error!(
-                        "Failed to delete iptables host input rule, host interface: {}, namespace interface: {}",
-                        self.host_interface.name, self.ns_interface.name
-                    )
-                });
+                    delete_firewall_rule(
+                        &[
+                            "iptables",
+                            "-D",
+                            "FORWARD",
+                            "-i",
+                            &self.host_interface.name,
+                            "-o",
+                            &self.ns_interface.name,
+                            "-j",
+                            "ACCEPT",
+                        ],
+                        "iptables host input rule",
+                    );
 
                     if !self.disable_ipv6 {
-                        sudo_command(&[
-                        "ip6tables",
-                        "-D",
-                        "FORWARD",
-                        "-o",
-                        &self.host_interface.name,
-                        "-i",
-                        &self.ns_interface.name,
-                        "-j",
-                        "ACCEPT",
-                    ])
-                .unwrap_or_else(|_| {
-                    log::error!(
-                        "Failed to delete ip6tables host output rule, host interface: {}, namespace interface: {}",
-                        self.host_interface.name, self.ns_interface.name
-                    )
-                });
+                        delete_firewall_rule(
+                            &[
+                                "ip6tables",
+                                "-D",
+                                "FORWARD",
+                                "-o",
+                                &self.host_interface.name,
+                                "-i",
+                                &self.ns_interface.name,
+                                "-j",
+                                "ACCEPT",
+                            ],
+                            "ip6tables host output rule",
+                        );
 
-                        sudo_command(&[
-                        "ip6tables",
-                        "-D",
-                        "FORWARD",
-                        "-i",
-                        &self.host_interface.name,
-                        "-o",
-                        &self.ns_interface.name,
-                        "-j",
-                        "ACCEPT",
-                    ])
-                .unwrap_or_else(|_| {
-                    log::error!(
-                        "Failed to delete ip6tables host input rule, host interface: {}, namespace interface: {}",
-                        self.host_interface.name, self.ns_interface.name
-                    )
-                });
+                        delete_firewall_rule(
+                            &[
+                                "ip6tables",
+                                "-D",
+                                "FORWARD",
+                                "-i",
+                                &self.host_interface.name,
+                                "-o",
+                                &self.ns_interface.name,
+                                "-j",
+                                "ACCEPT",
+                            ],
+                            "ip6tables host input rule",
+                        );
                     }
                 }
                 Firewall::NfTables => {
-                    sudo_command(&["nft", "delete", "table", "inet", "vopono_bridge"]).unwrap_or_else(
-                    |_| {
-                        log::error!(
-                            "Failed to delete nftables namespace bridge firewall rule, host interface: {}, namespace interface: {}",
-                            self.host_interface.name, self.ns_interface.name
-                        )
-                    },
-                );
+                    delete_firewall_rule(
+                        &["nft", "delete", "table", "inet", "vopono_bridge"],
+                        "nftables namespace bridge firewall rule",
+                    );
                 }
             }
+        }
+    }
+}
+
+impl FirewallException {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
+    }
+}
+
+/// Delete a firewall rule, treating already-absent rules as success.
+///
+/// Concurrent teardowns (`vopono stop` racing the session that owns the
+/// namespace, or two sessions sharing a host interface) can remove a rule
+/// before this Drop runs; iptables/nft report that as a plain failure, which
+/// previously surfaced as scary error-level noise during routine cleanup.
+fn delete_firewall_rule(command: &[&str], description: &str) {
+    let Some((program, args)) = command.split_first() else {
+        return;
+    };
+    let outcome = std::process::Command::new(program).args(args).output();
+    match outcome {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let normalized = stderr.to_ascii_lowercase();
+            if normalized.contains("bad rule")
+                || normalized.contains("matching rule exist")
+                || normalized.contains("no such file or directory")
+            {
+                debug!("Firewall rule already absent during teardown: {description}");
+            } else {
+                log::warn!("Failed to delete {description}: {}", stderr.trim());
+            }
+        }
+        Err(error) => {
+            log::warn!("Failed to run cleanup for {description}: {error}");
         }
     }
 }

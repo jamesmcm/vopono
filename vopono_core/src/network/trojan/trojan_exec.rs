@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::Context;
@@ -11,8 +12,12 @@ use super::{TrojanHost, get_cert, trojan_config::TrojanConfig};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Trojan {
-    pid: u32,
+    pub(crate) pid: u32,
     pub config: TrojanConfig,
+    #[serde(skip)]
+    _temporary_files: Vec<tempfile::NamedTempFile>,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 impl Trojan {
@@ -26,6 +31,7 @@ impl Trojan {
     ) -> anyhow::Result<Trojan> {
         let mut config = TrojanConfig::new(config_path)?;
         let config_path_buf;
+        let mut temporary_files = Vec::new();
 
         if let Some(cpath) = config_path {
             warn!("Using custom Trojan config file: {cpath:?}");
@@ -40,17 +46,18 @@ impl Trojan {
                 );
             } else {
                 let cert = get_cert::get_cert(h.host(), h.port())?;
-                config.set_cert(&cert)?;
+                temporary_files.push(config.set_cert(&cert)?);
             }
             config.set_verify_fields(!no_verify);
             config.set_remote_fields(&host.unwrap());
             config.set_password(password.unwrap());
             config.set_wg_forwarding_fields(peer.as_ref().unwrap());
 
-            let cpath = std::env::temp_dir().join("trojan_forward.json");
-            std::fs::write(&cpath, serde_json::to_string(&config)?)
-                .with_context(|| format!("Failed to write Trojan config to {:?}", cpath))?;
-            config_path_buf = cpath;
+            let mut config_file = tempfile::NamedTempFile::new()
+                .context("Failed to create temporary Trojan config")?;
+            config_file.write_all(serde_json::to_string(&config)?.as_bytes())?;
+            config_path_buf = config_file.path().to_path_buf();
+            temporary_files.push(config_file);
         }
 
         let trojan_exec = which("trojan").with_context(|| {
@@ -75,16 +82,27 @@ impl Trojan {
         Ok(Trojan {
             pid: handle.id(),
             config,
+            _temporary_files: temporary_files,
+            cleanup_enabled: true,
         })
     }
 }
 
 impl Drop for Trojan {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(self.pid as i32),
             nix::sys::signal::Signal::SIGTERM,
         )
         .expect("Failed to kill trojan process");
+    }
+}
+
+impl Trojan {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
     }
 }

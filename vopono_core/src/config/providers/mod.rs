@@ -5,7 +5,7 @@ mod mozilla;
 mod mullvad;
 mod nordvpn;
 pub mod pia;
-mod protonvpn;
+pub mod protonvpn;
 mod ui;
 mod warp;
 
@@ -125,6 +125,17 @@ impl VpnProvider {
             self,
             Self::PrivateInternetAccess | Self::ProtonVPN | Self::AzireVPN
         )
+    }
+
+    /// Server string used when the provider does not require one to be
+    /// supplied on the command line (Warp and None run without a server
+    /// prefix, but still need a stable placeholder for the namespace name).
+    pub fn default_server(&self) -> Option<String> {
+        match self {
+            Self::Warp => Some("warp".to_string()),
+            Self::None => Some("none".to_string()),
+            _ => None,
+        }
     }
 
     /// Whether port forwarding is available for this provider when using the

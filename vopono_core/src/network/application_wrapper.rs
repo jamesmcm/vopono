@@ -1,8 +1,8 @@
 use std::{
     ffi::CString,
     io::Write,
-    os::fd::{BorrowedFd, FromRawFd, IntoRawFd},
-    os::unix::{io::RawFd, process::CommandExt},
+    os::fd::{AsFd, OwnedFd},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
 };
@@ -17,7 +17,7 @@ use nix::{
     unistd::close,
 };
 
-use super::{netns::NetworkNamespace, port_forwarding::Forwarder};
+use super::{etc_overlay::EtcOverlay, netns::NetworkNamespace, port_forwarding::Forwarder};
 use crate::util::{
     check_process_running, env_vars::set_env_vars, get_running_process_pids, parse_command_str,
     process_is_in_network_namespace,
@@ -51,7 +51,7 @@ const SINGLE_INSTANCE_APPLICATIONS: &[&str] = &[
 pub struct ApplicationWrapper {
     pub handle: Child,
     pub port_forwarding: Option<Box<dyn Forwarder>>,
-    _etc_overlay: Option<tempfile::TempDir>,
+    _etc_overlay: Option<EtcOverlay>,
 }
 
 impl ApplicationWrapper {
@@ -66,10 +66,14 @@ impl ApplicationWrapper {
         silent: bool,
         host_env_vars: &std::collections::HashMap<String, String>,
         pipe_io: bool,
-        stdio_fds: Option<(RawFd, RawFd, RawFd)>,
+        stdio_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
         take_controlling_tty: bool,
     ) -> anyhow::Result<Self> {
         let app_vec = parse_command_str(application)?;
+        let warning_stderr = stdio_fds
+            .as_ref()
+            .map(|(_, _, stderr)| nix::unistd::dup(stderr.as_fd()))
+            .transpose()?;
 
         let shared_process_name = app_vec.first().and_then(|program| {
             Path::new(program)
@@ -106,7 +110,7 @@ impl ApplicationWrapper {
                         .join(", ")
                 ),
                 silent,
-                stdio_fds,
+                warning_stderr.as_ref(),
             );
         }
 
@@ -157,7 +161,7 @@ impl ApplicationWrapper {
                     "Application launcher PID {pid} exited before its network namespace could be verified; the existing process may have handled the request instead."
                 ),
                 silent,
-                stdio_fds,
+                warning_stderr.as_ref(),
             );
         }
 
@@ -174,7 +178,7 @@ impl ApplicationWrapper {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn run_with_env_in_netns(
+    fn run_with_env_in_netns(
         netns: &NetworkNamespace,
         command: &[&str],
         user: Option<String>,
@@ -182,12 +186,12 @@ impl ApplicationWrapper {
         silent: bool,
         capture_output: bool,
         capture_input: bool,
-        stdio_fds: Option<(RawFd, RawFd, RawFd)>,
+        stdio_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
         take_controlling_tty: bool,
         set_dir: Option<PathBuf>,
         forwarder: Option<&dyn Forwarder>,
         host_env_vars: &std::collections::HashMap<String, String>,
-    ) -> anyhow::Result<(Child, Option<tempfile::TempDir>)> {
+    ) -> anyhow::Result<(Child, Option<EtcOverlay>)> {
         let (prog, args) = command.split_first().context("Command cannot be empty")?;
         let mut handle: Command;
 
@@ -195,7 +199,7 @@ impl ApplicationWrapper {
         // another process layer.
         let use_direct_setns = nix::unistd::getuid().is_root()
             && (stdio_fds.is_some() || (capture_output && capture_input));
-        let mut etc_overlay = None;
+        let etc_overlay;
 
         if use_direct_setns {
             handle = Command::new(prog);
@@ -259,35 +263,11 @@ impl ApplicationWrapper {
             let netns_path_cstr = CString::new(format!("/var/run/netns/{}", netns.name))?;
             let want_controlling_tty = take_controlling_tty;
             let root_c = CString::new("/").unwrap();
-            let etc_ns_dir = format!("/etc/netns/{}", netns.name);
-            let overlay = tempfile::Builder::new()
-                .prefix("vopono-etc-")
-                .tempdir()
-                .context("Failed to create private /etc overlay directory")?;
-            let upper_dir = overlay.path().join("upper");
-            let work_dir = overlay.path().join("work");
-            std::fs::create_dir(&upper_dir)?;
-            std::fs::create_dir(&work_dir)?;
-            for name in ["resolv.conf", "hosts", "nsswitch.conf"] {
-                let source = PathBuf::from(&etc_ns_dir).join(name);
-                if source.is_file() {
-                    std::fs::copy(&source, upper_dir.join(name)).with_context(|| {
-                        format!(
-                            "Failed to stage {} for namespace {}",
-                            source.display(),
-                            netns.name
-                        )
-                    })?;
-                }
-            }
-            let overlay_options = CString::new(format!(
-                "lowerdir=/etc,upperdir={},workdir={}",
-                upper_dir.display(),
-                work_dir.display()
-            ))?;
-            let overlay_source = CString::new("vopono-etc").unwrap();
-            let overlay_type = CString::new("overlay").unwrap();
-            let etc_c = CString::new("/etc").unwrap();
+            let overlay = EtcOverlay::prepare(&netns.name)?;
+            let overlay_options = overlay.options.clone();
+            let overlay_source = overlay.source.clone();
+            let overlay_type = overlay.filesystem_type.clone();
+            let etc_c = overlay.target.clone();
             let ping_path = CString::new("/proc/sys/net/ipv4/ping_group_range").unwrap();
             etc_overlay = Some(overlay);
 
@@ -369,9 +349,44 @@ impl ApplicationWrapper {
                 });
             }
         } else {
-            // This non-daemon path remains unchanged
             handle = Command::new("ip");
             handle.args(["netns", "exec", netns.name.as_str()]);
+
+            // `ip netns exec` bind-mounts namespace-specific resolver files,
+            // but its mount namespace can still receive host-side unmounts.
+            // Tailscale replaces /etc/resolv.conf this way, causing a
+            // long-running application to fall back to MagicDNS, which is not
+            // reachable through the VPN namespace. Put the sudo path in a
+            // private mount namespace and stable /etc overlay before `ip`
+            // performs its namespace-specific mounts.
+            let overlay = EtcOverlay::prepare(&netns.name)?;
+            let overlay_options = overlay.options.clone();
+            let overlay_source = overlay.source.clone();
+            let overlay_type = overlay.filesystem_type.clone();
+            let root_c = CString::new("/").unwrap();
+            let etc_c = overlay.target.clone();
+            etc_overlay = Some(overlay);
+
+            unsafe {
+                handle.pre_exec(move || {
+                    unshare(CloneFlags::CLONE_NEWNS)?;
+                    mount::<std::ffi::CStr, std::ffi::CStr, std::ffi::CStr, std::ffi::CStr>(
+                        None,
+                        root_c.as_c_str(),
+                        None,
+                        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+                        None,
+                    )?;
+                    mount(
+                        Some(overlay_source.as_c_str()),
+                        etc_c.as_c_str(),
+                        Some(overlay_type.as_c_str()),
+                        MsFlags::empty(),
+                        Some(overlay_options.as_c_str()),
+                    )?;
+                    Ok(())
+                });
+            }
 
             let mut sudo_args: Vec<String> = vec![
                 "sudo".to_string(),
@@ -407,25 +422,20 @@ impl ApplicationWrapper {
             handle.stderr(Stdio::null());
         }
         match (stdio_fds, capture_input, capture_output) {
-            (Some((fd_in, fd_out_orig, fd_err_orig)), _, _) => unsafe {
-                // Ensure each Stdio gets a unique owned fd to avoid double-closing.
-                let in_fd = fd_in;
-                let mut out_fd = fd_out_orig;
-                let mut err_fd = fd_err_orig;
-                if out_fd == in_fd {
-                    out_fd = nix::unistd::dup(BorrowedFd::borrow_raw(out_fd))
-                        .map_err(|e| std::io::Error::other(format!("dup stdout failed: {e}")))?
-                        .into_raw_fd();
+            (Some((fd_in, fd_out, fd_err)), _, _) => {
+                if silent {
+                    // --silent: keep stdin wired to the client but discard the
+                    // application's output, even when stdio FDs were provided.
+                    handle.stdin(Stdio::from(fd_in));
+                    handle.stdout(Stdio::null());
+                    handle.stderr(Stdio::null());
+                    drop((fd_out, fd_err));
+                } else {
+                    handle.stdin(Stdio::from(fd_in));
+                    handle.stdout(Stdio::from(fd_out));
+                    handle.stderr(Stdio::from(fd_err));
                 }
-                if err_fd == in_fd || err_fd == out_fd {
-                    err_fd = nix::unistd::dup(BorrowedFd::borrow_raw(err_fd))
-                        .map_err(|e| std::io::Error::other(format!("dup stderr failed: {e}")))?
-                        .into_raw_fd();
-                }
-                handle.stdin(Stdio::from_raw_fd(in_fd));
-                handle.stdout(Stdio::from_raw_fd(out_fd));
-                handle.stderr(Stdio::from_raw_fd(err_fd));
-            },
+            }
             (None, true, true) => {
                 handle.stdin(Stdio::piped());
                 handle.stdout(Stdio::piped());
@@ -446,15 +456,19 @@ impl ApplicationWrapper {
     }
 }
 
-fn report_warning(message: String, silent: bool, stdio_fds: Option<(RawFd, RawFd, RawFd)>) {
+fn report_warning(message: String, silent: bool, stderr_fd: Option<&OwnedFd>) {
     if silent {
-        if let Some((_, _, stderr_fd)) = stdio_fds
-            && let Ok(dup_fd) = nix::unistd::dup(unsafe { BorrowedFd::borrow_raw(stderr_fd) })
-        {
-            let mut stderr = std::fs::File::from(dup_fd);
-            let _ = writeln!(stderr, "warning: {message}");
-            let _ = stderr.flush();
-        }
+        // --silent suppresses warnings as well as application output.
+        return;
+    }
+    if let Some(stderr_fd) = stderr_fd
+        && let Ok(dup_fd) = nix::unistd::dup(stderr_fd.as_fd())
+    {
+        // Daemon path: the application runs in the daemon, so route warnings
+        // back to the client's stderr instead of the daemon's journal.
+        let mut stderr = std::fs::File::from(dup_fd);
+        let _ = writeln!(stderr, "warning: {message}");
+        let _ = stderr.flush();
     } else {
         log::warn!("{message}");
     }

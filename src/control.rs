@@ -29,7 +29,10 @@ pub struct StopResult {
     pub namespace_removed: bool,
 }
 
-pub fn stop_application(application_id: &str) -> Result<StopResult> {
+pub fn stop_application(
+    application_id: &str,
+    requester_uid: Option<nix::unistd::Uid>,
+) -> Result<StopResult> {
     let pid = application_id
         .parse::<u32>()
         .map_err(|_| CliError::InvalidApplicationId {
@@ -47,6 +50,22 @@ pub fn stop_application(application_id: &str) -> Result<StopResult> {
         }
         .into());
     };
+
+    // Lockfiles live in a user-writable directory and PIDs can be recycled:
+    // in daemon mode the request may come from any local user, so only
+    // signal processes owned by the authenticated requester.
+    if let Some(uid) = requester_uid {
+        match process_real_uid(pid) {
+            Some(owner) if owner == uid.as_raw() => {}
+            other => {
+                return Err(anyhow::anyhow!(
+                    "Refusing to stop PID {pid} in namespace {namespace_id}: process owner {:?} does not match requesting uid {}",
+                    other,
+                    uid.as_raw()
+                ));
+            }
+        }
+    }
 
     // Lockfiles may be stale and PIDs can be recycled; never signal a process
     // that is not verifiably attached to the recorded network namespace.
@@ -79,13 +98,53 @@ pub fn stop_application(application_id: &str) -> Result<StopResult> {
     })
 }
 
-pub fn stop_namespace(namespace_id: &str) -> Result<StopResult> {
+pub fn stop_namespace(
+    namespace_id: &str,
+    requester_uid: Option<nix::unistd::Uid>,
+) -> Result<StopResult> {
     let status = read_lock_namespaces()?;
     if !status.namespaces.contains_key(namespace_id) {
         return Err(CliError::NamespaceNotFound {
             id: namespace_id.to_string(),
         }
         .into());
+    }
+
+    if let Some(uid) = requester_uid {
+        crate::namespace_ownership::authorize(namespace_id, uid)?;
+        // Make an explicit stop authoritative over a previous keep-alive or
+        // create-only request. A live handler will observe this after its child
+        // exits and perform normal teardown; an idle namespace is handled below.
+        crate::namespace_ownership::mark_stopping(namespace_id, uid)?;
+        terminate_namespace_user_processes(namespace_id, uid)?;
+        // A live daemon session holding this namespace writes a client lockfile
+        // and tears the namespace down itself on exit. Namespaces left alive by
+        // --keep-alive / --create-netns-only have no such session, so tear them
+        // down explicitly from the root-owned snapshot.
+        let lock_dir = vopono_core::util::config_dir()?
+            .join("vopono")
+            .join("locks")
+            .join(namespace_id);
+        if !vopono_core::status::has_client_lockfiles(&lock_dir)
+            && let Ok(namespace) = crate::namespace_ownership::load(namespace_id, uid)
+        {
+            namespace.teardown()?;
+        }
+        let namespace_removed = wait_for_namespace_removal(namespace_id)?;
+        if !namespace_removed {
+            return Err(CliError::NamespaceTeardownFailed {
+                namespace_id: namespace_id.to_string(),
+            }
+            .into());
+        }
+        crate::namespace_ownership::remove(namespace_id);
+        return Ok(StopResult {
+            version: SCHEMA_VERSION,
+            target: StopTargetKind::Namespace,
+            application_id: None,
+            namespace_id: namespace_id.to_string(),
+            namespace_removed,
+        });
     }
 
     let namespace = NetworkNamespace::from_existing(namespace_id.to_string())?;
@@ -98,7 +157,7 @@ pub fn stop_namespace(namespace_id: &str) -> Result<StopResult> {
     remove_lock_files(namespace_id)?;
     // Explicit (rather than implicit drop): removes firewall rules, veth pair,
     // runs predown, and deletes the network namespace.
-    namespace.teardown();
+    namespace.teardown()?;
     let namespace_removed = wait_for_namespace_removal(namespace_id)?;
     if !namespace_removed {
         return Err(CliError::NamespaceTeardownFailed {
@@ -106,7 +165,6 @@ pub fn stop_namespace(namespace_id: &str) -> Result<StopResult> {
         }
         .into());
     }
-
     Ok(StopResult {
         version: SCHEMA_VERSION,
         target: StopTargetKind::Namespace,
@@ -154,6 +212,15 @@ fn send_signal(pid: u32, signal: Signal) -> Result<(), CliError> {
             source: anyhow::Error::new(error),
         }),
     }
+}
+
+/// Real UID of `pid` from /proc, if the process exists and is inspectable.
+fn process_real_uid(pid: u32) -> Option<u32> {
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let line = status.lines().find(|line| line.starts_with("Uid:"))?;
+    line.split_whitespace()
+        .nth(1)
+        .and_then(|real_uid| real_uid.parse::<u32>().ok())
 }
 
 fn wait_for_process(pid: u32) -> Result<(), CliError> {
@@ -208,8 +275,47 @@ fn terminate_namespace_processes(namespace_id: &str) -> anyhow::Result<()> {
     .into())
 }
 
-fn wait_for_namespace_removal(namespace_id: &str) -> anyhow::Result<bool> {
+fn namespace_processes_for_uid(
+    namespace_id: &str,
+    uid: nix::unistd::Uid,
+) -> anyhow::Result<Vec<i32>> {
+    Ok(namespace_processes(namespace_id)?
+        .into_iter()
+        .filter(|pid| process_real_uid(*pid as u32) == Some(uid.as_raw()))
+        .collect())
+}
+
+fn terminate_namespace_user_processes(
+    namespace_id: &str,
+    uid: nix::unistd::Uid,
+) -> anyhow::Result<()> {
+    for pid in namespace_processes_for_uid(namespace_id, uid)? {
+        send_signal(pid as u32, Signal::SIGTERM)?;
+    }
     if wait_until(|| {
+        namespace_processes_for_uid(namespace_id, uid)
+            .map(|processes| processes.is_empty())
+            .unwrap_or(false)
+    }) {
+        return Ok(());
+    }
+    for pid in namespace_processes_for_uid(namespace_id, uid)? {
+        send_signal(pid as u32, Signal::SIGKILL)?;
+    }
+    anyhow::ensure!(
+        wait_until(|| {
+            namespace_processes_for_uid(namespace_id, uid)
+                .map(|processes| processes.is_empty())
+                .unwrap_or(false)
+        }),
+        "Processes owned by uid {} remain in namespace {namespace_id}",
+        uid.as_raw()
+    );
+    Ok(())
+}
+
+fn wait_for_namespace_removal(namespace_id: &str) -> anyhow::Result<bool> {
+    if wait_until_for(100, || {
         get_existing_namespaces()
             .map(|namespaces| !namespaces.iter().any(|name| name == namespace_id))
             .unwrap_or(false)
@@ -221,8 +327,12 @@ fn wait_for_namespace_removal(namespace_id: &str) -> anyhow::Result<bool> {
         .any(|name| name == namespace_id))
 }
 
-fn wait_until(mut condition: impl FnMut() -> bool) -> bool {
-    for _ in 0..20 {
+fn wait_until(condition: impl FnMut() -> bool) -> bool {
+    wait_until_for(20, condition)
+}
+
+fn wait_until_for(attempts: usize, mut condition: impl FnMut() -> bool) -> bool {
+    for _ in 0..attempts {
         if condition() {
             return true;
         }

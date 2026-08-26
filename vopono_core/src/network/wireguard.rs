@@ -21,6 +21,8 @@ const WIREGUARD_FWMARK: &str = "51820";
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Wireguard {
     pub executable_wg: String,
+    #[serde(skip)]
+    cleanup_enabled: bool,
     pub ip_link_type: String,
     pub ns_name: String,
     pub config_file: PathBuf,
@@ -232,11 +234,7 @@ impl Wireguard {
             )?;
         }
 
-        // TODO: Use bs58 here?
-        let if_name = namespace.name
-            [((namespace.name.len() as i32) - 13).max(0) as usize..namespace.name.len()]
-            .to_string();
-        assert!(if_name.len() <= 15, "ifname must be <= 15 chars: {if_name}");
+        let if_name = super::netns::veth_interface_base(&namespace.name)?;
 
         NetworkNamespace::exec(
             &namespace.name,
@@ -347,6 +345,20 @@ impl Wireguard {
                 warn!("Found no DNS settings in Wireguard config, using 8.8.8.8");
                 vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]
             });
+        // Split-tunnel configs keep a working default route through the veth
+        // for destinations outside AllowedIPs: flag resolvers that would
+        // therefore receive queries outside the tunnel.
+        if use_killswitch && !(has_ipv4_default || has_ipv6_default) {
+            for server in dns
+                .iter()
+                .filter(|server| !allowed_ips_cover(&config.peer.allowed_ips, server))
+            {
+                warn!(
+                    "DNS server {server} is outside the WireGuard AllowedIPs - DNS queries to it will bypass the tunnel"
+                );
+            }
+        }
+
         // TODO: DNS suffixes?
         let dns_egress_interface =
             (use_killswitch && (has_ipv4_default || has_ipv6_default)).then_some(if_name.as_str());
@@ -577,6 +589,7 @@ impl Wireguard {
 
         Ok(Self {
             executable_wg,
+            cleanup_enabled: true,
             ip_link_type,
             config_file,
             ns_name: namespace.name.clone(),
@@ -585,6 +598,11 @@ impl Wireguard {
             interface_addresses,
         })
     }
+}
+
+/// Whether `address` falls inside any of `allowed_ips`.
+fn allowed_ips_cover(allowed_ips: &[IpNet], address: &IpAddr) -> bool {
+    allowed_ips.iter().any(|network| network.contains(address))
 }
 
 fn has_default_allowed_ip(allowed_ips: &[IpNet], ipv4: bool) -> bool {
@@ -951,6 +969,9 @@ pub fn killswitch(
 
 impl Drop for Wireguard {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         match sudo_command(&[
             "ip",
             "netns",
@@ -984,6 +1005,12 @@ impl Drop for Wireguard {
                 Err(e) => warn!("Failed to delete nft table: {}: {:?}", self.ns_name, e),
             };
         }
+    }
+}
+
+impl Wireguard {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
     }
 }
 
@@ -1037,6 +1064,23 @@ mod tests {
         assert!(endpoint_needs_bypass_route(
             "2001:db8::10".parse().unwrap(),
             &default_allowed_ips
+        ));
+    }
+
+    #[test]
+    fn allowed_ips_coverage_check() {
+        let allowed = networks(&["10.0.0.0/8", "fd00::/8"]);
+        assert!(allowed_ips_cover(
+            &allowed,
+            &"10.1.2.3".parse::<IpAddr>().unwrap()
+        ));
+        assert!(!allowed_ips_cover(
+            &allowed,
+            &"192.0.2.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(allowed_ips_cover(
+            &allowed,
+            &"fd00::1".parse::<IpAddr>().unwrap()
         ));
     }
 

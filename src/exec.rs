@@ -4,12 +4,13 @@ use crate::cli_client::CliClient;
 use super::args::ExecCommand;
 use super::args::WrappedArg;
 use super::sync::synch;
-use anyhow::{anyhow, bail};
+use crate::tcp_proxy::TcpProxy;
+use anyhow::{Context, anyhow, bail};
 use log::{debug, error, info, warn};
 use signal_hook::iterator::SignalsInfo;
 use signal_hook::{consts::SIGINT, iterator::Signals};
-use std::net::{IpAddr, Ipv4Addr};
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::os::fd::{AsFd, OwnedFd};
 use std::path::PathBuf;
 use std::{
     fs::create_dir_all,
@@ -78,11 +79,12 @@ pub fn execute_as_daemon(
 pub fn execute_as_daemon_with_stdio(
     command: ExecCommand,
     pipe_io: bool,
-    stdio_fds: Option<(RawFd, RawFd, RawFd)>,
+    stdio_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
     take_controlling_tty: bool,
     forwarded_env: Option<std::collections::HashMap<String, String>>,
-) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace)> {
+) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace, Vec<TcpProxy>)> {
     let uiclient = CliClient {};
+    let silent = command.silent;
     let NamespaceConfig {
         ns,
         parsed_command,
@@ -113,14 +115,26 @@ pub fn execute_as_daemon_with_stdio(
     }
 
     // Machine-readable launch summary for frontend integrations, written to
-    // the client's stdout before any application output. Take ownership of
-    // the descriptor up-front: ApplicationWrapper hands it to the spawned
-    // child via Stdio::from_raw_fd, which closes it on drop.
+    // the client's stdout before any application output. Duplicate the
+    // descriptor up-front because ApplicationWrapper transfers the original
+    // descriptor to the spawned child.
     let report_out: Option<OwnedFd> = if parsed_command.json {
-        stdio_fds.map(|(_, stdout_fd, _)| unsafe { OwnedFd::from_raw_fd(stdout_fd) })
+        stdio_fds
+            .as_ref()
+            .map(|(_, stdout_fd, _)| nix::unistd::dup(stdout_fd.as_fd()))
+            .transpose()?
     } else {
         None
     };
+
+    // Bind the host-side --forward relays before spawning the application so a
+    // bind failure aborts the request instead of orphaning a running process.
+    let host_proxies = host_forward_proxies(
+        &ns,
+        parsed_command.forward.as_deref(),
+        parsed_command.no_proxy,
+        false,
+    )?;
 
     let ns = ns.write_lockfile(&parsed_command.application)?;
     let application = ApplicationWrapper::new(
@@ -130,7 +144,7 @@ pub fn execute_as_daemon_with_stdio(
         parsed_command.group.clone(),
         parsed_command.working_directory.clone().map(PathBuf::from),
         forwarder,
-        true, // Always silent on daemon side
+        silent,
         &host_env_vars,
         pipe_io,
         stdio_fds,
@@ -146,19 +160,64 @@ pub fn execute_as_daemon_with_stdio(
         let _ = out.flush();
     }
 
-    Ok((application, ns))
+    Ok((application, ns, host_proxies))
+}
+
+/// Daemon entry for `--create-netns-only`: bring up the namespace and leave it
+/// alive without spawning an application. The returned handle is detached from
+/// teardown (marked unmanaged) so the namespace survives the request handler;
+/// it stays visible to `vopono list` / `vopono stop` until stopped explicitly.
+pub fn create_daemon_namespace_only(
+    command: ExecCommand,
+    uid: nix::unistd::Uid,
+) -> anyhow::Result<NetworkNamespace> {
+    let uiclient = CliClient {};
+    let NamespaceConfig {
+        ns,
+        parsed_command,
+        forwarder,
+        host_env_vars: _,
+    } = setup_namespace(command, &uiclient, true, false)?; // daemon: do not auto-sync
+    let ns = ns.write_lockfile(&parsed_command.application)?;
+    // No application runs in this session, so the provider forwarder has nothing
+    // to serve and is torn down immediately (mirroring the CLI path).
+    drop(forwarder);
+    let mut ns = ns;
+    crate::namespace_ownership::mark_persistent(&ns.name, uid)?;
+    ns.detach();
+    Ok(ns)
 }
 
 /// Single-line machine-readable launch summary for `exec --json`.
 fn launch_report(ns: &NetworkNamespace, pid: u32, forwarder: Option<&dyn Forwarder>) -> String {
+    launch_report_value(
+        &ns.name,
+        pid,
+        &ns.state.open_ports,
+        &ns.state.host_forwarded_ports,
+        forwarder.map(|f| f.forwarded_port()),
+    )
+    .to_string()
+}
+
+/// Value builder for the `exec --json` launch summary, kept separate from
+/// `launch_report` so the port fields can be tested without a live namespace.
+fn launch_report_value(
+    namespace: &str,
+    pid: u32,
+    open_ports: &[u16],
+    host_forwarded_ports: &[u16],
+    forwarded_port: Option<u16>,
+) -> serde_json::Value {
     serde_json::json!({
         "version": crate::api::SCHEMA_VERSION,
         "event": "launched",
-        "namespace": ns.name,
+        "namespace": namespace,
         "pid": pid,
-        "forwarded_port": forwarder.map(|f| f.forwarded_port()),
+        "open_ports": open_ports,
+        "host_forwarded_ports": host_forwarded_ports,
+        "forwarded_port": forwarded_port,
     })
-    .to_string()
 }
 
 /// The main entry point for the non-daemon (sudo-based fallback) execution path.
@@ -202,6 +261,7 @@ fn setup_namespace(
     // namespace that already exists. Provider None also satisfies the
     // provider/protocol pairing validation without bringing up any service.
     let mut command = command;
+    let explicit_existing = command.existing_netns.is_some();
     let mut foreign_attach = false;
     if let Some(netns) = command.existing_netns.clone() {
         ensure_namespace_exists(&netns)?;
@@ -272,7 +332,7 @@ fn setup_namespace(
         _ => parsed_command.provider.get_dyn_provider().alias_2char(),
     };
 
-    let ns_name = if let Some(c_ns_name) = parsed_command.custom_netns_name.clone() {
+    let base_ns_name = if let Some(c_ns_name) = parsed_command.custom_netns_name.clone() {
         c_ns_name
     } else {
         let short_name = if parsed_command.server.len() > 7 {
@@ -282,13 +342,37 @@ fn setup_namespace(
         };
         format!("vo_{alias}_{short_name}")
     };
+    let daemon_uid = if vopono_core::util::is_daemon_mode() {
+        let user_name = parsed_command
+            .user
+            .as_deref()
+            .context("Daemon namespace setup requires an authenticated user")?;
+        Some(
+            nix::unistd::User::from_name(user_name)?
+                .with_context(|| format!("Authenticated user '{user_name}' no longer exists"))?
+                .uid,
+        )
+    } else {
+        None
+    };
+    let ns_name = if let Some(uid) = daemon_uid
+        && !explicit_existing
+    {
+        crate::namespace_ownership::name_for_uid(&base_ns_name, uid)?
+    } else {
+        base_ns_name
+    };
 
     let mut ns;
     let _sysctl;
     let forwarder;
 
     if get_existing_namespaces()?.contains(&ns_name) {
-        if foreign_attach {
+        if let Some(uid) = daemon_uid {
+            ns = crate::namespace_ownership::load(&ns_name, uid)?;
+            info!("Using root-owned state for existing namespace: {}", ns_name);
+            forwarder = None;
+        } else if foreign_attach {
             info!(
                 "Attaching to unmanaged namespace {} - vopono will not modify it and will leave it running on exit",
                 ns_name
@@ -301,19 +385,20 @@ fn setup_namespace(
                 forwarder,
                 host_env_vars,
             });
+        } else {
+            info!(
+                "Using existing namespace: {}, will not modify firewall rules",
+                ns_name
+            );
+            ns = NetworkNamespace::from_existing(ns_name)?;
+            forwarder = None;
         }
-        info!(
-            "Using existing namespace: {}, will not modify firewall rules",
-            ns_name
-        );
-        ns = NetworkNamespace::from_existing(ns_name)?;
         if parsed_command.port_forwarding || parsed_command.custom_port_forwarding.is_some() {
             warn!(
                 "Re-using existing network namespace {} - will not run port forwarder, should be run when netns first created",
                 ns.name
             );
         }
-        forwarder = None;
     } else {
         ns = NetworkNamespace::new(
             ns_name.clone(),
@@ -464,12 +549,64 @@ fn setup_namespace(
         }
     }
 
+    if let Some(uid) = daemon_uid {
+        crate::namespace_ownership::tag(&ns, uid)?;
+    }
+
     Ok(NamespaceConfig {
         ns,
         parsed_command,
         forwarder,
         host_env_vars,
     })
+}
+
+/// Bound the number of listeners a single invocation may create.
+const MAX_HOST_FORWARD_PORTS: usize = 32;
+
+/// Create host-side forwarders for `--forward` ports. Shared by the CLI and
+/// daemon execution paths so the two cannot drift. Ports are opened inside the
+/// namespace by the protocol setup; this starts the host->namespace relay.
+fn host_forward_proxies(
+    ns: &NetworkNamespace,
+    forward: Option<&[u16]>,
+    no_proxy: bool,
+    allow_privileged_ports: bool,
+) -> anyhow::Result<Vec<TcpProxy>> {
+    if no_proxy {
+        return Ok(Vec::new());
+    }
+    let Some(f) = forward.filter(|f| !f.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    anyhow::ensure!(
+        f.len() <= MAX_HOST_FORWARD_PORTS,
+        "At most {MAX_HOST_FORWARD_PORTS} host-forwarded ports may be requested"
+    );
+    let namespace_ip = ns
+        .veth_pair_ips
+        .as_ref()
+        .context("No veth pair IPs available for --forward")?
+        .ipv4
+        .as_ref()
+        .context("No IPv4 veth pair IP available for --forward")?
+        .namespace_ip;
+    let mut proxies = Vec::new();
+    for p in f {
+        validate_host_forward_port(*p, allow_privileged_ports)?;
+        debug!("Forwarding port: {}, {}", p, namespace_ip);
+        proxies.push(TcpProxy::new(*p, SocketAddr::new(namespace_ip, *p), false)?);
+    }
+    Ok(proxies)
+}
+
+fn validate_host_forward_port(port: u16, allow_privileged_ports: bool) -> anyhow::Result<()> {
+    if !allow_privileged_ports && port < 1024 {
+        bail!(
+            "Daemon forwarding to privileged host port {port} is not allowed; use a port of 1024 or higher"
+        );
+    }
+    Ok(())
 }
 
 fn run_application_and_wait(
@@ -480,38 +617,14 @@ fn run_application_and_wait(
     silent: bool,
     host_env_vars: &std::collections::HashMap<String, String>,
 ) -> anyhow::Result<i32> {
-    let mut proxy = Vec::new();
-    if let Some(f) = &parsed_command.forward
-        && !(parsed_command.no_proxy || f.is_empty())
-    {
-        for p in f {
-            debug!(
-                "Forwarding port: {}, {:?}",
-                p,
-                ns.veth_pair_ips
-                    .as_ref()
-                    .unwrap()
-                    .ipv4
-                    .as_ref()
-                    .unwrap()
-                    .namespace_ip
-            );
-            proxy.push(basic_tcp_proxy::TcpProxy::new(
-                *p,
-                std::net::SocketAddr::new(
-                    ns.veth_pair_ips
-                        .as_ref()
-                        .unwrap()
-                        .ipv4
-                        .as_ref()
-                        .unwrap()
-                        .namespace_ip,
-                    *p,
-                ),
-                false,
-            ));
-        }
-    }
+    // Kept alive for the lifetime of the application so forwarded ports stay
+    // reachable from the host; dropped (stopping the relays) at function exit.
+    let _proxy = host_forward_proxies(
+        ns,
+        parsed_command.forward.as_deref(),
+        parsed_command.no_proxy,
+        true,
+    )?;
 
     if !parsed_command.create_netns_only {
         let application = ApplicationWrapper::new(
@@ -670,11 +783,20 @@ fn run_protocol_in_netns(
 
     match parsed_command.protocol {
         Protocol::None => unreachable!(),
-        Protocol::Warp => ns.run_warp(
-            parsed_command.open_ports.as_ref(),
-            parsed_command.forward.as_ref(),
-            parsed_command.firewall,
-        )?,
+        Protocol::Warp => {
+            ns.run_warp(
+                parsed_command.open_ports.as_ref(),
+                parsed_command.forward.as_ref(),
+                parsed_command.firewall,
+            )?;
+            if !parsed_command.no_killswitch {
+                vopono_core::network::warp::Warp::apply_killswitch(
+                    ns,
+                    parsed_command.firewall,
+                    parsed_command.disable_ipv6,
+                )?;
+            }
+        }
         Protocol::OpenVpn => {
             let auth_file = if parsed_command.provider != VpnProvider::Custom {
                 verify_auth(
@@ -747,8 +869,7 @@ fn run_protocol_in_netns(
                     } else {
                         &dns
                     };
-                let old_dns = ns.dns_config.take();
-                std::mem::forget(old_dns);
+                ns.preserve_dns_files_for_reconfiguration();
                 ns.dns_config_with_interface(
                     effective_dns,
                     &[],
@@ -819,6 +940,15 @@ fn run_protocol_in_netns(
                 &parsed_command.server,
                 uiclient,
             )?;
+            if !parsed_command.no_killswitch {
+                vopono_core::network::openconnect::apply_killswitch(
+                    ns,
+                    parsed_command.firewall,
+                    parsed_command.disable_ipv6,
+                    &parsed_command.server,
+                    config_file.as_deref(),
+                )?;
+            }
         }
         Protocol::OpenFortiVpn => {
             ns.run_openfortivpn(
@@ -831,6 +961,16 @@ fn run_protocol_in_netns(
                 parsed_command.firewall,
                 parsed_command.allow_host_access,
             )?;
+            if !parsed_command.no_killswitch {
+                vopono_core::network::openfortivpn::apply_killswitch(
+                    ns,
+                    parsed_command.firewall,
+                    parsed_command.disable_ipv6,
+                    config_file
+                        .as_deref()
+                        .expect("No OpenFortiVPN config file provided"),
+                )?;
+            }
         }
         Protocol::Ssh => {
             let dns = parsed_command
@@ -936,7 +1076,7 @@ fn provider_port_forwarding(
             Some(VpnProvider::ProtonVPN) => {
                 vopono_core::util::open_hosts(
                     &ns.name,
-                    &[vopono_core::network::port_forwarding::natpmpc::PROTONVPN_GATEWAY],
+                    &[vopono_core::config::providers::protonvpn::PROTONVPN_GATEWAY],
                     parsed_command.firewall,
                 )?;
                 Some(Box::new(Natpmpc::new(
@@ -1002,4 +1142,40 @@ fn provider_port_forwarding(
     });
 
     Ok(PortForwardingSetup { forwarder, status })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{launch_report_value, validate_host_forward_port};
+
+    #[test]
+    fn daemon_forwarding_rejects_privileged_host_ports() {
+        assert!(validate_host_forward_port(22, false).is_err());
+        assert!(validate_host_forward_port(1023, false).is_err());
+        assert!(validate_host_forward_port(1024, false).is_ok());
+        assert!(validate_host_forward_port(22, true).is_ok());
+    }
+
+    #[test]
+    fn launch_report_includes_open_and_host_forwarded_ports() {
+        let report = launch_report_value("vo_test_abc", 42, &[8080, 8443], &[9000], Some(51820));
+        assert_eq!(
+            report["version"],
+            serde_json::json!(crate::api::SCHEMA_VERSION)
+        );
+        assert_eq!(report["event"], "launched");
+        assert_eq!(report["namespace"], "vo_test_abc");
+        assert_eq!(report["pid"], 42);
+        assert_eq!(report["open_ports"], serde_json::json!([8080, 8443]));
+        assert_eq!(report["host_forwarded_ports"], serde_json::json!([9000]));
+        assert_eq!(report["forwarded_port"], 51820);
+    }
+
+    #[test]
+    fn launch_report_reports_absent_forwarding_as_null() {
+        let report = launch_report_value("vo_test_abc", 42, &[8080], &[], None);
+        assert_eq!(report["open_ports"], serde_json::json!([8080]));
+        assert_eq!(report["host_forwarded_ports"], serde_json::json!([]));
+        assert!(report["forwarded_port"].is_null());
+    }
 }

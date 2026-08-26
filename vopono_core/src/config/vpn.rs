@@ -6,25 +6,18 @@ use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::str::FromStr;
 use strum::IntoEnumIterator;
-use strum_macros::Display;
-use strum_macros::EnumIter;
+use strum_macros::{Display, EnumIter, FromRepr};
 
-#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize, EnumIter, Default)]
+#[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize, EnumIter, FromRepr, Default)]
+#[repr(usize)]
 pub enum OpenVpnProtocol {
     #[default]
     UDP,
     TCP,
-}
-
-impl OpenVpnProtocol {
-    pub fn index_to_variant(index: usize) -> Self {
-        Self::iter()
-            .nth(index)
-            .expect("Invalid index for OpenVPN Protocol enum")
-    }
 }
 
 impl ConfigurationChoice for OpenVpnProtocol {
@@ -135,8 +128,13 @@ pub fn verify_auth(
 
             // Write OpenVPN credentials file
             let (user, pass) = provider.prompt_for_auth(uiclient)?;
-            let mut outfile = File::create(provider.auth_file_path()?.unwrap())?;
-            write!(outfile, "{user}\n{pass}")?;
+            let contents = format!("{user}\n{pass}");
+            if !crate::util::write_file_as_config_owner(&auth_file, &contents, Some(0o600))? {
+                let mut outfile = crate::util::create_private_file(&auth_file)?;
+                write!(outfile, "{contents}")?;
+                // Credentials file: restrict to the owning user.
+                std::fs::set_permissions(&auth_file, std::fs::Permissions::from_mode(0o600))?;
+            }
 
             info!("Credentials written to: {}", auth_file.to_string_lossy());
             Ok(Some(auth_file))

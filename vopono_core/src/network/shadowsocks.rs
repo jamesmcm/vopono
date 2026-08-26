@@ -23,7 +23,9 @@ use std::str::FromStr;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Shadowsocks {
-    pid: u32,
+    pub(crate) pid: u32,
+    #[serde(skip)]
+    cleanup_enabled: bool,
 }
 
 impl Shadowsocks {
@@ -77,7 +79,10 @@ impl Shadowsocks {
         )
         .context("Failed to launch Shadowsocks - is shadowsocks-libev installed?")?;
 
-        Ok(Self { pid: handle.id() })
+        Ok(Self {
+            pid: handle.id(),
+            cleanup_enabled: true,
+        })
     }
 }
 
@@ -128,6 +133,9 @@ pub fn get_routes_from_config(path: &Path) -> anyhow::Result<Vec<IpAddr>> {
 
 impl Drop for Shadowsocks {
     fn drop(&mut self) {
+        if !self.cleanup_enabled {
+            return;
+        }
         match nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(self.pid as i32),
             nix::sys::signal::Signal::SIGKILL,
@@ -135,5 +143,11 @@ impl Drop for Shadowsocks {
             Ok(_) => debug!("Killed Shadowsocks (pid: {})", self.pid),
             Err(e) => error!("Failed to kill Shadowsocks (pid: {}): {:?}", self.pid, e),
         }
+    }
+}
+
+impl Shadowsocks {
+    pub(crate) fn set_cleanup_enabled(&mut self, enabled: bool) {
+        self.cleanup_enabled = enabled;
     }
 }

@@ -1,7 +1,7 @@
 use anyhow::bail;
 use clap::ValueEnum;
 use dialoguer::MultiSelect;
-use log::{error, info};
+use log::info;
 use vopono_core::config::providers::{UiClient, VpnProvider};
 use vopono_core::config::vpn::Protocol;
 use vopono_core::util::set_config_permissions;
@@ -62,22 +62,22 @@ pub fn synch(
             record_sync(&provider_to_record, Protocol::Wireguard)?;
         }
         Some(Protocol::AmneziaWG) => {
-            error!("vopono sync not supported for AmneziaWG protocol");
+            bail!("vopono sync not supported for AmneziaWG protocol");
         }
         Some(Protocol::OpenConnect) => {
-            error!("vopono sync not supported for OpenConnect protocol");
+            bail!("vopono sync not supported for OpenConnect protocol");
         }
         Some(Protocol::OpenFortiVpn) => {
-            error!("vopono sync not supported for OpenFortiVpn protocol");
+            bail!("vopono sync not supported for OpenFortiVpn protocol");
         }
         Some(Protocol::Ssh) => {
-            error!("vopono sync is not needed for SSH protocol");
+            bail!("vopono sync is not needed for SSH protocol");
         }
         Some(Protocol::Warp) => {
-            error!("vopono sync not supported for Cloudflare Warp protocol");
+            bail!("vopono sync not supported for Cloudflare Warp protocol");
         }
         Some(Protocol::None) => {
-            error!("vopono sync not supported for None protocol");
+            bail!("vopono sync not supported for None protocol");
         }
         // Sync OpenVPN first so credentials are cached for Wireguard to reuse
         None => {

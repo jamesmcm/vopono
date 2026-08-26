@@ -8,10 +8,9 @@ use crate::network::wireguard_config::{
     WireguardConfig, WireguardEndpoint, WireguardInterface, WireguardPeer,
 };
 use crate::util::delete_all_files_in_dir;
-use crate::util::wireguard::{WgKey, generate_keypair, generate_public_key};
+use crate::util::wireguard::{WgKey, generate_keypair, prompt_for_private_key};
 use ipnet::{IpNet, Ipv4Net};
 use log::info;
-use regex::Regex;
 use serde::Deserialize;
 use std::fmt::Display;
 use std::fs::create_dir_all;
@@ -19,19 +18,14 @@ use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
+use strum_macros::{EnumIter, EnumString, FromRepr};
 
-#[derive(EnumIter, PartialEq, Default)]
+#[derive(EnumIter, EnumString, FromRepr, PartialEq, Default)]
+#[repr(usize)]
 enum WgKeyChoice {
     #[default]
     NewKey,
     ExistingKey,
-}
-
-impl WgKeyChoice {
-    fn index_to_variant(index: usize) -> Self {
-        Self::iter().nth(index).expect("Invalid index")
-    }
 }
 
 impl Display for WgKeyChoice {
@@ -66,18 +60,13 @@ impl ConfigurationChoice for WgKeyChoice {
 // The IP address of the standard DNS server is 172.16.0.1.
 // The AntiTracker DNS address is 10.0.254.2.
 // The AntiTracker's Hardcore Mode DNS address is 10.0.254.3.
-#[derive(EnumIter, PartialEq, Default)]
+#[derive(EnumIter, EnumString, FromRepr, PartialEq, Default)]
+#[repr(usize)]
 enum DNSChoice {
     #[default]
     Standard,
     AntiTracker,
     AntiTrackerHardcore,
-}
-
-impl DNSChoice {
-    fn index_to_variant(index: usize) -> Self {
-        Self::iter().nth(index).expect("Invalid index")
-    }
 }
 
 impl Display for DNSChoice {
@@ -133,9 +122,9 @@ impl WireguardProvider for IVPN {
             relays.push(relay);
         }
 
-        let wg_key_choice = WgKeyChoice::index_to_variant(
-            uiclient.get_configuration_choice(&WgKeyChoice::default())?,
-        );
+        let wg_key_choice =
+            WgKeyChoice::from_repr(uiclient.get_configuration_choice(&WgKeyChoice::default())?)
+                .expect("Invalid index");
         let keypair: WgKey = if wg_key_choice == WgKeyChoice::ExistingKey {
             prompt_for_wg_key(uiclient)?
         } else {
@@ -166,7 +155,8 @@ impl WireguardProvider for IVPN {
         let ip_address = Ipv4Addr::from_str(ip_address.trim())?;
         let ipnet = IpNet::from(Ipv4Net::new(ip_address, 32)?);
         let dns_choice =
-            DNSChoice::index_to_variant(uiclient.get_configuration_choice(&DNSChoice::default())?);
+            DNSChoice::from_repr(uiclient.get_configuration_choice(&DNSChoice::default())?)
+                .expect("Invalid index");
         let dns = dns_choice.to_ipv4();
         let interface = WireguardInterface {
             private_key: keypair.private,
@@ -181,8 +171,6 @@ impl WireguardProvider for IVPN {
         let allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?];
 
         let code_map = crate::util::country_map::code_to_country_map();
-        // TODO: avoid hacky regex for TOML -> wireguard config conversion
-        let re = Regex::new(r"=\s\[(?P<value>[^\]]+)\]")?;
         for relay in relays.iter() {
             let wireguard_peer = WireguardPeer {
                 public_key: relay.pubkey.clone(),
@@ -205,14 +193,10 @@ impl WireguardProvider for IVPN {
 
             let path = wireguard_dir.join(format!("{country_name}-{country_code}-{city}.conf"));
 
-            let mut toml = toml::to_string(&wireguard_conf)?;
-            toml.retain(|c| c != '"');
-            let toml = toml.replace(", ", ",");
-            let toml = re.replace_all(&toml, "= $value").to_string();
-            // Create file, write TOML
+            // Create file, write WireGuard config
             {
-                let mut f = std::fs::File::create(path)?;
-                write!(f, "{toml}")?;
+                let mut f = crate::util::create_private_file(&path)?;
+                write!(f, "{wireguard_conf}")?;
             }
         }
 
@@ -237,29 +221,11 @@ fn prompt_for_wg_key(uiclient: &dyn UiClient) -> anyhow::Result<WgKey> {
         })),
     })?;
 
-    let pubkey_clone = public_key.clone();
-    let private_key = uiclient.get_input(Input {
-        prompt: format!("Private key for {}", public_key),
-        validator: Some(Box::new(
-            move |private_key: &String| -> Result<(), String> {
-                let private_key = private_key.trim();
-
-                if private_key.len() != 44 {
-                    return Err("Expected private key length of 44 characters".to_string());
-                }
-
-                match generate_public_key(private_key) {
-                    Ok(pubkey) => {
-                        if pubkey != pubkey_clone {
-                            return Err("Private key does not match public key".to_string());
-                        }
-                        Ok(())
-                    }
-                    Err(_) => Err("Failed to generate public key".to_string()),
-                }
-            },
-        )),
-    })?;
+    let private_key = prompt_for_private_key(
+        uiclient,
+        &public_key,
+        format!("Private key for {public_key}"),
+    )?;
 
     Ok(WgKey {
         public: public_key,

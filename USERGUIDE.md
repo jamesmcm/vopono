@@ -62,12 +62,32 @@ Note there is a known issue that when using tmux, etc. - sometimes the
 original shell will not recover correctly upon terminating the
 application run with daemon mode.
 
+#### Environment variables in daemon mode
+
+When `exec` is forwarded to the root daemon, your full environment is
+forwarded to the application, so daemon-launched apps behave like the
+sudo fallback path: `PATH`, `LANG`/locale, `SSH_AUTH_SOCK`, proxy
+variables, and desktop session variables (`DISPLAY`, `WAYLAND_DISPLAY`,
+`XAUTHORITY`, `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, etc.) all come from
+your shell session.
+
+The forwarded environment is only applied to the application process
+(which runs as the connecting user), never to the daemon's own
+execution, and vopono's namespace variables (`VOPONO_NS`, `VOPONO_NS_IP`,
+`VOPONO_HOST_IP`, `VOPONO_FORWARDED_PORT`, ...) are always set by the
+daemon afterwards. The daemon's own logs always go to `journalctl`
+regardless of `--silent`.
+
 ### Creating only Network Namespace
 
 You can run vopono to create only the network namespace using the
 `--create-netns-only` argument, the application related arguments are
 then ignored (pass anything as the application name). This can be useful
 for debugging connection issues.
+
+In daemon mode, `--create-netns-only` creates the namespace, prints its
+name to stdout, and returns immediately; the namespace is left running
+until you stop it with `vopono stop --namespace <name>`.
 
 This can also be used to launch an application without sudo via firejail
 - e.g. (where `none` is passed as the dummy application):
@@ -623,7 +643,11 @@ If running servers and daemons inside of vopono, you can you use the
 port will also be proxied to your host machine at the same port number.
 Note for same daemons you may need to use the `-k` keep-alive option in
 case the process ID changes (you will then need to manually kill the
-daemon after finishing).
+daemon after finishing). In daemon mode, `-k` leaves the namespace
+running after the application exits and `-f` starts the host->namespace
+proxy; stop it later with `vopono stop --namespace <name>`. For security,
+the system daemon only permits host forwarding on unprivileged ports
+(`1024` and above).
 
 If you need to allow multiple incoming connections to TCP ports inside the namespace, you can specify multiple `-f $PORT` arguments. For example if you wanted to allow ports 8080, 8081 and 8082:
 
@@ -1171,7 +1195,7 @@ prompt); otherwise vopono falls back to local execution. The preferred
 polling interface is `status --json`; its top-level `version` field is the
 schema version, and error documents carry a stable machine-readable `code`
 alongside the message. Namespace status includes provider-managed forwarding,
-local `open_ports`, and host `forwarded_ports`.
+local `open_ports`, and host-side `host_forwarded_ports`.
 
 `status` is the canonical aggregate snapshot: it includes daemon health,
 namespaces, applications, selected server metadata, and port state. The
