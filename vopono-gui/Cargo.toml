@@ -1,7 +1,7 @@
 [package]
 name = "vopono-gui"
 description = "Graphical frontend for vopono"
-version = "0.1.4"
+version = "1.0.1"
 edition = "2024"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 license = "GPL-3.0-or-later"

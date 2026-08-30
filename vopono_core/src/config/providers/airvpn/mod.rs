@@ -6,6 +6,7 @@ use crate::config::providers::{Input, UiClient};
 use crate::config::vpn::Protocol;
 use anyhow::Context;
 use serde::Deserialize;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 pub struct AirVPN {}
@@ -86,12 +87,18 @@ pub(super) fn fetch_servers(client: &reqwest::blocking::Client) -> anyhow::Resul
 /// Resolve the AirVPN API key from the environment or interactively.
 ///
 /// Shared by both config generators; `protocol_label` only customises the
-/// error message shown when no key can be obtained.
+/// error message shown when no key can be obtained. The resolved key is
+/// cached per process so a sync run covering both protocols prompts only
+/// once.
 pub(super) fn require_api_key(
     uiclient: &dyn UiClient,
     protocol_label: &str,
 ) -> anyhow::Result<String> {
-    std::env::var("AIRVPN_API_KEY")
+    static API_KEY: OnceLock<String> = OnceLock::new();
+    if let Some(key) = API_KEY.get() {
+        return Ok(key.clone());
+    }
+    let key = std::env::var("AIRVPN_API_KEY")
         .or_else(|_| {
             uiclient.get_input(Input {
                 prompt: "Enter your AirVPN API key (see https://airvpn.org/apisettings/ )"
@@ -109,7 +116,8 @@ pub(super) fn require_api_key(
             validate_api_key(&key)
                 .map_err(|error| anyhow::anyhow!("Invalid AirVPN API key: {error}"))?;
             Ok(key)
-        })
+        })?;
+    Ok(API_KEY.get_or_init(|| key).clone())
 }
 
 impl Provider for AirVPN {
