@@ -176,7 +176,10 @@ fn parse_success_response<T: DeserializeOwned>(
 }
 
 fn is_not_found_response(error: &anyhow::Error) -> bool {
-    error.to_string().to_ascii_lowercase().contains("no port forwardings found")
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("no port forwardings found")
 }
 
 impl AzireVpnPortForwarding {
