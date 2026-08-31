@@ -376,7 +376,7 @@ mod tests {
     fn not_found_response_can_be_treated_as_empty_list() {
         let err = parse_success_response::<ListResponse>(
             "list",
-            r#"{"status":"error","message":"Not found"}"#,
+            r#"{"status":"error","message":"No port forwardings found"}"#,
         )
         .unwrap_err();
 
