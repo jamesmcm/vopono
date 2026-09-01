@@ -84,6 +84,7 @@ pub struct ArgsConfig {
     pub group: Option<String>,
     pub working_directory: Option<String>,
     pub custom: Option<PathBuf>,
+    pub auth_user_pass: Option<PathBuf>,
     pub dns: Option<Vec<IpAddr>>,
     pub hosts: Option<Vec<String>>,
     pub open_hosts: Option<Vec<IpAddr>>,
@@ -120,6 +121,12 @@ impl ArgsConfig {
         // TODO: Automate field mapping with procedural macro over ExecCommand struct?
         let custom: Option<PathBuf> = command_else_config_option!(custom, command, config)
             .and_then(|p| {
+                shellexpand::full(&p.to_string_lossy())
+                    .ok()
+                    .and_then(|s| PathBuf::from_str(s.as_ref()).ok())
+            });
+        let auth_user_pass =
+            command_else_config_option!(auth_user_pass, command, config).and_then(|p| {
                 shellexpand::full(&p.to_string_lossy())
                     .ok()
                     .and_then(|s| PathBuf::from_str(s.as_ref()).ok())
@@ -358,6 +365,7 @@ impl ArgsConfig {
             group,
             working_directory,
             custom,
+            auth_user_pass,
             dns,
             hosts,
             open_hosts,
@@ -412,5 +420,73 @@ impl ArgsConfig {
             log::error!("{msg}");
             anyhow!(msg)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ArgsConfig;
+    use crate::args::{App, Command};
+    use clap::Parser;
+    use config::Config;
+    use std::path::Path;
+
+    fn custom_openvpn_command(auth_user_pass: Option<&str>) -> crate::args::ExecCommand {
+        let mut args = vec![
+            "vopono",
+            "exec",
+            "--custom",
+            "vpn.ovpn",
+            "--protocol",
+            "openvpn",
+            "--interface",
+            "lo",
+        ];
+        if let Some(auth_user_pass) = auth_user_pass {
+            args.extend(["--auth-user-pass", auth_user_pass]);
+        }
+        args.push("firefox");
+
+        let app = App::try_parse_from(args).unwrap();
+        let Command::Exec(command) = app.cmd.unwrap() else {
+            panic!("expected exec command");
+        };
+        command
+    }
+
+    fn config_with_auth_path(path: &str) -> Config {
+        Config::builder()
+            .set_override("auth-user-pass", path)
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn cli_auth_user_pass_overrides_config_file() {
+        let args = ArgsConfig::get_cli_or_config_args(
+            custom_openvpn_command(Some("cli-auth.txt")),
+            config_with_auth_path("config-auth.txt"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            args.auth_user_pass,
+            Some(Path::new("cli-auth.txt").to_path_buf())
+        );
+    }
+
+    #[test]
+    fn config_file_provides_auth_user_pass_when_cli_omits_it() {
+        let args = ArgsConfig::get_cli_or_config_args(
+            custom_openvpn_command(None),
+            config_with_auth_path("config-auth.txt"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            args.auth_user_pass,
+            Some(Path::new("config-auth.txt").to_path_buf())
+        );
     }
 }

@@ -798,7 +798,11 @@ fn run_protocol_in_netns(
             }
         }
         Protocol::OpenVpn => {
-            let auth_file = if parsed_command.provider != VpnProvider::Custom {
+            // An explicit auth file is passed after --config, so it overrides
+            // any auth-user-pass directive contained in the OpenVPN profile.
+            let auth_file = if let Some(auth_file) = parsed_command.auth_user_pass.clone() {
+                Some(auth_file)
+            } else if parsed_command.provider != VpnProvider::Custom {
                 verify_auth(
                     parsed_command.provider.get_dyn_openvpn_provider()?,
                     uiclient,
