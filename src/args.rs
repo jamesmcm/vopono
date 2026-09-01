@@ -300,6 +300,10 @@ pub struct ExecCommand {
     #[clap(long = "custom")]
     pub custom: Option<PathBuf>,
 
+    /// OpenVPN username/password file (overrides provider and config-file credentials)
+    #[clap(long = "auth-user-pass")]
+    pub auth_user_pass: Option<PathBuf>,
+
     /// DNS Server (will override provider's DNS server)
     #[clap(long = "dns", short = 'd')]
     pub dns: Option<Vec<IpAddr>>,
@@ -368,7 +372,14 @@ pub struct ExecCommand {
     /// options are ignored.
     #[clap(
         long = "existing-netns",
-        conflicts_with_all = &["provider", "protocol", "server", "custom", "custom_netns_name"]
+        conflicts_with_all = &[
+            "provider",
+            "protocol",
+            "server",
+            "custom",
+            "auth_user_pass",
+            "custom_netns_name"
+        ]
     )]
     pub existing_netns: Option<String>,
 
@@ -573,6 +584,7 @@ fn parse_hosts_or_ips(arg: &str) -> anyhow::Result<IpAddr> {
 mod tests {
     use super::{App, Command, DaemonSubcommand, ListType};
     use clap::Parser;
+    use std::path::PathBuf;
     use vopono_core::config::vpn::Protocol;
 
     #[test]
@@ -602,6 +614,27 @@ mod tests {
         assert_eq!(command.ssh_proxy_port, Some(9080));
         assert_eq!(command.ssh_user.as_deref(), Some("gopostal"));
         assert_eq!(command.ssh_port, Some(2222));
+    }
+
+    #[test]
+    fn parses_openvpn_auth_user_pass_option() {
+        let app = App::try_parse_from([
+            "vopono",
+            "exec",
+            "--custom",
+            "vpn.ovpn",
+            "--protocol",
+            "openvpn",
+            "--auth-user-pass",
+            "auth.txt",
+            "firefox",
+        ])
+        .unwrap();
+
+        let Command::Exec(command) = app.cmd.unwrap() else {
+            panic!("expected exec command");
+        };
+        assert_eq!(command.auth_user_pass, Some(PathBuf::from("auth.txt")));
     }
 
     #[test]
@@ -651,6 +684,7 @@ mod tests {
             vec!["--protocol", "wireguard"],
             vec!["--server", "se"],
             vec!["--custom", "/tmp/foo.conf"],
+            vec!["--auth-user-pass", "/tmp/auth.txt"],
             vec!["--custom-netns-name", "vo_x"],
         ] {
             let mut argv = vec!["vopono", "exec", "--existing-netns", "vo_ar_romania"];
