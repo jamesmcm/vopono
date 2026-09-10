@@ -67,7 +67,12 @@ impl OpenVpn {
         File::create(&log_file_path)?;
 
         let config_file_path = config_file.canonicalize().context("Invalid path given")?;
-        set_config_permissions()?;
+        // Daemon model creates each config object with the correct owner/mode
+        // up front; the recursive walk runs dropped-privilege and cannot
+        // repair root-owned trees, so it must not run here (EPERM, #382).
+        if !crate::util::is_daemon_mode() {
+            set_config_permissions()?;
+        }
 
         // Check config file for up and down script entries and warn on their presence
         warn_on_scripts_config(&config_file_path)?;

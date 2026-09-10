@@ -252,7 +252,19 @@ fn setup_namespace(
     verbose: bool,
     auto_sync_if_missing: bool,
 ) -> anyhow::Result<NamespaceConfig> {
-    create_dir_all(vopono_dir()?)?;
+    // In daemon mode this runs as root: create the client config dir via the
+    // dropped-privilege helper so it stays user-owned. A plain
+    // create_dir_all() here would leave a root-owned dir that the
+    // unprivileged permission helper later cannot chmod (EPERM, #382).
+    {
+        let dir = vopono_dir()?;
+        if !vopono_core::util::ensure_dir_as_config_owner(&dir, Some(0o700))? {
+            if vopono_core::util::is_daemon_mode() {
+                anyhow::bail!("daemon config owner unavailable");
+            }
+            create_dir_all(&dir)?;
+        }
+    }
 
     // Attach mode (`--existing-netns <name>`): reuse a running namespace
     // as-is. The connection settings are neutralized here, at the CLI layer,

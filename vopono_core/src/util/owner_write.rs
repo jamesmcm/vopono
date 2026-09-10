@@ -133,7 +133,8 @@ pub fn perform_owner_write(request: &OwnerWriteRequest) -> anyhow::Result<()> {
         } => {
             for entry in walkdir::WalkDir::new(path) {
                 let entry = entry.with_context(|| format!("Failed to walk {}", path.display()))?;
-                let metadata = std::fs::symlink_metadata(entry.path())?;
+                let metadata = std::fs::symlink_metadata(entry.path())
+                    .with_context(|| format!("Failed to stat {}", entry.path().display()))?;
                 if metadata.file_type().is_symlink() {
                     continue;
                 }
@@ -142,7 +143,10 @@ pub fn perform_owner_write(request: &OwnerWriteRequest) -> anyhow::Result<()> {
                 } else {
                     *file_mode
                 };
-                std::fs::set_permissions(entry.path(), PermissionsExt::from_mode(mode))?;
+                std::fs::set_permissions(entry.path(), PermissionsExt::from_mode(mode))
+                    .with_context(|| {
+                        format!("Failed to set permissions on {}", entry.path().display())
+                    })?;
             }
         }
     }
