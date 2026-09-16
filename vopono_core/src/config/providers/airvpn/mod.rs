@@ -157,20 +157,20 @@ mod tests {
             "ca-Custom.ovpn"
         );
     }
-    
+
     #[test]
     fn api_key_validation_accepts_supported_lengths() {
         assert!(validate_api_key(&"a".repeat(40)).is_ok());
         assert!(validate_api_key(&"a".repeat(64)).is_ok());
     }
-    
+
     #[test]
     fn api_key_validation_rejects_invalid_keys() {
         assert!(validate_api_key(&"a".repeat(39)).is_err());
         assert!(validate_api_key(&"a".repeat(41)).is_err());
         assert!(validate_api_key(&"a".repeat(63)).is_err());
         assert!(validate_api_key(&"a".repeat(65)).is_err());
-    
+
         assert!(validate_api_key(&"A".repeat(40)).is_err());
         assert!(validate_api_key(&"g".repeat(40)).is_err());
     }
