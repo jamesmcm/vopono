@@ -24,14 +24,14 @@ pub(super) struct AirServer {
 
 pub(super) fn validate_api_key(value: &str) -> Result<(), String> {
     let key = value.trim().as_bytes();
-    if key.len() == 40
+    if matches!(key.len(), 40 | 64)
         && key
             .iter()
             .all(|character| character.is_ascii_digit() || (b'a'..=b'f').contains(character))
     {
         Ok(())
     } else {
-        Err("AirVPN API keys must be 40 lower-case hexadecimal characters".to_string())
+        Err("AirVPN API keys must be 40 or 64 lower-case hexadecimal characters".to_string())
     }
 }
 
@@ -136,7 +136,7 @@ impl Provider for AirVPN {
 
 #[cfg(test)]
 mod tests {
-    use super::generator_filename;
+    use super::{generator_filename, validate_api_key};
 
     #[test]
     fn generator_names_are_reduced_to_stable_config_ids() {
@@ -156,5 +156,22 @@ mod tests {
             generator_filename("ca-Custom.ovpn", "ovpn"),
             "ca-Custom.ovpn"
         );
+    }
+
+    #[test]
+    fn api_key_validation_accepts_supported_lengths() {
+        assert!(validate_api_key(&"a".repeat(40)).is_ok());
+        assert!(validate_api_key(&"a".repeat(64)).is_ok());
+    }
+
+    #[test]
+    fn api_key_validation_rejects_invalid_keys() {
+        assert!(validate_api_key(&"a".repeat(39)).is_err());
+        assert!(validate_api_key(&"a".repeat(41)).is_err());
+        assert!(validate_api_key(&"a".repeat(63)).is_err());
+        assert!(validate_api_key(&"a".repeat(65)).is_err());
+
+        assert!(validate_api_key(&"A".repeat(40)).is_err());
+        assert!(validate_api_key(&"g".repeat(40)).is_err());
     }
 }
