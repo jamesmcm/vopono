@@ -473,7 +473,17 @@ fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonFo
     // The daemon only applies these to the child process (which runs as the
     // authenticated connecting user) and re-applies its own VOPONO_* variables
     // afterwards, so nothing here affects the daemon's own execution.
-    let fwd_env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    let mut fwd_env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    // The daemon cannot ask pactl about the authenticated user's session:
+    // running it there would inspect the daemon's (root) audio session. Ask
+    // in the client context and forward the effective PulseAudio endpoint,
+    // including PipeWire's PulseAudio compatibility server, when the client
+    // has not explicitly set PULSE_SERVER.
+    if !fwd_env.contains_key("PULSE_SERVER")
+        && let Ok(server) = vopono_core::util::pulseaudio::get_pulseaudio_server()
+    {
+        fwd_env.insert("PULSE_SERVER".to_string(), server);
+    }
     let request = daemon::DaemonRequest::Execute {
         // Encode `ExecCommand` as JSON bytes carried inside the wincode daemon frame.
         cmd: serde_json::to_vec(&daemon_cmd)?,

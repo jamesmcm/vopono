@@ -92,22 +92,24 @@ pub fn execute_as_daemon_with_stdio(
         host_env_vars,
     } = setup_namespace(command, &uiclient, true, false)?; // daemon: do not auto-sync
 
-    // In daemon mode, ensure PULSE_SERVER points to the connecting user's runtime
-    // so apps can talk to the host Pulse/pipewire server.
+    // Do not pass through an audio endpoint discovered in the daemon's root
+    // session. The client forwards its effective PULSE_SERVER when pactl can
+    // identify one. Otherwise libpulse uses the connecting user's default
+    // socket based on XDG_RUNTIME_DIR.
     let mut host_env_vars = host_env_vars;
+    host_env_vars.remove("PULSE_SERVER");
     if let Some(ref user_name) = parsed_command.user
         && let Some(user) = nix::unistd::User::from_name(user_name)?
     {
-        let pulse = format!("unix:/run/user/{}/pulse/native", user.uid.as_raw());
-        host_env_vars.insert("PULSE_SERVER".to_string(), pulse);
-        // Ensure XDG_RUNTIME_DIR points at the connecting user's runtime dir
+        // PipeWire and the default PulseAudio socket live in the user's
+        // runtime directory. The client-provided XDG_RUNTIME_DIR is merged
+        // below when present; this is the standard systemd fallback.
         host_env_vars
             .entry("XDG_RUNTIME_DIR".to_string())
             .or_insert_with(|| format!("/run/user/{}", user.uid.as_raw()));
     }
 
-    // Merge all client-forwarded environment variables. Client side already whitelists
-    // which keys are forwarded; here we simply apply them.
+    // Merge all client-forwarded environment variables into the child setup.
     if let Some(fwd) = forwarded_env.as_ref() {
         for (k, v) in fwd {
             host_env_vars.insert(k.clone(), v.clone());

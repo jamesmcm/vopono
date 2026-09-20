@@ -415,6 +415,19 @@ impl ApplicationWrapper {
             }
         }
 
+        if crate::util::is_daemon_mode() {
+            // A system daemon may have its own PULSE_*/PIPEWIRE_* settings.
+            // Do not let those leak into another user's application when that
+            // user has no value for the same key; client values are applied
+            // immediately afterwards by set_env_vars.
+            for key in std::env::vars()
+                .map(|(key, _)| key)
+                .filter(|key| key.starts_with("PULSE_") || key.starts_with("PIPEWIRE_"))
+            {
+                handle.env_remove(key);
+            }
+        }
+
         set_env_vars(netns, forwarder, &mut handle, host_env_vars);
 
         if silent {
