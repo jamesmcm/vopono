@@ -196,6 +196,7 @@ impl VpnProvider {
             Self::AzireVPN => Ok(Box::new(azirevpn::AzireVPN {})),
             Self::AirVPN => Ok(Box::new(airvpn::AirVPN {})),
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
+            Self::NordVPN => Ok(Box::new(nordvpn::NordVPN {})),
             Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
             Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
             Self::None => unimplemented!("None provider runs no protocol"),

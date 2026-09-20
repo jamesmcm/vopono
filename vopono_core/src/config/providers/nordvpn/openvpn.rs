@@ -1,6 +1,6 @@
 use super::NordVPN;
 use super::{ConfigurationChoice, OpenVpnProvider};
-use crate::config::providers::{Input, Password, UiClient};
+use crate::config::providers::UiClient;
 use crate::config::vpn::OpenVpnProtocol;
 use crate::util::delete_all_files_in_dir;
 use log::debug;
@@ -24,16 +24,8 @@ impl OpenVpnProvider for NordVPN {
     }
 
     fn prompt_for_auth(&self, uiclient: &dyn UiClient) -> anyhow::Result<(String, String)> {
-        let username = uiclient.get_input(Input {
-            prompt: "NordVPN username".to_string(),
-            validator: None,
-        })?;
-
-        let password = uiclient.get_password(Password {
-            prompt: "Password".to_string(),
-            confirm: true,
-        })?;
-        Ok((username, password))
+        let credentials = self.service_credentials(uiclient)?;
+        Ok((credentials.username, credentials.password))
     }
 
     fn auth_file_path(&self) -> anyhow::Result<Option<PathBuf>> {
@@ -43,8 +35,6 @@ impl OpenVpnProvider for NordVPN {
     fn create_openvpn_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
         let openvpn_dir = self.openvpn_dir()?;
         let country_map = crate::util::country_map::code_to_country_map();
-        create_dir_all(&openvpn_dir)?;
-        delete_all_files_in_dir(&openvpn_dir)?;
         let url = "https://downloads.nordcdn.com/configs/archives/servers/ovpn.zip";
         let config_choice =
             ConfigType::from_repr(uiclient.get_configuration_choice(&ConfigType::default())?)
@@ -55,6 +45,9 @@ impl OpenVpnProvider for NordVPN {
             OpenVpnProtocol::TCP => "ovpn_tcp",
             OpenVpnProtocol::UDP => "ovpn_udp",
         };
+        let (user, pass) = self.prompt_for_auth(uiclient)?;
+        create_dir_all(&openvpn_dir)?;
+        delete_all_files_in_dir(&openvpn_dir)?;
         let server_regex = Regex::new(r"([a-z]+)(?:-(onion|[a-z]+))?([0-9]+)").unwrap();
         for i in 0..zip.len() {
             let mut file_contents: Vec<u8> = Vec::with_capacity(2048);
@@ -127,7 +120,6 @@ impl OpenVpnProvider for NordVPN {
         }
 
         // Write OpenVPN credentials file
-        let (user, pass) = self.prompt_for_auth(uiclient)?;
         if let Some(auth_file) = self.auth_file_path()? {
             let mut outfile = crate::util::create_private_file(&auth_file)?;
             write!(outfile, "{user}\n{pass}")?;

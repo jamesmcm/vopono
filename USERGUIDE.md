@@ -1158,7 +1158,11 @@ Note [iVPN no longer supports port forwarding](https://www.ivpn.net/blog/gradual
 
 ### NordVPN
 
-Starting 27 June 2023, the required user credentials are no longer your NordVPN login details but need to be generated in the user control panel, under Services → NordVPN. Scroll down and locate the Manual Setup tab, then click on Set up NordVPN manually and follow instructions. Copy your service credentials and re-sync NordVPN configuration inside Vopono.
+Generate a NordVPN access token from Nord Account as described in [NordVPN's token login guide](https://support.nordvpn.com/hc/en-us/articles/20286980309265-How-to-log-in-to-NordVPN-without-a-GUI-using-a-token), then run `vopono sync nordvpn`. vopono asks for the token without displaying it and exchanges it for the service credentials used by OpenVPN and the private key used by NordLynx (WireGuard). When syncing both protocols, enter the token once.
+
+You can also set `NORDVPN_ACCESS_TOKEN` for non-interactive sync. Keep this account token private; it is not the same as the OpenVPN service password.
+
+The generated configurations cover NordVPN's standard servers. vopono does not support NordVPN's Dedicated Server add-on or its port-forwarding rules. The `--open-ports` option only opens ports in the vopono namespace firewall; it does not request an inbound port from NordVPN.
 
 ### AzireVPN
 
