@@ -69,7 +69,11 @@ forwarded to the application, so daemon-launched apps behave like the
 sudo fallback path: `PATH`, `LANG`/locale, `SSH_AUTH_SOCK`, proxy
 variables, and desktop session variables (`DISPLAY`, `WAYLAND_DISPLAY`,
 `XAUTHORITY`, `XDG_RUNTIME_DIR`, `XDG_CONFIG_HOME`, etc.) all come from
-your shell session.
+your shell session. PipeWire clients use the forwarded runtime settings
+(`XDG_RUNTIME_DIR`, `PIPEWIRE_RUNTIME_DIR`, and `PIPEWIRE_REMOTE` when set).
+For PulseAudio clients, vopono forwards an explicit `PULSE_SERVER` or detects
+the client's active server with `pactl`; otherwise the normal per-user socket
+is used under `XDG_RUNTIME_DIR`.
 
 The forwarded environment is only applied to the application process
 (which runs as the connecting user), never to the daemon's own
