@@ -442,6 +442,36 @@ options.
 Note that ports for forwarding must also be added in [the client area webpage](https://airvpn.org/ports/), 
 and it is also possible to configure the VPN tunnel [DNS settings there](https://airvpn.org/dns/).
 
+#### Optional OpenVPN 3 Core backend
+
+OpenVPN 2 remains the default. To enable the optional OpenVPN 3 backend,
+install vopono with the `openvpn3` feature. Cargo installs both the vopono
+command and its feature-gated OpenVPN 3 helper executable from the same package:
+
+```bash
+$ cargo install vopono --features openvpn3
+```
+
+From a source checkout, run `VOPONO_OPENVPN3=1 ./install.sh` instead.
+Building the OpenVPN 3 helper builds OpenVPN 3 Core from source and requires
+Rust 1.88 or newer, a C++17 compiler, CMake, and Clang/libclang.
+
+Select the backend for one command with:
+
+```bash
+$ vopono exec --custom ./profile.ovpn --openvpn-backend openvpn3 firefox
+```
+
+Or set `openvpn_backend = "openvpn3"` in `~/.config/vopono/config.toml`.
+The helper runs inside the target namespace, receives credentials over an
+inherited Unix socketpair, and reports connection, DNS, and failure events
+back to vopono. The helper remains a separate process even though Cargo ships
+both executables in the same package. The OpenVPN 3 profile parser supports
+fewer OpenVPN 2 directives;
+profiles that depend on scripts or legacy options may need to keep using the
+default backend. Password-protected profiles need a file-based
+`auth-user-pass` directive or the `--auth-user-pass` option.
+
 #### Connection / hostname resolution issues
 
 If you face issues with OpenVPN resolving the remote host, try generating the VPN provider config files with IP addresses instead.

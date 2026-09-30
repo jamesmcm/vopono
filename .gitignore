@@ -1,4 +1,5 @@
 /target
+/openvpn3-helper/target
 /vopono-gui/target
 dialoguer
 test.sh

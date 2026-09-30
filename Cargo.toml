@@ -1,7 +1,7 @@
 [package]
 name = "vopono"
 description = "Launch applications via VPN tunnels using temporary network namespaces"
-version = "1.0.2"
+version = "1.0.3"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2024"
 license = "GPL-3.0-or-later"
@@ -14,6 +14,16 @@ keywords = ["vopono", "vpn", "wireguard", "openvpn", "netns"]
 members = [".", "vopono_core"]
 default-members = ["."]
 exclude = ["vopono-gui"]
+
+[[bin]]
+name = "vopono-openvpn3-helper"
+path = "openvpn3-helper/src/main.rs"
+required-features = ["openvpn3"]
+
+[features]
+default = []
+# Enables the OpenVPN 3 backend and installs its isolated helper executable.
+openvpn3 = ["vopono_core/openvpn3", "dep:openvpn-connect", "dep:tokio"]
 
 [dependencies]
 vopono_core = { path = "vopono_core" }
@@ -36,6 +46,8 @@ shellexpand = { version = "3", features = ["full"] }
 interprocess = "2"
 wincode = { version = "0.6", features = ["derive", "std"] }
 tempfile = "3"
+openvpn-connect = { version = "=0.1.2", features = ["vendor"], optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time", "sync"], optional = true }
 
 [package.metadata.deb]
 maintainer = "James McMurray <jamesmcm03@gmail.com>"

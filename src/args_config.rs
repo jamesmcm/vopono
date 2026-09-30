@@ -6,7 +6,10 @@ use anyhow::anyhow;
 use config::Config;
 use log::warn;
 use vopono_core::{
-    config::{providers::VpnProvider, vpn::Protocol},
+    config::{
+        providers::VpnProvider,
+        vpn::{OpenVpnBackend, Protocol},
+    },
     network::{
         firewall::Firewall,
         network_interface::{NetworkInterface, get_active_interfaces, interface_has_default_route},
@@ -85,6 +88,7 @@ pub struct ArgsConfig {
     pub working_directory: Option<String>,
     pub custom: Option<PathBuf>,
     pub auth_user_pass: Option<PathBuf>,
+    pub openvpn_backend: OpenVpnBackend,
     pub dns: Option<Vec<IpAddr>>,
     pub hosts: Option<Vec<String>>,
     pub open_hosts: Option<Vec<IpAddr>>,
@@ -304,6 +308,26 @@ impl ArgsConfig {
                     .and_then(|s| PathBuf::from_str(s.as_ref()).ok())
             });
 
+        #[cfg(feature = "openvpn3")]
+        let openvpn_backend = command_else_config_option_variant!(openvpn_backend, command, config)
+            .unwrap_or_default();
+        #[cfg(not(feature = "openvpn3"))]
+        let openvpn_backend = config
+            .get::<OpenVpnBackend>("openvpn_backend")
+            .or_else(|_| config.get("openvpn-backend"))
+            .unwrap_or_default();
+
+        #[cfg(not(feature = "openvpn3"))]
+        if openvpn_backend == OpenVpnBackend::OpenVpn3 {
+            error_and_bail!(
+                "OpenVPN 3 support is disabled in this vopono build; install or rebuild vopono with the `openvpn3` feature"
+            );
+        }
+
+        if openvpn_backend == OpenVpnBackend::OpenVpn3 && protocol != Protocol::OpenVpn {
+            error_and_bail!("The OpenVPN 3 backend can only be used with the OpenVPN protocol");
+        }
+
         if (trojan_host.is_some() || trojan_config.is_some()) && protocol != Protocol::Wireguard {
             error_and_bail!("Trojan is currently only supported for Wireguard forwarding");
         }
@@ -366,6 +390,7 @@ impl ArgsConfig {
             working_directory,
             custom,
             auth_user_pass,
+            openvpn_backend,
             dns,
             hosts,
             open_hosts,

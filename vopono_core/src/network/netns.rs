@@ -14,7 +14,7 @@ use super::veth_pair::VethPair;
 use super::warp::Warp;
 use super::wireguard::Wireguard;
 use crate::config::providers::{UiClient, VpnProvider};
-use crate::config::vpn::Protocol;
+use crate::config::vpn::{OpenVpnBackend, Protocol};
 use crate::network::host_masquerade::FirewallException;
 use crate::network::wireguard_config::WireguardPeer;
 use crate::util::{
@@ -30,7 +30,9 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::net::IpAddr;
+use std::os::fd::RawFd;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -576,6 +578,31 @@ impl ManagedNamespaceGuard {
         capture_input: bool,
         set_dir: Option<PathBuf>,
     ) -> anyhow::Result<std::process::Child> {
+        Self::exec_no_block_with_fds(
+            netns_name,
+            command,
+            user,
+            group,
+            silent,
+            capture_output,
+            capture_input,
+            set_dir,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn exec_no_block_with_fds(
+        netns_name: &str,
+        command: &[&str],
+        user: Option<String>,
+        group: Option<String>,
+        silent: bool,
+        capture_output: bool,
+        capture_input: bool,
+        set_dir: Option<PathBuf>,
+        inherited_fds: &[RawFd],
+    ) -> anyhow::Result<std::process::Child> {
         let mut handle = Command::new("ip");
         handle.args(["netns", "exec", netns_name]);
         if let Some(cdir) = set_dir {
@@ -619,6 +646,27 @@ impl ManagedNamespaceGuard {
             sudo_string.unwrap_or_else(|| String::from("")),
             command.join(" ")
         );
+
+        if !inherited_fds.is_empty() {
+            let inherited_fds = inherited_fds.to_vec();
+            // Keep the passed socket descriptors open through `ip netns exec`
+            // so the helper receives the same anonymous Unix socket endpoint.
+            unsafe {
+                handle.pre_exec(move || {
+                    for fd in &inherited_fds {
+                        let flags = libc::fcntl(*fd, libc::F_GETFD);
+                        if flags == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        if libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                    }
+                    Ok(())
+                });
+            }
+        }
+
         let handle = handle.args(command).spawn()?;
         Ok(handle)
     }
@@ -900,7 +948,7 @@ impl ManagedNamespaceGuard {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn run_openvpn(
+    pub fn run_openvpn_with_backend(
         &mut self,
         config_file: PathBuf,
         auth_file: Option<PathBuf>,
@@ -911,8 +959,9 @@ impl ManagedNamespaceGuard {
         firewall: Firewall,
         disable_ipv6: bool,
         verbose: bool,
+        backend: OpenVpnBackend,
     ) -> anyhow::Result<()> {
-        self.openvpn = Some(OpenVpn::run(
+        self.openvpn = Some(OpenVpn::run_with_backend(
             self,
             config_file,
             auth_file,
@@ -923,6 +972,7 @@ impl ManagedNamespaceGuard {
             firewall,
             disable_ipv6,
             verbose,
+            backend,
         )?);
         Ok(())
     }

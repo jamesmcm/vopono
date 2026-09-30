@@ -59,6 +59,19 @@ impl Display for OpenVpnProtocol {
     }
 }
 
+/// OpenVPN implementation selected for a session.
+///
+/// OpenVPN 2 remains the default. OpenVPN 3 is an optional backend that runs
+/// the Core bindings in a short-lived helper process inside the namespace.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Display, EnumIter, Default)]
+#[serde(rename_all = "lowercase")]
+#[strum(serialize_all = "lowercase")]
+pub enum OpenVpnBackend {
+    #[default]
+    OpenVpn2,
+    OpenVpn3,
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, Clone, Display, EnumIter)]
 pub enum Protocol {
     OpenVpn,
@@ -139,5 +152,24 @@ pub fn verify_auth(
             info!("Credentials written to: {}", auth_file.to_string_lossy());
             Ok(Some(auth_file))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OpenVpnBackend;
+
+    #[test]
+    fn openvpn_backend_identifiers_match_cli_and_serde_values() {
+        assert_eq!(OpenVpnBackend::OpenVpn2.to_string(), "openvpn2");
+        assert_eq!(OpenVpnBackend::OpenVpn3.to_string(), "openvpn3");
+        assert_eq!(
+            serde_json::to_string(&OpenVpnBackend::OpenVpn2).unwrap(),
+            "\"openvpn2\""
+        );
+        assert_eq!(
+            serde_json::from_str::<OpenVpnBackend>("\"openvpn3\"").unwrap(),
+            OpenVpnBackend::OpenVpn3
+        );
     }
 }

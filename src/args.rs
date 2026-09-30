@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use strum::IntoEnumIterator;
 use vopono_core::config::providers::VpnProvider;
+#[cfg(feature = "openvpn3")]
+use vopono_core::config::vpn::OpenVpnBackend;
 use vopono_core::config::vpn::Protocol;
 use vopono_core::network::firewall::Firewall;
 use vopono_core::network::network_interface::NetworkInterface;
@@ -303,6 +305,11 @@ pub struct ExecCommand {
     /// OpenVPN username/password file (overrides provider and config-file credentials)
     #[clap(long = "auth-user-pass")]
     pub auth_user_pass: Option<PathBuf>,
+
+    /// OpenVPN implementation to use (OpenVPN 3 requires the optional helper)
+    #[cfg(feature = "openvpn3")]
+    #[clap(value_enum, long = "openvpn-backend", ignore_case = true)]
+    pub openvpn_backend: Option<WrappedArg<OpenVpnBackend>>,
 
     /// DNS Server (will override provider's DNS server)
     #[clap(long = "dns", short = 'd')]
