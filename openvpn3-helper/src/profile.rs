@@ -25,21 +25,30 @@ pub(super) fn has_client_certificate_material(profile: &str) -> bool {
     false
 }
 
-pub(super) fn adapt_for_openvpn3(profile: &str) -> (String, bool) {
-    if !has_directive(profile, "remote") {
-        return (profile.to_string(), false);
-    }
+pub(super) struct OpenVpn3ProfileAdjustments {
+    pub(super) removed_ping_timer_rem: bool,
+    pub(super) removed_auth_nocache: bool,
+}
 
+pub(super) fn adapt_for_openvpn3(profile: &str) -> (String, OpenVpn3ProfileAdjustments) {
+    let has_remote = has_directive(profile, "remote");
     let mut adapted = String::with_capacity(profile.len());
     let mut inline_data_block = None;
-    let mut removed_ping_timer_rem = false;
+    let mut adjustments = OpenVpn3ProfileAdjustments {
+        removed_ping_timer_rem: false,
+        removed_auth_nocache: false,
+    };
     for line in profile.split_inclusive('\n') {
         if let Some(ProfileLine::Directive(option)) =
             parse_profile_line(line, &mut inline_data_block)
         {
             let directive = option.split_whitespace().next().unwrap_or_default();
-            if directive.eq_ignore_ascii_case("ping-timer-rem") {
-                removed_ping_timer_rem = true;
+            if directive.eq_ignore_ascii_case("auth-nocache") {
+                adjustments.removed_auth_nocache = true;
+                continue;
+            }
+            if has_remote && directive.eq_ignore_ascii_case("ping-timer-rem") {
+                adjustments.removed_ping_timer_rem = true;
                 continue;
             }
         }
@@ -47,7 +56,7 @@ pub(super) fn adapt_for_openvpn3(profile: &str) -> (String, bool) {
         adapted.push_str(line);
     }
 
-    (adapted, removed_ping_timer_rem)
+    (adapted, adjustments)
 }
 
 fn has_directive(profile: &str, wanted: &str) -> bool {
@@ -160,9 +169,9 @@ mod tests {
     #[test]
     fn strips_ping_timer_rem_when_a_remote_is_configured() {
         let profile = "client\nremote vpn.example 1194\nping-timer-rem\nresolv-retry infinite\n";
-        let (adapted, removed) = adapt_for_openvpn3(profile);
+        let (adapted, adjustments) = adapt_for_openvpn3(profile);
 
-        assert!(removed);
+        assert!(adjustments.removed_ping_timer_rem);
         assert!(adapted.contains("remote vpn.example 1194\n"));
         assert!(!adapted.lines().any(|line| line.trim() == "ping-timer-rem"));
         assert!(adapted.contains("resolv-retry infinite\n"));
@@ -171,9 +180,9 @@ mod tests {
     #[test]
     fn keeps_ping_timer_rem_without_an_explicit_remote() {
         let profile = "client\nping-timer-rem\n";
-        let (adapted, removed) = adapt_for_openvpn3(profile);
+        let (adapted, adjustments) = adapt_for_openvpn3(profile);
 
-        assert!(!removed);
+        assert!(!adjustments.removed_ping_timer_rem);
         assert_eq!(adapted, profile);
     }
 
@@ -181,9 +190,9 @@ mod tests {
     fn does_not_strip_option_text_from_inline_data_blocks() {
         let profile =
             "client\nremote vpn.example 1194\n<ca>\nping-timer-rem\n</ca>\nping-timer-rem\n";
-        let (adapted, removed) = adapt_for_openvpn3(profile);
+        let (adapted, adjustments) = adapt_for_openvpn3(profile);
 
-        assert!(removed);
+        assert!(adjustments.removed_ping_timer_rem);
         assert!(adapted.contains("<ca>\nping-timer-rem\n</ca>\n"));
         assert_eq!(
             adapted

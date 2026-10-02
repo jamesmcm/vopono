@@ -146,11 +146,11 @@ impl HelperProcess {
             profile_content
                 .push_str("\npull-filter ignore ifconfig-ipv6\npull-filter ignore route-ipv6\n");
         }
-        let (profile_content, removed_ping_timer_rem) = adapt_for_openvpn3(&profile_content);
-        if removed_ping_timer_rem {
+        let (mut profile_content, adjustments) = adapt_for_openvpn3(&profile_content);
+        if adjustments.removed_ping_timer_rem {
             Self::write_message(
-            writer,
-            &HelperMessage::Event {
+                writer,
+                &HelperMessage::Event {
                 name: "OPTION_ADAPTED".to_string(),
                 info: "Removed ping-timer-rem: it only affects listen-mode profiles without an explicit remote".to_string(),
                 error: false,
@@ -160,6 +160,32 @@ impl HelperProcess {
         .await
         .context("Reporting an OpenVPN 3 profile compatibility adjustment")?;
         }
+        let auth_nocache_notice = if adjustments.removed_auth_nocache {
+            "Removed auth-nocache from the profile and ignored server-pushed auth-nocache so credentials remain available for reconnects"
+        } else {
+            "Configured OpenVPN 3 to ignore server-pushed auth-nocache so credentials remain available for reconnects"
+        };
+        Self::write_message(
+            writer,
+            &HelperMessage::Event {
+                name: "OPTION_ADAPTED".to_string(),
+                info: auth_nocache_notice.to_string(),
+                error: false,
+                fatal: false,
+            },
+        )
+        .await
+        .context("Reporting the OpenVPN 3 auth-nocache compatibility adjustment")?;
+        // Retain credentials for automatic reconnects, even if the server
+        // pushes auth-nocache. Put this filter first so it takes precedence
+        // over any later pull-filter for the same option in the profile.
+        let auth_nocache_filter = "pull-filter ignore auth-nocache\n";
+        let filter_position = if profile_content.starts_with('\u{feff}') {
+            '\u{feff}'.len_utf8()
+        } else {
+            0
+        };
+        profile_content.insert_str(filter_position, auth_nocache_filter);
 
         let mut config = Config::new(profile_content);
         // OpenVPN Core treats a client profile with no cert/key as external PKI
