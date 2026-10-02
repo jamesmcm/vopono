@@ -859,7 +859,7 @@ fn run_protocol_in_netns(
                 }
             }
 
-            ns.run_openvpn(
+            ns.run_openvpn_with_backend(
                 config_path.clone(),
                 auth_file,
                 &dns,
@@ -869,6 +869,7 @@ fn run_protocol_in_netns(
                 parsed_command.firewall,
                 parsed_command.disable_ipv6,
                 verbose,
+                parsed_command.openvpn_backend.clone(),
             )?;
             debug!("Checking that OpenVPN is running in namespace: {}", ns.name);
             if !ns.check_openvpn_running() {
