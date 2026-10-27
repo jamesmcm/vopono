@@ -72,7 +72,7 @@ impl OpenVpnProvider for NordVPN {
                     .and_then(|x| x.file_name().map(|x| x.to_string_lossy().to_string()));
 
                 if fname.is_none() {
-                    debug!("Could not parse filename: {}", file.name());
+                    debug!("Could not parse filename: {}", file.name()?);
                     continue;
                 }
                 let fname = fname.unwrap();
@@ -110,10 +110,10 @@ impl OpenVpnProvider for NordVPN {
                     fname.to_string()
                 }
             } else {
-                file.name().to_string()
+                file.name()?.into_owned()
             };
 
-            debug!("Reading file: {}", file.name());
+            debug!("Reading file: {}", file.name()?);
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
             outfile.write_all(file_contents.as_slice())?;

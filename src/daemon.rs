@@ -34,6 +34,29 @@ use std::thread;
 
 // Do not change user's terminal modes; rely on PTY + signal/control forwarding
 
+/// Removes a daemon client's status lockfile when the handler exits.
+///
+/// The `client-<pid>` lockfile lets other sessions see the application. If the
+/// handler returns early or unwinds after writing it, leaving the lock behind
+/// would make the namespace look busy forever and block teardown.
+struct ClientLockfileGuard(Option<PathBuf>);
+
+impl Drop for ClientLockfileGuard {
+    fn drop(&mut self) {
+        let Some(path) = self.0.take() else {
+            return;
+        };
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => log::warn!(
+                "Failed to remove client lockfile {}: {error}",
+                path.display()
+            ),
+        }
+    }
+}
+
 /// Machine-readable health snapshot of the privileged daemon.
 ///
 /// `version` is the daemon's *reported* version (not this binary's); when the
@@ -648,15 +671,17 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
 
             // Create a per-client RON lock file under ~/.config/vopono/locks/<ns>/client-<pid>
             // so status readers can report daemon-launched applications and Drop can see
-            // other active clients before tearing down the namespace.
-            let client_lock_path: Option<PathBuf> =
+            // other active clients before tearing down the namespace. The guard removes
+            // it on every exit path, including early errors and unwinds.
+            let _client_lock = ClientLockfileGuard(
                 match _ns_guard.write_client_lockfile(child.id(), &requested_application) {
                     Ok(path) => path,
                     Err(error) => {
                         log::warn!("Failed to write daemon client status lockfile: {error}");
                         None
                     }
-                };
+                },
+            );
 
             // If using PTY, bridge between client FDs and PTY master
             let mut exit_status: Option<std::process::ExitStatus> = None;
@@ -788,10 +813,6 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 Some(s) => s,
                 None => child.wait()?,
             };
-            // Remove per-client lock now that this client has finished
-            if let Some(path) = client_lock_path {
-                let _ = std::fs::remove_file(path);
-            }
 
             // Ensure port forwarder is dropped before namespace teardown
             drop(port_forward_keepalive);
@@ -1013,6 +1034,26 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("frame too large"));
+    }
+
+    #[test]
+    fn client_lock_guard_removes_lockfile_on_drop() {
+        let dir = std::env::temp_dir().join(format!(
+            "vopono-client-lock-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("client-4242");
+        std::fs::write(&path, "lock").unwrap();
+        {
+            let _guard = super::ClientLockfileGuard(Some(path.clone()));
+        }
+        assert!(!path.exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

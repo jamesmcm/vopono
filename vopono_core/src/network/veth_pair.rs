@@ -180,27 +180,6 @@ impl VethPair {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::VethPair;
-    use crate::network::netns::NetworkNamespace;
-
-    #[test]
-    fn overlong_interface_names_return_errors() {
-        let namespace = NetworkNamespace::attach_unmanaged("vo_test".to_string()).unwrap();
-
-        let source_error = VethPair::new("s".repeat(16), "dest".to_string(), &namespace)
-            .unwrap_err()
-            .to_string();
-        assert!(source_error.contains("ifname must be <= 15 chars"));
-
-        let dest_error = VethPair::new("source".to_string(), "d".repeat(16), &namespace)
-            .unwrap_err()
-            .to_string();
-        assert!(dest_error.contains("ifname must be <= 15 chars"));
-    }
-}
-
 fn link_is_missing(name: &str) -> anyhow::Result<bool> {
     let output = std::process::Command::new("ip")
         .args(["link", "show", name])
@@ -310,5 +289,26 @@ impl VethPair {
         if let Some(network_manager) = &mut self.nm_unmanaged {
             network_manager.cleanup_enabled = enabled;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VethPair;
+    use crate::network::netns::NetworkNamespace;
+
+    #[test]
+    fn overlong_interface_names_return_errors() {
+        let namespace = NetworkNamespace::attach_unmanaged("vo_test".to_string()).unwrap();
+
+        let source_error = VethPair::new("s".repeat(16), "dest".to_string(), &namespace)
+            .unwrap_err()
+            .to_string();
+        assert!(source_error.contains("ifname must be <= 15 chars"));
+
+        let dest_error = VethPair::new("source".to_string(), "d".repeat(16), &namespace)
+            .unwrap_err()
+            .to_string();
+        assert!(dest_error.contains("ifname must be <= 15 chars"));
     }
 }

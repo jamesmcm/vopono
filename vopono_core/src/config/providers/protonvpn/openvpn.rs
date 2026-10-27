@@ -178,7 +178,8 @@ impl OpenVpnProvider for ProtonVPN {
             {
                 // Also handle server case from free servers
                 let mut hostname: Option<String> = None;
-                let mut code = file.name().split('.').next().unwrap();
+                let name = file.name()?;
+                let mut code = name.split('.').next().unwrap();
                 if code.contains("free") {
                     // Free case
                     let mut iter_split = code.split('-');
@@ -208,10 +209,10 @@ impl OpenVpnProvider for ProtonVPN {
                 };
                 format!("{}-{}{}.ovpn", country, code, host_str)
             } else {
-                file.name().to_string()
+                file.name()?.into_owned()
             };
 
-            debug!("Reading file: {}", file.name());
+            debug!("Reading file: {}", file.name()?);
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
             write!(outfile, "{file_contents}")?;

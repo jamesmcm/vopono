@@ -101,11 +101,21 @@ impl TcpProxy {
                     }
                     Err(_) => break,
                 };
-                let admitted = active
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                        (count < MAX_PROXY_CONNECTIONS).then_some(count + 1)
-                    })
-                    .is_ok();
+                let mut count = active.load(Ordering::Acquire);
+                let admitted = loop {
+                    if count >= MAX_PROXY_CONNECTIONS {
+                        break false;
+                    }
+                    match active.compare_exchange_weak(
+                        count,
+                        count + 1,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => break true,
+                        Err(current) => count = current,
+                    }
+                };
                 if !admitted {
                     log::warn!(
                         "Rejecting forwarded connection: limit of {MAX_PROXY_CONNECTIONS} reached"

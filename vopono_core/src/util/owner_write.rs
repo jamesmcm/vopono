@@ -69,6 +69,8 @@ pub enum OwnerWriteRequest {
         file_mode: u32,
         dir_mode: u32,
     },
+    /// Clean known lockfiles with the config owner's filesystem permissions.
+    CleanLocks { config_dir: PathBuf },
 }
 
 /// Child-side implementation of the hidden `vopono __write-user-file` verb.
@@ -148,6 +150,9 @@ pub fn perform_owner_write(request: &OwnerWriteRequest) -> anyhow::Result<()> {
                         format!("Failed to set permissions on {}", entry.path().display())
                     })?;
             }
+        }
+        OwnerWriteRequest::CleanLocks { config_dir } => {
+            super::lock_cleanup::clean_dead_locks(config_dir)?;
         }
     }
     Ok(())
@@ -310,6 +315,20 @@ pub fn set_tree_permissions_as_config_owner(
             path: path.to_path_buf(),
             file_mode,
             dir_mode,
+        },
+        uid,
+        gid,
+    )?;
+    Ok(true)
+}
+
+pub(super) fn clean_locks_as_config_owner(config_dir: &Path) -> anyhow::Result<bool> {
+    let Some((uid, gid)) = super::config_write_owner()? else {
+        return Ok(false);
+    };
+    spawn_owner_write(
+        &OwnerWriteRequest::CleanLocks {
+            config_dir: config_dir.to_path_buf(),
         },
         uid,
         gid,

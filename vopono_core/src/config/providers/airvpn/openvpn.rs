@@ -73,7 +73,7 @@ impl OpenVpnProvider for AirVPN {
             let mut file = zip.by_index(i)?;
             file.read_to_end(&mut file_contents)?;
 
-            let original_name = file.name().to_string();
+            let original_name = file.name()?.into_owned();
             let filename = if let Some("ovpn") = file
                 .enclosed_name()
                 .as_ref()
