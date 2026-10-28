@@ -176,6 +176,9 @@ fn namespace_entry(
     });
     let applications = locks
         .iter()
+        // A PID can survive in a lockfile left by an interrupted session; do
+        // not render it as a running application.
+        .filter(|lock| vopono_core::status::lockfile_application_is_live(lock))
         .map(|lock| application_entry(lock, now_seconds))
         .collect::<Vec<_>>();
     let namespace = &metadata.ns;
@@ -395,6 +398,9 @@ mod tests {
             .expect("namespace entry should build");
         assert_eq!(entry.created_at.as_deref(), Some("1970-01-01T00:06:40Z"));
         assert_eq!(entry.uptime_seconds, 600);
-        assert_eq!(entry.applications.len(), 2);
+        // The recorded PID cannot be live in the (nonexistent) test
+        // namespace, so only the PID-less metadata entry remains visible.
+        assert_eq!(entry.applications.len(), 1);
+        assert_eq!(entry.applications[0].command, "firefox");
     }
 }

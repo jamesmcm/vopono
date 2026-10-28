@@ -1,5 +1,6 @@
 pub mod country_map;
 pub mod env_vars;
+mod lock_cleanup;
 pub mod open_hosts;
 pub mod open_ports;
 pub mod owner_write;
@@ -407,57 +408,11 @@ pub fn sudo_command(command: &[&str]) -> anyhow::Result<()> {
 }
 
 pub fn clean_dead_locks() -> anyhow::Result<()> {
-    let running_processes = get_all_running_pids();
-    let mut lockfile_path = config_dir()?;
-    lockfile_path.push("vopono/locks");
-
-    if lockfile_path.exists() && lockfile_path.read_dir()?.next().is_some() {
-        debug!("Cleaning dead lock files...");
-        // Delete primary lock files if their PIDs are no longer running (numeric file names)
-        std::fs::create_dir_all(&lockfile_path)?;
-        WalkDir::new(&lockfile_path)
-            .into_iter()
-            .filter_map(|x| x.ok())
-            .filter(|x| x.path().is_file())
-            .filter_map(|x| {
-                let pid = x.file_name().to_str()?.parse::<u32>().ok()?;
-                (!running_processes.contains(&pid)).then_some((x, pid))
-            })
-            .try_for_each(|(entry, _)| {
-                debug!("Removing lockfile: {}", entry.path().display());
-                std::fs::remove_file(entry.path())
-            })?;
-
-        // Delete auxiliary client-* lock files if their PIDs are no longer running
-        WalkDir::new(&lockfile_path)
-            .into_iter()
-            .filter_map(|x| x.ok())
-            .filter(|x| x.path().is_file())
-            .filter_map(|x| {
-                let fname = x.file_name().to_str().unwrap_or("").to_string();
-                if let Some(rest) = fname.strip_prefix("client-")
-                    && let Ok(pid) = rest.parse::<u32>()
-                {
-                    return Some((x, pid));
-                }
-                None
-            })
-            .filter(|(_, pid)| !running_processes.contains(pid))
-            .try_for_each(|(entry, _)| {
-                debug!("Removing client lockfile: {}", entry.path().display());
-                std::fs::remove_file(entry.path())
-            })?;
-
-        // Delete subdirectories if they contain no locks (ignore errors)
-        WalkDir::new(&lockfile_path)
-            .into_iter()
-            .filter_map(|x| x.ok())
-            .filter(|x| x.path().is_dir())
-            .try_for_each(|x| std::fs::remove_dir(x.path()))
-            .ok();
-        std::thread::sleep(std::time::Duration::from_secs(1));
+    let config_base = config_dir()?;
+    if owner_write::clean_locks_as_config_owner(&config_base)? {
+        return Ok(());
     }
-    Ok(())
+    lock_cleanup::clean_dead_locks(&config_base)
 }
 
 /// Remove every lockfile for a single namespace, then the directory itself.

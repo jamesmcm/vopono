@@ -103,17 +103,17 @@ impl OpenVpnProvider for PrivateInternetAccess {
                 .and_then(|p| p.extension())
                 .and_then(|x| x.to_str())
             {
-                let fname = file.name();
+                let fname = file.name()?;
                 let country = fname.to_lowercase().replace(' ', "_");
                 let country = country.split('.').next().unwrap();
                 if let Some(code) = country_map.get(country) {
                     format!("{}-{}.ovpn", country, code)
                 } else {
                     debug!("Could not find country in country map: {country}");
-                    file.name().to_string()
+                    file.name()?.into_owned()
                 }
             } else {
-                file.name().to_string()
+                file.name()?.into_owned()
             };
 
             if let Some(capture) = re.captures(&String::from_utf8_lossy(&file_contents)) {
@@ -131,7 +131,7 @@ impl OpenVpnProvider for PrivateInternetAccess {
                 );
             }
 
-            debug!("Reading file: {}", file.name());
+            debug!("Reading file: {}", file.name()?);
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
             outfile.write_all(file_contents.as_slice())?;

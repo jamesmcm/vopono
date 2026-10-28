@@ -106,7 +106,7 @@ impl OpenVpnProvider for IVPN {
                 fname.to_lowercase()
             };
 
-            debug!("Reading file: {}, {}", file.name(), fname);
+            debug!("Reading file: {}, {}", file.name()?, fname);
             let mut outfile =
                 File::create(openvpn_dir.join(filename.to_lowercase().replace(' ', "_")))?;
             write!(outfile, "{file_contents}")?;

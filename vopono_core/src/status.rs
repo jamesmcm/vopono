@@ -1,8 +1,9 @@
 use crate::network::netns::LockfileStatus;
 use crate::util::{
-    chown_to_config_owner, config_dir, create_private_file, ensure_dir_as_config_owner,
-    write_file_as_config_owner,
+    check_process_running, chown_to_config_owner, config_dir, create_private_file,
+    ensure_dir_as_config_owner, write_file_as_config_owner,
 };
+use anyhow::Context;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ use walkdir::WalkDir;
 
 /// Sidecar file next to a namespace's lockfiles holding the latest
 /// provider-assigned forwarded port, refreshed by the forwarder thread.
-const FORWARDED_PORT_SIDECAR: &str = "port-forwarding.json";
+pub(crate) const FORWARDED_PORT_SIDECAR: &str = "port-forwarding.json";
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ForwardedPortSidecar {
@@ -253,6 +254,11 @@ impl LockfileKind {
     }
 }
 
+/// Whether the directory contains any client lockfile.
+///
+/// This is a raw existence check: stale locks left behind by a previous
+/// session count too. Callers deciding whether a namespace is still in use
+/// must prune stale locks first with [`prune_stale_client_lockfiles`].
 pub fn has_client_lockfiles(dir: &Path) -> bool {
     std::fs::read_dir(dir)
         .ok()
@@ -260,6 +266,141 @@ pub fn has_client_lockfiles(dir: &Path) -> bool {
         .flatten()
         .filter_map(|entry| entry.ok())
         .any(|entry| LockfileKind::from_path(&entry.path()) == Some(LockfileKind::Client))
+}
+
+/// Whether a lock directory contains no session state.
+///
+/// The forwarded-port sidecar is ignored because it is metadata rather than a
+/// session. Any other file (including a temporary file left by an interrupted
+/// writer) is treated as state that must be preserved.
+pub fn lock_dir_has_no_session_state(dir: &Path) -> anyhow::Result<bool> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_name().to_str() != Some(FORWARDED_PORT_SIDECAR) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether the application recorded in the `client-<pid>` lockfile at `path`
+/// is stale for `namespace`.
+///
+/// A lock is stale when its PID has exited, is a zombie, or now belongs to a
+/// process outside the namespace (PID reuse). If membership cannot be
+/// established the lock is treated as live, so an unprivileged caller never
+/// removes state it cannot verify.
+pub fn client_lockfile_is_stale(path: &Path, namespace: &str) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .and_then(client_pid_from_lockfile_name)
+        .is_some_and(|pid| application_pid_is_stale(pid, namespace))
+}
+
+/// Whether the application recorded in `lock` is still alive inside the
+/// namespace it names. Metadata-only locks (no PID) are treated as live.
+pub fn lockfile_application_is_live(lock: &LockfileStatus) -> bool {
+    lock.application_pid
+        .is_none_or(|pid| !application_pid_is_stale(pid, &lock.ns.name))
+}
+
+/// Remove client lockfiles whose application is no longer running in the
+/// namespace named by `dir` (the directory below `vopono/locks`).
+///
+/// Returns the number of stale locks removed. A missing directory is not an
+/// error: it simply has no locks to prune.
+pub fn prune_stale_client_lockfiles(dir: &Path) -> anyhow::Result<usize> {
+    prune_stale_client_lockfiles_with(dir, client_lockfile_is_stale)
+}
+
+fn prune_stale_client_lockfiles_with(
+    dir: &Path,
+    mut is_stale: impl FnMut(&Path, &str) -> bool,
+) -> anyhow::Result<usize> {
+    let Some(namespace) = dir.file_name().and_then(|name| name.to_str()) else {
+        return Ok(0);
+    };
+    if crate::network::netns::validate_netns_name(namespace).is_err() {
+        debug!(
+            "Ignoring lock directory with invalid namespace name: {}",
+            dir.display()
+        );
+        return Ok(0);
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let path = entry?.path();
+        if LockfileKind::from_path(&path) != Some(LockfileKind::Client) {
+            continue;
+        }
+        if is_stale(&path, namespace) {
+            debug!("Removing stale client lockfile: {}", path.display());
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                // The client guard or another cleanup may have removed it.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("Could not remove stale client lockfile {}", path.display())
+                    });
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Remove the forwarded-port sidecar from a namespace lock directory.
+///
+/// The sidecar is not session state, but it would otherwise keep the
+/// directory non-empty and block namespace teardown.
+pub(crate) fn remove_forwarded_port_sidecar(dir: &Path) {
+    let _ = std::fs::remove_file(dir.join(FORWARDED_PORT_SIDECAR));
+}
+
+fn application_pid_is_stale(pid: u32, namespace: &str) -> bool {
+    if !check_process_running(pid) || process_is_zombie(pid) {
+        return true;
+    }
+    // Lockfiles cannot outlive their namespace: when the netns handle is gone
+    // no recorded process can still be attached to it.
+    if !Path::new("/var/run/netns").join(namespace).exists() {
+        return true;
+    }
+    matches!(process_namespace_matches(pid, namespace), Some(false))
+}
+
+/// `/proc/<pid>/stat` state is `Z` for a zombie awaiting reaping.
+fn process_is_zombie(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    stat.rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().next())
+        .is_some_and(|state| state == "Z")
+}
+
+/// Compare the process and namespace `(device, inode)` pairs. Returns `None`
+/// when either handle cannot be inspected.
+fn process_namespace_matches(pid: u32, namespace: &str) -> Option<bool> {
+    use std::os::unix::fs::MetadataExt;
+
+    let process_namespace = std::fs::metadata(format!("/proc/{pid}/ns/net")).ok()?;
+    let target_namespace = std::fs::metadata(Path::new("/var/run/netns").join(namespace)).ok()?;
+    Some(
+        process_namespace.dev() == target_namespace.dev()
+            && process_namespace.ino() == target_namespace.ino(),
+    )
 }
 
 pub fn strict_namespaces(status: LockNamespacesStatus) -> anyhow::Result<LockNamespaces> {
@@ -502,6 +643,130 @@ mod tests {
         assert_eq!(locks.len(), 1);
         assert_eq!(locks[0].command, "daemon-app");
         let _ = fs::remove_dir_all(dir);
+    }
+
+    fn status_lock_with_pid(namespace: &str, command: &str, start: u64, pid: u32) -> String {
+        format!(
+            r#"(ns:(name:"{namespace}",provider:Mullvad,protocol:Wireguard),start:{start},command:"{command}",application_pid:Some({pid}))"#
+        )
+    }
+
+    #[test]
+    fn sidecar_is_not_session_state_but_unknown_files_are() {
+        let dir = unique_temp_dir("lockfile-presence");
+        let namespace = "vo_presence_test";
+        let ns_dir = dir.join(namespace);
+        fs::create_dir_all(&ns_dir).unwrap();
+
+        assert!(lock_dir_has_no_session_state(&ns_dir).unwrap());
+        fs::write(ns_dir.join("port-forwarding.json"), "{}").unwrap();
+        assert!(lock_dir_has_no_session_state(&ns_dir).unwrap());
+        fs::write(ns_dir.join("100"), status_lock(namespace, "daemon-app", 1)).unwrap();
+        assert!(!lock_dir_has_no_session_state(&ns_dir).unwrap());
+        fs::remove_file(ns_dir.join("100")).unwrap();
+        fs::write(ns_dir.join("client-123.tmp-456"), "partial").unwrap();
+        assert!(!lock_dir_has_no_session_state(&ns_dir).unwrap());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prunes_dead_client_lockfiles_but_keeps_primary_and_sidecar() {
+        let dir = unique_temp_dir("prune-stale");
+        let namespace = "vo_prune_test";
+        let ns_dir = dir.join(namespace);
+        fs::create_dir_all(&ns_dir).unwrap();
+        fs::write(ns_dir.join("100"), status_lock(namespace, "daemon-app", 1)).unwrap();
+        fs::write(
+            ns_dir.join(format!("client-{}", u32::MAX)),
+            status_lock_with_pid(namespace, "dead-app", 2, u32::MAX),
+        )
+        .unwrap();
+        fs::write(ns_dir.join("port-forwarding.json"), "{}").unwrap();
+
+        assert_eq!(prune_stale_client_lockfiles(&ns_dir).unwrap(), 1);
+        assert!(ns_dir.join("100").exists());
+        assert!(ns_dir.join("port-forwarding.json").exists());
+        assert!(!ns_dir.join(format!("client-{}", u32::MAX)).exists());
+        assert!(!has_client_lockfiles(&ns_dir));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn concurrent_pruning_tolerates_locks_removed_by_another_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let ns_dir = dir.path().join("vo_concurrent_prune");
+        fs::create_dir(&ns_dir).unwrap();
+        fs::write(ns_dir.join(format!("client-{}", u32::MAX)), "lock").unwrap();
+        let barrier = std::sync::Barrier::new(8);
+
+        std::thread::scope(|scope| {
+            let workers = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        prune_stale_client_lockfiles_with(&ns_dir, |path, namespace| {
+                            let stale = client_lockfile_is_stale(path, namespace);
+                            // Force every caller to inspect the same lock before
+                            // any one of them can remove it.
+                            barrier.wait();
+                            stale
+                        })
+                        .unwrap()
+                    })
+                })
+                .collect::<Vec<_>>();
+            let removed = workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .sum::<usize>();
+            assert_eq!(removed, 1);
+        });
+        assert!(!has_client_lockfiles(&ns_dir));
+    }
+
+    #[test]
+    fn pruning_preserves_errors_other_than_missing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let ns_dir = dir.path().join("vo_prune_error");
+        fs::create_dir_all(ns_dir.join(format!("client-{}", u32::MAX))).unwrap();
+        assert!(prune_stale_client_lockfiles(&ns_dir).is_err());
+    }
+
+    #[test]
+    fn removes_live_pid_recycled_outside_a_missing_namespace() {
+        let dir = unique_temp_dir("prune-recycled");
+        let namespace = "vo_prune_recycled";
+        let ns_dir = dir.join(namespace);
+        fs::create_dir_all(&ns_dir).unwrap();
+        let live_pid = std::process::id();
+        fs::write(
+            ns_dir.join(format!("client-{live_pid}")),
+            status_lock_with_pid(namespace, "recycled", 1, live_pid),
+        )
+        .unwrap();
+
+        // The namespace does not exist, so the record cannot be live.
+        assert_eq!(prune_stale_client_lockfiles(&ns_dir).unwrap(), 1);
+        assert!(!has_client_lockfiles(&ns_dir));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lockfile_liveness_hides_dead_apps_but_keeps_pid_less_metadata() {
+        let dead: LockfileStatus = ron::from_str(&status_lock_with_pid(
+            "vo_prune_live",
+            "firefox",
+            1,
+            u32::MAX,
+        ))
+        .unwrap();
+        assert!(!lockfile_application_is_live(&dead));
+
+        let metadata_only: LockfileStatus =
+            ron::from_str(&status_lock("vo_prune_live", "daemon-app", 1)).unwrap();
+        assert!(lockfile_application_is_live(&metadata_only));
     }
 
     #[test]

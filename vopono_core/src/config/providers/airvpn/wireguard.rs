@@ -130,7 +130,7 @@ impl WireguardProvider for AirVPN {
                 if file.enclosed_name().is_none() {
                     continue;
                 }
-                let original_name = file.name().to_string();
+                let original_name = file.name()?.into_owned();
                 let filename = super::generator_filename(&original_name, "conf");
                 debug!("Writing Wireguard config: {filename}");
                 let mut contents = Vec::with_capacity(4096);

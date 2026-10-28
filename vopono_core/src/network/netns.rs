@@ -1330,6 +1330,15 @@ impl ManagedNamespaceGuard {
         let mut lockfile_path = lock_dir.clone();
         // Each instance responsible for deleting their own lockfile
         lockfile_path.push(format!("{}", unistd::getpid()));
+        // A lock left by a previous session must not pin this namespace open.
+        // Prune client locks whose PID has exited or no longer belongs to this
+        // namespace before deciding whether another live session exists.
+        if let Err(error) = crate::status::prune_stale_client_lockfiles(&lock_dir) {
+            warn!(
+                "Could not prune stale client lockfiles in {}: {error:#}",
+                lock_dir.display()
+            );
+        }
         if crate::util::is_daemon_mode() && crate::status::has_client_lockfiles(&lock_dir) {
             debug!(
                 "Preserving daemon namespace lock while client locks remain: {}",
@@ -1355,18 +1364,14 @@ impl ManagedNamespaceGuard {
         // remain inside it. The lockfiles only track vopono-spawned sessions;
         // detached or externally-started processes would lose connectivity if
         // we deleted the namespace while they were still running.
-        let lock_dir_is_empty = if !lockfile_path.exists() {
-            true
-        } else {
-            match lockfile_path.read_dir() {
-                Ok(mut entries) => entries.next().is_none(),
-                Err(e) => {
-                    warn!(
-                        "Could not inspect locks directory {}: {e:?}; preserving namespace",
-                        lockfile_path.display()
-                    );
-                    false
-                }
+        let lock_dir_is_empty = match crate::status::lock_dir_has_no_session_state(&lockfile_path) {
+            Ok(no_session_state) => no_session_state,
+            Err(e) => {
+                warn!(
+                    "Could not inspect locks directory {}: {e:?}; preserving namespace",
+                    lockfile_path.display()
+                );
+                false
             }
         };
         let managed_helper_pids = [
@@ -1413,6 +1418,9 @@ impl ManagedNamespaceGuard {
             self.disposition = GuardDisposition::TornDown;
             // Only try to delete if exists
             if lockfile_path.exists() {
+                // The sidecar is not session state; drop it so the now-empty
+                // lock directory can be removed.
+                crate::status::remove_forwarded_port_sidecar(&lockfile_path);
                 std::fs::remove_dir(&lockfile_path).with_context(|| {
                     format!(
                         "Could not remove locks directory {}",

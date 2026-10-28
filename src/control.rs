@@ -103,7 +103,13 @@ pub fn stop_namespace(
     requester_uid: Option<nix::unistd::Uid>,
 ) -> Result<StopResult> {
     let status = read_lock_namespaces()?;
-    if !status.namespaces.contains_key(namespace_id) {
+    // Lockfiles can be missing (for example after a manual cleanup) while the
+    // owned namespace still exists, so consult both sources.
+    if !status.namespaces.contains_key(namespace_id)
+        && !get_existing_namespaces()?
+            .iter()
+            .any(|name| name == namespace_id)
+    {
         return Err(CliError::NamespaceNotFound {
             id: namespace_id.to_string(),
         }
@@ -115,20 +121,32 @@ pub fn stop_namespace(
         // Make an explicit stop authoritative over a previous keep-alive or
         // create-only request. A live handler will observe this after its child
         // exits and perform normal teardown; an idle namespace is handled below.
-        crate::namespace_ownership::mark_stopping(namespace_id, uid)?;
-        terminate_namespace_user_processes(namespace_id, uid)?;
-        // A live daemon session holding this namespace writes a client lockfile
-        // and tears the namespace down itself on exit. Namespaces left alive by
-        // --keep-alive / --create-netns-only have no such session, so tear them
-        // down explicitly from the root-owned snapshot.
+        allow_completed_teardown(
+            crate::namespace_ownership::mark_stopping(namespace_id, uid),
+            || namespace_exists(namespace_id),
+        )?;
+        allow_completed_teardown(
+            terminate_namespace_user_processes(namespace_id, uid),
+            || namespace_exists(namespace_id),
+        )?;
         let lock_dir = vopono_core::util::config_dir()?
             .join("vopono")
             .join("locks")
             .join(namespace_id);
-        if !vopono_core::status::has_client_lockfiles(&lock_dir)
-            && let Ok(namespace) = crate::namespace_ownership::load(namespace_id, uid)
-        {
-            namespace.teardown()?;
+        // The applications terminated above leave client lockfiles whose PIDs
+        // are now dead. Prune them before deciding whether a live daemon
+        // session still owns the namespace: a lock leaked by an earlier
+        // session must not block an explicit stop forever.
+        vopono_core::status::prune_stale_client_lockfiles(&lock_dir)?;
+        if !vopono_core::status::has_client_lockfiles(&lock_dir) {
+            // No live application lock remains. A handler may already have
+            // finished teardown; persistent namespaces need explicit cleanup.
+            if let Some(namespace) = allow_completed_teardown(
+                crate::namespace_ownership::load(namespace_id, uid),
+                || namespace_exists(namespace_id),
+            )? {
+                allow_completed_teardown(namespace.teardown(), || namespace_exists(namespace_id))?;
+            }
         }
         let namespace_removed = wait_for_namespace_removal(namespace_id)?;
         if !namespace_removed {
@@ -327,6 +345,26 @@ fn wait_for_namespace_removal(namespace_id: &str) -> anyhow::Result<bool> {
         .any(|name| name == namespace_id))
 }
 
+fn namespace_exists(namespace_id: &str) -> anyhow::Result<bool> {
+    Ok(get_existing_namespaces()?
+        .iter()
+        .any(|name| name == namespace_id))
+}
+
+// Once stop has been authorized, the application's handler may finish
+// teardown at any point. Suppress a later error only when absence is verified;
+// ownership failures for an existing namespace and inspection errors still fail.
+fn allow_completed_teardown<T>(
+    result: anyhow::Result<T>,
+    exists: impl FnOnce() -> anyhow::Result<bool>,
+) -> anyhow::Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(_) if !exists()? => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn wait_until(condition: impl FnMut() -> bool) -> bool {
     wait_until_for(20, condition)
 }
@@ -339,4 +377,44 @@ fn wait_until_for(attempts: usize, mut condition: impl FnMut() -> bool) -> bool 
         std::thread::sleep(Duration::from_millis(100));
     }
     condition()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::allow_completed_teardown;
+
+    #[test]
+    fn stop_accepts_teardown_completed_by_the_application_handler() {
+        let result = allow_completed_teardown::<()>(
+            Err(anyhow::anyhow!(
+                "namespace disappeared during snapshot load"
+            )),
+            || Ok(false),
+        );
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn stop_keeps_ownership_errors_when_the_namespace_still_exists() {
+        let error =
+            allow_completed_teardown::<()>(Err(anyhow::anyhow!("ownership tag is stale")), || {
+                Ok(true)
+            })
+            .unwrap_err();
+        assert_eq!(error.to_string(), "ownership tag is stale");
+    }
+
+    #[test]
+    fn stop_requires_verified_namespace_removal() {
+        assert!(
+            allow_completed_teardown::<()>(Err(anyhow::anyhow!("snapshot unavailable")), || Err(
+                anyhow::anyhow!("could not inspect namespaces")
+            ),)
+            .is_err()
+        );
+        assert_eq!(
+            allow_completed_teardown(Ok(42), || panic!("no error to recheck")).unwrap(),
+            Some(42)
+        );
+    }
 }
