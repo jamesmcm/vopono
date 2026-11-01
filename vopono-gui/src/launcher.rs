@@ -108,6 +108,12 @@ pub fn launch_provider_config(
 }
 
 fn add_launch_args(command: &mut Command, launch: &LaunchConfig) -> anyhow::Result<()> {
+    if launch.monitor {
+        command.arg("--monitor");
+    }
+    if launch.monitor && launch.recover {
+        command.arg("--recover");
+    }
     if launch.port_forwarding {
         command.arg("--port-forwarding");
         command

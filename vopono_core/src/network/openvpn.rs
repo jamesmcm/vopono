@@ -21,8 +21,12 @@ pub struct OpenVpn {
     #[serde(default)]
     pub openvpn_dns_servers: Vec<IpAddr>,
     pub logfile: PathBuf,
-    #[serde(skip)]
-    _runtime_dir: Option<tempfile::TempDir>,
+    #[serde(default)]
+    runtime_dir: Option<PathBuf>,
+    #[serde(default)]
+    supervised: bool,
+    #[serde(default)]
+    pub(crate) recovery_host: Option<String>,
     #[serde(skip)]
     cleanup_enabled: bool,
     // pub distinct_remotes: Vec<String>, // Unique IP Addresses or hostnames
@@ -66,7 +70,14 @@ impl OpenVpn {
         let log_file_str: String = log_file_path.as_os_str().to_string_lossy().to_string();
         File::create(&log_file_path)?;
 
-        let config_file_path = config_file.canonicalize().context("Invalid path given")?;
+        let (config_file_path, effective_auth_file) = if crate::util::is_daemon_mode() {
+            super::openvpn_config::snapshot(&config_file, runtime_dir.path(), auth_file.as_deref())?
+        } else {
+            (
+                config_file.canonicalize().context("Invalid path given")?,
+                auth_file.clone(),
+            )
+        };
         // Daemon model creates each config object with the correct owner/mode
         // up front; the recursive walk runs dropped-privilege and cannot
         // repair root-owned trees, so it must not run here (EPERM, #382).
@@ -92,7 +103,7 @@ impl OpenVpn {
         ])
         .to_vec();
 
-        if let Some(af_ref) = auth_file.as_ref() {
+        if let Some(af_ref) = effective_auth_file.as_ref() {
             command_vec.push("--auth-user-pass");
             command_vec.push(af_ref.as_os_str().to_str().unwrap());
         }
@@ -134,13 +145,30 @@ impl OpenVpn {
             command_vec.push("route-ipv6");
         }
 
-        let remotes = get_remotes_from_config(&config_file)?;
+        let remotes = get_remotes_from_config(&config_file_path)?;
+        let recovery_host = remotes.first().map(|remote| match &remote.host {
+            Host::IPv4(ip) => ip.to_string(),
+            Host::IPv6(ip) => ip.to_string(),
+            Host::Hostname(host) => host.clone(),
+        });
         debug!("Found remotes: {:?}", remotes);
         let working_dir = PathBuf::from(config_file_path.parent().unwrap());
 
+        let supervised = crate::util::is_daemon_mode();
+        let supervisor = if supervised {
+            Some(super::openvpn_supervisor::prepare(
+                &command_vec,
+                runtime_dir.path(),
+            )?)
+        } else {
+            None
+        };
+        let supervisor_refs = supervisor
+            .as_ref()
+            .map(|args| args.iter().map(String::as_str).collect::<Vec<_>>());
         let mut handle = NetworkNamespace::exec_no_block(
             &netns.name,
-            &command_vec,
+            supervisor_refs.as_deref().unwrap_or(&command_vec),
             None,
             None,
             !verbose,
@@ -191,15 +219,23 @@ impl OpenVpn {
                 break;
             }
 
-            if let Some(status) = handle.try_wait()? {
+            // A fast failure can exit while its AUTH_FAILED/TLS diagnosis is
+            // still buffered in the logfile. Drain those lines before using
+            // process exit as a generic startup failure.
+            if x == 0 && supervised && runtime_dir.path().join("child-exited").exists() {
+                terminate_startup(&mut handle);
+                return Err(anyhow!("OpenVPN exited before the tunnel was established"));
+            }
+            if x == 0
+                && let Some(status) = handle.try_wait()?
+            {
                 return Err(anyhow!(
                     "OpenVPN exited with {status} before the tunnel was established, use -v for full log output"
                 ));
             }
 
             if Instant::now() >= startup_deadline {
-                let _ = handle.kill();
-                let _ = handle.wait();
+                terminate_startup(&mut handle);
                 return Err(anyhow!(
                     "OpenVPN did not establish the tunnel within {} seconds, use -v for full log output",
                     OPENVPN_STARTUP_TIMEOUT.as_secs()
@@ -215,8 +251,7 @@ impl OpenVpn {
 
         match connect_state {
             Some(OpenVpnStartupState::AuthFailed) => {
-                let _ = handle.kill();
-                let _ = handle.wait();
+                terminate_startup(&mut handle);
                 let auth_path_display = auth_file
                     .as_ref()
                     .map(|p| p.display().to_string())
@@ -232,16 +267,27 @@ impl OpenVpn {
                     "OpenVPN server rejected the username/password in {}.{}",
                     auth_path_display, provider_hint
                 );
-                return Err(anyhow!(
-                    "OpenVPN server rejected the username/password in {}. DNS and transport settings do not cause AUTH_FAILED.{}",
-                    auth_path_display,
-                    provider_hint
-                ));
+                return Err(crate::diagnostics::Diagnostic::new(
+                    crate::diagnostics::DiagnosticCode::TunnelAuthentication,
+                    crate::diagnostics::DiagnosticState::Fail,
+                    "OpenVPN authentication rejected by the server",
+                    Some("Verify provider-specific VPN credentials; ProtonVPN uses separate OpenVPN credentials")).into());
+            }
+            Some(OpenVpnStartupState::TlsFailed) => {
+                terminate_startup(&mut handle);
+                return Err(crate::diagnostics::Diagnostic::new(
+                    crate::diagnostics::DiagnosticCode::TunnelTls,
+                    crate::diagnostics::DiagnosticState::Fail,
+                    "OpenVPN TLS negotiation or certificate verification failed",
+                    Some("Check system time, certificates and provider configuration"),
+                )
+                .into());
             }
             Some(OpenVpnStartupState::OptionsError) => {
-                let _ = handle.kill();
-                let _ = handle.wait();
-                error!("OpenVPN options error: {buffer}");
+                terminate_startup(&mut handle);
+                error!(
+                    "OpenVPN rejected configuration options; raw input is excluded from diagnostic output"
+                );
                 return Err(anyhow!("OpenVPN options error, use -v for full log output"));
             }
             Some(OpenVpnStartupState::Connected) => {}
@@ -266,7 +312,9 @@ impl OpenVpn {
             pid: id,
             openvpn_dns_servers,
             logfile: log_file_path,
-            _runtime_dir: Some(runtime_dir),
+            runtime_dir: Some(runtime_dir.keep()),
+            supervised,
+            recovery_host,
             cleanup_enabled: true,
         })
     }
@@ -274,6 +322,39 @@ impl OpenVpn {
     pub fn check_if_running(&self) -> bool {
         check_process_running(self.pid)
     }
+
+    /// Reuse the frozen launch plan; neither configuration nor credentials are
+    /// read from user-writable files during automatic recovery.
+    pub fn request_restart(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.supervised
+                && self
+                    .runtime_dir
+                    .as_ref()
+                    .is_some_and(|path| super::openvpn_supervisor::matches(self.pid, path)),
+            "OpenVPN has no live namespace supervisor"
+        );
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(self.pid as i32),
+            nix::sys::signal::Signal::SIGUSR1,
+        )?;
+        Ok(())
+    }
+}
+
+fn terminate_startup(child: &mut std::process::Child) {
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(child.id() as i32),
+        nix::sys::signal::Signal::SIGTERM,
+    );
+    for _ in 0..40 {
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 impl Drop for OpenVpn {
@@ -281,12 +362,29 @@ impl Drop for OpenVpn {
         if !self.cleanup_enabled {
             return;
         }
-        match nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(self.pid as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        ) {
-            Ok(_) => debug!("Killed OpenVPN (pid: {})", self.pid),
-            Err(e) => error!("Failed to kill OpenVPN (pid: {}): {:?}", self.pid, e),
+        if self.supervised {
+            if let Some(runtime) = &self.runtime_dir
+                && super::openvpn_supervisor::matches(self.pid, runtime)
+            {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(self.pid as i32),
+                    nix::sys::signal::Signal::SIGTERM,
+                );
+                for _ in 0..40 {
+                    if !super::openvpn_supervisor::matches(self.pid, runtime) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        } else {
+            match nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(self.pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            ) {
+                Ok(_) => debug!("Killed OpenVPN (pid: {})", self.pid),
+                Err(e) => error!("Failed to kill OpenVPN (pid: {}): {:?}", self.pid, e),
+            }
         }
 
         match std::fs::remove_file(&self.logfile) {
@@ -299,6 +397,9 @@ impl Drop for OpenVpn {
                 self.logfile.as_os_str().to_string_lossy(),
                 e
             ),
+        }
+        if let Some(runtime) = &self.runtime_dir {
+            let _ = std::fs::remove_dir_all(runtime);
         }
     }
 }
@@ -684,6 +785,7 @@ enum OpenVpnStartupState {
     Connected,
     AuthFailed,
     OptionsError,
+    TlsFailed,
 }
 
 /// Match stable OpenVPN messages anywhere in a line because
@@ -691,6 +793,8 @@ enum OpenVpnStartupState {
 fn parse_openvpn_startup_state(log: &str) -> Option<OpenVpnStartupState> {
     if log.contains("AUTH_FAILED") {
         Some(OpenVpnStartupState::AuthFailed)
+    } else if log.contains("TLS Error") || log.contains("VERIFY ERROR") {
+        Some(OpenVpnStartupState::TlsFailed)
     } else if log.contains("Options error") {
         Some(OpenVpnStartupState::OptionsError)
     } else if log.contains("Initialization Sequence Completed") {
@@ -716,43 +820,24 @@ pub fn warn_on_scripts_config(path: &Path) -> anyhow::Result<bool> {
 }
 
 pub fn get_remotes_from_config(path: &Path) -> anyhow::Result<Vec<Remote>> {
-    let file_string =
-        std::fs::read_to_string(path).context(format!("Reading OpenVPN config file: {path:?}"))?;
-    let mut output_vec = Vec::new();
-    // Regex extract
-    let re = Regex::new(r"(?m)^\s*remote ([^\s]+) ([0-9]+)\s?(tcp|udp|tcp-client)?")?;
-    let caps = re.captures_iter(&file_string);
-
-    let re2 = Regex::new(r"(?m)^\s*proto ([a-z\-]+)")?;
-    let mut caps2 = re2.captures_iter(&file_string);
-    let default_proto = caps2.next().and_then(|x| x.get(1));
-
-    for cap in caps {
-        let proto = match (cap.get(3), default_proto) {
-            (None, None) => {
-                return Err(anyhow!(
-                    "No protocol given in OpenVPN config: {}",
-                    path.display()
-                ));
-            }
-            (Some(x), _) => OpenVpnProtocol::from_str(x.as_str()),
-            (None, Some(x)) => OpenVpnProtocol::from_str(x.as_str()),
-        }?;
-
-        output_vec.push(Remote {
-            host: Host::from_str(cap.get(1).unwrap().as_str()).expect("Could not convert hostname"),
-            port: cap.get(2).unwrap().as_str().parse::<u16>()?,
-            protocol: proto,
-        });
-    }
-
-    if output_vec.is_empty() {
-        return Err(anyhow!(
-            "Failed to extract remotes from config file: {}",
-            path.display()
-        ));
-    }
-    Ok(output_vec)
+    let content =
+        std::fs::read_to_string(path).context("Reading OpenVPN endpoint configuration")?;
+    let endpoints = crate::diagnostics::parse_openvpn(&content, path)
+        .map_err(|_| anyhow!("Invalid or unsupported OpenVPN remote configuration"))?;
+    endpoints
+        .into_iter()
+        .map(|endpoint| {
+            Ok(Remote {
+                host: Host::from_str(&endpoint.host)?,
+                port: endpoint.port,
+                protocol: if endpoint.tcp {
+                    OpenVpnProtocol::TCP
+                } else {
+                    OpenVpnProtocol::UDP
+                },
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -873,6 +958,18 @@ mod tests {
         assert_eq!(
             parse_openvpn_startup_state(log),
             Some(OpenVpnStartupState::AuthFailed)
+        );
+    }
+
+    #[test]
+    fn classifies_tls_failures_without_exposing_server_reply() {
+        assert_eq!(
+            parse_openvpn_startup_state("timestamp TLS Error: TLS key negotiation failed"),
+            Some(OpenVpnStartupState::TlsFailed)
+        );
+        assert_eq!(
+            parse_openvpn_startup_state("timestamp VERIFY ERROR: certificate expired"),
+            Some(OpenVpnStartupState::TlsFailed)
         );
     }
 

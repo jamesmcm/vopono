@@ -22,6 +22,20 @@ impl VoponoGuiApp {
                     ui.label(format!("{} {}", ns.provider, ns.protocol));
                     ui.label(format!("uptime {}", ns.uptime));
                 });
+                if let Some(health) = &ns.health {
+                    ui.label(format!(
+                        "TCP/DNS health: {:?} · recovery attempts: {}",
+                        health.state, health.reconnect_attempts
+                    ));
+                    if let Some(age) = health.handshake_age_seconds {
+                        ui.small(format!("WireGuard handshake: {age}s ago"));
+                    }
+                    if let Some(error) = &health.last_error {
+                        ui.label(error);
+                    }
+                } else {
+                    ui.small("Health monitoring is disabled for this namespace.");
+                }
                 if ns.applications.is_empty() {
                     ui.label("Keep-alive or no lockfile applications.");
                 } else {

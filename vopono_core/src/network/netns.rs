@@ -1317,6 +1317,41 @@ impl ManagedNamespaceGuard {
 }
 
 impl ManagedNamespaceGuard {
+    /// Inspect detached applications as well as registered sessions. VPN helper
+    /// processes and their children do not pin an otherwise unused namespace.
+    pub fn has_application_processes(&self) -> anyhow::Result<bool> {
+        let managed_helper_pids = [
+            self.openvpn.as_ref().map(|helper| helper.pid),
+            self.warp.as_ref().map(|helper| helper.pid),
+            self.shadowsocks.as_ref().map(|helper| helper.pid),
+            self.openconnect.as_ref().map(|helper| helper.pid),
+            self.openfortivpn.as_ref().map(|helper| helper.pid),
+            self.trojan.as_ref().map(|helper| helper.pid),
+            self.ssh.as_ref().map(|helper| helper.ssh_pid),
+            self.ssh.as_ref().map(|helper| helper.redsocks_pid),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|pid| pid as i32)
+        .collect::<Vec<_>>();
+        let pids = get_pids_in_namespace(&self.name)?;
+        let processes = System::new_all();
+        let parents = pids
+            .iter()
+            .filter_map(|pid| {
+                processes
+                    .process(sysinfo::Pid::from_u32(*pid as u32))
+                    .and_then(|process| process.parent())
+                    .map(|parent| (*pid, parent.as_u32() as i32))
+            })
+            .collect::<HashMap<_, _>>();
+        Ok(has_unaccounted_processes(
+            &pids,
+            &managed_helper_pids,
+            &parents,
+        ))
+    }
+
     fn perform_teardown(&mut self) -> anyhow::Result<()> {
         if self.disposition != GuardDisposition::Managed {
             debug!(
@@ -1374,42 +1409,10 @@ impl ManagedNamespaceGuard {
                 false
             }
         };
-        let managed_helper_pids = [
-            self.openvpn.as_ref().map(|helper| helper.pid),
-            self.warp.as_ref().map(|helper| helper.pid),
-            self.shadowsocks.as_ref().map(|helper| helper.pid),
-            self.openconnect.as_ref().map(|helper| helper.pid),
-            self.openfortivpn.as_ref().map(|helper| helper.pid),
-            self.trojan.as_ref().map(|helper| helper.pid),
-            self.ssh.as_ref().map(|helper| helper.ssh_pid),
-            self.ssh.as_ref().map(|helper| helper.redsocks_pid),
-        ]
-        .into_iter()
-        .flatten()
-        .map(|pid| pid as i32)
-        .collect::<Vec<_>>();
-        let has_unaccounted_processes = match get_pids_in_namespace(&self.name) {
-            Ok(pids) => {
-                let processes = System::new_all();
-                let process_parents = pids
-                    .iter()
-                    .filter_map(|pid| {
-                        processes
-                            .process(sysinfo::Pid::from_u32(*pid as u32))
-                            .and_then(|process| process.parent())
-                            .map(|parent| (*pid, parent.as_u32() as i32))
-                    })
-                    .collect::<HashMap<_, _>>();
-                has_unaccounted_processes(&pids, &managed_helper_pids, &process_parents)
-            }
-            Err(e) => {
-                warn!(
-                    "Could not inspect processes in namespace {}: {e:?}; preserving namespace",
-                    self.name
-                );
-                true
-            }
-        };
+        let has_unaccounted_processes = self.has_application_processes().unwrap_or_else(|error| {
+            warn!("Could not inspect namespace processes: {error}; preserving namespace");
+            true
+        });
 
         if lock_dir_is_empty && !has_unaccounted_processes {
             // Commit to teardown before dropping any resource. A later error

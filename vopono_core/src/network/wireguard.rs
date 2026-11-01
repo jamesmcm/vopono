@@ -29,6 +29,8 @@ pub struct Wireguard {
     pub firewall: Firewall,
     pub if_name: String,
     pub interface_addresses: Vec<IpAddr>,
+    #[serde(default)]
+    pub(crate) recovery: Option<super::recovery::Peer>,
 }
 
 impl Wireguard {
@@ -138,6 +140,13 @@ impl Wireguard {
         );
         let peer_endpoint =
             SocketAddr::new(peer_endpoint_ip, config.peer.endpoint.port()).to_string();
+        let recovery = super::recovery::Peer {
+            host: config.peer.endpoint.ip_or_hostname(),
+            port: config.peer.endpoint.port(),
+            public_key: config.peer.public_key.clone(),
+            address: peer_endpoint_ip,
+            disable_ipv6,
+        };
         let endpoint_line = Regex::new(r"(?m)^Endpoint\s*=.*$")?;
         config_string = endpoint_line
             .replace_all(&config_string, format!("Endpoint = {peer_endpoint}"))
@@ -596,6 +605,7 @@ impl Wireguard {
             firewall,
             if_name,
             interface_addresses,
+            recovery: Some(recovery),
         })
     }
 }

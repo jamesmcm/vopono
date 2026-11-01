@@ -70,7 +70,12 @@ pub enum OwnerWriteRequest {
         dir_mode: u32,
     },
     /// Clean known lockfiles with the config owner's filesystem permissions.
-    CleanLocks { config_dir: PathBuf },
+    CleanLocks {
+        config_dir: PathBuf,
+    },
+    RemoveFile {
+        path: PathBuf,
+    },
 }
 
 /// Child-side implementation of the hidden `vopono __write-user-file` verb.
@@ -83,6 +88,11 @@ pub fn perform_owner_write(request: &OwnerWriteRequest) -> anyhow::Result<()> {
         anyhow::bail!("refusing privileged write helper invocation as root");
     }
     match request {
+        OwnerWriteRequest::RemoveFile { path } => match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        },
         OwnerWriteRequest::File {
             path,
             contents,
@@ -242,6 +252,18 @@ fn spawn_owner_write(request: &OwnerWriteRequest, uid: Uid, gid: Gid) -> anyhow:
     }
 }
 
+pub fn remove_file_as_config_owner(path: &Path) -> anyhow::Result<()> {
+    let (uid, gid) =
+        super::config_owner_override().context("Missing authenticated config owner")?;
+    spawn_owner_write(
+        &OwnerWriteRequest::RemoveFile {
+            path: path.to_owned(),
+        },
+        uid,
+        gid,
+    )
+}
+
 /// Write `contents` to `path` as the configured config owner.
 ///
 /// The daemon uses its authenticated owner override; a privileged sudo process
@@ -362,6 +384,72 @@ pub fn validated_user_owned_dir(path: &Path, uid: Uid) -> anyhow::Result<PathBuf
         uid.as_raw()
     );
     Ok(canonical)
+}
+
+/// Read a regular configuration file with the authenticated user's permissions.
+/// Runs a separate executable so daemon threads never change process credentials.
+pub fn read_file_as_config_owner(path: &Path) -> anyhow::Result<Vec<u8>> {
+    if !super::is_daemon_mode() {
+        return read_regular_file(path);
+    }
+    let (uid, gid) =
+        super::config_owner_override().context("Missing authenticated config owner")?;
+    anyhow::ensure!(
+        !uid.is_root(),
+        "Unprivileged configuration reader requires a non-root owner"
+    );
+    let exe = helper_exe_override().context("Missing config reader executable")?;
+    let user = User::from_uid(uid)?.context("Unknown config owner")?;
+    let name = std::ffi::CString::new(user.name)?;
+    let output = unsafe {
+        let mut command = Command::new(exe);
+        command
+            .arg("__read-user-file")
+            .arg(path)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        command.pre_exec(move || {
+            nix::unistd::initgroups(&name, gid)?;
+            nix::unistd::setgid(gid)?;
+            nix::unistd::setuid(uid)?;
+            Ok(())
+        });
+        command.output()?
+    };
+    anyhow::ensure!(
+        output.status.success(),
+        "Configuration file is not readable by its owner"
+    );
+    Ok(output.stdout)
+}
+
+fn read_regular_file(path: &Path) -> anyhow::Result<Vec<u8>> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(path)?;
+    anyhow::ensure!(
+        file.metadata()?.is_file(),
+        "Configuration input must be a regular file"
+    );
+    let mut bytes = Vec::new();
+    file.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() <= 4 * 1024 * 1024,
+        "Configuration file exceeds size limit"
+    );
+    Ok(bytes)
+}
+
+pub fn run_owner_read(path: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !nix::unistd::geteuid().is_root(),
+        "Refusing privileged configuration reader"
+    );
+    std::io::stdout().write_all(&read_regular_file(path)?)?;
+    Ok(())
 }
 
 #[cfg(test)]

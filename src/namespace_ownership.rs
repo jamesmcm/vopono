@@ -9,13 +9,25 @@ use vopono_core::network::netns::{NamespaceSnapshot, NetworkNamespace};
 const OWNER_DIR: &str = "/run/vopono/namespace-owners";
 static OWNER_RECORD_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct OwnerRecord {
     uid: u32,
     device: u64,
     inode: u64,
     namespace: StoredNamespace,
     lifecycle: NamespaceLifecycle,
+    runtime: Option<RuntimeSettings>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RuntimeSettings {
+    pub config_base: PathBuf,
+    pub gid: u32,
+    pub monitor: bool,
+    pub recover: bool,
+    pub host_ports: Vec<u16>,
+    pub forwarder: Option<vopono_core::network::port_forwarding::ForwarderSnapshot>,
+    pub daemon_pid: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -51,6 +63,8 @@ impl<'de> Deserialize<'de> for OwnerRecord {
             persistent: bool,
             #[serde(default)]
             stopping: bool,
+            #[serde(default)]
+            runtime: Option<RuntimeSettings>,
         }
 
         let wire = Wire::deserialize(deserializer)?;
@@ -67,6 +81,7 @@ impl<'de> Deserialize<'de> for OwnerRecord {
             inode: wire.inode,
             namespace: wire.namespace,
             lifecycle,
+            runtime: wire.runtime,
         })
     }
 }
@@ -126,7 +141,9 @@ pub fn tag(namespace_state: &NetworkNamespace, uid: Uid) -> anyhow::Result<()> {
     // Re-tagging happens whenever an existing namespace is reused. Preserve a
     // previous keep-alive/create-only decision rather than silently reverting
     // it to ordinary last-client teardown semantics.
-    let lifecycle = validated_record(name, uid)
+    let existing = validated_record(name, uid).ok();
+    let lifecycle = existing
+        .as_ref()
         .map(|record| record.lifecycle)
         .unwrap_or_default();
     let record = OwnerRecord {
@@ -135,8 +152,73 @@ pub fn tag(namespace_state: &NetworkNamespace, uid: Uid) -> anyhow::Result<()> {
         inode: namespace.ino(),
         namespace: StoredNamespace::Snapshot(namespace_state.snapshot()?),
         lifecycle,
+        runtime: existing.and_then(|record| record.runtime),
     };
     persist_record(name, &record)
+}
+
+pub fn save_runtime(name: &str, uid: Uid, runtime: RuntimeSettings) -> anyhow::Result<()> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
+    let mut record = validated_record(name, uid)?;
+    record.runtime = Some(runtime);
+    persist_record(name, &record)
+}
+
+pub fn update_snapshot(name: &str, uid: Uid, snapshot: NamespaceSnapshot) -> anyhow::Result<()> {
+    anyhow::ensure!(snapshot.name == name, "Namespace snapshot name mismatch");
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
+    let mut record = validated_record(name, uid)?;
+    record.namespace = StoredNamespace::Snapshot(snapshot);
+    persist_record(name, &record)
+}
+
+/// Enumerate only trusted, identity-bound records. Stale records never authorize
+/// attachment to a different namespace that happens to reuse the same name.
+pub fn restart_records() -> anyhow::Result<Vec<(String, Uid, RuntimeSettings)>> {
+    let mut records = Vec::new();
+    let entries = match std::fs::read_dir(OWNER_DIR) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(records),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if vopono_core::network::netns::validate_netns_name(&name).is_err() {
+            continue;
+        }
+        let result = (|| -> anyhow::Result<_> {
+            let meta = std::fs::symlink_metadata(entry.path())?;
+            anyhow::ensure!(
+                meta.is_file() && meta.uid() == 0 && meta.len() <= 4 * 1024 * 1024,
+                "Invalid ownership record"
+            );
+            let record: OwnerRecord = serde_json::from_reader(std::fs::File::open(entry.path())?)?;
+            let uid = Uid::from_raw(record.uid);
+            let record = validated_record(&name, uid)?;
+            Ok(record.runtime.map(|runtime| (name.clone(), uid, runtime)))
+        })();
+        match result {
+            Ok(Some(record)) => records.push(record),
+            Ok(None) => {}
+            Err(_) => {
+                // A stale root-owned record is disposable; its namespace is not.
+                log::warn!("Ignoring stale or invalid namespace ownership record {name}");
+                if entry.file_type()?.is_file()
+                    && std::fs::symlink_metadata(entry.path())?.uid() == 0
+                {
+                    std::fs::remove_file(entry.path())?;
+                }
+            }
+        }
+    }
+    Ok(records)
 }
 
 fn persist_record(name: &str, record: &OwnerRecord) -> anyhow::Result<()> {
@@ -147,6 +229,7 @@ fn persist_record(name: &str, record: &OwnerRecord) -> anyhow::Result<()> {
     file.persist(&path)
         .map_err(|error| error.error)
         .with_context(|| format!("Failed to persist ownership tag for {name}"))?;
+    std::fs::File::open(OWNER_DIR)?.sync_all()?;
     Ok(())
 }
 
@@ -179,6 +262,13 @@ pub fn is_persistent(name: &str, uid: Uid) -> anyhow::Result<bool> {
         .expect("owner record lock poisoned");
     let record = validated_record(name, uid)?;
     Ok(record.is_persistent())
+}
+
+pub fn is_stopping(name: &str, uid: Uid) -> anyhow::Result<bool> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
+    Ok(validated_record(name, uid)?.lifecycle == NamespaceLifecycle::Stopping)
 }
 
 pub fn mark_persistent(name: &str, uid: Uid) -> anyhow::Result<()> {
@@ -272,6 +362,7 @@ mod tests {
             inode: 11,
             namespace: StoredNamespace::LegacyJson("snapshot".to_string()),
             lifecycle: NamespaceLifecycle::Active,
+            runtime: None,
         };
         assert!(validate_record("vo_test", &record, Uid::from_raw(1000), 7, 11).is_ok());
         assert!(
@@ -317,6 +408,7 @@ mod tests {
             inode: 11,
             namespace: StoredNamespace::LegacyJson("snapshot".to_string()),
             lifecycle: NamespaceLifecycle::Active,
+            runtime: None,
         };
         record.mark_persistent("vo_test").unwrap();
         assert!(record.is_persistent());

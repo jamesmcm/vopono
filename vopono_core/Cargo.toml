@@ -23,6 +23,7 @@ nix = { version = "0.31", features = [
     "process",
     "sched",
     "mount",
+    "socket",
 ] }
 serde = { version = "1", features = ["derive", "std"] }
 csv = "1"

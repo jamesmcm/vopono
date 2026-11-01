@@ -363,3 +363,23 @@ fn validate_pia_wireguard_server_info(server_info: &WireguardServerInfo) -> anyh
 
     Ok(())
 }
+
+pub(crate) fn diagnostic_catalogue(
+    body: &str,
+) -> anyhow::Result<Vec<super::super::diagnostics::CatalogueServer>> {
+    let info: VpnInfo = serde_json::from_str(body.lines().next().context("Empty catalogue")?)?;
+    Ok(info
+        .regions
+        .into_iter()
+        .filter(|r| !r.offline)
+        .flat_map(|r| {
+            r.servers.wg.unwrap_or_default().into_iter().map(move |s| {
+                super::super::diagnostics::CatalogueServer {
+                    id: r.id.clone(),
+                    addresses: vec![s.ip],
+                    public_key: None,
+                }
+            })
+        })
+        .collect())
+}

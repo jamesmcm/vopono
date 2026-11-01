@@ -1,11 +1,13 @@
 mod airvpn;
 pub mod azirevpn;
+pub mod diagnostics;
 mod ivpn;
 mod mozilla;
 mod mullvad;
 mod nordvpn;
 pub mod pia;
 pub mod protonvpn;
+pub mod transaction;
 mod ui;
 mod warp;
 

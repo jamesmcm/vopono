@@ -1,0 +1,2 @@
+{"regions":[{"id":"test","name":"Test","country":"SE","auto_region":false,"dns":"test.invalid","port_forward":true,"geo":false,"offline":false,"servers":{"wg":[{"ip":"192.0.2.1","cn":"test.invalid"}]}},{"id":"offline","name":"Offline","country":"SE","auto_region":false,"dns":"offline.invalid","port_forward":false,"geo":false,"offline":true,"servers":{"wg":[{"ip":"192.0.2.2","cn":"offline.invalid"}]}}]}
+fixture-signature-not-used-for-TLS-schema-test

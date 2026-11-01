@@ -3,6 +3,7 @@
 use std::{fs, net::IpAddr, path::PathBuf, str::FromStr};
 
 use anyhow::anyhow;
+use clap::ValueEnum;
 use config::Config;
 use log::warn;
 use vopono_core::{
@@ -55,14 +56,23 @@ macro_rules! command_else_config_option_variant {
     // If None then read from Config .get("expr")
     // Returns None if absent in both
     ($field_id:ident, $command:ident, $config:ident) => {
-        $command.$field_id.map(|x| x.to_variant()).or_else(|| {
-            $config
-                .get(stringify!($field_id))
-                .or($config.get(&stringify!($field_id).replace('_', "-")))
-                .map_err(|_e| anyhow!("Failed to read config file"))
-                .ok()
-        })
+        $command
+            .$field_id
+            .map(|x| x.to_variant())
+            .or_else(|| config_variant(&$config, stringify!($field_id)))
     };
+}
+
+fn config_variant<T>(config: &Config, name: &str) -> Option<T>
+where
+    T: strum::IntoEnumIterator + Clone + std::fmt::Display,
+{
+    config
+        .get_string(name)
+        .or_else(|_| config.get_string(&name.replace('_', "-")))
+        .ok()
+        .and_then(|value| crate::args::WrappedArg::<T>::from_str(&value, true).ok())
+        .map(|value| value.to_variant())
 }
 
 macro_rules! error_and_bail {
@@ -132,16 +142,30 @@ impl ArgsConfig {
                     .and_then(|s| PathBuf::from_str(s.as_ref()).ok())
             });
 
-        // Note application cannot be defined in config file
-        let application: String = shellexpand::full(&command.application)
-            .map_err(|e| {
-                anyhow!(
-                    "Shell expansion error for application: {:?}, error: {:?}",
-                    command.application,
-                    e
-                )
-            })
-            .map(|c| c.to_string())?;
+        let application = if command.application.is_empty() && command.profile.is_some() {
+            config
+                .get_string("application")
+                .map_err(|_| anyhow!("Named profile requires an application"))?
+        } else {
+            command.application.clone()
+        };
+        anyhow::ensure!(
+            !application.is_empty() || command.create_netns_only,
+            "An application or --profile is required (except with --create-netns-only)"
+        );
+        let application: String = if command.literal_application {
+            application
+        } else {
+            shellexpand::full(&application)
+                .map_err(|e| {
+                    anyhow!(
+                        "Shell expansion error for application: {:?}, error: {:?}",
+                        command.application,
+                        e
+                    )
+                })
+                .map(|c| c.to_string())?
+        };
         let custom_netns_name = command_else_config_option!(custom_netns_name, command, config);
         let open_hosts = command_else_config_option!(open_hosts, command, config);
         let hosts = command_else_config_option!(hosts, command, config);
@@ -407,19 +431,27 @@ impl ArgsConfig {
         let mut vopono_config_settings_builder = config::Config::builder();
 
         if let Some(path) = config_path.clone() {
-            vopono_config_settings_builder =
-                vopono_config_settings_builder.add_source(config::File::from(path));
+            if vopono_core::util::is_daemon_mode() {
+                let bytes = vopono_core::util::owner_write::read_file_as_config_owner(&path)?;
+                let content =
+                    String::from_utf8(bytes).map_err(|_| anyhow!("Configuration must be UTF-8"))?;
+                vopono_config_settings_builder = vopono_config_settings_builder
+                    .add_source(config::File::from_str(&content, config::FileFormat::Toml));
+            } else {
+                vopono_config_settings_builder =
+                    vopono_config_settings_builder.add_source(config::File::from(path));
+            }
         }
 
-        vopono_config_settings_builder.build().map_err(|e| {
-            let msg = format!(
-                "Failed to parse config from: {}, err: {}",
-                config_path.unwrap().to_string_lossy(),
-                e
-            );
-            log::error!("{msg}");
-            anyhow!(msg)
-        })
+        let settings = vopono_config_settings_builder.build().map_err(|_| {
+            anyhow::Error::new(vopono_core::diagnostics::Diagnostic::new(
+                vopono_core::diagnostics::DiagnosticCode::ProviderConfig,
+                vopono_core::diagnostics::DiagnosticState::Fail,
+                "Could not read or parse the vopono configuration file",
+                Some("Check the configuration path, permissions and TOML syntax"),
+            ))
+        })?;
+        crate::profiles::select(settings, command.profile.as_deref())
     }
 }
 
@@ -487,6 +519,46 @@ mod tests {
         assert_eq!(
             args.auth_user_pass,
             Some(Path::new("config-auth.txt").to_path_buf())
+        );
+    }
+
+    #[test]
+    fn profile_enum_values_accept_cli_spellings_and_literal_argv_is_not_expanded() {
+        let app = App::try_parse_from([
+            "vopono",
+            "exec",
+            "--interface",
+            "lo",
+            "--profile",
+            "agent",
+            "printf '$HOME' '$VOPONO_UNSET_MCP_LITERAL'",
+        ])
+        .unwrap();
+        let Command::Exec(mut command) = app.cmd.unwrap() else {
+            unreachable!()
+        };
+        command.literal_application = true;
+        let config = Config::builder()
+            .add_source(config::File::from_str(
+                "[profiles.agent]\nprovider='none'\nprotocol='none'\nfirewall='nftables'\n",
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap();
+        let config = crate::profiles::select(config, Some("agent")).unwrap();
+        let args = ArgsConfig::get_cli_or_config_args(command, config).unwrap();
+        assert_eq!(
+            args.provider,
+            vopono_core::config::providers::VpnProvider::None
+        );
+        assert_eq!(args.protocol, vopono_core::config::vpn::Protocol::None);
+        assert_eq!(
+            args.firewall,
+            vopono_core::network::firewall::Firewall::NfTables
+        );
+        assert_eq!(
+            vopono_core::util::parse_command_str(&args.application).unwrap(),
+            ["printf", "$HOME", "$VOPONO_UNSET_MCP_LITERAL"]
         );
     }
 }
