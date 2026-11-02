@@ -35,6 +35,11 @@ use vopono_core::util::{
 };
 use vopono_core::util::{parse_command_str, vopono_dir};
 
+// Daemon setup runs concurrently for different namespaces. Hold this only
+// while selecting a free subnet and publishing its addresses on the host;
+// protocol setup and handshakes must not block unrelated namespace creation.
+static SUBNET_ALLOCATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Configuration struct for namespace setup results
 pub struct NamespaceConfig {
     pub ns: NetworkNamespace,
@@ -398,7 +403,6 @@ fn setup_namespace_inner(
             parsed_command.open_ports.as_deref(),
             parsed_command.forward.as_deref(),
         );
-        let target_subnet = get_target_subnet()?;
         ns.add_loopback()?;
         ns.add_veth_pair()?;
 
@@ -416,12 +420,17 @@ fn setup_namespace_inner(
             }
         }
 
-        ns.add_routing(
-            target_subnet,
-            parsed_command.open_hosts.as_ref(),
-            parsed_command.allow_host_access,
-            parsed_command.disable_ipv6,
-        )?;
+        let target_subnet = {
+            let _allocation = SUBNET_ALLOCATION.lock().unwrap_or_else(|p| p.into_inner());
+            let target_subnet = get_target_subnet()?;
+            ns.add_routing(
+                target_subnet,
+                parsed_command.open_hosts.as_ref(),
+                parsed_command.allow_host_access,
+                parsed_command.disable_ipv6,
+            )?;
+            target_subnet
+        };
         ns.enable_unprivileged_ping()?;
 
         if parsed_command.firewall == vopono_core::network::firewall::Firewall::NfTables {

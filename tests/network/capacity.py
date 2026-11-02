@@ -1,6 +1,9 @@
 """Namespace quotas include pending setup and are reclaimed on failure/stop."""
+from concurrent.futures import ThreadPoolExecutor
+import json
 from pathlib import Path
 import sys
+from threading import Barrier
 from common import Context, wait_for
 
 ctx = Context(*sys.argv[1:])
@@ -45,3 +48,23 @@ stop('capacity_reused')
 for n in range(1, 16):
     stop(f'capacity{n}')
 print('PASS: namespace/monitor limits, control availability and failure/stop permit reclamation', flush=True)
+
+# Separate namespace transitions must still reserve distinct host subnets.
+start = Barrier(8)
+
+
+def create_concurrent(n):
+    start.wait(timeout=10)
+    create(f'parallel{n}')
+
+
+with ThreadPoolExecutor(max_workers=8) as workers:
+    list(workers.map(create_concurrent, range(8)))
+addresses = []
+for n in range(8):
+    record = json.loads((Path('/run/vopono/namespace-owners') / ctx.namespace(f'parallel{n}')).read_text())
+    addresses.append(record['namespace']['veth_pair_ips']['ipv4']['host_ip'])
+assert len(set(addresses)) == len(addresses), f'Concurrent namespaces reused subnets: {addresses}'
+for n in range(8):
+    stop(f'parallel{n}')
+print('PASS: concurrent namespace creation assigns distinct host subnets', flush=True)
