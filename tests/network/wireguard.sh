@@ -25,6 +25,12 @@ cleanup() {
     rm -rf "$scratch"
 }
 trap cleanup EXIT
+# The unprivileged test account may differ from the checkout owner (as on
+# GitHub's Ubuntu runners). Keep the executable and working directory outside
+# private home-directory ancestors; do not relax checkout permissions.
+install -m 755 -- "$binary" "$scratch/vopono"
+binary="$scratch/vopono"
+cd "$scratch"
 # Isolate all fixed privileged paths, including DNS overlays and the daemon socket.
 mkdir "$scratch/etc"
 cp -a /etc/. "$scratch/etc/"
