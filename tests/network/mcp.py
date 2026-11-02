@@ -132,7 +132,18 @@ def output_ready():
 
 
 wait_for(output_ready)
-assert server.call('check', namespace=vpn['namespace'], skip_dns=True, skip_ipv6=True)['result']['connected']
+
+
+def vpn_connected():
+    # Application output can precede the first WireGuard handshake. A failed
+    # readiness probe is expected while that asynchronous setup completes.
+    result = server.request('tools/call', {'name': 'check', 'arguments': {
+        'namespace': vpn['namespace'], 'timeout_ms': 300,
+        'skip_dns': True, 'skip_ipv6': True}})
+    return not result['isError'] and result['structuredContent']['result']['connected']
+
+
+wait_for(vpn_connected, seconds=10)
 snapshot = server.call('job_output', job_id=vpn['job_id'], stdout_offset=200000, max_bytes=16384)
 assert snapshot['stdout']['dropped_bytes'] == 0
 assert 'LITERAL:' in snapshot['stdout']['text'] and '$HOME' in snapshot['stdout']['text']

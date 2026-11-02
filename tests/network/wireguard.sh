@@ -67,6 +67,8 @@ ip route add default via 192.0.2.2 dev uplink
 ip -n peer addr add 192.0.2.2/24 dev peerlink
 ip -n peer link set peerlink up
 ip -n peer link set lo up
+# Exercise address rotation without relying on the host's secondary-IP policy.
+ip netns exec peer sysctl -q net.ipv4.conf.peerlink.promote_secondaries=0
 umask 077
 wg genkey > "$scratch/server.key"
 wg genkey > "$scratch/client.key"

@@ -61,8 +61,10 @@ inode = os.stat('/run/netns/' + name).st_ino
 status = json.loads(client('status', '--json').stdout)
 pid = next(ns for ns in status['namespaces'] if ns['id'] == name)['applications'][0]['pid']
 # Rotate the DNS endpoint and make the original literal address unusable.
-command('ip', '-n', 'peer', 'addr', 'add', '192.0.2.3/24', 'dev', 'peerlink')
+# Removing a primary IPv4 address may also remove secondary addresses in its
+# subnet. Add the replacement after removal so it becomes the new primary.
 command('ip', '-n', 'peer', 'addr', 'delete', '192.0.2.2/24', 'dev', 'peerlink')
+command('ip', '-n', 'peer', 'addr', 'add', '192.0.2.3/24', 'dev', 'peerlink')
 Path('/etc/hosts').write_text(Path('/etc/hosts').read_text().replace('192.0.2.2 rotating.test', '192.0.2.3 rotating.test'))
 wait_for(reachable)
 record = json.loads((Path('/run/vopono/namespace-owners') / name).read_text())
