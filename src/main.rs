@@ -9,6 +9,7 @@ mod check;
 mod cli_client;
 mod control;
 mod daemon;
+mod daemon_client;
 mod doctor;
 mod errors;
 mod exec;
@@ -26,13 +27,11 @@ mod sync;
 mod tcp_proxy;
 
 use crate::args::ExecCommand;
-use anyhow::{Context, anyhow};
+use anyhow::anyhow;
 use clap::Parser;
 use cli_client::CliClient;
 use interprocess::TryClone;
-use interprocess::local_socket::ToFsName;
 use interprocess::local_socket::prelude::*;
-use interprocess::os::unix::local_socket::FilesystemUdSocket;
 use list::{output_list, output_status};
 use list_configs::print_configs;
 use log::{LevelFilter, debug, info, warn};
@@ -342,22 +341,6 @@ fn handle_check(command: args::CheckCommand, askpass: bool) -> anyhow::Result<()
     Ok(())
 }
 
-/// Connect to the root daemon, verify its peer credentials, and complete the
-/// version handshake. Callers that expect a slow response must set their own
-/// timeouts after this returns.
-fn connect_daemon() -> anyhow::Result<LocalSocketStream> {
-    let name = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?;
-    let mut conn =
-        LocalSocketStream::connect(name).map_err(|e| anyhow!("Daemon not running: {e}"))?;
-    let LocalSocketStream::UdSocket(socket) = &conn;
-    let credentials =
-        nix::sys::socket::getsockopt(&socket.as_fd(), nix::sys::socket::sockopt::PeerCredentials)
-            .context("Failed to inspect daemon socket credentials")?;
-    anyhow::ensure!(credentials.uid() == 0, "Daemon socket peer is not root");
-    daemon::exchange_versions_with_daemon(&mut conn);
-    Ok(conn)
-}
-
 enum CheckForwardError {
     /// The request never produced a daemon result; local/sudo retry is safe.
     Retry(anyhow::Error),
@@ -373,7 +356,8 @@ fn forward_check_to_daemon(
     v6_host: &str,
     dns_host: &str,
 ) -> Result<check::ConnectivityStatus, CheckForwardError> {
-    let mut conn = connect_daemon().map_err(CheckForwardError::Retry)?;
+    let mut conn = daemon_client::connect(daemon_client::Compatibility::Warn)
+        .map_err(CheckForwardError::Retry)?;
     daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_STOP_TIMEOUT_SECONDS)
         .map_err(CheckForwardError::Retry)?;
 
@@ -455,7 +439,8 @@ fn run_stop_locally(request: StopRequest, json: bool, askpass: bool) -> anyhow::
 /// must be reported without retrying, since the daemon may still be tearing
 /// down the requested process or namespace.
 fn forward_stop_to_daemon(request: StopRequest, json: bool) -> Result<i32, StopForwardError> {
-    let mut conn = connect_daemon().map_err(StopForwardError::Retry)?;
+    let mut conn = daemon_client::connect(daemon_client::Compatibility::Warn)
+        .map_err(StopForwardError::Retry)?;
     daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_STOP_TIMEOUT_SECONDS)
         .map_err(StopForwardError::Retry)?;
 
@@ -519,7 +504,7 @@ enum DaemonForward {
 }
 
 fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonForward> {
-    let mut conn = connect_daemon()?;
+    let mut conn = daemon_client::connect(daemon_client::Compatibility::Warn)?;
 
     debug!("Connected to daemon, forwarding command.");
     if let Some(user) = &cmd.user {
@@ -534,46 +519,7 @@ fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonFo
              the application will run as the connecting group"
         );
     }
-    let mut daemon_cmd = cmd.clone();
-    let client_working_dir = std::env::current_dir()?;
-    resolve_custom_path_for_daemon(&mut daemon_cmd, &client_working_dir);
-    // Match the sudo/CLI path, where the application inherits the client's
-    // working directory when --working-directory is not given.
-    if daemon_cmd.working_directory.is_none() {
-        daemon_cmd.working_directory = Some(client_working_dir.to_string_lossy().into_owned());
-    }
-    daemon_cmd.silent = silent;
-    // Expand variables in the client context, then tell the daemon the command
-    // is literal. Otherwise `$HOME`/`$VAR` would expand against root's
-    // environment in the daemon process.
-    if !daemon_cmd.literal_application && !daemon_cmd.application.is_empty() {
-        daemon_cmd.application = shellexpand::full(&daemon_cmd.application)
-            .map_err(|_| anyhow!("Shell expansion failed for the application command"))?
-            .into_owned();
-        daemon_cmd.literal_application = true;
-    }
-
-    // Forward the client's environment so daemon-launched applications match the
-    // sudo/CLI path, where the child inherits the invoking user's environment.
-    // The daemon only applies these to the child process (which runs as the
-    // authenticated connecting user) and re-applies its own VOPONO_* variables
-    // afterwards, so nothing here affects the daemon's own execution.
-    let mut fwd_env: std::collections::HashMap<String, String> = std::env::vars().collect();
-    // The daemon cannot ask pactl about the authenticated user's session:
-    // running it there would inspect the daemon's (root) audio session. Ask
-    // in the client context and forward the effective PulseAudio endpoint,
-    // including PipeWire's PulseAudio compatibility server, when the client
-    // has not explicitly set PULSE_SERVER.
-    if !fwd_env.contains_key("PULSE_SERVER")
-        && let Ok(server) = vopono_core::util::pulseaudio::get_pulseaudio_server()
-    {
-        fwd_env.insert("PULSE_SERVER".to_string(), server);
-    }
-    let request = daemon::DaemonRequest::Execute {
-        // Encode `ExecCommand` as JSON bytes carried inside the wincode daemon frame.
-        cmd: serde_json::to_vec(&daemon_cmd)?,
-        env: fwd_env,
-    };
+    let request = daemon_client::prepare_execute(cmd.clone(), silent)?;
     let bytes = wincode::serialize(&request)?;
     conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
     conn.write_all(&bytes)?;

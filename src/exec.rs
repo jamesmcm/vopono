@@ -295,13 +295,12 @@ fn setup_namespace_inner(
                     uiclient,
                 )?;
             } else {
-                // In daemon mode, avoid interactive sync and return a clear error.
-                anyhow::bail!(
-                    "Missing configuration for {} {}. Run 'vopono sync --provider {} --protocol {}' as your user to initialize.",
-                    parsed_command.provider,
-                    parsed_command.protocol,
-                    parsed_command.provider,
-                    parsed_command.protocol
+                return Err(
+                    vopono_core::diagnostics::SetupError::ProviderNotConfigured {
+                        provider: parsed_command.provider.clone(),
+                        protocol: parsed_command.protocol.clone(),
+                    }
+                    .into(),
                 );
             }
         }

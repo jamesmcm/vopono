@@ -186,6 +186,7 @@ pub struct Session {
     pub ns: NetworkNamespace,
     uid: Uid,
     controller: bool,
+    registered: bool,
     valid: Arc<AtomicBool>,
     forwarder: Option<Box<dyn Forwarder>>,
     monitor: Option<crate::health::Monitor>,
@@ -223,6 +224,7 @@ impl Session {
             ns,
             uid,
             controller,
+            registered: true,
             valid,
             forwarder,
             monitor_enabled: monitor.is_some(),
@@ -280,8 +282,12 @@ impl Session {
     }
 }
 
-impl Drop for Session {
-    fn drop(&mut self) {
+impl Session {
+    fn unregister_application(&mut self) {
+        if !self.registered {
+            return;
+        }
+        self.registered = false;
         {
             let _transition = lock_namespace(&self.ns.name);
             let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
@@ -291,6 +297,12 @@ impl Drop for Session {
                 entry.applications = entry.applications.saturating_sub(1);
             }
         }
+    }
+
+    /// Run only after the request has replied and released its client resources.
+    /// The creating thread retains provider leases and its authenticated config context.
+    pub fn run_until_unused(mut self) {
+        self.unregister_application();
         if !self.controller {
             return;
         }
@@ -397,6 +409,25 @@ impl Drop for Session {
     }
 }
 
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.unregister_application();
+        if self.controller {
+            let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
+            if sessions
+                .get(&self.ns.name)
+                .is_some_and(|entry| Arc::ptr_eq(&entry.valid, &self.valid))
+            {
+                sessions.remove(&self.ns.name);
+                release_resources(&self.ns.name);
+            }
+        }
+        // An unwind/early return must preserve the namespace. The explicit
+        // controller loop performs teardown after verifying its last user.
+        self.disarm();
+    }
+}
+
 /// Rebuild workers from root-owned intent, without rereading client commands or
 /// provisioning VPN keys. Kernel tunnels and applications survive daemon exit.
 pub fn restore_all() -> anyhow::Result<()> {
@@ -451,7 +482,7 @@ pub fn restore_all() -> anyhow::Result<()> {
                 Ok(Some(session))
             })();
             match result {
-                Ok(Some(session)) => drop(session),
+                Ok(Some(session)) => session.run_until_unused(),
                 Ok(None) => {}
                 Err(error) => {
                     log::warn!("Could not restore namespace {name}: {error}");
@@ -511,12 +542,12 @@ mod tests {
         drop(second);
         assert!(!dropped.get());
         invalidate(&first.ns.name);
-        drop(first);
+        first.run_until_unused();
         let replacement = Session::register(ns(), Uid::current(), None, false, false);
         assert!(replacement.controller);
         assert!(dropped.get());
         assert!(replacement.valid.load(Ordering::Acquire));
         invalidate(&replacement.ns.name);
-        drop(replacement);
+        replacement.run_until_unused();
     }
 }

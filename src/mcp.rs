@@ -199,28 +199,12 @@ impl Server {
             "doctor" => {
                 let input: DoctorInput = arguments_as(arguments)?;
                 let settings = self.settings(&input.profile)?;
-                let mut args = vec![
-                    "doctor".to_owned(),
-                    "--json".into(),
-                    "--timeout-ms".into(),
-                    "500".into(),
-                ];
-                for (key, flag) in [
-                    ("custom", "--custom"),
-                    ("provider", "--provider"),
-                    ("protocol", "--protocol"),
-                    ("server", "--server"),
-                ] {
-                    if key == "server" && settings.get_string("provider").is_err() {
-                        continue;
-                    }
-                    if let Ok(value) = settings.get_string(key) {
-                        args.extend([flag.into(), value]);
-                    }
-                }
-                if input.offline {
-                    args.push("--offline".into());
-                }
+                let command = self.profile(&input.profile)?;
+                let connection = crate::args_config::ConnectionSettings::read(&command, &settings)
+                    .map_err(|_| {
+                        anyhow::anyhow!("Could not resolve the profile connection settings")
+                    })?;
+                let args = connection.doctor_command(input.offline);
                 jobs::json_command(&args, Duration::from_secs(25)).map_err(|_| {
                     anyhow::anyhow!("Doctor could not complete within its output/time limits")
                 })

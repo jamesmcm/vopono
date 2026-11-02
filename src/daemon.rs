@@ -194,19 +194,7 @@ pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) {
     if set_socket_timeouts_for(conn, DAEMON_HANDSHAKE_TIMEOUT_SECONDS).is_err() {
         return;
     }
-    let sent = wincode::serialize(&DaemonRequest::ClientVersion(own.to_string()))
-        .ok()
-        .and_then(|bytes| write_framed(conn, &bytes).ok());
-    // The daemon answers the handshake with its own version directly.
-    let daemon_version = sent.and_then(|_| {
-        read_framed(conn, MAX_FRAME_LEN)
-            .ok()
-            .and_then(|response| wincode::deserialize::<DaemonResponse>(&response).ok())
-            .and_then(|parsed| match parsed {
-                DaemonResponse::Version(version) => Some(version),
-                _ => None,
-            })
-    });
+    let daemon_version = client_handshake(conn).ok();
     // Restore blocking mode for the long-lived session that follows.
     let _ = clear_socket_timeouts(conn);
     let Some(daemon_version) = daemon_version else {
@@ -220,6 +208,20 @@ pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) {
         VersionSkew::MajorMismatch => log::error!(
             "Daemon vopono version {daemon_version} is incompatible with client version {own}; update vopono and restart the daemon."
         ),
+    }
+}
+
+/// Version handshake on an already authenticated connection.
+pub(crate) fn client_handshake(conn: &mut LocalSocketStream) -> anyhow::Result<String> {
+    write_framed(
+        conn,
+        &wincode::serialize(&DaemonRequest::ClientVersion(
+            env!("CARGO_PKG_VERSION").into(),
+        ))?,
+    )?;
+    match wincode::deserialize::<DaemonResponse>(&read_framed(conn, MAX_FRAME_LEN)?)? {
+        DaemonResponse::Version(version) => Ok(version),
+        _ => anyhow::bail!("Unexpected daemon version response"),
     }
 }
 
@@ -526,7 +528,7 @@ pub fn start() -> anyhow::Result<()> {
         thread::spawn(move || {
             // Keep namespace resources on this thread, but outside the request
             // handler's scope. Its admission slots and client descriptors must
-            // close before Session::drop waits for the namespace's last user.
+            // close before the controller waits for the namespace's last user.
             let mut session = None;
             let mut error_conn = conn.try_clone().ok();
             if let Err(e) = handle_client(conn, client_slot, &mut session) {
@@ -540,7 +542,9 @@ pub fn start() -> anyhow::Result<()> {
                 }
             }
             drop(error_conn);
-            drop(session);
+            if let Some(session) = session {
+                session.run_until_unused();
+            }
             // Namespace cleanup still uses the creating client's config tree
             // and dropped-privilege helpers after the request has finished.
             vopono_core::util::set_config_dir_override(None);

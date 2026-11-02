@@ -1418,9 +1418,10 @@ false degradation. Split tunnels may also intentionally exclude these targets.
 
 `--recover` requires `--monitor`. After repeated failed TCP probes it repairs
 the existing namespace's host route, interface rules and WireGuard endpoint,
-including endpoint DNS changes and the matching iptables/nftables kill-switch
-exception. A failed OpenVPN process is restarted from private frozen inputs; an
-OpenVPN endpoint that rotates to a new IP may still require an explicit
+including gateway/source changes on the same interface, endpoint DNS changes,
+and the matching iptables/nftables kill-switch exception. A failed OpenVPN process
+is restarted from private frozen inputs; an OpenVPN endpoint that rotates to a
+new IP may still require an explicit
 reconnect. Attempts are exponentially spaced, with at most five
 per continuous outage; a changed host route or endpoint resets that budget.
 The existing application keeps running and the kill switch remains installed.
@@ -1679,7 +1680,9 @@ applications may remain alive inside their protected namespace. Inspect
 While the MCP session remains available, `job_cancel` can retry cleanup of a
 recorded namespace after the daemon returns. Its original exit result may remain
 `indeterminate` even after cleanup is confirmed.
-An `indeterminate` result must not trigger an automatic relaunch.
+Explicit daemon refusals finish as `failed` with a sanitized reason; a refusal
+alone does not leave an unresolved cleanup record. An `indeterminate` result
+must not trigger an automatic relaunch.
 
 ## Privileged OpenVPN configuration handling
 

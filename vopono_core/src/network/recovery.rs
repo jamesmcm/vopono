@@ -90,7 +90,10 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
             .as_mut()
             .context("Missing frozen WireGuard endpoint")?;
         let endpoint = SocketAddr::new(address, peer.port);
-        if changed_underlay {
+        // Recovery may follow a gateway/preferred-source change on the same
+        // interface. Invalidate exactly this tunnel's old NAT tuple on every
+        // repair; interface-name comparisons cannot detect those changes.
+        {
             let output = NetworkNamespace::exec_with_output(
                 &state.name,
                 &[&wg.executable_wg, "show", &wg.if_name, "listen-port"],

@@ -48,12 +48,8 @@ impl OpenVpn {
     ) -> anyhow::Result<Self> {
         // TODO: Refactor this to separate functions
 
-        if let Err(x) = which::which("openvpn") {
-            error!("OpenVPN not found. Is OpenVPN installed and on PATH?");
-            return Err(anyhow!(
-                "OpenVPN not found. Is OpenVPN installed and on PATH?: {:?}",
-                x
-            ));
+        if which::which("openvpn").is_err() {
+            return Err(crate::diagnostics::SetupError::DependencyMissing("openvpn").into());
         }
 
         // OpenVPN runs as root and opens its log path itself. Keep that path
@@ -822,7 +818,7 @@ pub fn warn_on_scripts_config(path: &Path) -> anyhow::Result<bool> {
 pub fn get_remotes_from_config(path: &Path) -> anyhow::Result<Vec<Remote>> {
     let content =
         std::fs::read_to_string(path).context("Reading OpenVPN endpoint configuration")?;
-    let endpoints = crate::diagnostics::parse_openvpn(&content, path)
+    let endpoints = super::openvpn_config::endpoints(&content)
         .map_err(|_| anyhow!("Invalid or unsupported OpenVPN remote configuration"))?;
     endpoints
         .into_iter()

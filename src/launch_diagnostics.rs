@@ -1,6 +1,6 @@
 //! Bounded launch-failure evidence with no raw configuration/protocol replies.
 use crate::args::ExecCommand;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
 use vopono_core::config::vpn::Protocol;
 use vopono_core::diagnostics::{Diagnostic, DiagnosticCode as Code, DiagnosticState as State};
@@ -8,6 +8,7 @@ use vopono_core::diagnostics::{Diagnostic, DiagnosticCode as Code, DiagnosticSta
 #[derive(Debug)]
 pub struct LaunchFailure {
     pub diagnostics: Vec<Diagnostic>,
+    pub code: crate::errors::ErrorCode,
 }
 impl std::fmt::Display for LaunchFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -37,10 +38,31 @@ pub fn collect(
     if error.downcast_ref::<LaunchFailure>().is_some() {
         return error;
     }
-    let primary = error.downcast_ref::<Diagnostic>().cloned().unwrap_or_else(|| Diagnostic::new(
-        if matches!(protocol, Some(Protocol::Wireguard | Protocol::AmneziaWG)) { Code::TunnelHandshake } else { Code::ProviderConfig },
-        State::Fail, "VPN setup failed; authentication and protection have not been established",
-        Some("Inspect the diagnostic evidence below; use vopono doctor for additional checks")));
+    let setup = error.downcast_ref::<vopono_core::diagnostics::SetupError>();
+    let typed = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::errors::CliError>());
+    let code = setup
+        .map(crate::errors::ErrorCode::from_setup)
+        .or_else(|| typed.map(crate::errors::CliError::code))
+        .unwrap_or(crate::errors::ErrorCode::VpnConnectionFailed);
+    let primary = error.downcast_ref::<Diagnostic>().cloned().unwrap_or_else(|| {
+        // Only typed local failures can supply their explanation. Preserve a
+        // typed CLI category without copying its potentially tainted context.
+        let message = setup.map(ToString::to_string).unwrap_or_else(|| match code {
+            crate::errors::ErrorCode::ProtocolNotSupported => "Provider does not support the selected protocol".into(),
+            crate::errors::ErrorCode::ServerNotFound => "No synchronized configuration matches the selected server".into(),
+            crate::errors::ErrorCode::NamespaceNotFound => "The requested namespace does not exist".into(),
+            _ => "VPN setup failed; authentication and protection have not been established".into(),
+        });
+        Diagnostic::new(
+            if setup.is_none() && typed.is_none() && matches!(protocol, Some(Protocol::Wireguard | Protocol::AmneziaWG)) {
+                Code::TunnelHandshake
+            } else { Code::ProviderConfig },
+            State::Fail, &message,
+            Some("Inspect the diagnostic evidence below; use vopono doctor for additional checks"),
+        )
+    });
     let mut diagnostics = vec![primary];
     let deadline = Instant::now() + Duration::from_secs(2);
     if let (Some(path), Some(protocol)) = (path, protocol) {
@@ -84,33 +106,88 @@ pub fn collect(
             None,
         ));
     }
-    anyhow::Error::new(LaunchFailure { diagnostics })
+    anyhow::Error::new(LaunchFailure { diagnostics, code })
 }
 
 pub fn command_failure(command: &ExecCommand, error: anyhow::Error) -> anyhow::Error {
     if error.downcast_ref::<LaunchFailure>().is_some() {
         return error;
     }
-    let settings = crate::args_config::ArgsConfig::get_config_file(command).ok();
-    let path = command
-        .custom
-        .clone()
-        .or_else(|| settings.as_ref()?.get::<PathBuf>("custom").ok());
-    let protocol = command
-        .protocol
+    let connection = crate::args_config::ArgsConfig::get_config_file(command)
+        .ok()
+        .and_then(|config| crate::args_config::ConnectionSettings::read(command, &config).ok());
+    let path = connection
         .as_ref()
-        .map(|p| p.to_variant())
-        .or_else(|| settings.as_ref()?.get::<Protocol>("protocol").ok())
-        .or_else(|| {
-            path.as_ref()
-                .and_then(|p| vopono_core::util::get_config_file_protocol(p).ok())
-        });
-    collect(error, path.as_deref(), protocol.as_ref())
+        .and_then(|connection| connection.custom.as_deref());
+    let protocol = connection
+        .as_ref()
+        .and_then(|connection| connection.detected_protocol().ok());
+    collect(error, path, protocol.as_ref())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn safe_setup_failures_keep_their_codes_and_drop_untrusted_context() {
+        use crate::errors::ErrorCode;
+        use vopono_core::config::providers::VpnProvider;
+        use vopono_core::diagnostics::SetupError;
+
+        for (failure, expected, message) in [
+            (
+                SetupError::ProtocolNotSupported {
+                    provider: VpnProvider::Mullvad,
+                    protocol: Protocol::OpenVpn,
+                },
+                ErrorCode::ProtocolNotSupported,
+                "Mullvad does not support OpenVpn",
+            ),
+            (
+                SetupError::DependencyMissing("wg"),
+                ErrorCode::DependencyMissing,
+                "wg is not installed",
+            ),
+            (
+                SetupError::ProviderNotConfigured {
+                    provider: VpnProvider::Mullvad,
+                    protocol: Protocol::Wireguard,
+                },
+                ErrorCode::ProviderNotConfigured,
+                "vopono sync mullvad",
+            ),
+            (
+                SetupError::Configuration("An application or --profile is required"),
+                ErrorCode::InternalError,
+                "An application or --profile is required",
+            ),
+        ] {
+            let error = collect(
+                anyhow::anyhow!("private context NEVER_SHARE").context(failure),
+                None,
+                None,
+            );
+            assert_eq!(ErrorCode::from_anyhow(&error), expected);
+            assert!(error.to_string().contains(message));
+            assert!(!format!("{error:#}").contains("NEVER_SHARE"));
+            assert!(
+                !crate::errors::error_json_value(&error)
+                    .to_string()
+                    .contains("NEVER_SHARE")
+            );
+        }
+        let error = collect(
+            anyhow::anyhow!("AUTH_FAILED token=NEVER_SHARE"),
+            None,
+            Some(&Protocol::OpenVpn),
+        );
+        assert!(
+            !crate::errors::error_json_value(&error)
+                .to_string()
+                .contains("NEVER_SHARE")
+        );
+    }
+
     #[test]
     fn reports_typed_failures_and_local_evidence_without_retaining_secrets() {
         let config = tempfile::NamedTempFile::new().unwrap();

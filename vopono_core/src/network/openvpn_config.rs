@@ -200,61 +200,185 @@ pub(crate) fn validate(content: &str, config: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sanitize(
-    content: &str,
-    mut copy: impl FnMut(&str, usize) -> anyhow::Result<PathBuf>,
-) -> anyhow::Result<String> {
+/// A single syntax interpretation shared by preflight, freezing and remote
+/// extraction. Inline credentials remain opaque; connection blocks are scopes.
+enum ConfigLine<'a> {
+    Directive { raw: &'a str, fields: Vec<String> },
+    Inline(&'a str),
+    ConnectionStart,
+    ConnectionEnd,
+}
+
+fn parse_lines(content: &str) -> anyhow::Result<Vec<ConfigLine<'_>>> {
     ensure!(
         !content.contains('\0'),
-        "NUL bytes are not supported in daemon OpenVPN configurations"
+        "NUL bytes are not supported in OpenVPN configurations"
     );
-    let mut output = String::new();
-    let mut inline: Option<String> = None;
-    let mut file_index = 0;
+    let mut output = Vec::new();
+    let mut inline: Option<&str> = None;
+    let mut connection = false;
     for line in content.lines().map(str::trim) {
-        if let Some(tag) = &inline {
+        if let Some(tag) = inline {
+            // OpenVPN recognizes closing-tag prefixes, including after reading
+            // a long line in chunks. Reject all embedded tags and suffixes.
             let closing = format!("</{tag}>");
-            // OpenVPN ends inline data at a closing-tag prefix. Reject any
-            // suffix so it cannot see directives that we treat as opaque data.
-            // Check embedded tags too: OpenVPN reads long lines in chunks,
-            // which can put an embedded tag at the start of a parser read.
             if line.contains(&closing) {
                 ensure!(line == closing, "Ambiguous OpenVPN inline closing tag");
                 inline = None;
             }
-            output.push_str(line);
-            output.push('\n');
+            output.push(ConfigLine::Inline(line));
             continue;
         }
         if line.is_empty() || line.starts_with(['#', ';']) {
             continue;
         }
-        if line.starts_with('<') {
+        if line == "<connection>" {
+            ensure!(!connection, "Nested OpenVPN connection block");
+            connection = true;
+            output.push(ConfigLine::ConnectionStart);
+        } else if line == "</connection>" {
+            ensure!(connection, "Unmatched OpenVPN connection block");
+            connection = false;
+            output.push(ConfigLine::ConnectionEnd);
+        } else if line.starts_with('<') {
             let tag = line
                 .strip_prefix('<')
                 .and_then(|s| s.strip_suffix('>'))
                 .context("Malformed inline OpenVPN block")?;
-            // Connection blocks are option scopes, never opaque inline data.
-            if tag == "connection" || tag == "/connection" {
+            ensure!(inline_file(tag), "Unsupported inline OpenVPN block");
+            inline = Some(tag);
+            output.push(ConfigLine::Inline(line));
+        } else {
+            let fields = shell_words::split(line)
+                .map_err(|_| anyhow::anyhow!("Malformed OpenVPN directive"))?;
+            ensure!(!fields.is_empty(), "Empty OpenVPN directive");
+            output.push(ConfigLine::Directive { raw: line, fields });
+        }
+    }
+    ensure!(inline.is_none() && !connection, "Unclosed OpenVPN block");
+    Ok(output)
+}
+
+pub(crate) fn endpoints(content: &str) -> anyhow::Result<Vec<crate::diagnostics::Endpoint>> {
+    use crate::diagnostics::{Endpoint, valid_host};
+    struct Group {
+        tcp: bool,
+        port: u16,
+        remotes: Vec<Vec<String>>,
+    }
+    let mut groups = vec![Group {
+        tcp: false,
+        port: 1194,
+        remotes: Vec::new(),
+    }];
+    let mut current = 0;
+    for line in parse_lines(content)? {
+        let fields = match line {
+            ConfigLine::Inline(_) => continue,
+            ConfigLine::ConnectionStart => {
+                groups.push(Group {
+                    tcp: groups[0].tcp,
+                    port: groups[0].port,
+                    remotes: Vec::new(),
+                });
+                current = groups.len() - 1;
+                continue;
+            }
+            ConfigLine::ConnectionEnd => {
+                current = 0;
+                continue;
+            }
+            ConfigLine::Directive { fields, .. } => fields,
+        };
+        match fields[0].trim_start_matches("--") {
+            "remote" => {
+                ensure!((2..=4).contains(&fields.len()), "Invalid OpenVPN remote");
+                groups[current].remotes.push(fields);
+            }
+            "proto" => {
+                let value = fields.get(1).context("Missing OpenVPN protocol")?;
+                ensure!(valid_proto(value), "Invalid OpenVPN protocol");
+                groups[current].tcp = value.starts_with("tcp");
+            }
+            "port" | "rport" => {
+                groups[current].port = fields
+                    .get(1)
+                    .context("Missing OpenVPN port")?
+                    .parse()
+                    .map_err(|_| anyhow::anyhow!("Invalid OpenVPN port"))?;
+            }
+            "config" | "cd" => anyhow::bail!("Nested OpenVPN configuration is unsupported"),
+            _ => {}
+        }
+    }
+    let mut endpoints = Vec::new();
+    for group in groups {
+        for fields in group.remotes {
+            let host = fields[1].clone();
+            let port = fields
+                .get(2)
+                .map(|p| p.parse::<u16>())
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("Invalid OpenVPN remote port"))?
+                .unwrap_or(group.port);
+            let proto = fields.get(3);
+            ensure!(
+                valid_host(&host) && port != 0 && proto.is_none_or(|p| valid_proto(p)),
+                "Invalid OpenVPN endpoint"
+            );
+            endpoints.push(Endpoint {
+                host,
+                port,
+                tcp: proto.map_or(group.tcp, |p| p.starts_with("tcp")),
+            });
+        }
+    }
+    ensure!(
+        !endpoints.is_empty() && endpoints.len() <= 16,
+        "Expected 1-16 OpenVPN endpoints"
+    );
+    Ok(endpoints)
+}
+
+fn valid_proto(value: &str) -> bool {
+    [
+        "udp",
+        "udp4",
+        "udp6",
+        "tcp",
+        "tcp-client",
+        "tcp4",
+        "tcp6",
+        "tcp4-client",
+        "tcp6-client",
+    ]
+    .contains(&value)
+}
+
+fn sanitize(
+    content: &str,
+    mut copy: impl FnMut(&str, usize) -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<String> {
+    let mut output = String::new();
+    let mut file_index = 0;
+    for entry in parse_lines(content)? {
+        let (line, fields) = match entry {
+            ConfigLine::Inline(line) => {
                 output.push_str(line);
                 output.push('\n');
                 continue;
             }
-            ensure!(
-                inline_file(tag),
-                "Unsupported inline OpenVPN block in daemon configuration"
-            );
-            inline = Some(tag.to_owned());
-            output.push_str(line);
-            output.push('\n');
-            continue;
-        }
-        let fields =
-            shell_words::split(line).map_err(|_| anyhow::anyhow!("Malformed OpenVPN directive"))?;
-        let option = fields
-            .first()
-            .context("Empty OpenVPN directive")?
-            .trim_start_matches("--");
+            ConfigLine::ConnectionStart => {
+                output.push_str("<connection>\n");
+                continue;
+            }
+            ConfigLine::ConnectionEnd => {
+                output.push_str("</connection>\n");
+                continue;
+            }
+            ConfigLine::Directive { raw, fields } => (raw, fields),
+        };
+        let option = fields[0].trim_start_matches("--");
         // Never permit --dev /dev/... to open an arbitrary host file or reuse
         // a host interface through --dev-node or --iproute.
         if option == "dev" {
@@ -338,13 +462,34 @@ fn sanitize(
         output.push_str(line);
         output.push('\n');
     }
-    ensure!(inline.is_none(), "Unclosed OpenVPN inline block");
     Ok(output)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn syntax_rejections_are_shared_by_freezing_and_endpoint_extraction() {
+        for input in [
+            "remote localhost\n<connection>\n<connection>\n</connection>\n</connection>",
+            "remote localhost\n</connection>",
+            "remote localhost\n<connection>",
+            "remote localhost\n<key>\nsecret\n</key>#suffix",
+            "remote localhost\n<key>\nsecret",
+            "remote localhost\nremote 'unterminated",
+            "remote localhost\0",
+        ] {
+            assert!(endpoints(input).is_err());
+            assert!(sanitize(input, |_, _| unreachable!()).is_err());
+        }
+        let input = "client\n<connection>\nremote 'tcp.test'\nproto tcp-client\nrport 443\n</connection>\n<key>\nremote hidden.test 1194\n</key>";
+        let safe = sanitize(input, |_, _| unreachable!()).unwrap();
+        let remotes = endpoints(&safe).unwrap();
+        assert_eq!(remotes.len(), 1);
+        assert_eq!(remotes[0].host, "tcp.test");
+        assert!(remotes[0].tcp);
+        assert_eq!(remotes[0].port, 443);
+    }
     #[test]
     fn rejects_inline_closing_tag_suffixes_that_hide_privileged_directives() {
         for tag in ["ca", "cert", "key", "auth-user-pass", "tls-crypt"] {

@@ -143,12 +143,10 @@ impl Monitor {
                                     anyhow::anyhow!("Namespace transition in progress")
                                 })?;
                             let state = recovery_state.as_mut().unwrap();
-                            let mut candidate =
-                                serde_json::from_value(serde_json::to_value(&*state)?)?;
+                            let mut candidate = state.inert_copy()?;
                             vopono_core::network::recovery::repair(&mut candidate)?;
                             if let Some((uid, _)) = owner {
-                                let replacement =
-                                    serde_json::from_value(serde_json::to_value(&candidate)?)?;
+                                let replacement = candidate.inert_copy()?;
                                 crate::namespace_ownership::update_snapshot(
                                     &name,
                                     uid,

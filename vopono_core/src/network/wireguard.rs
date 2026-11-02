@@ -5,7 +5,7 @@ use crate::network::wireguard_config::WireguardConfig;
 use crate::util::sudo_command;
 use anyhow::{Context, anyhow};
 use ipnet::IpNet;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -60,12 +60,11 @@ impl Wireguard {
         let executable_wg = executable_wg.unwrap_or("wg").to_string();
         let ip_link_type = ip_link_type.unwrap_or("wireguard").to_string();
 
-        if let Err(x) = which::which(&executable_wg) {
-            error!("{executable_wg} binary not found. Is wireguard-tools installed and on PATH?");
-            return Err(anyhow!(
-                "{executable_wg} binary not found. Is wireguard-tools installed and on PATH?: {:?}",
-                x
-            ));
+        if which::which(&executable_wg).is_err() {
+            return Err(crate::diagnostics::SetupError::DependencyMissing(
+                if executable_wg == "awg" { "awg" } else { "wg" },
+            )
+            .into());
         }
 
         let mut config_string = std::fs::read_to_string(&config_file)

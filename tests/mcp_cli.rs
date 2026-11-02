@@ -114,3 +114,34 @@ fn cli_rejects_invalid_limits_and_root_execution() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("ordinary user"));
     }
 }
+
+#[test]
+fn doctor_honors_custom_profile_over_an_inherited_provider_and_server() {
+    if nix::unistd::Uid::current().is_root() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let vpn = directory.path().join("vpn.conf");
+    std::fs::write(&vpn, "[Interface]\nPrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\n").unwrap();
+    let config = directory.path().join("config.toml");
+    std::fs::write(&config, format!("provider='mullvad'\nserver='se'\n[profiles.custom]\ncustom='{}'\nprotocol='wireguard'\napplication='true'\n", vpn.display())).unwrap();
+    let input = [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"doctor","arguments":{"profile":"custom"}}}),
+    ].iter().map(|request| format!("{request}\n")).collect::<String>();
+    let output = run(
+        input.as_bytes(),
+        &["--vopono-config", config.to_str().unwrap()],
+    );
+    let replies: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(replies[1]["result"]["isError"], false, "{replies:?}");
+    assert_eq!(
+        replies[1]["result"]["structuredContent"]["diagnostics"][0]["state"],
+        "pass"
+    );
+}

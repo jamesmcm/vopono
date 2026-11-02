@@ -2,16 +2,14 @@
 use crate::args::ExecCommand;
 use crate::daemon::{self, DaemonRequest, DaemonResponse};
 use anyhow::{Context, ensure};
-use interprocess::local_socket::ToFsName;
 use interprocess::local_socket::prelude::*;
-use interprocess::os::unix::local_socket::FilesystemUdSocket;
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::unistd::pipe2;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::AsRawFd;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -70,6 +68,46 @@ pub(super) struct Job {
     done: AtomicBool,
 }
 impl Job {
+    fn finish(&self, result: anyhow::Result<DaemonResponse>, cleaned: bool) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        match result {
+            Ok(DaemonResponse::Exit(code)) => {
+                state.exit_code = Some(code);
+                state.phase = if self.cancel.load(Ordering::Acquire) {
+                    "cancelled"
+                } else if code == 0 {
+                    "completed"
+                } else {
+                    "failed"
+                };
+            }
+            Ok(DaemonResponse::Json(bytes)) => {
+                // An explicit stop can make a keep-alive handler reject
+                // its final persistence update. Confirmed cleanup still
+                // completes cancellation; retain the daemon's diagnosis.
+                state.phase = if self.cancel.load(Ordering::Acquire) && cleaned {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
+                state.error = serde_json::from_slice(&bytes).ok();
+            }
+            Ok(DaemonResponse::Error(message)) => {
+                state.phase = "failed";
+                state.error = Some(json!({"message": refusal_reason(&message)}));
+            }
+            _ => {
+                state.phase = "indeterminate";
+                state.error = Some(
+                    json!({"message":"Daemon result unavailable; do not automatically relaunch. Inspect this namespace with vopono status."}),
+                );
+            }
+        }
+        state.cleanup_error = !cleaned || state.phase == "indeterminate";
+        drop(state);
+        self.done.store(true, Ordering::Release);
+    }
+
     pub fn status(&self) -> Value {
         let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         json!({"version":1, "job_id":self.id, "profile":self.profile,
@@ -109,6 +147,16 @@ impl Job {
         let mut report = self.status();
         report["cancel_requested"] = json!(self.cancel.load(Ordering::Acquire));
         report
+    }
+}
+
+// Raw daemon errors can contain user-controlled paths/context. Keep only
+// reviewed, fixed refusal reasons; an unknown refusal is still a definite result.
+fn refusal_reason(message: &str) -> &'static str {
+    match message.split(':').next().unwrap_or("").trim() {
+        "Concurrent daemon execution limit reached" => "Concurrent daemon execution limit reached",
+        "No usable config directory for client" => "No usable config directory for client",
+        _ => "Daemon rejected the execution request",
     }
 }
 
@@ -166,25 +214,11 @@ impl Jobs {
         command.custom_netns_name = Some(format!("mcp-{id}"));
         command.json = true;
         command.silent = false;
-        if command.working_directory.is_none() {
-            command.working_directory =
-                Some(std::env::current_dir()?.to_string_lossy().into_owned());
-        }
-        crate::resolve_custom_path_for_daemon(&mut command, &std::env::current_dir()?);
-        if !command.literal_application && !command.application.is_empty() {
-            command.application = shellexpand::full(&command.application)
-                .map_err(|_| anyhow::anyhow!("Shell expansion failed for the profile command"))?
-                .into_owned();
-            command.literal_application = true;
-        }
+        let request = crate::daemon_client::prepare_execute(command, false)?;
         let mut conn = connect()?;
         let (stdout_read, stdout_write) = pipe2(OFlag::O_CLOEXEC)?;
         let (stderr_read, stderr_write) = pipe2(OFlag::O_CLOEXEC)?;
         let stdin = File::open("/dev/null")?;
-        let request = DaemonRequest::Execute {
-            cmd: serde_json::to_vec(&command)?,
-            env: std::env::vars().collect(),
-        };
         daemon::write_framed(&mut conn, &wincode::serialize(&request)?)?;
         // Once Execute has been sent, descriptor delivery is part of that
         // request. Never fall back or retry the launch on an ambiguous failure.
@@ -230,39 +264,7 @@ impl Jobs {
                 drain(&mut stdout, &worker_job.stdout);
                 drain(&mut stderr, &worker_job.stderr);
             }
-            let mut state = worker_job.state.lock().unwrap_or_else(|p| p.into_inner());
-            match result {
-                Ok(DaemonResponse::Exit(code)) => {
-                    state.exit_code = Some(code);
-                    state.phase = if worker_job.cancel.load(Ordering::Acquire) {
-                        "cancelled"
-                    } else if code == 0 {
-                        "completed"
-                    } else {
-                        "failed"
-                    };
-                }
-                Ok(DaemonResponse::Json(bytes)) => {
-                    // An explicit stop can make a keep-alive handler reject
-                    // its final persistence update. Confirmed cleanup still
-                    // completes cancellation; retain the daemon's diagnosis.
-                    state.phase = if worker_job.cancel.load(Ordering::Acquire) && cleaned {
-                        "cancelled"
-                    } else {
-                        "failed"
-                    };
-                    state.error = serde_json::from_slice(&bytes).ok();
-                }
-                _ => {
-                    state.phase = "indeterminate";
-                    state.error = Some(
-                        json!({"message":"Daemon result unavailable; do not automatically relaunch. Inspect this namespace with vopono status."}),
-                    );
-                }
-            }
-            state.cleanup_error = !cleaned || state.phase == "indeterminate";
-            drop(state);
-            worker_job.done.store(true, Ordering::Release);
+            worker_job.finish(result, cleaned);
         });
         Ok(job.status())
     }
@@ -324,30 +326,7 @@ impl Drop for Jobs {
 }
 
 pub(super) fn connect() -> anyhow::Result<LocalSocketStream> {
-    let mut conn =
-        LocalSocketStream::connect(crate::SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?)
-            .context("Vopono daemon is unavailable; start it separately as an administrator")?;
-    // Check the credentials on this exact connection, not just the path.
-    let LocalSocketStream::UdSocket(socket) = &conn;
-    ensure!(
-        nix::sys::socket::getsockopt(&socket.as_fd(), nix::sys::socket::sockopt::PeerCredentials)?
-            .uid()
-            == 0,
-        "Vopono daemon socket must belong to a root process"
-    );
-    daemon::set_socket_timeouts_for(&conn, 2)?;
-    daemon::write_framed(
-        &mut conn,
-        &wincode::serialize(&DaemonRequest::ClientVersion(
-            env!("CARGO_PKG_VERSION").into(),
-        ))?,
-    )?;
-    let version = daemon::read_framed(&mut conn, daemon::MAX_FRAME_LEN)?;
-    ensure!(
-        matches!(wincode::deserialize::<DaemonResponse>(&version)?,DaemonResponse::Version(ref version) if version==env!("CARGO_PKG_VERSION")),
-        "MCP requires a matching daemon version; restart or update the daemon"
-    );
-    Ok(conn)
+    crate::daemon_client::connect(crate::daemon_client::Compatibility::Exact)
 }
 
 fn cleanup_namespace(name: &str, config_home: Option<String>) -> anyhow::Result<()> {
@@ -555,5 +534,56 @@ mod tests {
         assert_eq!(jobs.jobs.len(), HISTORY - 1);
         assert!(jobs.get("1").is_ok());
         assert!(jobs.get("0").is_err());
+    }
+
+    #[test]
+    fn explicit_refusals_are_failed_redacted_and_evictable_but_disconnects_are_not() {
+        let mut jobs = Jobs::new(1).unwrap();
+        for id in 0..=HISTORY as u64 {
+            jobs.reserve_history().unwrap();
+            let job = Arc::new(Job {
+                id: id.to_string(),
+                namespace: format!("refused-{id}"),
+                profile: "test".into(),
+                state: Mutex::new(State {
+                    phase: "starting",
+                    exit_code: None,
+                    error: None,
+                    cleanup_error: false,
+                }),
+                stdout: Mutex::default(),
+                stderr: Mutex::default(),
+                cancel: AtomicBool::new(false),
+                done: AtomicBool::new(false),
+            });
+            job.finish(
+                Ok(DaemonResponse::Error(
+                    "Concurrent daemon execution limit reached: NEVER_SHARE".into(),
+                )),
+                true,
+            );
+            let report = job.status();
+            assert_eq!(report["state"], "failed");
+            assert_eq!(report["cleanup_pending"], false);
+            assert!(
+                report["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("execution limit")
+            );
+            assert!(!report.to_string().contains("NEVER_SHARE"));
+            jobs.jobs.insert(id, job);
+        }
+        assert!(jobs.get("0").is_err());
+        let job = jobs.jobs.values().next().unwrap();
+        job.finish(
+            Ok(DaemonResponse::Error("unreviewed NEVER_SHARE".into())),
+            false,
+        );
+        assert_eq!(job.status()["cleanup_pending"], true);
+        assert!(!job.status().to_string().contains("NEVER_SHARE"));
+        job.finish(Err(anyhow::anyhow!("Daemon disconnected")), true);
+        assert_eq!(job.status()["state"], "indeterminate");
+        assert_eq!(job.status()["cleanup_pending"], true);
     }
 }

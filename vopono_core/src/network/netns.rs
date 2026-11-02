@@ -283,6 +283,14 @@ fn write_lockfile_data(path: &Path, contents: &str) -> anyhow::Result<()> {
 }
 
 impl NamespaceSnapshot {
+    /// Copy persisted metadata while resetting every resource cleanup flag.
+    /// Never implement Clone on the live resource owners: that could duplicate
+    /// authority to kill helpers or remove networking. Serde is the existing
+    /// audited boundary between owning guards and inert descriptions.
+    pub fn inert_copy(&self) -> anyhow::Result<Self> {
+        Ok(serde_json::from_value(serde_json::to_value(self)?)?)
+    }
+
     pub fn into_managed_guard(self) -> ManagedNamespaceGuard {
         let mut guard = ManagedNamespaceGuard {
             name: self.name,
@@ -1644,6 +1652,30 @@ mod tests {
     fn detached_namespace_teardown_is_a_noop() {
         let namespace = super::NetworkNamespace::attach_unmanaged("vo_test".to_string()).unwrap();
         namespace.teardown().unwrap();
+    }
+
+    #[test]
+    fn inert_copy_never_inherits_cleanup_authority() {
+        let runtime = tempfile::tempdir().unwrap();
+        let log = runtime.path().join("openvpn.log");
+        std::fs::write(&log, "keep").unwrap();
+        let ns = super::NetworkNamespace::attach_unmanaged("inert_copy_test".into()).unwrap();
+        let mut snapshot = ns.snapshot().unwrap();
+        let mut vpn: super::OpenVpn = serde_json::from_value(serde_json::json!({
+            "pid": std::process::id(), "openvpn_dns_servers": [], "logfile": log,
+            "runtime_dir": runtime.path(), "supervised": true,
+        }))
+        .unwrap();
+        vpn.set_cleanup_enabled(true);
+        snapshot.openvpn = Some(vpn);
+        let copy = snapshot.inert_copy().unwrap();
+        snapshot
+            .openvpn
+            .as_mut()
+            .unwrap()
+            .set_cleanup_enabled(false);
+        drop(copy);
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "keep");
     }
 
     #[test]

@@ -173,20 +173,18 @@ impl VpnProvider {
     pub fn get_dyn_openvpn_provider(&self) -> anyhow::Result<Box<dyn OpenVpnProvider>> {
         match self {
             Self::PrivateInternetAccess => Ok(Box::new(pia::PrivateInternetAccess {})),
-            Self::Mullvad => Err(anyhow!(
-                "Mullvad does not support OpenVPN as of January 2026"
-            )),
             Self::ProtonVPN => Ok(Box::new(protonvpn::ProtonVPN {})),
-            Self::AzireVPN => Err(anyhow!(
-                "AzireVPN does not support OpenVPN as of March 2025"
-            )),
             Self::AirVPN => Ok(Box::new(airvpn::AirVPN {})),
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::NordVPN => Ok(Box::new(nordvpn::NordVPN {})),
-            Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
-            Self::MozillaVPN => Err(anyhow!("MozillaVPN only supports Wireguard!")),
-            Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
             Self::None => unimplemented!("None provider runs no protocol"),
+            Self::Mullvad | Self::AzireVPN | Self::Warp | Self::MozillaVPN | Self::Custom => {
+                Err(crate::diagnostics::SetupError::ProtocolNotSupported {
+                    provider: self.clone(),
+                    protocol: Protocol::OpenVpn,
+                }
+                .into())
+            }
         }
     }
 
@@ -199,10 +197,12 @@ impl VpnProvider {
             Self::AirVPN => Ok(Box::new(airvpn::AirVPN {})),
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::NordVPN => Ok(Box::new(nordvpn::NordVPN {})),
-            Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
-            Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
             Self::None => unimplemented!("None provider runs no protocol"),
-            _ => Err(anyhow!("Wireguard not implemented")),
+            _ => Err(crate::diagnostics::SetupError::ProtocolNotSupported {
+                provider: self.clone(),
+                protocol: Protocol::Wireguard,
+            }
+            .into()),
         }
     }
 

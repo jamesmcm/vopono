@@ -51,6 +51,20 @@ def wait_for(condition):
     raise AssertionError("Timed out waiting for daemon state")
 
 
+# Safe launch failures must keep their specific category and explanation.
+for args, code, message in [
+    (['--provider', 'mullvad', '--protocol', 'openvpn', '--server', 'se', 'true'],
+     'protocol_not_supported', 'Mullvad does not support'),
+    (['--provider', 'mullvad', '--protocol', 'wireguard', '--server', 'se', 'true'],
+     'provider_not_configured', 'vopono sync mullvad'),
+    (['--provider', 'none'], 'internal_error', 'An application or --profile is required'),
+]:
+    result = client('exec', '--interface', 'uplink', '--json', *args, check=False)
+    report = json.loads(result.stdout)['error']
+    assert result.returncode != 0 and report['code'] == code, report
+    assert message in report['message'], report
+print('PASS: launch diagnostics preserve configuration/protocol reasons and error categories', flush=True)
+
 # More completed persistent requests than the per-user execution limit must
 # leave admission available. Each capture must finish before namespace stop.
 names = [f"reg_slot{n}-u{uid}" for n in range(9)]

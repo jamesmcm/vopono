@@ -98,6 +98,24 @@ cancelled = restricted.finish(job)
 assert cancelled['state'] == 'cancelled', cancelled
 restricted.close()
 
+# A definite daemon admission refusal must not become an unresolved job.
+admission_name = ctx.namespace('mcp_admission')
+ctx.client('exec', '--provider', 'none', '--custom-netns-name', 'mcp_admission',
+           '--interface', 'uplink', '--firewall', 'nftables', '--create-netns-only')
+occupants = [ctx.spawn(['exec', '--existing-netns', admission_name, '--interface', 'uplink',
+    'sleep 90'], f'mcp-admission-{index}.log') for index in range(8)]
+wait_for(lambda: len(ctx.status(admission_name)['applications']) == 8)
+refused_server = MCP('--allow-profile', 'fixed')
+refused = refused_server.call('run_profile', profile='fixed')
+refusal = refused_server.finish(refused)
+assert refusal['state'] == 'failed', refusal
+assert 'execution limit' in refusal['error']['message'], refusal
+refused_server.close()
+ctx.client('stop', 'namespace', admission_name, '--json')
+for occupant in occupants:
+    occupant.wait(timeout=15)
+print('PASS: explicit daemon admission refusals remain definite, cleaned-up MCP failures', flush=True)
+
 server = MCP('--allow-command')
 assert server.call('doctor', profile='vpn')['diagnostics'][0]['state'] == 'pass'
 bad = server.request('tools/call', {'name': 'doctor', 'arguments': {'profile': 'broken'}})

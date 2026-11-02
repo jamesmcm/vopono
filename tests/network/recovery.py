@@ -67,6 +67,27 @@ Path('/etc/hosts').write_text(Path('/etc/hosts').read_text().replace('192.0.2.2 
 wait_for(reachable)
 record = json.loads((Path('/run/vopono/namespace-owners') / name).read_text())
 wait_for(lambda: json.loads((Path('/run/vopono/namespace-owners') / name).read_text())['namespace']['wireguard']['recovery']['address'] == '192.0.2.3')
+# A new gateway/source on the same interface must invalidate the old UDP
+# conntrack tuple. Keep the old address installed so the kernel does not flush
+# the mapping for us, and make the old source unusable at the peer.
+command('ip', 'addr', 'add', '192.0.4.1/24', 'dev', 'uplink')
+command('ip', '-n', 'peer', 'addr', 'add', '192.0.4.2/24', 'dev', 'peerlink')
+command('ip', 'route', 'replace', '192.0.2.3/32', 'via', '192.0.4.2',
+        'dev', 'uplink', 'src', '192.0.4.1')
+for chain, flag in [('INPUT', '-s'), ('OUTPUT', '-d')]:
+    command('ip', 'netns', 'exec', 'peer', 'iptables', '-I', chain, flag, '192.0.2.1', '-j', 'DROP')
+assert not reachable(), 'Old source unexpectedly remained usable'
+wait_for(reachable)
+assert os.stat('/run/netns/' + name).st_ino == inode
+assert Path('/proc/' + str(pid)).exists()
+for chain, flag in [('INPUT', '-s'), ('OUTPUT', '-d')]:
+    command('ip', 'netns', 'exec', 'peer', 'iptables', '-D', chain, flag, '192.0.2.1', '-j', 'DROP')
+command('ip', 'route', 'delete', '192.0.2.3/32')
+command('ip', 'addr', 'delete', '192.0.4.1/24', 'dev', 'uplink')
+command('ip', '-n', 'peer', 'addr', 'delete', '192.0.4.2/24', 'dev', 'peerlink')
+wait_for(reachable)
+print('PASS: same-interface gateway/source recovery preserves application and namespace identity', flush=True)
+
 command('ip', 'link', 'add', 'uplink2', 'type', 'veth', 'peer', 'name', 'peerlink2')
 command('ip', 'link', 'set', 'peerlink2', 'netns', 'peer')
 command('ip', 'addr', 'add', '192.0.3.1/24', 'dev', 'uplink2')

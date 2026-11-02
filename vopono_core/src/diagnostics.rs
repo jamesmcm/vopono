@@ -8,6 +8,42 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
+/// Safe setup failures: values are enums or fixed local explanations, never
+/// configuration contents, filesystem error strings or provider replies.
+#[derive(Debug)]
+pub enum SetupError {
+    Configuration(&'static str),
+    ProviderNotConfigured {
+        provider: crate::config::providers::VpnProvider,
+        protocol: Protocol,
+    },
+    ProtocolNotSupported {
+        provider: crate::config::providers::VpnProvider,
+        protocol: Protocol,
+    },
+    DependencyMissing(&'static str),
+}
+impl std::fmt::Display for SetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Configuration(message) => f.write_str(message),
+            Self::ProviderNotConfigured { provider, protocol } => write!(
+                f,
+                "Missing configuration for {provider} {protocol}. Run vopono sync {} --protocol {} as your user",
+                provider.id(),
+                protocol.id()
+            ),
+            Self::ProtocolNotSupported { provider, protocol } => {
+                write!(f, "{provider} does not support {protocol}")
+            }
+            Self::DependencyMissing(binary) => {
+                write!(f, "{binary} is not installed or is not on PATH")
+            }
+        }
+    }
+}
+impl std::error::Error for SetupError {}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticCode {
@@ -189,7 +225,7 @@ pub fn validate_config(path: &Path, protocol: &Protocol) -> Result<Vec<Endpoint>
         }
         Protocol::OpenVpn => {
             crate::network::openvpn_config::validate(&content, path).map_err(|_| fail())?;
-            parse_openvpn(&content, path).map_err(|_| fail())
+            crate::network::openvpn_config::endpoints(&content).map_err(|_| fail())
         }
         _ => Err(Diagnostic::new(
             DiagnosticCode::ProviderConfig,
@@ -200,136 +236,13 @@ pub fn validate_config(path: &Path, protocol: &Protocol) -> Result<Vec<Endpoint>
     }
 }
 
-fn valid_host(host: &str) -> bool {
+pub(crate) fn valid_host(host: &str) -> bool {
     !host.is_empty()
         && host.len() <= 253
         && (host.parse::<IpAddr>().is_ok()
             || host
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_')))
-}
-
-pub(crate) fn parse_openvpn(content: &str, _path: &Path) -> Result<Vec<Endpoint>, ()> {
-    struct Group {
-        tcp: bool,
-        port: u16,
-        remotes: Vec<Vec<String>>,
-    }
-    let mut groups = vec![Group {
-        tcp: false,
-        port: 1194,
-        remotes: Vec::new(),
-    }];
-    let mut current = 0;
-    let mut inline: Option<String> = None;
-    for line in content.lines().map(str::trim) {
-        if let Some(tag) = &inline {
-            if line.starts_with(&format!("</{tag}>")) {
-                inline = None;
-            }
-            continue;
-        }
-        if line.is_empty() || line.starts_with(['#', ';']) {
-            continue;
-        }
-        if line == "<connection>" {
-            if current != 0 {
-                return Err(());
-            }
-            groups.push(Group {
-                tcp: groups[0].tcp,
-                port: groups[0].port,
-                remotes: Vec::new(),
-            });
-            current = groups.len() - 1;
-            continue;
-        }
-        if line == "</connection>" {
-            if current == 0 {
-                return Err(());
-            }
-            current = 0;
-            continue;
-        }
-        if line.starts_with('<') {
-            let tag = line
-                .strip_prefix('<')
-                .and_then(|s| s.strip_suffix('>'))
-                .ok_or(())?;
-            if !crate::network::openvpn_config::inline_file(tag) {
-                return Err(());
-            }
-            inline = Some(tag.to_owned());
-            continue;
-        }
-        let fields = shell_words::split(line).map_err(|_| ())?;
-        let Some(option) = fields.first() else {
-            continue;
-        };
-        match option.trim_start_matches("--") {
-            "remote" => {
-                if !(2..=4).contains(&fields.len()) {
-                    return Err(());
-                }
-                groups[current].remotes.push(fields);
-            }
-            "proto" => {
-                let value = fields.get(1).ok_or(())?;
-                if !valid_proto(value) {
-                    return Err(());
-                }
-                groups[current].tcp = value.starts_with("tcp");
-            }
-            "port" | "rport" => {
-                groups[current].port = fields.get(1).ok_or(())?.parse().map_err(|_| ())?
-            }
-            "config" | "cd" => return Err(()),
-            _ => {}
-        }
-    }
-    if inline.is_some() || current != 0 {
-        return Err(());
-    }
-    let mut endpoints = Vec::new();
-    for group in groups {
-        for fields in group.remotes {
-            let host = fields[1].clone();
-            let port = fields
-                .get(2)
-                .map(|p| p.parse::<u16>())
-                .transpose()
-                .map_err(|_| ())?
-                .unwrap_or(group.port);
-            let proto = fields.get(3);
-            if !valid_host(&host) || port == 0 || proto.is_some_and(|p| !valid_proto(p)) {
-                return Err(());
-            }
-            endpoints.push(Endpoint {
-                host,
-                port,
-                tcp: proto.map_or(group.tcp, |p| p.starts_with("tcp")),
-            });
-        }
-    }
-    if endpoints.is_empty() || endpoints.len() > 16 {
-        return Err(());
-    }
-    Ok(endpoints)
-}
-
-fn valid_proto(value: &str) -> bool {
-    [
-        "udp",
-        "udp4",
-        "udp6",
-        "tcp",
-        "tcp-client",
-        "tcp4",
-        "tcp6",
-        "tcp4-client",
-        "tcp6-client",
-    ]
-    .contains(&value)
 }
 
 pub fn endpoint_diagnostics(endpoint: &Endpoint, timeout: Duration) -> Vec<Diagnostic> {
@@ -414,16 +327,21 @@ mod tests {
     }
     #[test]
     fn openvpn_defaults_inline_data_and_remote_protocol() {
-        let endpoints = parse_openvpn("proto tcp-client\nport 443\nremote localhost\nremote ::1 1194 udp6\n<key>\nPRIVATE SECRET\n</key>", Path::new("/tmp/test.ovpn")).unwrap();
+        let endpoints = crate::network::openvpn_config::endpoints("proto tcp-client\nport 443\nremote localhost\nremote ::1 1194 udp6\n<key>\nPRIVATE SECRET\n</key>").unwrap();
         assert!(endpoints[0].tcp);
         assert_eq!(endpoints[0].port, 443);
         assert!(!endpoints[1].tcp);
-        assert!(parse_openvpn("remote localhost\n<key>\nsecret", Path::new("x")).is_err());
-        assert!(parse_openvpn("remote localhost\nconfig other.ovpn", Path::new("x")).is_err());
+        assert!(
+            crate::network::openvpn_config::endpoints("remote localhost\n<key>\nsecret").is_err()
+        );
+        assert!(
+            crate::network::openvpn_config::endpoints("remote localhost\nconfig other.ovpn")
+                .is_err()
+        );
     }
     #[test]
     fn openvpn_quoted_remotes_defaults_and_connection_scopes() {
-        let endpoints = parse_openvpn("--remote 'default.test'\n<connection>\nremote 'tcp.test'\nproto tcp-client\nrport 443\n</connection>\n<connection>\nremote udp.test 53 udp\n</connection>\n", Path::new("x")).unwrap();
+        let endpoints = crate::network::openvpn_config::endpoints("--remote 'default.test'\n<connection>\nremote 'tcp.test'\nproto tcp-client\nrport 443\n</connection>\n<connection>\nremote udp.test 53 udp\n</connection>\n").unwrap();
         assert_eq!(endpoints.len(), 3);
         assert_eq!(endpoints[0].host, "default.test");
         assert_eq!(endpoints[0].port, 1194);

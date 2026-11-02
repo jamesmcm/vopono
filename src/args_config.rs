@@ -79,8 +79,145 @@ macro_rules! error_and_bail {
     // log to error and bail
     ($msg:literal) => {
         log::error!("{}", $msg);
-        anyhow::bail!($msg);
+        return Err(vopono_core::diagnostics::SetupError::Configuration($msg).into());
     };
+}
+
+/// Connection selection shared by execution, launch diagnostics and MCP doctor.
+/// Profile overlays are applied before this type reads CLI/config precedence.
+#[derive(Debug)]
+pub(crate) struct ConnectionSettings {
+    pub provider: Option<VpnProvider>,
+    pub protocol: Option<Protocol>,
+    pub server: Option<String>,
+    pub custom: Option<PathBuf>,
+}
+impl ConnectionSettings {
+    pub fn read(command: &ExecCommand, config: &Config) -> anyhow::Result<Self> {
+        let custom: Option<PathBuf> = command_else_config_option!(custom, command, config);
+        let custom = custom
+            .map(|path| {
+                shellexpand::full(&path.to_string_lossy())
+                    .map(|path| PathBuf::from(path.as_ref()))
+                    .map_err(|_| {
+                        vopono_core::diagnostics::SetupError::Configuration(
+                            "Could not expand the custom configuration path",
+                        )
+                    })
+            })
+            .transpose()?;
+        let protocol = command
+            .protocol
+            .as_ref()
+            .map(|p| p.to_variant())
+            .or_else(|| config_variant(config, "protocol"));
+        let provider = if custom.is_some() {
+            Some(VpnProvider::Custom)
+        } else {
+            command
+                .provider
+                .as_ref()
+                .map(|p| p.to_variant())
+                .or_else(|| config_variant(config, "provider"))
+                .or_else(|| (protocol == Some(Protocol::Ssh)).then_some(VpnProvider::Custom))
+        };
+        let protocol = if provider == Some(VpnProvider::None) {
+            Some(Protocol::None)
+        } else {
+            protocol
+        };
+        Ok(Self {
+            provider,
+            protocol,
+            server: command_else_config_option!(server, command, config),
+            custom,
+        })
+    }
+
+    pub fn detected_protocol(&self) -> anyhow::Result<Protocol> {
+        if let Some(protocol) = &self.protocol {
+            return Ok(protocol.clone());
+        }
+        if let Some(path) = &self.custom {
+            return get_config_file_protocol(path).map_err(|_| {
+                vopono_core::diagnostics::SetupError::Configuration(
+                    "Could not detect the custom VPN protocol; check the file or specify --protocol"
+                ).into()
+            });
+        }
+        match self.provider.as_ref() {
+            Some(VpnProvider::None | VpnProvider::Custom) => Ok(Protocol::None),
+            Some(provider) => Ok(provider.get_dyn_provider().default_protocol()),
+            None => Err(vopono_core::diagnostics::SetupError::Configuration(
+                "Enter a VPN provider as a command-line argument or in the vopono config.toml file",
+            )
+            .into()),
+        }
+    }
+
+    fn for_execution(&self) -> anyhow::Result<(VpnProvider, Protocol, String)> {
+        use vopono_core::diagnostics::SetupError;
+        let provider = self.provider.clone().ok_or(SetupError::Configuration(
+            "Enter a VPN provider as a command-line argument or in the vopono config.toml file",
+        ))?;
+        let protocol = self.detected_protocol()?;
+        if provider == VpnProvider::Custom && self.custom.is_none() && protocol != Protocol::Ssh {
+            return Err(SetupError::Configuration(
+                "Must provide config file if using custom VPN Provider",
+            )
+            .into());
+        }
+        let server = if let Some(path) = &self.custom {
+            if protocol == Protocol::Ssh {
+                self.server.clone().ok_or(SetupError::Configuration(
+                    "SSH server or OpenSSH host alias must be provided with --server",
+                ))?
+            } else if protocol == Protocol::OpenConnect {
+                self.server.clone().unwrap_or_default()
+            } else {
+                let path = path.to_str().ok_or(SetupError::Configuration(
+                    "Custom configuration path must be UTF-8",
+                ))?;
+                let encoded = bs58::encode(path).into_string();
+                encoded[..encoded.len().min(11)].to_owned()
+            }
+        } else {
+            self.server.clone().or_else(|| provider.default_server()).ok_or(SetupError::Configuration(
+                "VPN server prefix must be provided as a command-line argument or in the vopono config.toml file"
+            ))?
+        };
+        if (provider == VpnProvider::Warp) != (protocol == Protocol::Warp)
+            || (provider == VpnProvider::None) != (protocol == Protocol::None)
+            || (protocol == Protocol::Ssh && provider != VpnProvider::Custom)
+        {
+            return Err(SetupError::ProtocolNotSupported { provider, protocol }.into());
+        }
+        Ok((provider, protocol, server))
+    }
+
+    pub fn doctor_command(&self, offline: bool) -> Vec<String> {
+        let mut args = vec![
+            "doctor".into(),
+            "--json".into(),
+            "--timeout-ms".into(),
+            "500".into(),
+        ];
+        if let Some(path) = &self.custom {
+            args.extend(["--custom".into(), path.to_string_lossy().into_owned()]);
+        } else if let Some(provider) = &self.provider {
+            args.extend(["--provider".into(), provider.id().into()]);
+            if let Some(server) = &self.server {
+                args.extend(["--server".into(), server.clone()]);
+            }
+        }
+        if let Some(protocol) = &self.protocol {
+            args.extend(["--protocol".into(), protocol.id().into()]);
+        }
+        if offline {
+            args.push("--offline".into());
+        }
+        args
+    }
 }
 
 // TODO: Generate this from procedural macro?
@@ -129,12 +266,8 @@ impl ArgsConfig {
     /// Also handle CLI args consistency errors
     pub fn get_cli_or_config_args(command: ExecCommand, config: Config) -> anyhow::Result<Self> {
         // TODO: Automate field mapping with procedural macro over ExecCommand struct?
-        let custom: Option<PathBuf> = command_else_config_option!(custom, command, config)
-            .and_then(|p| {
-                shellexpand::full(&p.to_string_lossy())
-                    .ok()
-                    .and_then(|s| PathBuf::from_str(s.as_ref()).ok())
-            });
+        let connection = ConnectionSettings::read(&command, &config)?;
+        let custom = connection.custom.clone();
         let auth_user_pass =
             command_else_config_option!(auth_user_pass, command, config).and_then(|p| {
                 shellexpand::full(&p.to_string_lossy())
@@ -151,7 +284,9 @@ impl ArgsConfig {
         };
         anyhow::ensure!(
             !application.is_empty() || command.create_netns_only,
-            "An application or --profile is required (except with --create-netns-only)"
+            vopono_core::diagnostics::SetupError::Configuration(
+                "An application or --profile is required (except with --create-netns-only)"
+            )
         );
         let application: String = if command.literal_application {
             application
@@ -250,71 +385,7 @@ impl ArgsConfig {
             ),
         }
 
-        let provider: VpnProvider;
-        let server: String;
-        let protocol: Protocol;
-
-        // Assign protocol and server from args or vopono config file or custom config if used
-        if let Some(path) = &custom {
-            protocol = command_else_config_option!(protocol, command, config)
-                .map(|x| x.to_variant())
-                .ok_or_else(|| anyhow!("."))
-                .or_else(|_| get_config_file_protocol(path))?;
-
-            provider = VpnProvider::Custom;
-
-            if protocol == Protocol::Ssh {
-                server = command_else_config_option!(server, command, config).ok_or_else(|| {
-                    anyhow!("SSH server or OpenSSH host alias must be provided with --server")
-                })?;
-            } else if protocol != Protocol::OpenConnect {
-                // Encode filename with base58 so we can fit it within 16 chars for the veth pair name
-                let sname = bs58::encode(&path.to_str().unwrap()).into_string();
-
-                server = sname[0..std::cmp::min(11, sname.len())].to_string();
-            } else {
-                // For OpenConnect the server-name can be provided via the usual config or
-                // command-line-options. Since it also can be provided via the custom-config we will
-                // set an empty-string if it isn't provided.
-                server = command_else_config_option!(server, command, config).unwrap_or_default();
-            }
-        } else {
-            // Get server and provider
-            let requested_protocol = command_else_config_option_variant!(protocol, command, config);
-            provider = command_else_config_option_variant!(provider, command, config)
-                .or_else(|| {
-                    (requested_protocol == Some(Protocol::Ssh)).then_some(VpnProvider::Custom)
-                })
-                .ok_or_else(|| {
-                    let msg =
-                "Enter a VPN provider as a command-line argument or in the vopono config.toml file";
-                    log::error!("{msg}");
-                    anyhow!(msg)
-                })?;
-
-            if provider == VpnProvider::Custom && requested_protocol != Some(Protocol::Ssh) {
-                error_and_bail!("Must provide config file if using custom VPN Provider");
-            }
-
-            server = command_else_config_option!(server, command, config)
-                .or_else(|| provider.default_server())
-                .ok_or_else(|| {
-                    let msg = "VPN server prefix must be provided as a command-line argument or in the vopono config.toml file";
-                    log::error!("{msg}"); anyhow!(msg)})?;
-
-            // `--provider None` launches an isolated namespace without any VPN
-            // service; it overrides protocol settings from CLI args or the
-            // vopono config file rather than failing the None/None pairing
-            // check below.
-            protocol = if provider == VpnProvider::None {
-                if let Some(requested) = requested_protocol.filter(|p| *p != Protocol::None) {
-                    warn!("Provider None ignores the configured protocol ({requested})");
-                }
-                Protocol::None
-            } else {
-                requested_protocol.unwrap_or_else(|| provider.get_dyn_provider().default_protocol())
-            };
-        }
+        let (provider, protocol, server) = connection.for_execution()?;
 
         // TODO: Error handling
         let trojan_host = command_else_config_option!(trojan_host, command, config);
@@ -338,28 +409,6 @@ impl ArgsConfig {
             && (trojan_host.is_some() || trojan_password.is_some() || trojan_no_verify)
         {
             warn!("Trojan config file provided - ignoring other trojan settings");
-        }
-
-        if (provider == VpnProvider::Warp && protocol != Protocol::Warp)
-            || (provider != VpnProvider::Warp && protocol == Protocol::Warp)
-        {
-            error_and_bail!("Cloudflare Warp protocol must use Warp provider");
-        }
-
-        if provider == VpnProvider::None && custom.is_some() {
-            error_and_bail!("Custom config cannot be set when using None provider");
-        }
-
-        if (provider == VpnProvider::None && protocol != Protocol::None)
-            || (provider != VpnProvider::None && protocol == Protocol::None)
-        {
-            error_and_bail!(
-                "None protocol must use None provider - will run not run any VPN service inside netns"
-            );
-        }
-
-        if protocol == Protocol::Ssh && provider != VpnProvider::Custom {
-            error_and_bail!("SSH protocol must use the Custom provider");
         }
 
         let ssh_proxy_port = command
@@ -462,6 +511,45 @@ mod tests {
     use clap::Parser;
     use config::Config;
     use std::path::Path;
+
+    #[test]
+    fn connection_selection_is_shared_and_honors_cli_and_profile_precedence() {
+        let config = Config::builder().add_source(config::File::from_str(
+            "provider='mullvad'\nprotocol='wireguard'\nserver='se'\n[profiles.custom]\ncustom='/tmp/client.ovpn'\nprotocol='openvpn'\n",
+            config::FileFormat::Toml,
+        )).build().unwrap();
+        let config = crate::profiles::select(config, Some("custom")).unwrap();
+        for (explicit, expected) in [
+            (None, vopono_core::config::vpn::Protocol::OpenVpn),
+            (
+                Some("wireguard"),
+                vopono_core::config::vpn::Protocol::Wireguard,
+            ),
+        ] {
+            let mut argv = vec!["vopono", "exec", "--profile", "custom"];
+            if let Some(protocol) = explicit {
+                argv.extend(["--protocol", protocol]);
+            }
+            let Some(Command::Exec(command)) = App::try_parse_from(argv).unwrap().cmd else {
+                unreachable!()
+            };
+            let settings = super::ConnectionSettings::read(&command, &config).unwrap();
+            let (provider, protocol, _) = settings.for_execution().unwrap();
+            assert_eq!(
+                provider,
+                vopono_core::config::providers::VpnProvider::Custom
+            );
+            assert_eq!(protocol, expected);
+            let args = settings.doctor_command(true);
+            assert!(args.iter().any(|arg| arg == "--custom"));
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg == "--provider" || arg == "--server")
+            );
+            assert!(args.iter().any(|arg| arg == expected.id()));
+        }
+    }
 
     fn custom_openvpn_command(auth_user_pass: Option<&str>) -> crate::args::ExecCommand {
         let mut args = vec![

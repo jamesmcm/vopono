@@ -82,6 +82,16 @@ impl CliError {
 }
 
 impl ErrorCode {
+    pub fn from_setup(error: &vopono_core::diagnostics::SetupError) -> Self {
+        use vopono_core::diagnostics::SetupError;
+        match error {
+            SetupError::Configuration(_) => Self::InternalError,
+            SetupError::ProviderNotConfigured { .. } => Self::ProviderNotConfigured,
+            SetupError::ProtocolNotSupported { .. } => Self::ProtocolNotSupported,
+            SetupError::DependencyMissing(_) => Self::DependencyMissing,
+        }
+    }
+
     /// Classify a legacy `anyhow` error into a stable code.
     ///
     /// Typed [`CliError`]s are matched first; everything else falls through to
@@ -98,12 +108,15 @@ impl ErrorCode {
             return code;
         }
 
+        if let Some(report) = error.downcast_ref::<crate::launch_diagnostics::LaunchFailure>() {
+            return report.code;
+        }
+        if let Some(setup) = error.downcast_ref::<vopono_core::diagnostics::SetupError>() {
+            return Self::from_setup(setup);
+        }
         if error
             .downcast_ref::<vopono_core::diagnostics::Diagnostic>()
             .is_some()
-            || error
-                .downcast_ref::<crate::launch_diagnostics::LaunchFailure>()
-                .is_some()
         {
             return Self::VpnConnectionFailed;
         }
@@ -169,6 +182,10 @@ pub fn error_json_value(error: &Error) -> serde_json::Value {
             "context": context,
         }
     });
+    if let Some(setup) = error.downcast_ref::<vopono_core::diagnostics::SetupError>() {
+        value["error"]["message"] = serde_json::json!(setup.to_string());
+        value["error"]["context"] = serde_json::json!([]);
+    }
     if let Some(diagnostic) = error.downcast_ref::<vopono_core::diagnostics::Diagnostic>() {
         value["error"]["diagnostics"] = serde_json::json!([diagnostic]);
         value["error"]["message"] = serde_json::json!(diagnostic.to_string());
