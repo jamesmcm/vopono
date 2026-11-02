@@ -7,6 +7,7 @@ import socket
 import subprocess
 import sys
 import time
+from common import application_pid
 
 binary, scratch_arg, user = sys.argv[1:]
 scratch = Path(scratch_arg)
@@ -28,8 +29,9 @@ def client(*args):
 def wait_for(condition, seconds=80):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
-        if condition():
-            return
+        result = condition()
+        if result:
+            return result
         time.sleep(.5)
     raise AssertionError('Underlay recovery timed out')
 
@@ -58,8 +60,12 @@ with (scratch / 'underlay-client.log').open('w') as log:
         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
 wait_for(reachable)
 inode = os.stat('/run/netns/' + name).st_ino
-status = json.loads(client('status', '--json').stdout)
-pid = next(ns for ns in status['namespaces'] if ns['id'] == name)['applications'][0]['pid']
+def registered_pid():
+    status = json.loads(client('status', '--json').stdout)
+    return application_pid(next(ns for ns in status['namespaces'] if ns['id'] == name))
+
+
+pid = wait_for(registered_pid)
 # Rotate the DNS endpoint and make the original literal address unusable.
 # Removing a primary IPv4 address may also remove secondary addresses in its
 # subnet. Add the replacement after removal so it becomes the new primary.

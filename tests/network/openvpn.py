@@ -5,7 +5,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
-from common import Context, command, wait_for
+from common import Context, application_pid, command, wait_for
 
 ctx = Context(*sys.argv[1:])
 scratch = ctx.scratch
@@ -99,11 +99,10 @@ def connected():
     return json.loads(ctx.client('check', name, '--skip-ipv6', '--skip-dns', '--json').stdout)['result']['connected']
 
 
-wait_for(lambda: bool(ctx.status(name)['applications']), seconds=30)
+app_pid = wait_for(lambda: application_pid(ctx.status(name)), seconds=30)
 wait_for(connected, seconds=30)
 assert Path('/etc/resolv.conf').read_bytes() == host_dns
 inode = os.stat('/run/netns/' + name).st_ino
-app_pid = ctx.status(name)['applications'][0]['pid']
 record = json.loads((Path('/run/vopono/namespace-owners') / name).read_text())
 runtime = Path(record['namespace']['openvpn']['runtime_dir'])
 old_child = int((runtime / 'child.pid').read_text())

@@ -17,12 +17,20 @@ def wait_for(condition, seconds=15):
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
-            if condition():
-                return
+            result = condition()
+            if result:
+                return result
         except (OSError, KeyError, ValueError, subprocess.SubprocessError):
             pass
         time.sleep(.1)
     raise AssertionError('Timed out waiting for isolated network state')
+
+
+def application_pid(namespace):
+    # Status can expose namespace metadata before an application's PID has
+    # been published. Only a process registration establishes readiness.
+    return next((app['pid'] for app in namespace['applications']
+                 if app['pid'] is not None), None)
 
 
 class Context:

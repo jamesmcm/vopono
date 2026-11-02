@@ -6,7 +6,7 @@ import socket
 import subprocess
 import sys
 import time
-from common import Context, command, wait_for
+from common import Context, application_pid, command, wait_for
 
 ctx = Context(*sys.argv[1:])
 name = ctx.namespace('leases')
@@ -29,11 +29,10 @@ creator = ctx.spawn(['exec', '--custom', str(ctx.scratch / 'client.conf'), '--pr
 def ready():
     if creator.poll() is not None:
         raise AssertionError((ctx.scratch / 'lease-creator.log').read_text())
-    return bool(ctx.status(name)['applications'])
+    return application_pid(ctx.status(name))
 
 
-wait_for(ready)
-creator_pid = ctx.status(name)['applications'][0]['pid']
+creator_pid = wait_for(ready)
 server = ctx.user_file('relay-server.py',
     'import socket\ns=socket.socket(); s.bind(("0.0.0.0",43128)); s.listen()\n'
     'while True:\n c,_=s.accept(); c.sendall(b"shared relay"); c.close()\n', 0o644)

@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import socket
 import sys
-from common import Context, wait_for
+from common import Context, application_pid, wait_for
 
 ctx = Context(*sys.argv[1:])
 name = ctx.namespace('restarted')
@@ -22,7 +22,7 @@ def echo():
 
 
 wait_for(echo)
-app_pid = ctx.status(name)['applications'][0]['pid']
+app_pid = wait_for(lambda: application_pid(ctx.status(name)))
 inode = os.stat('/run/netns/' + name).st_ino
 for abrupt in (False, True):
     ctx.restart(abrupt)
