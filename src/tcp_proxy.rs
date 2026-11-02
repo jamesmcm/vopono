@@ -1,5 +1,5 @@
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -84,7 +84,33 @@ impl TcpProxy {
         } else {
             Ipv6Addr::UNSPECIFIED
         };
-        let listener = std::net::TcpListener::bind(SocketAddr::new(IpAddr::V6(ip), listen_port))?;
+        use nix::sys::socket::{
+            AddressFamily, Backlog, SockFlag, SockType, SockaddrIn6, bind, listen, setsockopt,
+            socket, sockopt,
+        };
+        use std::os::fd::AsRawFd;
+        let socket = socket(
+            AddressFamily::Inet6,
+            SockType::Stream,
+            SockFlag::SOCK_CLOEXEC,
+            None,
+        )?;
+        // Reclaim the relay after stop/restart even when accepted connections
+        // are still in TIME_WAIT. This does not permit two live listeners.
+        setsockopt(&socket, sockopt::ReuseAddr, &true)?;
+        bind(
+            socket.as_raw_fd(),
+            &SockaddrIn6::from(std::net::SocketAddrV6::new(ip, listen_port, 0, 0)),
+        )?;
+        listen(&socket, Backlog::new(128)?)?;
+        let listener = std::net::TcpListener::from(socket);
+        Self::from_listener(listener, proxy_to)
+    }
+
+    fn from_listener(
+        listener: std::net::TcpListener,
+        proxy_to: SocketAddr,
+    ) -> anyhow::Result<Self> {
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
@@ -212,10 +238,7 @@ mod tests {
             // has been disabled entirely.
             return;
         };
-        let port = reservation.local_addr().unwrap().port();
-        drop(reservation);
-
-        let proxy = TcpProxy::new(port, "[::1]:9".parse().unwrap(), true).unwrap();
+        let proxy = TcpProxy::from_listener(reservation, "[::1]:9".parse().unwrap()).unwrap();
         let started = std::time::Instant::now();
         drop(proxy);
         assert!(started.elapsed() < Duration::from_secs(2));
@@ -242,8 +265,7 @@ mod tests {
 
         let reservation = std::net::TcpListener::bind("[::1]:0").unwrap();
         let proxy_port = reservation.local_addr().unwrap().port();
-        drop(reservation);
-        let proxy = TcpProxy::new(proxy_port, upstream_addr, true).unwrap();
+        let proxy = TcpProxy::from_listener(reservation, upstream_addr).unwrap();
 
         let mut client = std::net::TcpStream::connect(("::1", proxy_port)).unwrap();
         client

@@ -18,8 +18,10 @@ pub struct Piapf {
     pub port: u16,
     loop_thread_handle: Option<JoinHandle<()>>,
     send_channel: Sender<bool>,
+    params: ThreadParamsImpl,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ThreadParamsImpl {
     pub port: u16,
     pub netns_name: String,
@@ -201,10 +203,15 @@ impl Piapf {
                 ns.predown_group.clone(),
             ),
         };
+        Self::resume(params)
+    }
+
+    pub fn resume(params: ThreadParamsImpl) -> anyhow::Result<Self> {
         let port = Self::refresh_port(&params)?;
         Self::callback_command(&params, port);
         let (send, recv) = mpsc::channel::<bool>();
         let owner_write_context = crate::util::capture_owner_write_context()?;
+        let retained = params.clone();
         let handle = std::thread::spawn(move || {
             crate::util::install_owner_write_context(&owner_write_context);
             Self::thread_loop(params, recv);
@@ -215,6 +222,7 @@ impl Piapf {
             port,
             loop_thread_handle: Some(handle),
             send_channel: send,
+            params: retained,
         })
     }
 }
@@ -273,5 +281,8 @@ impl Drop for Piapf {
 impl Forwarder for Piapf {
     fn forwarded_port(&self) -> u16 {
         self.port
+    }
+    fn snapshot(&self) -> Option<super::ForwarderSnapshot> {
+        Some(super::ForwarderSnapshot::Pia(self.params.clone()))
     }
 }

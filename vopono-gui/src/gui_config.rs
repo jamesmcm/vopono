@@ -24,6 +24,10 @@ pub struct LaunchConfig {
     #[serde(default)]
     pub port_forwarding: bool,
     #[serde(default)]
+    pub monitor: bool,
+    #[serde(default)]
+    pub recover: bool,
+    #[serde(default)]
     pub open_ports: Vec<u16>,
 }
 
@@ -32,6 +36,8 @@ impl Default for LaunchConfig {
         Self {
             gamepad_enabled: true,
             port_forwarding: false,
+            monitor: false,
+            recover: false,
             open_ports: Vec::new(),
         }
     }

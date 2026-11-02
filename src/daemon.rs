@@ -194,19 +194,7 @@ pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) {
     if set_socket_timeouts_for(conn, DAEMON_HANDSHAKE_TIMEOUT_SECONDS).is_err() {
         return;
     }
-    let sent = wincode::serialize(&DaemonRequest::ClientVersion(own.to_string()))
-        .ok()
-        .and_then(|bytes| write_framed(conn, &bytes).ok());
-    // The daemon answers the handshake with its own version directly.
-    let daemon_version = sent.and_then(|_| {
-        read_framed(conn, MAX_FRAME_LEN)
-            .ok()
-            .and_then(|response| wincode::deserialize::<DaemonResponse>(&response).ok())
-            .and_then(|parsed| match parsed {
-                DaemonResponse::Version(version) => Some(version),
-                _ => None,
-            })
-    });
+    let daemon_version = client_handshake(conn).ok();
     // Restore blocking mode for the long-lived session that follows.
     let _ = clear_socket_timeouts(conn);
     let Some(daemon_version) = daemon_version else {
@@ -220,6 +208,20 @@ pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) {
         VersionSkew::MajorMismatch => log::error!(
             "Daemon vopono version {daemon_version} is incompatible with client version {own}; update vopono and restart the daemon."
         ),
+    }
+}
+
+/// Version handshake on an already authenticated connection.
+pub(crate) fn client_handshake(conn: &mut LocalSocketStream) -> anyhow::Result<String> {
+    write_framed(
+        conn,
+        &wincode::serialize(&DaemonRequest::ClientVersion(
+            env!("CARGO_PKG_VERSION").into(),
+        ))?,
+    )?;
+    match wincode::deserialize::<DaemonResponse>(&read_framed(conn, MAX_FRAME_LEN)?)? {
+        DaemonResponse::Version(version) => Ok(version),
+        _ => anyhow::bail!("Unexpected daemon version response"),
     }
 }
 
@@ -278,6 +280,10 @@ const MAX_CONTROL_FRAME_LEN: usize = 64 * 1024;
 const MAX_CONCURRENT_CLIENTS: usize = 32;
 const MAX_CLIENTS_PER_UID: usize = 8;
 static CLIENT_ADMISSION: LazyLock<ClientAdmission> = LazyLock::new(ClientAdmission::default);
+// Long-running applications must not consume the slots needed to admit stop,
+// status and probe requests. Retained namespace controllers consume neither.
+static EXECUTION_ADMISSION: LazyLock<ClientAdmission> = LazyLock::new(ClientAdmission::default);
+static PROBE_ADMISSION: LazyLock<ClientAdmission> = LazyLock::new(ClientAdmission::default);
 
 #[derive(Default)]
 struct ClientAdmission {
@@ -297,10 +303,18 @@ struct ClientSlot<'a> {
 
 impl ClientAdmission {
     fn acquire(&self, uid: Uid) -> Option<ClientSlot<'_>> {
+        self.acquire_with_limits(uid, MAX_CLIENTS_PER_UID, MAX_CONCURRENT_CLIENTS)
+    }
+    fn acquire_with_limits(
+        &self,
+        uid: Uid,
+        per_uid: usize,
+        total: usize,
+    ) -> Option<ClientSlot<'_>> {
         let mut state = self.state.lock().expect("client admission lock poisoned");
         let uid = uid.as_raw();
         let uid_count = state.by_uid.get(&uid).copied().unwrap_or_default();
-        if state.total >= MAX_CONCURRENT_CLIENTS || uid_count >= MAX_CLIENTS_PER_UID {
+        if state.total >= total || uid_count >= per_uid {
             return None;
         }
         state.total += 1;
@@ -441,6 +455,25 @@ pub enum DaemonResponse {
 
 /// Starts the vopono daemon and listens for client connections.
 pub fn start() -> anyhow::Result<()> {
+    // A second daemon must never unlink the first daemon's live socket.
+    std::fs::create_dir_all("/run/vopono")?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let daemon_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open("/run/vopono/daemon.lock")?;
+    anyhow::ensure!(
+        unsafe {
+            nix::libc::flock(
+                daemon_lock.as_raw_fd(),
+                nix::libc::LOCK_EX | nix::libc::LOCK_NB,
+            )
+        } == 0,
+        "Another vopono daemon is already running"
+    );
     // Clean up any stale socket file from a previous unclean shutdown.
     let _ = std::fs::remove_file(SOCKET_PATH);
 
@@ -458,6 +491,8 @@ pub fn start() -> anyhow::Result<()> {
             std::process::exit(0);
         }
     });
+
+    crate::namespace_sessions::restore_all()?;
 
     let name = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?;
 
@@ -491,9 +526,12 @@ pub fn start() -> anyhow::Result<()> {
             continue;
         };
         thread::spawn(move || {
-            let _client_slot = client_slot;
+            // Keep namespace resources on this thread, but outside the request
+            // handler's scope. Its admission slots and client descriptors must
+            // close before the controller waits for the namespace's last user.
+            let mut session = None;
             let mut error_conn = conn.try_clone().ok();
-            if let Err(e) = handle_client(conn) {
+            if let Err(e) = handle_client(conn, client_slot, &mut session) {
                 error!("Error handling client: {}", e);
                 if let Some(conn) = error_conn.as_mut() {
                     let response = DaemonResponse::Error(format!("{e:#}"));
@@ -503,6 +541,15 @@ pub fn start() -> anyhow::Result<()> {
                     }
                 }
             }
+            drop(error_conn);
+            if let Some(session) = session {
+                session.run_until_unused();
+            }
+            // Namespace cleanup still uses the creating client's config tree
+            // and dropped-privilege helpers after the request has finished.
+            vopono_core::util::set_config_dir_override(None);
+            vopono_core::util::set_config_owner_override(None);
+            vopono_core::util::set_helper_exe_override(None);
         });
     }
     Ok(())
@@ -528,8 +575,143 @@ fn get_peer_credentials(stream: &LocalSocketStream) -> anyhow::Result<(Uid, Gid)
     Ok((Uid::from_raw(creds.uid()), Gid::from_raw(creds.gid())))
 }
 
+/// Wait for an application, bridging terminal I/O only for interactive clients.
+fn wait_for_application(
+    child: &mut std::process::Child,
+    conn: &LocalSocketStream,
+    pty_master: Option<OwnedFd>,
+    client_fds: Option<&(OwnedFd, OwnedFd, OwnedFd)>,
+) -> anyhow::Result<std::process::ExitStatus> {
+    let Some(master_fd) = pty_master else {
+        return Ok(child.wait()?);
+    };
+    let mut exit_status = None;
+    use std::io::{Read as _, Write as _};
+    // Duplicate client FDs so we don't close the originals when Files drop
+    let (client_stdin_fd, client_stdout_fd, _) = client_fds.expect("PTY client fds retained");
+    let client_stdin_dup: OwnedFd = nix::unistd::dup(client_stdin_fd.as_fd())?;
+    let client_stdout_dup: OwnedFd = nix::unistd::dup(client_stdout_fd.as_fd())?;
+    let client_stdin = std::fs::File::from(client_stdin_dup);
+    let client_stdout = std::fs::File::from(client_stdout_dup);
+    let pty_master_file_r = std::fs::File::from(master_fd);
+    let pty_master_file_w = pty_master_file_r.try_clone()?;
+
+    // Do not change user terminal modes; inject control bytes into PTY on signals
+
+    // Control listener: on SIGINT/SIGTSTP/SIGQUIT inject termios cc into PTY master; others killpg
+    let ctrl_conn = conn.try_clone()?;
+    let pty_writer_for_ctrl = pty_master_file_w.try_clone()?;
+    let child_pgid = nix::unistd::Pid::from_raw(-(child.id() as i32));
+    thread::spawn(move || forward_terminal_signals(ctrl_conn, pty_writer_for_ctrl, child_pgid));
+
+    // stdin copier: client stdin -> pty master
+    let mut stdin_reader = client_stdin;
+    let mut pty_writer = pty_master_file_w;
+    let child_pgid_for_stdin = child_pgid; // Pid is Copy; used for optional SIGHUP on EOF
+    let child_done = Arc::new(AtomicBool::new(false));
+    let child_done_for_stdin = Arc::clone(&child_done);
+    let stdin_copier = thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while !child_done_for_stdin.load(Ordering::Acquire) {
+            if !fd_readable(stdin_reader.as_raw_fd(), 50) {
+                continue;
+            }
+            let Ok(n) = stdin_reader.read(&mut buf) else {
+                break;
+            };
+            if n == 0 {
+                // Client reached EOF (Ctrl-D in cooked mode or client closed input).
+                // Inject EOT into the child's TTY so interactive shells exit cleanly.
+                let _ = pty_writer.write_all(&[0x04]); // EOT
+                let _ = pty_writer.flush();
+                // Optional: also send SIGHUP to the child's process group
+                let _ =
+                    nix::sys::signal::kill(child_pgid_for_stdin, nix::sys::signal::Signal::SIGHUP);
+                break;
+            }
+            if pty_writer.write_all(&buf[..n]).is_err() {
+                break;
+            }
+        }
+    });
+
+    // output copier: pty master -> client stdout (stderr merges on TTY)
+    let mut pty_reader = pty_master_file_r;
+    let mut stdout_writer = client_stdout;
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = pty_reader.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            if stdout_writer.write_all(&buf[..n]).is_err() {
+                break;
+            }
+            let _ = stdout_writer.flush();
+        }
+    });
+
+    // Wait for child to exit.
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => {
+                log::debug!("try_wait error: {e}");
+                break;
+            }
+        }
+    }
+    // Stop and join the terminal reader before replying to the client. Leaving this
+    // thread alive would let it steal terminal-query responses from the caller's
+    // shell after the command has completed.
+    child_done.store(true, Ordering::Release);
+    let _ = stdin_copier.join();
+    match exit_status {
+        Some(status) => Ok(status),
+        None => Ok(child.wait()?),
+    }
+}
+
+/// Preserve terminal-generated signals and forward other signals to the process group.
+fn forward_terminal_signals(
+    mut conn: LocalSocketStream,
+    mut terminal: std::fs::File,
+    group: nix::unistd::Pid,
+) {
+    while let Ok(bytes) = read_framed(&mut conn, MAX_CONTROL_FRAME_LEN) {
+        let Ok(DaemonRequest::Control(DaemonControl::Signal(signal))) =
+            wincode::deserialize::<DaemonRequest>(&bytes)
+        else {
+            continue;
+        };
+        let Ok(signal) = nix::sys::signal::Signal::try_from(signal) else {
+            continue;
+        };
+        let control_byte = match signal {
+            nix::sys::signal::Signal::SIGINT => Some(0x03),
+            nix::sys::signal::Signal::SIGTSTP => Some(0x1A),
+            nix::sys::signal::Signal::SIGQUIT => Some(0x1C),
+            _ => None,
+        };
+        if let Some(byte) = control_byte {
+            let _ = terminal.write_all(&[byte]);
+            let _ = terminal.flush();
+        } else {
+            let _ = nix::sys::signal::kill(group, signal);
+        }
+    }
+}
+
 /// Handles a single client connection.
-fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
+fn handle_client(
+    mut conn: LocalSocketStream,
+    client_slot: ClientSlot<'_>,
+    session: &mut Option<crate::namespace_sessions::Session>,
+) -> anyhow::Result<()> {
     // An unauthenticated local peer must not be able to occupy a daemon
     // worker indefinitely by connecting without sending a complete request.
     set_socket_timeouts(&conn)?;
@@ -574,6 +756,10 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             cmd,
             env: forwarded_env,
         } => {
+            let _execution_slot = EXECUTION_ADMISSION
+                .acquire(uid)
+                .context("Concurrent daemon execution limit reached")?;
+            drop(client_slot);
             // Receive stdin, stdout, stderr FDs via SCM_RIGHTS (exec only)
             let [client_stdin_fd, client_stdout_fd, client_stderr_fd] =
                 recv_fds_over_unix_socket(&conn)?;
@@ -586,264 +772,167 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             let mut exec_command: ExecCommand = serde_json::from_slice(&cmd)?;
             exec_command.user = Some(user.name);
             exec_command.group = Some(group.name);
-            let requested_application = exec_command.application.clone();
-            let silent = exec_command.silent;
-            let keep_alive = exec_command.keep_alive;
-            let client_report_out = if silent {
-                None
-            } else {
-                Some(nix::unistd::dup(
-                    client_fds.as_ref().expect("client fds present").1.as_fd(),
-                )?)
-            };
+            let json = exec_command.json;
+            let execution = (|| -> anyhow::Result<()> {
+                crate::profiles::prepare(&mut exec_command)?;
+                let requested_application = exec_command.application.clone();
+                let silent = exec_command.silent;
+                let keep_alive = exec_command.keep_alive;
+                let monitor = exec_command.monitor;
+                let recover = exec_command.recover;
+                let transition = crate::namespace_sessions::begin_setup();
+                let client_report_out = if silent {
+                    None
+                } else {
+                    Some(nix::unistd::dup(
+                        client_fds.as_ref().expect("client fds present").1.as_fd(),
+                    )?)
+                };
 
-            // `--create-netns-only`: bring up the namespace and leave it alive
-            // without spawning an application. The client learns the namespace
-            // name and exits; `vopono stop --namespace` tears it down later.
-            if exec_command.create_netns_only {
-                let ns = crate::exec::create_daemon_namespace_only(exec_command, uid)?;
-                // No child will consume the received SCM_RIGHTS descriptors in
-                // this branch, so take ownership and close all three locally.
-                let (_client_stdin, client_stdout, _client_stderr) =
-                    client_fds.take().expect("client fds present");
-                let mut out = std::fs::File::from(client_stdout);
-                let _ = writeln!(out, "Created namespace {}", ns.name);
-                let _ = out.flush();
-                drop(ns);
-                write_response(&mut conn, &DaemonResponse::Exit(0))?;
-                return Ok(());
-            }
-
-            // Take ownership of the NetworkNamespace object (`_ns`).
-            // It will now be dropped only when `handle_client` finishes,
-            // which happens after the child process has exited.
-            // If the client stdin is a TTY, run the child on a dedicated PTY and bridge I/O.
-            // This preserves job control and avoids stealing the user's controlling TTY.
-            let client_has_tty =
-                nix_isatty(client_fds.as_ref().expect("client fds present").0.as_fd())
-                    .unwrap_or(false);
-            let (application, ns, host_proxies): (
-                vopono_core::network::application_wrapper::ApplicationWrapper,
-                vopono_core::network::netns::NetworkNamespace,
-                Vec<crate::tcp_proxy::TcpProxy>,
-            );
-            let mut pty_master: Option<OwnedFd> = None;
-            if client_has_tty {
-                let p = openpty(None, None).map_err(|e| anyhow!("openpty failed: {e}"))?;
-                let slave_out = nix::unistd::dup(p.slave.as_fd())?;
-                let slave_err = nix::unistd::dup(p.slave.as_fd())?;
-                // Spawn child with PTY slave as stdio, and let it take controlling TTY in pre_exec
-                (application, ns, host_proxies) = execute_as_daemon_with_stdio(
-                    exec_command,
-                    false,
-                    Some((p.slave, slave_out, slave_err)),
-                    true,
-                    Some(forwarded_env.clone()),
-                )?;
-                pty_master = Some(p.master);
-            } else {
-                (application, ns, host_proxies) = execute_as_daemon_with_stdio(
-                    exec_command,
-                    false,
-                    client_fds.take(),
-                    false,
-                    Some(forwarded_env.clone()),
-                )?;
-            }
-
-            // Keep port-forwarding alive for the lifetime of this handler
-            let port_forward_keepalive = application.port_forwarding;
-            // Inform the client about the forwarded port too (not only daemon logs);
-            // suppressed by --silent along with the rest of the app output.
-            if !silent
-                && let Some(ref fwd) = port_forward_keepalive
-                && let Some(dup_fd) = client_report_out
-            {
-                let mut out = std::fs::File::from(dup_fd);
-                let _ = writeln!(out, "Port Forwarding on port {}", fwd.forwarded_port());
-                let _ = out.flush();
-            }
-
-            let mut child = application.handle;
-
-            // Keep the namespace alive while the child runs
-            let mut _ns_guard = ns;
-
-            // Create a per-client RON lock file under ~/.config/vopono/locks/<ns>/client-<pid>
-            // so status readers can report daemon-launched applications and Drop can see
-            // other active clients before tearing down the namespace. The guard removes
-            // it on every exit path, including early errors and unwinds.
-            let _client_lock = ClientLockfileGuard(
-                match _ns_guard.write_client_lockfile(child.id(), &requested_application) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        log::warn!("Failed to write daemon client status lockfile: {error}");
-                        None
-                    }
-                },
-            );
-
-            // If using PTY, bridge between client FDs and PTY master
-            let mut exit_status: Option<std::process::ExitStatus> = None;
-            if let Some(master_fd) = pty_master {
-                use std::io::{Read as _, Write as _};
-                // Duplicate client FDs so we don't close the originals when Files drop
-                let (client_stdin_fd, client_stdout_fd, _) =
-                    client_fds.as_ref().expect("PTY client fds retained");
-                let client_stdin_dup: OwnedFd = nix::unistd::dup(client_stdin_fd.as_fd())?;
-                let client_stdout_dup: OwnedFd = nix::unistd::dup(client_stdout_fd.as_fd())?;
-                let client_stdin = std::fs::File::from(client_stdin_dup);
-                let client_stdout = std::fs::File::from(client_stdout_dup);
-                let pty_master_file_r = std::fs::File::from(master_fd);
-                let pty_master_file_w = pty_master_file_r.try_clone()?;
-
-                // Do not change user terminal modes; inject control bytes into PTY on signals
-
-                // Control listener: on SIGINT/SIGTSTP/SIGQUIT inject termios cc into PTY master; others killpg
-                let mut ctrl_conn = conn.try_clone()?;
-                let mut pty_writer_for_ctrl = pty_master_file_w.try_clone()?;
-                let child_pgid = nix::unistd::Pid::from_raw(-(child.id() as i32));
-                thread::spawn(move || {
-                    loop {
-                        let Ok(buf) = read_framed(&mut ctrl_conn, MAX_CONTROL_FRAME_LEN) else {
-                            break;
-                        };
-                        if let Ok(DaemonRequest::Control(ctrl)) =
-                            wincode::deserialize::<DaemonRequest>(&buf)
-                        {
-                            match ctrl {
-                                DaemonControl::Signal(sig) => {
-                                    if let Ok(sig_enum) = nix::sys::signal::Signal::try_from(sig) {
-                                        match sig_enum {
-                                            nix::sys::signal::Signal::SIGINT => {
-                                                let _ = pty_writer_for_ctrl.write_all(&[0x03]);
-                                                let _ = pty_writer_for_ctrl.flush();
-                                            }
-                                            nix::sys::signal::Signal::SIGTSTP => {
-                                                let _ = pty_writer_for_ctrl.write_all(&[0x1A]);
-                                                let _ = pty_writer_for_ctrl.flush();
-                                            }
-                                            nix::sys::signal::Signal::SIGQUIT => {
-                                                let _ = pty_writer_for_ctrl.write_all(&[0x1C]);
-                                                let _ = pty_writer_for_ctrl.flush();
-                                            }
-                                            _ => {
-                                                let _ =
-                                                    nix::sys::signal::kill(child_pgid, sig_enum);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-
-                // stdin copier: client stdin -> pty master
-                let mut stdin_reader = client_stdin;
-                let mut pty_writer = pty_master_file_w;
-                let child_pgid_for_stdin = child_pgid; // Pid is Copy; used for optional SIGHUP on EOF
-                let child_done = Arc::new(AtomicBool::new(false));
-                let child_done_for_stdin = Arc::clone(&child_done);
-                let stdin_copier = thread::spawn(move || {
-                    let mut buf = [0u8; 4096];
-                    while !child_done_for_stdin.load(Ordering::Acquire) {
-                        if !fd_readable(stdin_reader.as_raw_fd(), 50) {
-                            continue;
-                        }
-                        let Ok(n) = stdin_reader.read(&mut buf) else {
-                            break;
-                        };
-                        if n == 0 {
-                            // Client reached EOF (Ctrl-D in cooked mode or client closed input).
-                            // Inject EOT into the child's TTY so interactive shells exit cleanly.
-                            let _ = pty_writer.write_all(&[0x04]); // EOT
-                            let _ = pty_writer.flush();
-                            // Optional: also send SIGHUP to the child's process group
-                            let _ = nix::sys::signal::kill(
-                                child_pgid_for_stdin,
-                                nix::sys::signal::Signal::SIGHUP,
-                            );
-                            break;
-                        }
-                        if pty_writer.write_all(&buf[..n]).is_err() {
-                            break;
-                        }
-                    }
-                });
-
-                // output copier: pty master -> client stdout (stderr merges on TTY)
-                let mut pty_reader = pty_master_file_r;
-                let mut stdout_writer = client_stdout;
-                thread::spawn(move || {
-                    let mut buf = [0u8; 4096];
-                    while let Ok(n) = pty_reader.read(&mut buf) {
-                        if n == 0 {
-                            break;
-                        }
-                        if stdout_writer.write_all(&buf[..n]).is_err() {
-                            break;
-                        }
-                        let _ = stdout_writer.flush();
-                    }
-                });
-
-                // Wait for child to exit.
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            exit_status = Some(status);
-                            break;
-                        }
-                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                        Err(e) => {
-                            log::debug!("try_wait error: {e}");
-                            break;
-                        }
-                    }
+                // `--create-netns-only`: bring up the namespace and leave it alive
+                // without spawning an application. The client learns the namespace
+                // name and exits; `vopono stop --namespace` tears it down later.
+                if exec_command.create_netns_only {
+                    let setup = crate::exec::setup_daemon_namespace_only(exec_command)?;
+                    let proxies = if !setup.parsed_command.no_proxy
+                        && !crate::namespace_sessions::contains(&setup.ns.name)
+                    {
+                        crate::exec::restore_host_proxies(
+                            &setup.ns,
+                            &setup.ns.state.host_forwarded_ports,
+                        )?
+                    } else {
+                        Vec::new()
+                    };
+                    crate::namespace_ownership::mark_persistent(&setup.ns.name, uid)?;
+                    let session = session.insert(crate::namespace_sessions::Session::register(
+                        setup.ns,
+                        uid,
+                        setup.forwarder,
+                        monitor,
+                        recover,
+                    ));
+                    session.retain_proxies(proxies);
+                    session.persist_options()?;
+                    drop(transition);
+                    // No child will consume the received SCM_RIGHTS descriptors in
+                    // this branch, so take ownership and close all three locally.
+                    let (_client_stdin, client_stdout, _client_stderr) =
+                        client_fds.take().expect("client fds present");
+                    let mut out = std::fs::File::from(client_stdout);
+                    let _ = writeln!(out, "Created namespace {}", session.ns.name);
+                    let _ = out.flush();
+                    drop(out);
+                    write_response(&mut conn, &DaemonResponse::Exit(0))?;
+                    return Ok(());
                 }
-                // Stop and join the terminal reader before replying to the client. Leaving this
-                // thread alive would let it steal terminal-query responses from the caller's
-                // shell after the command has completed.
-                child_done.store(true, Ordering::Release);
-                let _ = stdin_copier.join();
-            }
 
-            let status = match exit_status {
-                Some(s) => s,
-                None => child.wait()?,
-            };
-
-            // Ensure port forwarder is dropped before namespace teardown
-            drop(port_forward_keepalive);
-            // Stop the host-side --forward relays before the namespace is torn down.
-            drop(host_proxies);
-
-            if keep_alive {
-                info!(
-                    "Keep-alive flag active - leaving network namespace {} alive",
-                    _ns_guard.name
+                // The caller retains namespace resources after this handler
+                // closes its client descriptors and execution admission slot.
+                // If the client stdin is a TTY, run the child on a dedicated PTY and bridge I/O.
+                // This preserves job control and avoids stealing the user's controlling TTY.
+                let client_has_tty =
+                    nix_isatty(client_fds.as_ref().expect("client fds present").0.as_fd())
+                        .unwrap_or(false);
+                let (mut application, ns, host_proxies): (
+                    vopono_core::network::application_wrapper::ApplicationWrapper,
+                    vopono_core::network::netns::NetworkNamespace,
+                    Vec<crate::tcp_proxy::TcpProxy>,
                 );
-                crate::namespace_ownership::mark_persistent(&_ns_guard.name, uid)?;
-            }
-            let persistent = match crate::namespace_ownership::is_persistent(&_ns_guard.name, uid) {
-                Ok(persistent) => persistent,
-                Err(error) => {
-                    warn!(
-                        "Could not read persistent state for namespace {}: {error}; preserving it to avoid destructive teardown",
-                        _ns_guard.name
-                    );
-                    true
+                let mut pty_master: Option<OwnedFd> = None;
+                if client_has_tty {
+                    let p = openpty(None, None).map_err(|e| anyhow!("openpty failed: {e}"))?;
+                    let slave_out = nix::unistd::dup(p.slave.as_fd())?;
+                    let slave_err = nix::unistd::dup(p.slave.as_fd())?;
+                    // Spawn child with PTY slave as stdio, and let it take controlling TTY in pre_exec
+                    (application, ns, host_proxies) = execute_as_daemon_with_stdio(
+                        exec_command,
+                        false,
+                        Some((p.slave, slave_out, slave_err)),
+                        true,
+                        Some(forwarded_env.clone()),
+                    )?;
+                    pty_master = Some(p.master);
+                } else {
+                    (application, ns, host_proxies) = execute_as_daemon_with_stdio(
+                        exec_command,
+                        false,
+                        client_fds.take(),
+                        false,
+                        Some(forwarded_env.clone()),
+                    )?;
                 }
-            };
-            if keep_alive || persistent {
-                // Detach the handle so its Drop does not tear the namespace down;
-                // it stays visible to `vopono list` / `vopono stop` until stopped.
-                _ns_guard.detach();
-            }
 
-            let response_code = status.code().unwrap_or(1);
-            write_response(&mut conn, &DaemonResponse::Exit(response_code))?;
+                // Create a per-client RON lock file under ~/.config/vopono/locks/<ns>/client-<pid>
+                // so status readers can report daemon-launched applications and Drop can see
+                // other active clients before tearing down the namespace. The guard removes
+                // it on every exit path, including early errors and unwinds.
+                let _client_lock = ClientLockfileGuard(
+                    match ns.write_client_lockfile(application.handle.id(), &requested_application)
+                    {
+                        Ok(path) => path,
+                        Err(error) => {
+                            log::warn!("Failed to write daemon client status lockfile: {error}");
+                            None
+                        }
+                    },
+                );
+
+                let session = session.insert(crate::namespace_sessions::Session::register(
+                    ns,
+                    uid,
+                    application.port_forwarding,
+                    monitor,
+                    recover,
+                ));
+                session.retain_proxies(host_proxies);
+                session.persist_options()?;
+                drop(transition);
+                // Inform the client about the forwarded port too (not only daemon logs);
+                // suppressed by --silent along with the rest of the app output.
+                if !silent
+                    && let Some(port) = session.forwarded_port()
+                    && let Some(dup_fd) = client_report_out
+                {
+                    let mut out = std::fs::File::from(dup_fd);
+                    let _ = writeln!(out, "Port Forwarding on port {}", port);
+                    let _ = out.flush();
+                }
+
+                let status = wait_for_application(
+                    &mut application.handle,
+                    &conn,
+                    pty_master,
+                    client_fds.as_ref(),
+                )?;
+
+                if keep_alive {
+                    info!(
+                        "Keep-alive flag active - leaving network namespace {} alive",
+                        session.ns.name
+                    );
+                    crate::namespace_ownership::mark_persistent(&session.ns.name, uid)?;
+                }
+                // Remove this application's status before the namespace controller
+                // waits for other clients, detached children or explicit persistence.
+                drop(_client_lock);
+
+                let response_code = status.code().unwrap_or(1);
+                write_response(&mut conn, &DaemonResponse::Exit(response_code))?;
+                Ok(())
+            })();
+            if let Err(error) = execution {
+                if json {
+                    write_response(
+                        &mut conn,
+                        &DaemonResponse::Json(serde_json::to_vec(
+                            &crate::errors::error_json_value(&error),
+                        )?),
+                    )?;
+                } else {
+                    return Err(error);
+                }
+            }
         }
         DaemonRequest::Version => {
             write_response(
@@ -859,7 +948,22 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 DaemonStopTarget::Application(id) => {
                     crate::control::stop_application(&id, Some(uid))
                 }
-                DaemonStopTarget::Namespace(id) => crate::control::stop_namespace(&id, Some(uid)),
+                DaemonStopTarget::Namespace(id) => {
+                    let _transition = crate::namespace_sessions::lock_namespace(&id);
+                    let result = (|| {
+                        crate::namespace_ownership::authorize(&id, uid)?;
+                        crate::namespace_sessions::stop_monitor(&id)?;
+                        crate::control::stop_namespace(&id, Some(uid))
+                    })();
+                    if result.is_ok() {
+                        crate::namespace_sessions::invalidate(&id);
+                    }
+                    drop(_transition);
+                    if result.is_ok() {
+                        crate::namespace_sessions::wait_released(&id)?;
+                    }
+                    result
+                }
             };
             let payload = match outcome {
                 Ok(result) => serde_json::to_vec(&result)?,
@@ -868,6 +972,28 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             write_response(&mut conn, &DaemonResponse::Json(payload))?;
         }
         DaemonRequest::CheckNamespace(request) => {
+            let _probe_slot = PROBE_ADMISSION
+                .acquire_with_limits(uid, 2, 8)
+                .context("Concurrent connectivity probe limit reached")?;
+            drop(client_slot);
+            anyhow::ensure!(
+                (1..=30000).contains(
+                    &request
+                        .timeout_ms
+                        .unwrap_or(crate::check::DEFAULT_TIMEOUT_MS)
+                ),
+                "Probe timeout must be between 1 and 30000 milliseconds"
+            );
+            anyhow::ensure!(request.port != Some(0), "Probe port must be nonzero");
+            for host in [&request.v4_host, &request.v6_host, &request.dns_host]
+                .into_iter()
+                .flatten()
+            {
+                anyhow::ensure!(
+                    !host.is_empty() && host.len() <= 253 && !host.starts_with('-'),
+                    "Invalid probe host"
+                );
+            }
             // The probe needs root to enter the namespace, so it can only run
             // here (or in the sudo fallback path of the CLI).
             crate::namespace_ownership::authorize(&request.id, uid)?;
@@ -903,10 +1029,6 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             // Handshake-only frame; a bare one carries no request payload.
         }
     }
-    // Clear any thread-local override before exiting the handler
-    vopono_core::util::set_config_dir_override(None);
-    vopono_core::util::set_config_owner_override(None);
-    vopono_core::util::set_helper_exe_override(None);
     Ok(())
 }
 

@@ -1350,3 +1350,377 @@ drops or rejects the packet.
 If you need to fully remove disabled UFW rules for troubleshooting, use
 UFW's own flush mechanism or uninstall UFW and reboot. Merely running
 `ufw disable` may not remove all chains from the active ruleset.
+
+## Diagnose configuration and connection failures
+
+`doctor` runs as your user, without creating a namespace, launching an application,
+logging in to a provider, or changing your configuration:
+
+```sh
+vopono doctor
+vopono doctor --provider mullvad --server sweden
+vopono doctor --provider mullvad --server sweden --catalogue --json
+vopono doctor --custom /absolute/path/vpn.conf --offline --json
+vopono provider check mullvad --json
+vopono provider check privateinternetaccess --json
+```
+
+The baseline checks WireGuard/OpenVPN configuration structure, required keys and
+referenced files, endpoint DNS, host connectivity, and destination routes. Route
+inspection uses Linux netlink directly. `--offline` restricts diagnosis to local
+files. Network checks have short timeouts (`--timeout-ms`, default 3000, maximum
+30000). DNS errors preserve whether resolution failed or timed out; the system
+resolver does not expose a reliable DNS response code such as NXDOMAIN.
+
+`--catalogue` compares WireGuard endpoints against Mullvad's or PIA's public server
+catalogue. Mullvad comparisons also check the server public key. Unsupported
+providers are explicitly skipped. A failed catalogue fetch leaves freshness
+unknown. New sync operations record a timestamp and fingerprint for each config;
+modified or older configs without a matching fingerprint have unknown sync
+provenance. Config age alone never proves that a server was retired.
+
+JSON reports contain stable diagnostic codes, states, explanations and suggested
+actions. Configuration contents, private keys, authentication replies and raw
+provider responses are excluded. Exit status is 1 if a diagnostic failed; warnings
+and skipped stages do not imply failure. A catalogue warning is different from a
+successful compatibility check: `provider check` exits 1 on fetch/schema failure,
+which makes it suitable for scheduled smoke tests.
+
+`doctor` does not perform a live VPN handshake. Use `vopono check NAMESPACE --json`
+for an existing namespace. Its `connected` field means that at least one TCP probe
+succeeded; it does not prove authentication or isolation. DNS errors and transport
+failures now carry separate machine-readable reasons. Ordinary VPN setup errors
+also receive an actionable diagnostic; `exec --json` carries that diagnostic in
+its error document, including through the daemon. A missing WireGuard handshake
+cannot distinguish an unreachable endpoint from an unauthorized key.
+
+## Monitor a shared daemon namespace
+
+With the daemon running, launch as your normal user:
+
+```sh
+vopono exec --provider mullvad --server sweden --monitor --recover firefox
+vopono status --json
+```
+
+Monitoring checks TCP connectivity and DNS every 15 seconds and, for WireGuard,
+reports handshake age. `status --json` includes `health.state`, `checked_at`,
+`last_successful_probe`, `handshake_age_seconds`, `reconnect_attempts` and
+`last_error`. The daemon persists this in a small `health.json` sidecar under the
+namespace lock directory; it is advisory telemetry, not proof of VPN
+authentication or isolation. Samples older than 90 seconds are reported as
+degraded. State transitions are persisted immediately, while unchanged samples
+are refreshed by a 30-second heartbeat rather than on every probe. The GUI has
+matching launch options and displays this health information on its Status page.
+Probe targets are Cloudflare's IPv4/IPv6 DNS addresses on TCP port 443 and
+`one.one.one.one` for DNS; a network that deliberately blocks them can report
+false degradation. Split tunnels may also intentionally exclude these targets.
+
+`--recover` requires `--monitor`. After repeated failed TCP probes it repairs
+the existing namespace's host route, interface rules and WireGuard endpoint,
+including gateway/source changes on the same interface, endpoint DNS changes,
+and the matching iptables/nftables kill-switch exception. A failed OpenVPN process
+is restarted from private frozen inputs; an OpenVPN endpoint that rotates to a
+new IP may still require an explicit
+reconnect. Attempts are exponentially spaced, with at most five
+per continuous outage; a changed host route or endpoint resets that budget.
+The existing application keeps running and the kill switch remains installed.
+Recovery never provisions a device or rotates keys. Retired servers and revoked
+credentials still require diagnosis or an explicit sync.
+Monitoring is selected when the daemon first takes ownership of a namespace;
+start a new namespace to change those options.
+
+The daemon keeps one controller for each active namespace. Provider port leases
+and host TCP relays outlive the creating application while another application,
+a detached child, or explicit persistence still needs the namespace. Create-only
+and `--keep-alive` namespaces retain those resources until explicitly stopped:
+
+```sh
+vopono stop namespace NAMESPACE
+```
+
+Creation, attachment and teardown are serialized per namespace. A slow handshake
+in one namespace does not block unrelated namespaces. Port renewal tasks retry
+transient provider failures with bounded backoff instead of permanently exiting.
+A daemon restart validates persisted root-owned namespace identities and restores
+monitors, host relays and provider lease workers. Interrupted stops finish during
+startup. The systemd unit uses `KillMode=process` to preserve applications and VPN
+helpers when restarting the daemon. Noninteractive applications keep running;
+interactive PTY sessions cannot reconnect their terminal and may receive SIGHUP.
+
+Persistent controllers are limited to 16 per user and 64 total; monitored
+namespaces to 8 per user and 32 total. Probe concurrency is also bounded.
+Status and stop requests remain available when launch capacity is exhausted.
+
+Provider syncs serialize updates, generate and validate in a private staging
+directory, then atomically publish the provider files with their freshness
+metadata. Failed generation or validation preserves the installed generation.
+
+## Named launch profiles and desktop launchers
+
+Add profiles to `~/.config/vopono/config.toml`. Explicit command-line settings
+win over profile values, and profile values override global defaults. Boolean
+flags enable features; a true profile/default flag cannot be disabled by omitting
+it on the command line.
+
+```toml
+[profiles.private-browser]
+provider = "mullvad"
+protocol = "wireguard"
+server = "sweden"
+application = "firefox --no-remote -P vpn"
+monitor = true
+recover = true
+
+[profiles.downloads]
+provider = "privateinternetaccess"
+protocol = "wireguard"
+server = "sweden"
+application = "qbittorrent"
+port-forwarding = true
+```
+
+```sh
+vopono profiles list --json
+vopono exec --profile private-browser
+vopono exec --profile downloads 'another-application'
+vopono profiles export private-browser --output ~/.local/share/applications/vopono-browser.desktop
+```
+
+Create the output directory first. Export refuses to overwrite an existing file.
+The launcher invokes the CLI with an absolute config path; it does not copy
+application commands, credentials, or VPN keys into the desktop entry. Profile
+names accept letters, digits, hyphens and underscores. Use absolute custom config
+paths in profiles. Choose a separate browser profile to avoid handing the launch
+to a browser process already running outside the VPN namespace.
+
+## Use vopono from LLM agents
+
+Vopono ships a portable [Agent Skill](skills/vopono/SKILL.md) for agents with
+shell access, and a local MCP server for clients that use structured tools.
+Both use existing profiles, diagnostics and daemon ownership checks.
+
+**Installing the skill or connecting the MCP server does not put the harness
+itself on a VPN.** Vopono routes processes launched inside its network namespace.
+It does not change the host's default route or automatically intercept other
+tools' requests.
+
+| Traffic | Uses the vopono namespace? |
+| --- | --- |
+| Application started by `vopono exec` or MCP `run_profile` | Yes, including its local child processes |
+| Client explicitly configured to use a proxy running in the namespace | The traffic sent through that proxy |
+| A separate shell tool running on the host | Only commands explicitly launched through vopono |
+| Harness built-in web search or a remotely hosted browser | No; requests run wherever that tool is hosted |
+| Other MCP servers and their tools | No, unless their actual network process is separately placed in the namespace or configured for its proxy |
+| The harness's model/provider API requests | No, unless the local harness making those requests is itself launched through vopono |
+
+To route an entire local CLI harness and the processes it starts, launch the
+harness itself through vopono, for example `vopono exec --profile agent-network
+'YOUR-HARNESS-COMMAND'`. Remote tools still execute on their remote hosts.
+Existing browser processes can also remain outside the namespace: use a separate
+browser profile/data directory to prevent a launcher from reusing them.
+
+The MCP server must run on the Linux host with vopono and its network namespaces.
+A skill installed in a cloud sandbox cannot control your workstation by itself;
+it needs an explicitly configured connection to that host. The server described
+here uses local stdio and does not open an HTTP listener. Network namespaces
+isolate networking; they do not sandbox application filesystem access.
+
+### Install the portable skill
+
+The source is `skills/vopono/`. It follows the open
+[Agent Skills format](https://agentskills.io/specification), with one shared
+`SKILL.md` and a CLI reference. With the third-party
+[Skills CLI](https://github.com/vercel-labs/skills), install from a checkout:
+
+```sh
+npx skills add . --skill vopono --global
+```
+
+After the skill is published in the GitHub repository, users can install it
+without cloning. Select harnesses interactively, or target all supported agents:
+
+```sh
+npx skills add jamesmcm/vopono --skill vopono --global
+npx skills add jamesmcm/vopono --skill vopono --global --agent '*'
+```
+
+The installer supports common harnesses including Codex, Claude Code, Cursor,
+Gemini CLI, GitHub Copilot and OpenCode, handling their discovery directories.
+It requires Node.js for installation; vopono and the MCP server do not.
+For manual installation, copy the complete `skills/vopono/` directory into your
+harness's skill directory, such as `~/.agents/skills/vopono/` for Codex or
+`~/.claude/skills/vopono/` for Claude Code. Installing instructions does not install
+the vopono binary, VPN tools, credentials or provider configurations.
+
+### Connect the local MCP server
+
+Install vopono, prepare your VPN configurations, and start the root daemon
+separately as described above. Run the MCP server as your ordinary user:
+
+```sh
+vopono mcp serve --allow-profile agent-downloads
+```
+
+For clients using an `mcpServers` JSON configuration, the connection looks like:
+
+```json
+{
+  "mcpServers": {
+    "vopono": {
+      "command": "/usr/bin/vopono",
+      "args": ["mcp", "serve", "--allow-profile", "agent-downloads"]
+    }
+  }
+}
+```
+
+Use the actual installed binary path. Each harness has its own configuration
+file or UI; clients with a different configuration format need the same command
+and argument array. Pass `--vopono-config /absolute/path/config.toml` to select a
+particular file. If your configuration uses `XDG_CONFIG_HOME`, set that environment
+variable on the server process too. The server requires a matching daemon version
+for jobs, never falls back to sudo, and never automatically syncs provider data.
+Restart an existing daemon after updating the vopono binary, including when
+switching between development builds with the same package version.
+
+Create a noninteractive profile first, for example:
+
+```toml
+[profiles.agent-downloads]
+provider = "mullvad"
+protocol = "wireguard"
+server = "sweden"
+application = "curl --fail --location --output /tmp/download.html https://example.org/"
+```
+
+Without `--allow-command`, `run_profile` runs only the application's configured
+command. Repeating `--allow-profile NAME` restricts profile access; omitting it
+exposes all configured profile names. To allow an agent to supply a literal argv
+array instead, explicitly enable it on the server:
+
+```sh
+vopono mcp serve --allow-profile agent-downloads --allow-command
+```
+
+An override then uses arguments such as:
+
+```json
+{
+  "profile": "agent-downloads",
+  "argv": ["curl", "--fail", "https://example.org/"],
+  "timeout_seconds": 60
+}
+```
+
+Argv values are passed without environment expansion or an implicit shell.
+Enabling this option permits arbitrary applications as your user, including an
+explicit shell; profile restrictions select network settings, not a filesystem
+or command sandbox. Profile commands retain the ordinary CLI's environment
+expansion behavior.
+
+Jobs use the profile's `working-directory` (or `working_directory`), falling back
+to the MCP server's working directory. Prefer absolute configuration and output
+paths when launching the server from a desktop client.
+
+### MCP tools and job lifetime
+
+| Tool | Purpose |
+| --- | --- |
+| `status` | Inspect daemon and namespace state; omits application command arguments |
+| `profiles_list` | List allowed profile names without exposing configuration contents |
+| `doctor` | Read-only preflight for a profile; `offline` defaults to `true` |
+| `check` | Probe an owned namespace through the daemon |
+| `run_profile` | Start a job and return its ID and dedicated namespace promptly |
+| `job_status` | Inspect completion, exit code, diagnostics and cleanup status |
+| `job_output` | Poll bounded stdout/stderr with independent byte offsets |
+| `job_cancel` | Request termination and cleanup of this session's job |
+
+Typical workflow: `profiles_list`, optional `doctor`, `run_profile`, then poll
+`job_status` and `job_output`. Use `check` for namespace reachability, and
+`job_cancel` when the workload should stop. A successful TCP probe does not by
+itself establish VPN authentication or prove isolation. Cancellation operates on
+the job's dedicated namespace, including its descendants, rather than stopping a
+namespace shared with unrelated applications. Jobs cannot attach to an existing
+namespace, and create-only profiles are rejected.
+
+Each job establishes its own connection. Parallel jobs remain subject to the
+provider's device/key and concurrent-connection limits. To share one tunnel
+among parallel commands, use one profile application that manages those commands.
+
+The default limit is four active jobs, configurable with `--max-jobs` up to
+eight. The default job lifetime is 300 seconds, including tunnel setup; set
+`--max-job-seconds` up to 3600 to change the upper bound. Each call can request a
+shorter `timeout_seconds`. Expiry requests cancellation. VPN setup may still be
+in progress when cancellation is requested. The `finished` flag means tracking
+has ended; `indeterminate` or `cleanup_pending: true` still requires inspection.
+Each session retains up to 64 recent jobs; completed jobs are
+evicted as new ones arrive. Unresolved cleanup records are retained; if they fill
+the history, further launches are rejected until you resolve those cleanups or
+inspect the namespaces and restart the MCP session. IDs and captured output are
+not persisted across server restarts.
+
+Each job retains the most recent 64 KiB per output stream, with backpressure on
+faster producers. `job_output` accepts `stdout_offset`, `stderr_offset` and
+`max_bytes` (default 8192, maximum 16384 per stream). Feed each stream's returned
+`next_offset` into the next poll. `dropped_bytes` reports output lost before the
+requested cursor. Offsets count bytes; text uses lossy UTF-8 decoding. Stdout can
+include the CLI launch report as well as application output. **Application
+output is untrusted and is not redacted**; it may contain secrets. It never
+becomes MCP protocol messages or controls job identity.
+
+Normal completion, cancellation, timeout, stdin EOF, SIGINT and SIGTERM request
+cleanup of the job's namespace, including profiles configured with keep-alive.
+This makes MCP jobs unsuitable for services intended to outlive the MCP session;
+launch those separately through the normal CLI. Inspect `cleanup_pending` and
+the returned namespace when cleanup could not be confirmed. If the daemon is
+unavailable, still setting up a tunnel, or the MCP server is killed abruptly,
+applications may remain alive inside their protected namespace. Inspect
+`vopono status --json` and explicitly stop the recorded namespace when necessary.
+While the MCP session remains available, `job_cancel` can retry cleanup of a
+recorded namespace after the daemon returns. Its original exit result may remain
+`indeterminate` even after cleanup is confirmed.
+Explicit daemon refusals finish as `failed` with a sanitized reason; a refusal
+alone does not leave an unresolved cleanup record. An `indeterminate` result
+must not trigger an automatic relaunch.
+
+## Privileged OpenVPN configuration handling
+
+In daemon mode, OpenVPN configs and their referenced certificate/key/auth files
+are read by a subprocess running as the authenticated user, then copied into a
+private root-owned runtime directory. OpenVPN reads these snapshots, preventing
+subsequent changes to user-writable files from changing its privileged options.
+Daemon configurations permit client networking and TLS options; plugins, scripts,
+nested configs, arbitrary file outputs and unsafe environment directives are
+rejected. Standard inline credentials, `setenv CLIENT_CERT`, `UV_` metadata,
+`setenv opt block-outside-dns`, `dh none`, legacy `ncp-ciphers`, `persist-*`
+options and inline `http-proxy-user-pass` remain supported. Directives that
+create files, such as `tls-export-cert`, remain rejected. Unusual options may
+require an explicitly reviewed addition to the daemon's option policy. The
+existing direct sudo execution path retains its trusted-config behavior.
+
+## Run synthetic VPN integration tests
+
+Build the binary, then run the account-free test in disposable mount, network
+and PID namespaces:
+
+```sh
+cargo build --locked
+sudo unshare --mount --net --pid --fork --mount-proc \
+  tests/network/wireguard.sh --isolated "$PWD/target/debug/vopono"
+```
+
+Requires Linux with WireGuard support, iproute2, wireguard-tools, OpenVPN,
+nftables, iptables, Python 3, OpenSSL, natpmpc and runuser. Local WireGuard and
+OpenVPN TLS peers cover dual-stack connectivity, blocked underlay traffic,
+shared application lifetime, daemon restart/crash, relay and lease renewal,
+resource limits, DNS endpoint rotation, host interface replacement, OpenVPN
+process recovery, authentication/TLS failures and host DNS preservation.
+The suite also checks stop/name reuse, rejected OpenVPN directives and
+failed-setup cleanup, plus MCP jobs, profile restrictions, output limits,
+literal argv, timeouts, descendant cancellation and client-disconnect cleanup.
+CI tests both OpenVPN 2.6 and 2.7 and runs a stdio interoperability check with the
+official Python MCP SDK. Fixed paths such
+as `/run/vopono.sock` and `/etc/netns` are isolated from the host. The script
+refuses execution outside a fresh PID namespace. CI runs this test on PRs;
+public-provider checks run on the daily schedule or manual dispatch.

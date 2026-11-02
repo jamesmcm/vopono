@@ -5,7 +5,7 @@ use crate::network::wireguard_config::WireguardConfig;
 use crate::util::sudo_command;
 use anyhow::{Context, anyhow};
 use ipnet::IpNet;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -29,6 +29,8 @@ pub struct Wireguard {
     pub firewall: Firewall,
     pub if_name: String,
     pub interface_addresses: Vec<IpAddr>,
+    #[serde(default)]
+    pub(crate) recovery: Option<super::recovery::Peer>,
 }
 
 impl Wireguard {
@@ -58,12 +60,11 @@ impl Wireguard {
         let executable_wg = executable_wg.unwrap_or("wg").to_string();
         let ip_link_type = ip_link_type.unwrap_or("wireguard").to_string();
 
-        if let Err(x) = which::which(&executable_wg) {
-            error!("{executable_wg} binary not found. Is wireguard-tools installed and on PATH?");
-            return Err(anyhow!(
-                "{executable_wg} binary not found. Is wireguard-tools installed and on PATH?: {:?}",
-                x
-            ));
+        if which::which(&executable_wg).is_err() {
+            return Err(crate::diagnostics::SetupError::DependencyMissing(
+                if executable_wg == "awg" { "awg" } else { "wg" },
+            )
+            .into());
         }
 
         let mut config_string = std::fs::read_to_string(&config_file)
@@ -138,6 +139,13 @@ impl Wireguard {
         );
         let peer_endpoint =
             SocketAddr::new(peer_endpoint_ip, config.peer.endpoint.port()).to_string();
+        let recovery = super::recovery::Peer {
+            host: config.peer.endpoint.ip_or_hostname(),
+            port: config.peer.endpoint.port(),
+            public_key: config.peer.public_key.clone(),
+            address: peer_endpoint_ip,
+            disable_ipv6,
+        };
         let endpoint_line = Regex::new(r"(?m)^Endpoint\s*=.*$")?;
         config_string = endpoint_line
             .replace_all(&config_string, format!("Endpoint = {peer_endpoint}"))
@@ -596,6 +604,7 @@ impl Wireguard {
             firewall,
             if_name,
             interface_addresses,
+            recovery: Some(recovery),
         })
     }
 }

@@ -1,3 +1,4 @@
+use crate::network::health::is_health_sidecar;
 use crate::status::{self, FORWARDED_PORT_SIDECAR, LockfileKind};
 use anyhow::Context;
 use nix::dir::{Dir, Entry, Type};
@@ -82,7 +83,10 @@ pub(super) fn clean_dead_locks(config_base: &Path) -> anyhow::Result<()> {
 
         let remaining = entries(&mut dir)?;
         if remaining.iter().all(|file| {
-            file.file_name().to_bytes() == FORWARDED_PORT_SIDECAR.as_bytes()
+            let Ok(name) = file.file_name().to_str() else {
+                return false;
+            };
+            (name == FORWARDED_PORT_SIDECAR || is_health_sidecar(name))
                 && file.file_type() == Some(Type::File)
         }) {
             for file in remaining {
@@ -176,6 +180,26 @@ mod tests {
 
         assert!(!dir.exists());
         assert!(config_link.is_dir());
+    }
+
+    #[test]
+    fn health_sidecars_are_not_session_state_and_are_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let namespace = "vo_cleanup_health";
+        assert!(!Path::new("/var/run/netns").join(namespace).exists());
+        let dir = temp.path().join("vopono/locks").join(namespace);
+        fs::create_dir_all(&dir).unwrap();
+        for name in [
+            crate::network::health::HEALTH_FILE,
+            "health.tmp-4242",
+            FORWARDED_PORT_SIDECAR,
+        ] {
+            fs::write(dir.join(name), "state").unwrap();
+        }
+
+        clean_dead_locks(temp.path()).unwrap();
+
+        assert!(!dir.exists(), "health-only lock directory was not removed");
     }
 
     #[test]

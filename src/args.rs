@@ -108,6 +108,8 @@ pub struct App {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    #[clap(name = "mcp", about = "Expose local vopono tools over MCP stdio")]
+    Mcp(McpCommand),
     #[clap(
         name = "daemon",
         about = "Run or inspect the privileged root vopono daemon"
@@ -124,6 +126,16 @@ pub enum Command {
     )]
     Check(CheckCommand),
     #[clap(
+        name = "doctor",
+        about = "Diagnose configuration and endpoint failures without creating a tunnel"
+    )]
+    Doctor(DoctorCommand),
+    #[clap(
+        name = "profiles",
+        about = "List named profiles or export a desktop launcher"
+    )]
+    Profiles(ProfilesCommand),
+    #[clap(
         name = "__connectivity-probe",
         about = "Internal TCP probe executed inside a network namespace",
         hide = true
@@ -135,6 +147,10 @@ pub enum Command {
         hide = true
     )]
     WriteUserFile,
+    #[clap(name = "__read-user-file", hide = true)]
+    ReadUserFile { path: PathBuf },
+    #[clap(name = "__openvpn-supervisor", hide = true)]
+    OpenVpnSupervisor { path: PathBuf },
     #[clap(
         name = "list",
         about = "List running vopono namespaces and applications"
@@ -161,6 +177,37 @@ pub enum Command {
         about = "List possible server configs for VPN provider, beginning with prefix"
     )]
     Servers(ServersCommand),
+}
+
+#[derive(Parser, Debug)]
+pub struct McpCommand {
+    #[clap(subcommand)]
+    pub command: McpSubcommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum McpSubcommand {
+    /// Run as your ordinary user; the privileged daemon must already be running for jobs.
+    Serve(McpServeCommand),
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct McpServeCommand {
+    /// Configuration file containing the named profiles exposed to this server.
+    #[clap(long)]
+    pub vopono_config: Option<PathBuf>,
+    /// Restrict profile access to these names (repeatable; default: all configured profiles).
+    #[clap(long = "allow-profile")]
+    pub allow_profiles: Vec<String>,
+    /// Let run_profile replace a profile's application with an explicit argv array.
+    #[clap(long)]
+    pub allow_command: bool,
+    /// Maximum simultaneously active jobs in this MCP session.
+    #[clap(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=8))]
+    pub max_jobs: u8,
+    /// Maximum job lifetime, including VPN setup; cancellation is requested on expiry.
+    #[clap(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub max_job_seconds: u64,
 }
 
 #[derive(Parser, Debug)]
@@ -211,6 +258,11 @@ pub struct ProviderCommand {
 pub enum ProviderSubcommand {
     #[clap(name = "status", about = "Show provider configuration state")]
     Status(ProviderStatusCommand),
+    #[clap(
+        name = "check",
+        about = "Check a public provider catalogue without credentials"
+    )]
+    Check(ProviderStatusCommand),
 }
 
 #[derive(Parser, Debug)]
@@ -281,8 +333,29 @@ pub struct ExecCommand {
     #[clap(long = "server", short = 's')]
     pub server: Option<String>,
 
-    /// Application to run (should be on PATH or full path to binary)
+    /// Application to run (defaults to the named profile's application).
+    #[clap(default_value = "")]
     pub application: String,
+
+    /// Internal: MCP has already quoted a literal argv; do not expand environment variables.
+    #[clap(skip)]
+    #[serde(default)]
+    pub literal_application: bool,
+
+    /// Named application profile from [profiles.NAME] in config.toml.
+    #[clap(long)]
+    #[serde(default)]
+    pub profile: Option<String>,
+
+    /// Monitor namespace TCP/DNS health through the daemon.
+    #[clap(long)]
+    #[serde(default)]
+    pub monitor: bool,
+
+    /// Refresh an existing WireGuard peer's keepalive after repeated failures.
+    #[clap(long, requires = "monitor")]
+    #[serde(default)]
+    pub recover: bool,
 
     /// User with which to run the application (default is current user)
     #[clap(long = "user", short = 'u')]
@@ -462,7 +535,7 @@ pub struct CheckCommand {
     pub port: u16,
 
     /// Connection timeout in milliseconds per family
-    #[clap(long = "timeout-ms", default_value_t = crate::check::DEFAULT_TIMEOUT_MS)]
+    #[clap(long = "timeout-ms", default_value_t = crate::check::DEFAULT_TIMEOUT_MS, value_parser = clap::value_parser!(u64).range(1..=30000))]
     pub timeout_ms: u64,
 
     /// IPv4 target to connect to
@@ -508,7 +581,7 @@ pub struct ProbeCommand {
     #[clap(long = "port")]
     pub port: u16,
 
-    #[clap(long = "timeout-ms")]
+    #[clap(long = "timeout-ms", value_parser = clap::value_parser!(u64).range(1..=30000))]
     pub timeout_ms: u64,
 
     #[clap(long = "dns-host")]
@@ -747,4 +820,43 @@ mod tests {
             );
         }
     }
+}
+
+#[derive(Parser, Debug)]
+pub struct DoctorCommand {
+    #[clap(value_enum, long, ignore_case = true, conflicts_with = "custom")]
+    pub provider: Option<WrappedArg<VpnProvider>>,
+    #[clap(value_enum, long, ignore_case = true)]
+    pub protocol: Option<WrappedArg<Protocol>>,
+    #[clap(long, requires = "provider")]
+    pub server: Option<String>,
+    #[clap(long)]
+    pub custom: Option<PathBuf>,
+    /// Only inspect local files; do not resolve names, connect or fetch catalogues.
+    #[clap(long, conflicts_with = "catalogue")]
+    pub offline: bool,
+    /// Fetch the public WireGuard catalogue (Mullvad/PIA); never authenticates or provisions keys.
+    #[clap(long, requires = "provider")]
+    pub catalogue: bool,
+    #[clap(long, default_value_t = 3000, value_parser = clap::value_parser!(u64).range(1..=30000))]
+    pub timeout_ms: u64,
+    #[clap(long)]
+    pub json: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct ProfilesCommand {
+    #[clap(long, global = true)]
+    pub vopono_config: Option<PathBuf>,
+    #[clap(subcommand)]
+    pub command: ProfileSubcommand,
+}
+#[derive(Subcommand, Debug)]
+pub enum ProfileSubcommand {
+    List(JsonCommand),
+    Export {
+        name: String,
+        #[clap(long)]
+        output: PathBuf,
+    },
 }

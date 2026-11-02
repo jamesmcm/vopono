@@ -267,6 +267,13 @@ impl Forwarder for AzireVpnPortForwarding {
     fn forwarded_port(&self) -> u16 {
         self.port
     }
+    fn snapshot(&self) -> Option<super::ForwarderSnapshot> {
+        Some(super::ForwarderSnapshot::Azire {
+            local_ip: self.local_ip,
+            access_token: self.access_token.clone(),
+            netns_name: self.netns_name.clone(),
+        })
+    }
 }
 
 impl Drop for AzireVpnPortForwarding {

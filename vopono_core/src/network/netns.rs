@@ -283,6 +283,14 @@ fn write_lockfile_data(path: &Path, contents: &str) -> anyhow::Result<()> {
 }
 
 impl NamespaceSnapshot {
+    /// Copy persisted metadata while resetting every resource cleanup flag.
+    /// Never implement Clone on the live resource owners: that could duplicate
+    /// authority to kill helpers or remove networking. Serde is the existing
+    /// audited boundary between owning guards and inert descriptions.
+    pub fn inert_copy(&self) -> anyhow::Result<Self> {
+        Ok(serde_json::from_value(serde_json::to_value(self)?)?)
+    }
+
     pub fn into_managed_guard(self) -> ManagedNamespaceGuard {
         let mut guard = ManagedNamespaceGuard {
             name: self.name,
@@ -1317,6 +1325,41 @@ impl ManagedNamespaceGuard {
 }
 
 impl ManagedNamespaceGuard {
+    /// Inspect detached applications as well as registered sessions. VPN helper
+    /// processes and their children do not pin an otherwise unused namespace.
+    pub fn has_application_processes(&self) -> anyhow::Result<bool> {
+        let managed_helper_pids = [
+            self.openvpn.as_ref().map(|helper| helper.pid),
+            self.warp.as_ref().map(|helper| helper.pid),
+            self.shadowsocks.as_ref().map(|helper| helper.pid),
+            self.openconnect.as_ref().map(|helper| helper.pid),
+            self.openfortivpn.as_ref().map(|helper| helper.pid),
+            self.trojan.as_ref().map(|helper| helper.pid),
+            self.ssh.as_ref().map(|helper| helper.ssh_pid),
+            self.ssh.as_ref().map(|helper| helper.redsocks_pid),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|pid| pid as i32)
+        .collect::<Vec<_>>();
+        let pids = get_pids_in_namespace(&self.name)?;
+        let processes = System::new_all();
+        let parents = pids
+            .iter()
+            .filter_map(|pid| {
+                processes
+                    .process(sysinfo::Pid::from_u32(*pid as u32))
+                    .and_then(|process| process.parent())
+                    .map(|parent| (*pid, parent.as_u32() as i32))
+            })
+            .collect::<HashMap<_, _>>();
+        Ok(has_unaccounted_processes(
+            &pids,
+            &managed_helper_pids,
+            &parents,
+        ))
+    }
+
     fn perform_teardown(&mut self) -> anyhow::Result<()> {
         if self.disposition != GuardDisposition::Managed {
             debug!(
@@ -1374,42 +1417,10 @@ impl ManagedNamespaceGuard {
                 false
             }
         };
-        let managed_helper_pids = [
-            self.openvpn.as_ref().map(|helper| helper.pid),
-            self.warp.as_ref().map(|helper| helper.pid),
-            self.shadowsocks.as_ref().map(|helper| helper.pid),
-            self.openconnect.as_ref().map(|helper| helper.pid),
-            self.openfortivpn.as_ref().map(|helper| helper.pid),
-            self.trojan.as_ref().map(|helper| helper.pid),
-            self.ssh.as_ref().map(|helper| helper.ssh_pid),
-            self.ssh.as_ref().map(|helper| helper.redsocks_pid),
-        ]
-        .into_iter()
-        .flatten()
-        .map(|pid| pid as i32)
-        .collect::<Vec<_>>();
-        let has_unaccounted_processes = match get_pids_in_namespace(&self.name) {
-            Ok(pids) => {
-                let processes = System::new_all();
-                let process_parents = pids
-                    .iter()
-                    .filter_map(|pid| {
-                        processes
-                            .process(sysinfo::Pid::from_u32(*pid as u32))
-                            .and_then(|process| process.parent())
-                            .map(|parent| (*pid, parent.as_u32() as i32))
-                    })
-                    .collect::<HashMap<_, _>>();
-                has_unaccounted_processes(&pids, &managed_helper_pids, &process_parents)
-            }
-            Err(e) => {
-                warn!(
-                    "Could not inspect processes in namespace {}: {e:?}; preserving namespace",
-                    self.name
-                );
-                true
-            }
-        };
+        let has_unaccounted_processes = self.has_application_processes().unwrap_or_else(|error| {
+            warn!("Could not inspect namespace processes: {error}; preserving namespace");
+            true
+        });
 
         if lock_dir_is_empty && !has_unaccounted_processes {
             // Commit to teardown before dropping any resource. A later error
@@ -1641,6 +1652,30 @@ mod tests {
     fn detached_namespace_teardown_is_a_noop() {
         let namespace = super::NetworkNamespace::attach_unmanaged("vo_test".to_string()).unwrap();
         namespace.teardown().unwrap();
+    }
+
+    #[test]
+    fn inert_copy_never_inherits_cleanup_authority() {
+        let runtime = tempfile::tempdir().unwrap();
+        let log = runtime.path().join("openvpn.log");
+        std::fs::write(&log, "keep").unwrap();
+        let ns = super::NetworkNamespace::attach_unmanaged("inert_copy_test".into()).unwrap();
+        let mut snapshot = ns.snapshot().unwrap();
+        let mut vpn: super::OpenVpn = serde_json::from_value(serde_json::json!({
+            "pid": std::process::id(), "openvpn_dns_servers": [], "logfile": log,
+            "runtime_dir": runtime.path(), "supervised": true,
+        }))
+        .unwrap();
+        vpn.set_cleanup_enabled(true);
+        snapshot.openvpn = Some(vpn);
+        let copy = snapshot.inert_copy().unwrap();
+        snapshot
+            .openvpn
+            .as_mut()
+            .unwrap()
+            .set_cleanup_enabled(false);
+        drop(copy);
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "keep");
     }
 
     #[test]

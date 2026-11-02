@@ -1,3 +1,4 @@
+use crate::network::health::{HEALTH_FILE, is_health_sidecar};
 use crate::network::netns::LockfileStatus;
 use crate::util::{
     check_process_running, chown_to_config_owner, config_dir, create_private_file,
@@ -281,7 +282,10 @@ pub fn lock_dir_has_no_session_state(dir: &Path) -> anyhow::Result<bool> {
     };
     for entry in entries {
         let entry = entry?;
-        if entry.file_name().to_str() != Some(FORWARDED_PORT_SIDECAR) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            return Ok(false);
+        };
+        if name != FORWARDED_PORT_SIDECAR && !is_health_sidecar(&name) {
             return Ok(false);
         }
     }
@@ -366,6 +370,14 @@ fn prune_stale_client_lockfiles_with(
 /// directory non-empty and block namespace teardown.
 pub(crate) fn remove_forwarded_port_sidecar(dir: &Path) {
     let _ = std::fs::remove_file(dir.join(FORWARDED_PORT_SIDECAR));
+    let _ = std::fs::remove_file(dir.join(HEALTH_FILE));
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry.file_name().to_str().is_some_and(is_health_sidecar) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 fn application_pid_is_stale(pid: u32, namespace: &str) -> bool {
