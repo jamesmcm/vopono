@@ -20,6 +20,11 @@ cleanup() {
         echo 'Synthetic VPN test failed. Last daemon messages:'
         tail -50 "$scratch/daemon.log" 2>/dev/null || true
         tail -20 "$scratch/client1.log" 2>/dev/null || true
+        if [[ -f $scratch/check.json ]]; then
+            echo 'Last namespace connectivity result:'
+            cat "$scratch/check.json"
+        fi
+        tail -20 "$scratch/peer.log" 2>/dev/null || true
     fi
     # PID namespace exit kills every remaining daemon, service and application.
     rm -rf "$scratch"
@@ -34,6 +39,9 @@ cd "$scratch"
 # Isolate all fixed privileged paths, including DNS overlays and the daemon socket.
 mkdir "$scratch/etc"
 cp -a /etc/. "$scratch/etc/"
+# Ubuntu's resolver file can point into /run/systemd/resolve. Freeze its
+# contents before the private /run mount hides that symlink's target.
+cp -L --remove-destination /etc/resolv.conf "$scratch/etc/resolv.conf"
 mount --bind "$scratch/etc" /etc
 mount -t tmpfs tmpfs /run
 mkdir -p /run/netns

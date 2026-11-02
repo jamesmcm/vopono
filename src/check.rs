@@ -66,7 +66,7 @@ pub struct DnsStatus {
     /// Host that was resolved inside the namespace.
     pub host: String,
     /// All returned addresses (A and AAAA), in resolver order.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resolved_ips: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u64>,
@@ -508,6 +508,13 @@ mod tests {
         let json = serde_json::to_value(status).unwrap();
         assert_eq!(json["code"], "namespace_dns");
         assert_eq!(json["error"], "DNS resolution timed out");
+        // Empty addresses are omitted on the daemon wire. A failed DNS probe
+        // must deserialize as a failure report rather than an internal error.
+        assert!(json.get("resolved_ips").is_none());
+        let restored: DnsStatus = serde_json::from_value(json).unwrap();
+        assert!(restored.resolved_ips.is_empty());
+        assert_eq!(restored.code, Some(DiagnosticCode::NamespaceDns));
+        assert_eq!(restored.error.as_deref(), Some("DNS resolution timed out"));
     }
 
     #[test]
