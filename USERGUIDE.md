@@ -1381,6 +1381,27 @@ vopono provider check mullvad --json
 vopono provider check privateinternetaccess --json
 ```
 
+The default report uses wrapped tables, readable check names, a result summary,
+and coloured states on interactive terminals. Colours are disabled when stdout
+is redirected, `NO_COLOR` is nonempty, or `TERM=dumb`. Use `--color always` or
+`--color never` to override detection.
+
+For agents and logs, `--plain` (alias `--plaintext`) emits one tab-separated
+record per diagnostic, with the header `scope`, `check`, `state`, `message`,
+`action`. Check/state names are stable snake_case; backslashes and control
+characters in values are escaped, so each record stays on one line. This mode
+never includes ANSI colours or table borders, even with `--color always`.
+Use `--json` for complete structured network and cached monitor data; it is
+mutually exclusive with `--plain`. All formats preserve the same exit status:
+failed diagnostics return 1. Namespace reports label monitor state as cached,
+separately from this invocation's fresh probes.
+
+```sh
+vopono doctor --plain
+vopono doctor --namespace NAMESPACE --offline --plaintext
+vopono doctor --color never
+```
+
 Every mode, including `--offline`, checks the daemon socket and compares its
 reported version with the CLI. The JSON `daemon` object includes `available`,
 `pid`, `socket`, daemon `version`, `cli_version`, `compatible` (same major), and
@@ -1816,14 +1837,34 @@ paths when launching the server from a desktop client.
 
 | Tool | Purpose |
 | --- | --- |
-| `status` | Inspect daemon and namespace state; omits application command arguments |
+| `status` | Inspect daemon, namespaces and cached health; omits application command arguments |
+| `health` | Read cached monitor state and diagnostic evidence for one or all owned namespaces |
 | `profiles_list` | List allowed profile names without exposing configuration contents |
-| `doctor` | Read-only preflight for a profile; `offline` defaults to `true` |
+| `doctor` | Diagnose a profile, one namespace, or all running namespaces; `offline` defaults to `true` |
 | `check` | Probe an owned namespace through the daemon |
 | `run_profile` | Start a job and return its ID and dedicated namespace promptly |
 | `job_status` | Inspect completion, exit code, diagnostics and cleanup status |
 | `job_output` | Poll bounded stdout/stderr with independent byte offsets |
 | `job_cancel` | Request termination and cleanup of this session's job |
+
+MCP tools return structured JSON, independent of the terminal display settings.
+`doctor {"profile":"agent-downloads"}` retains configuration preflight. Call
+`doctor {}` to discover and inspect running namespaces, or
+`doctor {"namespace":"ID","offline":false,"timeout_ms":500}` for fresh host,
+namespace and link probes. `profile` and `namespace` are mutually exclusive.
+For namespace diagnostics, `dns_host` selects a hostname (`offline:false` is
+required), and `skip_ipv6:true` skips IPv6 probes. The per-probe timeout ranges
+from 1 to 5000 ms; each doctor call is also limited to 25 seconds and 1 MiB of
+JSON output. Select one namespace if an all-namespace report exceeds those limits.
+
+`health {"namespace":"ID"}` reads the latest cached monitor result without
+probing; `health {}` returns all owned namespaces. Results include sample and
+diagnostic timestamps, state, handshake age, reconnect attempts, last error,
+daemon identity and diagnostic evidence/actions. `health:null` means no monitor
+sample is available (for example, monitoring was not enabled); samples older
+than 90 seconds are degraded, just as in CLI status. A degraded sample is returned
+as data, while a missing or invalid namespace is a tool error. Use fresh doctor
+or check probes to investigate cached failures.
 
 Typical workflow: `profiles_list`, optional `doctor`, `run_profile`, then poll
 `job_status` and `job_output`. Use `check` for namespace reachability, and

@@ -437,8 +437,8 @@ fn supervise(
     }
 }
 
-/// Read-only CLI commands use the same bounded capture without borrowing MCP
-/// stdout. Killing a process group also closes descendants' inherited pipes.
+/// Read-only CLI commands use bounded JSON capture without borrowing MCP stdout.
+/// Killing a process group also closes descendants' inherited pipes.
 pub(super) fn json_command(args: &[String], timeout: Duration) -> anyhow::Result<(Value, bool)> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
@@ -454,10 +454,17 @@ pub(super) fn json_command(args: &[String], timeout: Duration) -> anyhow::Result
     let stdout = child.stdout.take().context("Missing command output")?;
     let mut stdout = File::from(std::os::fd::OwnedFd::from(stdout));
     nonblocking(&stdout)?;
-    let capture = Mutex::new(Capture::default());
+    // A namespace report includes both current diagnostics and cached monitor
+    // evidence. Keep this larger than job log history, without truncating JSON
+    // or increasing the per-job stdout/stderr buffers.
+    const MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
+    let mut bytes = Vec::new();
     let deadline = Instant::now() + timeout;
     let outcome = loop {
-        drain(&mut stdout, &capture);
+        let read = read_diagnostics(&mut stdout, &mut bytes, MAX_DIAGNOSTIC_BYTES);
+        if let Err(error) = read {
+            break Err(error);
+        }
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
@@ -473,21 +480,56 @@ pub(super) fn json_command(args: &[String], timeout: Duration) -> anyhow::Result
         let _ = child.wait();
     }
     let status = outcome?;
-    drain(&mut stdout, &capture);
-    let bytes = capture
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .complete_bytes()
-        .context("Diagnostic result exceeded output limit")?;
+    read_diagnostics(&mut stdout, &mut bytes, MAX_DIAGNOSTIC_BYTES)?;
     Ok((
         serde_json::from_slice(&bytes).context("Diagnostic command did not return JSON")?,
         !status.success(),
     ))
 }
 
+fn read_diagnostics(
+    input: &mut impl Read,
+    output: &mut Vec<u8>,
+    limit: usize,
+) -> anyhow::Result<()> {
+    let mut chunk = [0u8; 8192];
+    loop {
+        match input.read(&mut chunk) {
+            Ok(0) => return Ok(()),
+            Ok(count) => {
+                ensure!(
+                    output.len() + count <= limit,
+                    "Diagnostic result exceeded output limit"
+                );
+                output.extend_from_slice(&chunk[..count]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn diagnostic_reports_exceeding_job_history_are_complete_but_bounded() {
+        let bytes = vec![b'x'; CAPTURE_BYTES + 8192];
+        let mut output = Vec::new();
+        read_diagnostics(&mut std::io::Cursor::new(&bytes), &mut output, 1024 * 1024).unwrap();
+        assert_eq!(output, bytes);
+        let mut output = Vec::new();
+        assert!(
+            read_diagnostics(
+                &mut std::io::Cursor::new(&bytes),
+                &mut output,
+                CAPTURE_BYTES
+            )
+            .is_err()
+        );
+        assert!(output.len() <= CAPTURE_BYTES);
+    }
     #[test]
     fn capture_bounds_memory_and_reports_lost_bytes_and_polling_offsets() {
         let mut capture = Capture::default();

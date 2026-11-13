@@ -43,7 +43,13 @@ separate setup task, not an automatic diagnostic retry.
 
 ## Verify and manage the workload
 
-Use `doctor` for read-only preflight when diagnosing a profile. Offline checks
+Use `doctor {"profile":"NAME"}` for read-only profile preflight, `doctor {}`
+for namespace discovery, or `doctor {"namespace":"ID","offline":false}` for
+fresh diagnostics. Use `health {"namespace":"ID"}` for cached monitor state,
+sample timestamps and diagnostic evidence; omit the namespace to inspect all.
+A null health means no cached sample, and stale samples are degraded. `status`
+also includes cached health. MCP returns structured JSON. With CLI access use
+`doctor --json` or `--plain` rather than parsing the coloured table. Offline checks
 validate local inputs; they do not establish an authenticated tunnel. `check`
 probes an existing namespace. A successful TCP probe alone proves neither VPN
 authentication nor firewall isolation. Report uncertainty rather than assuming

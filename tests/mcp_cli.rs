@@ -62,7 +62,7 @@ fn stdio_handshake_discovery_and_validation_emit_only_json_rpc_lines() {
             .unwrap()
             .contains("does not route the harness")
     );
-    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(replies[1]["result"]["tools"].as_array().unwrap().len(), 9);
     assert!(
         replies[1]["result"]["tools"]
             .as_array()
@@ -147,4 +147,44 @@ fn doctor_honors_custom_profile_over_an_inherited_provider_and_server() {
             .iter()
             .any(|d| d["code"] == "provider_config" && d["state"] == "pass")
     );
+}
+
+#[test]
+fn doctor_discovery_and_health_are_structured_and_reject_invalid_selectors() {
+    if nix::unistd::Uid::current().is_root() {
+        return;
+    }
+    let requests = [
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"doctor","arguments":{}}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"health","arguments":{}}}),
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"doctor","arguments":{"namespace":"missing-namespace"}}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"health","arguments":{"namespace":"missing-namespace"}}}),
+        json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"doctor","arguments":{"profile":"restricted","namespace":"missing-namespace"}}}),
+    ];
+    let input = requests
+        .iter()
+        .map(|r| format!("{r}\n"))
+        .collect::<String>();
+    let output = run(input.as_bytes(), &[]);
+    assert!(output.status.success());
+    let replies: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(replies.len(), 6);
+    let doctor = &replies[1]["result"]["structuredContent"];
+    assert_eq!(doctor["version"], 1);
+    assert!(doctor["diagnostics"].is_array());
+    assert_eq!(replies[2]["result"]["isError"], false);
+    assert_eq!(
+        replies[2]["result"]["structuredContent"]["namespaces"],
+        json!([])
+    );
+    for reply in &replies[3..] {
+        assert_eq!(reply["result"]["isError"], true);
+    }
+    assert!(!replies.iter().any(|r| r.to_string().contains('\x1b')));
 }

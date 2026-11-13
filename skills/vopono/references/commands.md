@@ -9,6 +9,8 @@ vopono profiles list --json
 vopono exec --profile downloads 'curl --fail --location --output archive.tar.gz https://example.org/archive.tar.gz'
 vopono status --json
 vopono check NAMESPACE --json
+vopono doctor --namespace NAMESPACE --json
+vopono doctor --namespace NAMESPACE --offline --plain
 vopono stop application PID --json
 ```
 
@@ -30,7 +32,12 @@ vopono doctor --custom /absolute/path/to/vpn.conf --offline --json
 vopono doctor --custom /absolute/path/to/vpn.conf --json
 ```
 
-Without `--offline`, doctor performs bounded host/endpoint network probes.
+Default doctor output is a coloured table. Use `--plain`/`--plaintext` for
+undecorated tab-separated records with escaped controls, or `--json` for complete
+structured reports, including cached monitor health. `--plain` and `--json` are
+mutually exclusive. With no configuration selector, doctor discovers running
+namespaces; `--namespace ID` selects one. Without `--offline`, doctor performs
+fresh host/namespace or host/endpoint network probes.
 `doctor --catalogue --provider mullvad` or `privateinternetaccess` checks public
 catalogues without account authentication. It does not register devices or
 rotate keys. Use existing diagnostic codes and actions to choose the next step;

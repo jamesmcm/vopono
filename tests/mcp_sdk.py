@@ -17,7 +17,10 @@ async def main():
                 initialized = (await session.initialize()).model_dump(by_alias=True)
                 assert initialized['serverInfo']['name'] == 'vopono'
                 tools = await session.list_tools()
-                assert len(tools.tools) == 8
+                assert len(tools.tools) == 9
+                assert {'doctor', 'health', 'status'} <= {tool.name for tool in tools.tools}
+                health = (await session.call_tool('health', {})).model_dump(by_alias=True)
+                assert not health['isError'] and health['structuredContent']['version'] == 1
                 profiles = (await session.call_tool('profiles_list', {})).model_dump(by_alias=True)
                 assert profiles['structuredContent']['profiles'] == []
                 missing = (await session.call_tool('job_status', {'job_id': 'missing'})).model_dump(by_alias=True)

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 const MAX_MESSAGE: usize = 1024 * 1024;
 const PROTOCOL: &str = "2025-11-25";
-const INSTRUCTIONS: &str = "Use named profiles to run local applications in vopono namespaces. Only those applications (or clients explicitly configured for a namespace-hosted proxy) use that network. Installing this MCP server does not route the harness, built-in browser, remote web search, other MCP servers, or model API calls through a VPN. Jobs require an already-running privileged daemon; this server runs as the ordinary user and never uses sudo or provisions provider keys. Poll jobs and output, and cancel jobs you no longer need. A connected probe alone does not prove VPN authentication or isolation.";
+const INSTRUCTIONS: &str = "Use named profiles to run local applications in vopono namespaces. Only those applications (or clients explicitly configured for a namespace-hosted proxy) use that network. Installing this MCP server does not route the harness, built-in browser, remote web search, other MCP servers, or model API calls through a VPN. Jobs require an already-running privileged daemon; this server runs as the ordinary user and never uses sudo or provisions provider keys. Poll jobs and output, and cancel jobs you no longer need. Use health for cached monitor state and diagnostic evidence, and doctor with a namespace and offline=false for fresh diagnostics; doctor without selectors discovers your running namespaces. A connected probe alone does not prove VPN authentication or isolation.";
 
 struct Server {
     options: McpServeCommand,
@@ -156,6 +156,61 @@ impl Server {
             anyhow::anyhow!("Could not load the named profile; check the configured TOML file")
         })
     }
+    fn doctor_args(&self, input: DoctorInput) -> anyhow::Result<Vec<String>> {
+        ensure!(
+            (1..=5000).contains(&input.timeout_ms),
+            "timeout_ms must be between 1 and 5000"
+        );
+        ensure!(
+            input.profile.is_none() || input.namespace.is_none(),
+            "Select either a profile or a namespace"
+        );
+        ensure!(
+            input.profile.is_none() || input.dns_host.is_none() && !input.skip_ipv6,
+            "dns_host and skip_ipv6 are namespace diagnostics options"
+        );
+        ensure!(
+            !input.offline || input.dns_host.is_none(),
+            "dns_host requires offline=false"
+        );
+        let mut args = if let Some(profile) = input.profile {
+            let settings = self.settings(&profile)?;
+            let command = self.profile(&profile)?;
+            let connection = crate::args_config::ConnectionSettings::read(&command, &settings)
+                .map_err(|_| {
+                    anyhow::anyhow!("Could not resolve the profile connection settings")
+                })?;
+            connection.doctor_command(input.offline)
+        } else {
+            let mut args = vec![
+                "doctor".into(),
+                "--json".into(),
+                "--timeout-ms".into(),
+                "500".into(),
+            ];
+            if let Some(namespace) = input.namespace {
+                vopono_core::network::netns::validate_netns_name(&namespace)?;
+                args.extend(["--namespace".into(), namespace]);
+            }
+            if input.offline {
+                args.push("--offline".into());
+            }
+            args
+        };
+        let timeout = args.iter().position(|arg| arg == "--timeout-ms").unwrap() + 1;
+        args[timeout] = input.timeout_ms.to_string();
+        if let Some(host) = input.dns_host {
+            ensure!(
+                !host.is_empty() && host.len() <= 253 && !host.chars().any(char::is_control),
+                "Invalid DNS probe hostname"
+            );
+            args.extend(["--dns-host".into(), host]);
+        }
+        if input.skip_ipv6 {
+            args.push("--skip-ipv6".into());
+        }
+        Ok(args)
+    }
     fn call(&mut self, name: &str, arguments: Value) -> anyhow::Result<(Value, bool)> {
         match name {
             "status" => {
@@ -169,6 +224,26 @@ impl Server {
                 Ok((
                     json!({"version":1,"daemon":status.daemon,"namespaces":namespaces,
                     "inspection_errors":status.errors.len()}),
+                    false,
+                ))
+            }
+            "health" => {
+                let input: HealthInput = arguments_as(arguments)?;
+                if let Some(namespace) = &input.namespace {
+                    vopono_core::network::netns::validate_netns_name(namespace)?;
+                }
+                let status = crate::list::status_snapshot()
+                    .map_err(|_| anyhow::anyhow!("Could not inspect local namespace health"))?;
+                let namespaces: Vec<_> = status.namespaces.into_iter()
+                    .filter(|ns| input.namespace.as_ref().is_none_or(|id| id == &ns.id))
+                    .map(|ns| json!({"id":ns.id,"provider":ns.provider,"protocol":ns.protocol,"health":ns.health}))
+                    .collect();
+                ensure!(
+                    input.namespace.is_none() || !namespaces.is_empty(),
+                    "Namespace not found among your running namespaces"
+                );
+                Ok((
+                    json!({"version":1,"daemon":status.daemon,"namespaces":namespaces,"inspection_errors":status.errors.len()}),
                     false,
                 ))
             }
@@ -198,15 +273,9 @@ impl Server {
             }
             "doctor" => {
                 let input: DoctorInput = arguments_as(arguments)?;
-                let settings = self.settings(&input.profile)?;
-                let command = self.profile(&input.profile)?;
-                let connection = crate::args_config::ConnectionSettings::read(&command, &settings)
-                    .map_err(|_| {
-                        anyhow::anyhow!("Could not resolve the profile connection settings")
-                    })?;
-                let args = connection.doctor_command(input.offline);
+                let args = self.doctor_args(input)?;
                 jobs::json_command(&args, Duration::from_secs(25)).map_err(|_| {
-                    anyhow::anyhow!("Doctor could not complete within its output/time limits")
+                    anyhow::anyhow!("Doctor could not complete within its output/time limits; select one namespace or use health for cached evidence")
                 })
             }
             "check" => {
@@ -323,6 +392,7 @@ impl Server {
 
 const TOOL_NAMES: &[&str] = &[
     "status",
+    "health",
     "profiles_list",
     "doctor",
     "check",
@@ -337,8 +407,15 @@ fn tools(allow_command: bool, timeout: u64) -> Vec<Value> {
     let definitions = [
         (
             "status",
-            "Inspect local namespaces and daemon availability. Application command arguments are omitted.",
+            "Inspect local namespaces, cached monitor health/diagnostics and daemon availability. Application command arguments are omitted.",
             json!({}),
+            vec![],
+            true,
+        ),
+        (
+            "health",
+            "Read cached monitor state for one or all owned namespaces without running probes. Includes sample freshness, handshake age, reconnect attempts, errors and diagnostic evidence. A null health means no monitor sample is available; stale samples are degraded. This is advisory telemetry, not proof of isolation.",
+            json!({"namespace":string}),
             vec![],
             true,
         ),
@@ -351,9 +428,9 @@ fn tools(allow_command: bool, timeout: u64) -> Vec<Value> {
         ),
         (
             "doctor",
-            "Read-only profile preflight. Offline by default; never creates a tunnel, authenticates or provisions keys.",
-            json!({"profile":profile,"offline":{"type":"boolean","default":true}}),
-            vec!["profile"],
+            "Diagnose a profile or an owned namespace; omit both to discover running namespaces. Includes host/namespace DNS, links, interfaces, firewall evidence and cached monitor health. Offline by default; offline=false runs fresh network probes. Never creates a tunnel, authenticates or provisions keys. profile and namespace are mutually exclusive; dns_host/skip_ipv6 apply only without a profile, and dns_host requires offline=false.",
+            json!({"profile":profile,"namespace":string,"offline":{"type":"boolean","default":true},"timeout_ms":{"type":"integer","minimum":1,"maximum":5000,"default":500},"dns_host":{"type":"string","minLength":1,"maxLength":253},"skip_ipv6":{"type":"boolean","default":false}}),
+            vec![],
             true,
         ),
         (
@@ -398,12 +475,17 @@ fn tools(allow_command: bool, timeout: u64) -> Vec<Value> {
             false,
         ),
     ];
-    definitions.into_iter().map(|(name,description,properties,required,read_only)| json!({
-        "name":name,"description":description,
-        "inputSchema":{"type":"object","properties":properties,"required":required,"additionalProperties":false},
-        "outputSchema":{"type":"object"},
-        "annotations":{"readOnlyHint":read_only,"destructiveHint":matches!(name,"run_profile"|"job_cancel"),"idempotentHint":read_only||name=="job_cancel","openWorldHint":matches!(name,"doctor"|"check"|"run_profile")}
-    })).collect()
+    definitions.into_iter().map(|(name,description,properties,required,read_only)| {
+        let mut schema = json!({"type":"object","properties":properties,"required":required,"additionalProperties":false});
+        if name == "doctor" {
+            schema["not"] = json!({"required":["profile","namespace"]});
+        }
+        json!({
+            "name":name,"description":description,"inputSchema":schema,
+            "outputSchema":{"type":"object"},
+            "annotations":{"readOnlyHint":read_only,"destructiveHint":matches!(name,"run_profile"|"job_cancel"),"idempotentHint":read_only||name=="job_cancel","openWorldHint":matches!(name,"doctor"|"check"|"run_profile")}
+        })
+    }).collect()
 }
 
 #[derive(Deserialize)]
@@ -412,9 +494,23 @@ struct Empty {}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DoctorInput {
-    profile: String,
+    profile: Option<String>,
+    namespace: Option<String>,
     #[serde(default = "yes")]
     offline: bool,
+    #[serde(default = "doctor_timeout")]
+    timeout_ms: u64,
+    dns_host: Option<String>,
+    #[serde(default)]
+    skip_ipv6: bool,
+}
+fn doctor_timeout() -> u64 {
+    500
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HealthInput {
+    namespace: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -602,6 +698,53 @@ mod tests {
         .unwrap()
     }
     #[test]
+    fn doctor_supports_discovery_and_live_namespace_options_without_a_profile() {
+        let server = server();
+        let args = server
+            .doctor_args(arguments_as(json!({})).unwrap())
+            .unwrap();
+        assert!(args.iter().any(|arg| arg == "--offline"));
+        assert!(args.iter().any(|arg| arg == "--json"));
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--provider" || arg == "--namespace")
+        );
+        let args = server
+            .doctor_args(
+                arguments_as(json!({
+                    "namespace":"test-u1000","offline":false,"timeout_ms":200,
+                    "dns_host":"example.com","skip_ipv6":true
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(
+            App::try_parse_from(std::iter::once("vopono").chain(args.iter().map(String::as_str)))
+                .is_ok()
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--namespace", "test-u1000"])
+        );
+        assert!(args.windows(2).any(|pair| pair == ["--timeout-ms", "200"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--dns-host", "example.com"])
+        );
+        assert!(!args.iter().any(|arg| arg == "--offline"));
+        for invalid in [
+            json!({"profile":"restricted","namespace":"test"}),
+            json!({"namespace":"../other"}),
+            json!({"dns_host":"example.com"}),
+            json!({"timeout_ms":0}),
+            json!({"timeout_ms":5001}),
+            json!({"profile":"restricted","skip_ipv6":true}),
+        ] {
+            assert!(server.doctor_args(arguments_as(invalid).unwrap()).is_err());
+        }
+    }
+    #[test]
     fn lifecycle_negotiation_notifications_and_tool_failures_follow_json_rpc() {
         let mut server = server();
         assert_eq!(
@@ -623,7 +766,7 @@ mod tests {
         let tools = server
             .request(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
             .unwrap();
-        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 8);
+        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 9);
         let result=server.request(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"job_status","arguments":{"job_id":"foreign"}}})).unwrap();
         assert_eq!(result["result"]["isError"], true);
         assert_eq!(

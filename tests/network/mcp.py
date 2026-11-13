@@ -16,14 +16,15 @@ config = ctx.user_file('mcp-settings.toml', f'''
 provider = "none"
 interface = "uplink"
 firewall = "nftables"
-application = "sleep 30"
+application = "sleep 120"
 keep-alive = true
 [profiles.vpn]
+monitor = true
 custom = "{ctx.scratch / 'client.conf'}"
 protocol = "wireguard"
 interface = "uplink"
 firewall = "nftables"
-application = "sleep 30"
+application = "sleep 120"
 working-directory = "{ctx.scratch}"
 [profiles.broken]
 custom = "{invalid}"
@@ -39,7 +40,7 @@ class MCP:
         self.sequence = 0
         self.log = (ctx.scratch / f'mcp-{time.monotonic_ns()}.log').open('w')
         self.process = subprocess.Popen(ctx.base + ['mcp', 'serve', '--vopono-config', str(config),
-            '--max-jobs', '2', '--max-job-seconds', '20', *options],
+            '--max-jobs', '2', '--max-job-seconds', '120', *options],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, text=True)
         self.request('initialize', {'protocolVersion': '2025-11-25', 'capabilities': {},
             'clientInfo': {'name': 'vopono-network-test', 'version': '1'}})
@@ -121,7 +122,7 @@ assert any(d['code'] == 'provider_config' and d['state'] == 'pass'
            for d in server.call('doctor', profile='vpn')['diagnostics'])
 bad = server.request('tools/call', {'name': 'doctor', 'arguments': {'profile': 'broken'}})
 assert bad['isError'] and 'NEVER_SHARE_MCP_KEY' not in json.dumps(bad)
-noisy = "import os,subprocess,sys,time; subprocess.Popen(['sleep','30']); sys.stdout.write('x'*200000+'\\nLITERAL:'+repr(sys.argv[1:])+'\\n'); sys.stdout.flush(); sys.stderr.write('stderr-marker:'+os.getcwd()+'\\n'); sys.stderr.flush(); time.sleep(30)"
+noisy = "import os,subprocess,sys,time; subprocess.Popen(['sleep','120']); sys.stdout.write('x'*200000+'\\nLITERAL:'+repr(sys.argv[1:])+'\\n'); sys.stdout.flush(); sys.stderr.write('stderr-marker:'+os.getcwd()+'\\n'); sys.stderr.flush(); time.sleep(120)"
 vpn = server.call('run_profile', profile='vpn', argv=['python3', '-c', noisy, '', 'a b', "a'b", '$HOME'])
 other = server.call('run_profile', profile='fixed')
 assert server.request('tools/call', {'name': 'run_profile', 'arguments': {'profile': 'fixed'}})['isError']
@@ -145,6 +146,56 @@ def vpn_connected():
 
 
 wait_for(vpn_connected, seconds=10)
+
+
+def monitored_health():
+    snapshot = server.call('health', namespace=vpn['namespace'])
+    sample = snapshot['namespaces'][0]['health']
+    return sample if sample and sample['state'] == 'connected' and sample['diagnostics'] else None
+
+
+sample = wait_for(monitored_health, seconds=20)
+assert sample['checked_at'] and sample['daemon_pid'] and sample['diagnostics_checked_at']
+assert any(d['code'] == 'host_firewall' for d in sample['diagnostics'])
+all_health = server.call('health')['namespaces']
+assert any(ns['id'] == vpn['namespace'] and ns['health'] for ns in all_health)
+assert any(ns['id'] == other['namespace'] and ns['health'] is None for ns in all_health)
+# Full doctor reports can exceed job log history once monitor evidence is included.
+large_sidecar = ctx.scratch / 'config/vopono/locks' / vpn['namespace'] / 'health.json'
+original_large = large_sidecar.read_bytes()
+try:
+    large = json.loads(original_large)
+    large['last_error'] = 'large-cached-evidence-' + 'x' * max(0, 60000 - len(original_large))
+    large_sidecar.write_text(json.dumps(large))
+    response = server.request('tools/call', {'name': 'doctor', 'arguments': {'namespace': vpn['namespace']}})
+    large_report = response['structuredContent']
+    cached = large_report['namespaces'][0]['health']
+    assert cached['last_error'] == large['last_error'], response
+    assert len(json.dumps(large_report)) > 65536, 'Fixture did not exceed job log history'
+finally:
+    large_sidecar.write_bytes(original_large)
+# Cached telemetry must retain the same staleness semantics as CLI status.
+sidecar = ctx.scratch / 'config/vopono/locks' / vpn['namespace'] / 'health.json'
+original = sidecar.read_bytes()
+try:
+    stale = json.loads(original)
+    stale['checked_at'] = 1
+    sidecar.write_text(json.dumps(stale))
+    cached = server.call('health', namespace=vpn['namespace'])['namespaces'][0]['health']
+    assert cached['state'] == 'degraded' and 'stale' in cached['last_error']
+finally:
+    sidecar.write_bytes(original)
+for arguments in ({}, {'namespace': vpn['namespace']},
+                  {'namespace': vpn['namespace'], 'offline': False, 'timeout_ms': 300,
+                   'dns_host': 'one.one.one.one', 'skip_ipv6': True}):
+    response = server.request('tools/call', {'name': 'doctor', 'arguments': arguments})
+    report = response['structuredContent']
+    diagnosed = next(ns for ns in report['namespaces'] if ns['id'] == vpn['namespace'])
+    assert diagnosed['health']['checked_at'] and diagnosed['network']['dns']['nameservers']
+    if arguments.get('offline') is False:
+        assert diagnosed['connectivity']['connected'] and diagnosed['connectivity']['dns']['resolved_ips']
+assert server.request('tools/call', {'name': 'health', 'arguments': {'namespace': 'not-owned'}})['isError']
+print('PASS: MCP namespace doctor, live DNS probes, cached health, stale/unmonitored samples and diagnostic evidence', flush=True)
 snapshot = server.call('job_output', job_id=vpn['job_id'], stdout_offset=200000, max_bytes=16384)
 assert snapshot['stdout']['dropped_bytes'] == 0
 assert 'LITERAL:' in snapshot['stdout']['text'] and '$HOME' in snapshot['stdout']['text']

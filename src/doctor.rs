@@ -11,6 +11,8 @@ use vopono_core::diagnostics::{
     resolve_bounded, validate_config,
 };
 
+mod output;
+
 #[derive(Serialize)]
 struct Report {
     version: u8,
@@ -154,6 +156,8 @@ impl Report {
 
 pub fn run(command: DoctorCommand) -> anyhow::Result<i32> {
     let json = command.json;
+    let plain = command.plain;
+    let color = command.color;
     let offline = command.offline;
     let skip_ipv6 = command.skip_ipv6;
     let timeout = Duration::from_millis(command.timeout_ms);
@@ -180,18 +184,7 @@ pub fn run(command: DoctorCommand) -> anyhow::Result<i32> {
     if json {
         crate::api::print_json(&report)?;
     } else {
-        print_diagnostics(&report.diagnostics);
-        if let Some(network) = &report.host_network {
-            print_diagnostics(&network.diagnostics);
-        }
-        for ns in &report.namespaces {
-            println!("\nNamespace {} ({}, {})", ns.id, ns.provider, ns.protocol);
-            print_diagnostics(&ns.diagnostics);
-            if let Some(network) = &ns.network {
-                print_diagnostics(&network.diagnostics);
-            }
-            println!("  Details: vopono check {} --json", ns.id);
-        }
+        print!("{}", output::render(&report, plain, color));
     }
     Ok(i32::from(failed))
 }
@@ -257,20 +250,6 @@ fn namespace_environment(id: &str, command: &DoctorCommand) -> Option<NamespaceN
                 Some("Run the rebuilt daemon to enable namespace topology inspection; DNS file details remain available without it")));
             network
         }),
-    }
-}
-
-fn print_diagnostics(diagnostics: &[Diagnostic]) {
-    for d in diagnostics {
-        println!(
-            "{:<20} {:<7} {}",
-            format!("{:?}", d.code),
-            format!("{:?}", d.state),
-            d.message
-        );
-        if let Some(action) = &d.action {
-            println!("  Suggested action: {action}");
-        }
     }
 }
 
@@ -457,6 +436,8 @@ struct NamespaceReport {
     id: String,
     provider: String,
     protocol: String,
+    /// Cached monitor evidence, independent of this invocation's fresh probes.
+    health: Option<crate::health::Health>,
     diagnostics: Vec<Diagnostic>,
     #[serde(skip_serializing_if = "Option::is_none")]
     connectivity: Option<ConnectivityStatus>,
@@ -593,6 +574,7 @@ fn diagnose_namespaces(
             id: ns.id,
             provider: ns.provider,
             protocol: ns.protocol,
+            health: ns.health,
             diagnostics: Vec::new(),
             connectivity: None,
             network: None,

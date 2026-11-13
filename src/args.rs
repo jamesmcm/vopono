@@ -130,7 +130,7 @@ pub enum Command {
         name = "doctor",
         about = "Diagnose DNS, interfaces, host links, firewalls and VPN configurations",
         long_about = "Check daemon availability and CLI/daemon versions, host and namespace DNS servers,\ndefaults, interfaces and local veth links, plus Internet connectivity, forwarding,\nfirewall rules, Tailscale/NetworkManager interference and AppArmor.\nUse --namespace to select one running namespace. The root daemon supplies\nprivileged read-only evidence without a sudo prompt. With --provider or --custom,\ninspect a stored configuration and its host endpoint instead.\nNo tunnel is created and no configuration, firewall or AppArmor policy is changed.",
-        after_help = "Examples:\n  vopono doctor\n  vopono doctor --namespace vo_ar_romania\n  vopono doctor --namespace vo_ar_romania --dns-host example.com\n  vopono doctor --provider mullvad --server sweden\n  vopono doctor --custom /path/to/vpn.conf --offline\n\nUse vopono status to list namespace IDs, or vopono check ID --help for custom probe targets."
+        after_help = "Examples:\n  vopono doctor\n  vopono doctor --namespace vo_ar_romania\n  vopono doctor --namespace vo_ar_romania --dns-host example.com\n  vopono doctor --provider mullvad --server sweden\n  vopono doctor --custom /path/to/vpn.conf --offline\n  vopono doctor --plain\n  vopono doctor --json\n\nTables use colour on terminals; --color always|never overrides detection. Use --plain for tab-separated agent output or --json for structured reports. Use vopono status to list namespace IDs."
     )]
     Doctor(DoctorCommand),
     #[clap(
@@ -923,9 +923,23 @@ pub struct DoctorCommand {
     /// Timeout in milliseconds per network probe.
     #[clap(long, default_value_t = 3000, value_parser = clap::value_parser!(u64).range(1..=30000))]
     pub timeout_ms: u64,
+    /// Emit undecorated tab-separated diagnostics with stable check/state names (alias: --plaintext).
+    #[clap(long, visible_alias = "plaintext", conflicts_with = "json")]
+    pub plain: bool,
+    /// Colour table output; auto honours NO_COLOR, TERM=dumb and redirected stdout.
+    #[clap(long, value_enum, default_value_t = DoctorColor::Auto)]
+    pub color: DoctorColor,
     /// Emit a versioned report with per-namespace diagnostics and connectivity results.
     #[clap(long)]
     pub json: bool,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default)]
+pub enum DoctorColor {
+    #[default]
+    Auto,
+    Always,
+    Never,
 }
 
 #[derive(Parser, Debug)]
