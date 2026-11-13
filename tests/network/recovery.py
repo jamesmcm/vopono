@@ -33,7 +33,10 @@ def wait_for(condition, seconds=80):
         if result:
             return result
         time.sleep(.5)
-    raise AssertionError('Underlay recovery timed out')
+    status = json.loads(client('status', '--json').stdout)
+    health = next((ns['health'] for ns in status['namespaces'] if ns['id'] == name), None)
+    raise AssertionError(
+        f'Underlay recovery timed out ({condition.__name__}); last health: {json.dumps(health)}')
 
 def connected():
     result = client('check', name, '--timeout-ms', '300', '--skip-dns', '--skip-ipv6', '--json')
@@ -155,6 +158,7 @@ for table in ('vopono_nat', 'vopono_bridge'):
     assert any(comment.endswith('_uplink2') for comment in comments), (table, comments)
 command('ip', '-n', 'peer', 'link', 'set', 'wgpeer', 'up')
 wait_for(recovered)
+wait_for(monitor_reconnected)
 assert os.stat('/run/netns/' + name).st_ino == inode
 assert Path('/proc/' + str(pid)).exists()
 client('stop', 'namespace', name, '--json')

@@ -75,6 +75,9 @@ wg genkey > "$scratch/client.key"
 server_public=$(wg pubkey < "$scratch/server.key")
 client_public=$(wg pubkey < "$scratch/client.key")
 ip -n peer link add wgpeer type wireguard
+# Link-down flushes static IPv6 addresses by default. The simulated transport
+# outage must preserve the peer's DNS/TCP endpoints when the link comes back.
+ip netns exec peer sysctl -q net.ipv6.conf.wgpeer.keep_addr_on_down=1
 ip netns exec peer wg set wgpeer private-key "$scratch/server.key" listen-port 51820 peer "$client_public" allowed-ips 10.66.0.2/32,fd66::2/128
 ip -n peer addr add 10.66.0.1/24 dev wgpeer
 ip -n peer addr add fd66::1/64 dev wgpeer
@@ -137,7 +140,7 @@ for _ in $(seq 1 50); do if recovery_observed 2>/dev/null; then break; fi; sleep
 recovery_observed
 blocked
 ip -n peer link set wgpeer up
-wait_for probe
+wait_for dual_stack_ready
 blocked
 # Explicit stop must be authoritative and idempotent at the resource level.
 client stop namespace "$name" --json > /dev/null
