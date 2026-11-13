@@ -572,7 +572,25 @@ mod tests {
                 .message
                 .contains("TLS/server identity remain unverified")
         );
-        drop(listener);
+        // Reserve a non-listening TCP port instead of releasing a listener's
+        // port for a concurrent test/process to reuse before the failed probe.
+        use nix::sys::socket::{
+            AddressFamily, SockFlag, SockType, SockaddrIn, bind, getsockname, socket,
+        };
+        use std::os::fd::AsRawFd;
+        let reserved = socket(
+            AddressFamily::Inet,
+            SockType::Stream,
+            SockFlag::empty(),
+            None,
+        )
+        .unwrap();
+        bind(reserved.as_raw_fd(), &SockaddrIn::new(127, 0, 0, 1, 0)).unwrap();
+        let reserved_address: SockaddrIn = getsockname(reserved.as_raw_fd()).unwrap();
+        let endpoint = Endpoint {
+            port: reserved_address.port(),
+            ..endpoint
+        };
         let report = endpoint_diagnostics_with_resolution(
             &endpoint,
             Duration::from_millis(50),
