@@ -122,12 +122,15 @@ pub enum Command {
     Exec(ExecCommand),
     #[clap(
         name = "check",
-        about = "Check network connectivity of a running namespace"
+        about = "Check IPv4, IPv6 and DNS in a running namespace (find IDs with status)",
+        after_help = "For automatic discovery and diagnosis of running namespaces, run: vopono doctor"
     )]
     Check(CheckCommand),
     #[clap(
         name = "doctor",
-        about = "Diagnose configuration and endpoint failures without creating a tunnel"
+        about = "Diagnose DNS, interfaces, host links, firewalls and VPN configurations",
+        long_about = "Check daemon availability and CLI/daemon versions, host and namespace DNS servers,\ndefaults, interfaces and local veth links, plus Internet connectivity, forwarding,\nfirewall rules, Tailscale/NetworkManager interference and AppArmor.\nUse --namespace to select one running namespace. The root daemon supplies\nprivileged read-only evidence without a sudo prompt. With --provider or --custom,\ninspect a stored configuration and its host endpoint instead.\nNo tunnel is created and no configuration, firewall or AppArmor policy is changed.",
+        after_help = "Examples:\n  vopono doctor\n  vopono doctor --namespace vo_ar_romania\n  vopono doctor --namespace vo_ar_romania --dns-host example.com\n  vopono doctor --provider mullvad --server sweden\n  vopono doctor --custom /path/to/vpn.conf --offline\n\nUse vopono status to list namespace IDs, or vopono check ID --help for custom probe targets."
     )]
     Doctor(DoctorCommand),
     #[clap(
@@ -807,6 +810,71 @@ mod tests {
     }
 
     #[test]
+    fn doctor_selects_namespaces_and_rejects_mixed_modes() {
+        let app = App::try_parse_from([
+            "vopono",
+            "doctor",
+            "--namespace",
+            "vo_ar_romania",
+            "--dns-host",
+            "example.com",
+            "--skip-ipv6",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Doctor(command) = app.cmd.unwrap() else {
+            panic!("expected doctor command");
+        };
+        assert_eq!(command.namespace.as_deref(), Some("vo_ar_romania"));
+        assert_eq!(command.dns_host.as_deref(), Some("example.com"));
+        assert!(command.skip_ipv6);
+        assert!(command.json);
+
+        for extra in [
+            vec!["--provider", "airvpn"],
+            vec!["--custom", "/tmp/vpn.conf"],
+            vec!["--protocol", "wireguard"],
+        ] {
+            let mut argv = vec!["vopono", "doctor", "--namespace", "vo_ar_romania"];
+            argv.extend(extra);
+            assert!(App::try_parse_from(argv).is_err());
+        }
+        for argv in [
+            vec![
+                "vopono",
+                "doctor",
+                "--provider",
+                "airvpn",
+                "--dns-host",
+                "example.com",
+            ],
+            vec![
+                "vopono",
+                "doctor",
+                "--custom",
+                "/tmp/vpn.conf",
+                "--skip-ipv6",
+            ],
+            vec!["vopono", "doctor", "--offline", "--dns-host", "example.com"],
+            vec!["vopono", "doctor", "--protocol", "wireguard"],
+        ] {
+            assert!(App::try_parse_from(argv).is_err());
+        }
+        assert!(
+            App::try_parse_from([
+                "vopono",
+                "doctor",
+                "--custom",
+                "/tmp/vpn.conf",
+                "--protocol",
+                "wireguard",
+                "--offline"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn provider_values_parse_case_insensitively() {
         for spelling in ["airvpn", "AirVPN", "AIRVPN", "aIrVpN"] {
             let app =
@@ -823,23 +891,39 @@ mod tests {
 }
 
 #[derive(Parser, Debug)]
+#[clap(group = clap::ArgGroup::new("configuration").args(["provider", "custom"]))]
 pub struct DoctorCommand {
+    /// Diagnose one running namespace instead of discovering all of them (IDs: vopono status).
+    #[clap(long, value_name = "ID", conflicts_with_all = ["provider", "protocol", "custom", "server", "catalogue"])]
+    pub namespace: Option<String>,
+    /// Hostname to resolve using each namespace's DNS configuration.
+    #[clap(long, value_name = "HOST", conflicts_with_all = ["provider", "custom", "offline"])]
+    pub dns_host: Option<String>,
+    /// Skip IPv6 probes when IPv6 is intentionally disabled in the namespace.
+    #[clap(long, conflicts_with_all = ["provider", "custom", "offline"])]
+    pub skip_ipv6: bool,
+    /// Inspect a provider's stored configuration instead of running namespaces.
     #[clap(value_enum, long, ignore_case = true, conflicts_with = "custom")]
     pub provider: Option<WrappedArg<VpnProvider>>,
-    #[clap(value_enum, long, ignore_case = true)]
+    /// Protocol of the selected configuration.
+    #[clap(value_enum, long, ignore_case = true, requires = "configuration")]
     pub protocol: Option<WrappedArg<Protocol>>,
+    /// Stored configuration selector (use a unique server name).
     #[clap(long, requires = "provider")]
     pub server: Option<String>,
+    /// Inspect this configuration file instead of running namespaces.
     #[clap(long)]
     pub custom: Option<PathBuf>,
-    /// Only inspect local files; do not resolve names, connect or fetch catalogues.
+    /// Inspect local configuration and system state without network probes (including host DNS).
     #[clap(long, conflicts_with = "catalogue")]
     pub offline: bool,
     /// Fetch the public WireGuard catalogue (Mullvad/PIA); never authenticates or provisions keys.
     #[clap(long, requires = "provider")]
     pub catalogue: bool,
+    /// Timeout in milliseconds per network probe.
     #[clap(long, default_value_t = 3000, value_parser = clap::value_parser!(u64).range(1..=30000))]
     pub timeout_ms: u64,
+    /// Emit a versioned report with per-namespace diagnostics and connectivity results.
     #[clap(long)]
     pub json: bool,
 }

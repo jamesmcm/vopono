@@ -401,10 +401,19 @@ pub enum DaemonRequest {
     /// Probe connectivity of an existing network namespace (requires root).
     CheckNamespace(CheckNamespaceRequest),
     /// First frame sent by every client: its own crate version, so the
-    /// daemon can warn about client/daemon version skew. Must stay the
-    /// LAST variant - older clients never send it, and appended variants
-    /// preserve the wire indices of all earlier ones.
+    /// daemon can warn about client/daemon version skew. New variants must
+    /// be appended after this one to preserve all existing wire indices.
     ClientVersion(String),
+    /// Return sanitized, read-only host firewall/AppArmor evidence. No network probes.
+    HostDiagnostics {
+        skip_ipv6: bool,
+    },
+    NamespaceDiagnostics {
+        id: String,
+        offline: bool,
+        skip_ipv6: bool,
+        timeout_ms: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug, Clone)]
@@ -1022,6 +1031,40 @@ fn handle_client(
             let payload = serde_json::to_vec(&status)?;
             write_response(&mut conn, &DaemonResponse::Json(payload))?;
         }
+        DaemonRequest::HostDiagnostics { skip_ipv6 } => {
+            let _probe_slot = PROBE_ADMISSION
+                .acquire_with_limits(uid, 2, 8)
+                .context("Concurrent host inspection limit reached")?;
+            drop(client_slot);
+            let diagnostics = vopono_core::diagnostics::host::inspect(skip_ipv6);
+            write_response(
+                &mut conn,
+                &DaemonResponse::Json(serde_json::to_vec(&diagnostics)?),
+            )?;
+        }
+        DaemonRequest::NamespaceDiagnostics {
+            id,
+            offline,
+            skip_ipv6,
+            timeout_ms,
+        } => {
+            let _probe_slot = PROBE_ADMISSION
+                .acquire_with_limits(uid, 2, 8)
+                .context("Concurrent namespace inspection limit reached")?;
+            drop(client_slot);
+            anyhow::ensure!(
+                (1..=30000).contains(&timeout_ms),
+                "Invalid diagnostic timeout"
+            );
+            let snapshot = crate::namespace_ownership::diagnostic_snapshot(&id, uid)?;
+            let report = vopono_core::diagnostics::topology::namespace_network(
+                &snapshot, offline, skip_ipv6, timeout_ms,
+            )?;
+            write_response(
+                &mut conn,
+                &DaemonResponse::Json(serde_json::to_vec(&report)?),
+            )?;
+        }
         DaemonRequest::Control(_) => {
             // Ignore unexpected control frame sent as the first message
         }
@@ -1148,6 +1191,30 @@ fn recv_fds_over_unix_socket(conn: &LocalSocketStream) -> anyhow::Result<[OwnedF
 mod tests {
     use super::{ClientAdmission, MAX_CLIENTS_PER_UID, checked_frame_len, versions_compatible};
     use nix::unistd::Uid;
+
+    #[test]
+    fn host_diagnostics_appends_to_the_wire_protocol_without_changing_old_indices() {
+        use super::DaemonRequest;
+        for (request, index) in [
+            (DaemonRequest::Version, 2u32),
+            (DaemonRequest::ClientVersion("1.0.3".into()), 5u32),
+            (DaemonRequest::HostDiagnostics { skip_ipv6: true }, 6u32),
+            (
+                DaemonRequest::NamespaceDiagnostics {
+                    id: "vo_test".into(),
+                    offline: true,
+                    skip_ipv6: false,
+                    timeout_ms: 3000,
+                },
+                7u32,
+            ),
+        ] {
+            let bytes = wincode::serialize(&request).unwrap();
+            assert_eq!(&bytes[..4], &index.to_le_bytes());
+            let decoded: DaemonRequest = wincode::deserialize(&bytes).unwrap();
+            assert_eq!(wincode::serialize(&decoded).unwrap(), bytes);
+        }
+    }
 
     #[test]
     fn framed_messages_are_rejected_before_oversized_allocation() {

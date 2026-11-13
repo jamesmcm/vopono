@@ -97,12 +97,18 @@ chown "$uid:$gid" "$scratch/client.conf"
 RUST_LOG=debug "$binary" daemon > "$scratch/daemon.log" 2>&1 &
 wait_for test -S /run/vopono.sock
 name="test_wg-u$uid"
-client exec --custom "$scratch/client.conf" --protocol wireguard --custom-netns-name test_wg --interface uplink --firewall nftables --monitor --recover 'sleep 180' > "$scratch/client1.log" 2>&1 &
+client exec --custom "$scratch/client.conf" --protocol wireguard --custom-netns-name test_wg --interface uplink --firewall nftables --monitor --recover 'sleep 360' > "$scratch/client1.log" 2>&1 &
 wait_for test -e "/run/netns/$name"
 probe() { client check "$name" --json > "$scratch/check.json" 2>/dev/null && python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["result"]; assert r["connected"] and r["dns"]["resolved_ips"]' "$scratch/check.json"; }
 # Both inner IP families and DNS must work; the host underlay is forbidden.
 dual_stack_ready() { probe && python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["result"]; assert "latency_ms" in r["ipv4"] and "latency_ms" in r["ipv6"]' "$scratch/check.json"; }
 wait_for dual_stack_ready
+python3 "$test_dir/doctor.py" "$binary" "$scratch" "$user"
+python3 "$test_dir/monitor.py" "$binary" "$scratch" "$user"
+if [[ ${3:-} == --monitor-only ]]; then
+    echo 'PASS: isolated doctor and monitor checks'
+    exit 0
+fi
 blocked() { ip netns exec "$name" python3 -c 'import socket; s=socket.socket(); s.settimeout(1)
 try: s.connect(("192.0.2.2",443))
 except OSError: raise SystemExit(0)

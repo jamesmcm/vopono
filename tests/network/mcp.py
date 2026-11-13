@@ -117,7 +117,8 @@ for occupant in occupants:
 print('PASS: explicit daemon admission refusals remain definite, cleaned-up MCP failures', flush=True)
 
 server = MCP('--allow-command')
-assert server.call('doctor', profile='vpn')['diagnostics'][0]['state'] == 'pass'
+assert any(d['code'] == 'provider_config' and d['state'] == 'pass'
+           for d in server.call('doctor', profile='vpn')['diagnostics'])
 bad = server.request('tools/call', {'name': 'doctor', 'arguments': {'profile': 'broken'}})
 assert bad['isError'] and 'NEVER_SHARE_MCP_KEY' not in json.dumps(bad)
 noisy = "import os,subprocess,sys,time; subprocess.Popen(['sleep','30']); sys.stdout.write('x'*200000+'\\nLITERAL:'+repr(sys.argv[1:])+'\\n'); sys.stdout.flush(); sys.stderr.write('stderr-marker:'+os.getcwd()+'\\n'); sys.stderr.flush(); time.sleep(30)"

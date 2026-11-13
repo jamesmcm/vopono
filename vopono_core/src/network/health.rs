@@ -33,6 +33,14 @@ pub struct Health {
     pub handshake_age_seconds: Option<u64>,
     pub reconnect_attempts: u32,
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<crate::diagnostics::Diagnostic>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics_checked_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daemon_pid: Option<u32>,
 }
 
 pub fn read_health(name: &str) -> Option<Health> {
@@ -59,4 +67,18 @@ fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn older_health_sidecars_remain_readable() {
+        let health: Health = serde_json::from_str(r#"{"state":"connected","checked_at":1,"last_successful_probe":1,"handshake_age_seconds":2,"reconnect_attempts":0,"last_error":null}"#).unwrap();
+        assert!(health.diagnostics.is_empty());
+        assert!(health.diagnostics_checked_at.is_none());
+        assert!(health.daemon_version.is_none());
+        assert!(health.daemon_pid.is_none());
+    }
 }

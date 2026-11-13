@@ -140,8 +140,11 @@ fn doctor_honors_custom_profile_over_an_inherited_provider_and_server() {
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
     assert_eq!(replies[1]["result"]["isError"], false, "{replies:?}");
-    assert_eq!(
-        replies[1]["result"]["structuredContent"]["diagnostics"][0]["state"],
-        "pass"
+    assert!(
+        replies[1]["result"]["structuredContent"]["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["code"] == "provider_config" && d["state"] == "pass")
     );
 }

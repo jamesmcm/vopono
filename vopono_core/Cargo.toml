@@ -6,7 +6,6 @@ edition = "2024"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/jamesmcm/vopono"
-homepage = "https://github.com/jamesmcm/vopono"
 readme = "README.md"
 keywords = ["vopono", "vpn", "wireguard", "openvpn", "netns"]
 
@@ -42,7 +41,7 @@ reqwest = { default-features = false, version = "0.13", features = [
     "query",
     "rustls",
 ] } # TODO: Can we remove Tokio dependency?
-sysinfo = "0.39"
+sysinfo = "0.40"
 base64 = "0.23"
 x25519-dalek = { version = "3.0.0-rc.0", features = ["static_secrets"] }
 strum = "0.28"

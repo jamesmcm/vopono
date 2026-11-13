@@ -290,6 +290,9 @@ fn flatten_applications(namespaces: &[NamespaceEntry]) -> Vec<ApplicationListEnt
 fn print_human_status(status: &StatusDocument) {
     println!("{}", status.daemon.human_line());
     print_namespaces(&status.namespaces);
+    if !status.namespaces.is_empty() {
+        println!("\nRun vopono doctor to check connectivity and DNS in these namespaces.");
+    }
     if !status.errors.is_empty() {
         for error in &status.errors {
             eprintln!("status warning: {error}");

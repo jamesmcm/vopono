@@ -88,7 +88,8 @@ data-ciphers AES-256-GCM
 verb 3
 ''')
 preflight = json.loads(ctx.client('doctor', '--custom', str(profile), '--offline', '--json').stdout)
-assert preflight['diagnostics'][0]['state'] == 'pass'
+assert any(d['code'] == 'provider_config' and d['state'] == 'pass'
+           for d in preflight['diagnostics'])
 name = ctx.namespace('tls')
 app = ctx.spawn(['exec', '--custom', str(profile), '--protocol', 'openvpn',
     '--custom-netns-name', 'tls', '--interface', 'uplink', '--firewall', 'nftables',
@@ -114,10 +115,12 @@ wait_for(lambda: int((runtime / 'child.pid').read_text()) != old_child, seconds=
 wait_for(connected, seconds=30)
 assert os.stat('/run/netns/' + name).st_ino == inode
 assert Path(f'/proc/{app_pid}').exists()
-checked_before_restart = ctx.status(name)['health']['checked_at']
-ctx.restart(abrupt=True)
+daemon = ctx.restart(abrupt=True)
 wait_for(connected)
-wait_for(lambda: ctx.status(name)['health']['checked_at'] > checked_before_restart,
+# Timestamps have one-second resolution: the replacement's first sample can
+# share the old sample's timestamp, then remain unchanged until the heartbeat.
+# The writer PID identifies the restarted monitor without that timing race.
+wait_for(lambda: ctx.status(name)['health']['daemon_pid'] == daemon.pid,
          seconds=25)
 ctx.client('stop', 'namespace', name, '--json')
 assert not runtime.exists()

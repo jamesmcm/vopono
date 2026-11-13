@@ -311,7 +311,8 @@ pub fn get_pids_in_namespace(ns_name: &str) -> anyhow::Result<Vec<i32>> {
 pub fn check_process_running(pid: u32) -> bool {
     let s = System::new_with_specifics(
         RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
-    );
+    )
+    .expect("Failed to initialize process information");
     s.process(sysinfo::Pid::from_u32(pid)).is_some()
 }
 
@@ -324,7 +325,8 @@ pub fn check_process_running(pid: u32) -> bool {
 pub fn get_running_process_pids(process_name: &str) -> Vec<u32> {
     let s = System::new_with_specifics(
         RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
-    );
+    )
+    .expect("Failed to initialize process information");
     s.processes()
         .iter()
         .filter(|(_, process)| process.name().to_string_lossy() == process_name)
@@ -353,14 +355,16 @@ pub fn process_is_in_network_namespace(pid: u32, ns_name: &str) -> anyhow::Resul
 pub fn get_all_running_pids() -> Vec<u32> {
     let s = System::new_with_specifics(
         RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
-    );
+    )
+    .expect("Failed to initialize process information");
     s.processes().keys().map(|x| x.as_u32()).collect()
 }
 
 pub fn get_all_running_process_names() -> Vec<String> {
     let s = System::new_with_specifics(
         RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
-    );
+    )
+    .expect("Failed to initialize process information");
     s.processes()
         .values()
         .map(|x| x.name().to_string_lossy().to_string())

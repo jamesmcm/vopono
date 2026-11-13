@@ -148,6 +148,11 @@ file, so you no longer need to repeat them.
 
 ### Checking connectivity
 
+Run `vopono doctor` to discover and check all running namespaces visible to your
+user, or `vopono doctor --namespace ID` to diagnose just one. `vopono status` lists
+the IDs. Doctor reports connectivity and DNS failures with suggested next steps.
+Use `check` for custom TCP targets and individual probes:
+
 `check` probes a running namespace over both address families (one TCP
 connection each) plus a DNS resolution using the namespace's own resolver.
 It uses the root daemon when available (unprivileged users cannot enter
@@ -445,6 +450,14 @@ and it is also possible to configure the VPN tunnel [DNS settings there](https:/
 #### Connection / hostname resolution issues
 
 If you face issues with OpenVPN resolving the remote host, try generating the VPN provider config files with IP addresses instead.
+
+`vopono doctor --custom /path/to/profile.ovpn` (or `--provider` and `--server`)
+checks that exact endpoint using the host resolver before a tunnel is available.
+Changing namespace DNS cannot resolve an endpoint that itself needs the tunnel's
+DNS to become reachable. Prefer an IP-address profile from the provider's
+generator or current catalogue while retaining certificate/server identity
+verification. A failed lookup alone does not establish that the hostname is
+internal-only: host DNS failure or a retired name can produce the same symptom.
 
 e.g. the error may appear as follows:
 
@@ -1358,6 +1371,9 @@ logging in to a provider, or changing your configuration:
 
 ```sh
 vopono doctor
+vopono doctor --namespace vo_ar_romania
+vopono doctor --namespace vo_ar_romania --dns-host example.com --json
+vopono doctor --namespace vo_ar_romania --skip-ipv6
 vopono doctor --provider mullvad --server sweden
 vopono doctor --provider mullvad --server sweden --catalogue --json
 vopono doctor --custom /absolute/path/vpn.conf --offline --json
@@ -1365,12 +1381,143 @@ vopono provider check mullvad --json
 vopono provider check privateinternetaccess --json
 ```
 
-The baseline checks WireGuard/OpenVPN configuration structure, required keys and
+Every mode, including `--offline`, checks the daemon socket and compares its
+reported version with the CLI. The JSON `daemon` object includes `available`,
+`pid`, `socket`, daemon `version`, `cli_version`, `compatible` (same major), and
+`versions_match` (exact match, or `null` when unknown). A missing daemon or failed
+version handshake produces a warning. Different versions with the same major
+produce a warning; incompatible/unrecognized versions fail the diagnostic.
+Reports include start/update/restart guidance without managing the service.
+Equal version strings do not establish identical builds or feature support:
+rebuilding without changing the package version can still leave an older daemon
+running. Updating the executable does not update that process.
+
+With no configuration selector, `doctor` discovers running namespaces using the
+same read-only snapshot as `status`, then probes IPv4 TCP, IPv6 TCP, and DNS inside
+each namespace through the root daemon. It works without `--monitor` and reports
+each namespace separately, including exact `vopono check ID --json` commands.
+`--namespace ID` selects one namespace; `--dns-host HOST` tests a particular
+hostname through the namespace's resolver. Use `--skip-ipv6` if IPv6 is intentionally
+disabled. These options apply to running namespaces rather than stored configs.
+If the daemon is unavailable, discovery still works and probes are explicitly
+skipped with a command you can run through the existing sudo fallback. Doctor
+itself never prompts for sudo. When invoked as root, it can probe directly.
+`--offline` discovers namespaces but skips their network probes. No running
+namespaces produces guidance for selecting a stored configuration.
+
+Both modes also check host DNS independently of namespace DNS. Provider API calls
+during sync/provisioning, public catalogue requests, and VPN endpoints configured
+by hostname depend on the host resolver before a tunnel is available. WireGuard
+and OpenVPN resolve their endpoint hostnames on the host. An established tunnel
+using an IP endpoint can keep working while host DNS is broken. The host probe
+resolves `one.one.one.one` using the system resolver; it does not prove that every
+provider hostname resolves. `--offline` skips this lookup too.
+
+PIA generates IP-based WireGuard bootstrap profiles and pins the registration
+server's certificate hostname to its catalogue IP for the `addKey` request;
+that internal certificate hostname need not resolve through host DNS. With
+`--provider privateinternetaccess`, doctor recognizes the initial placeholder
+server key/address as a bootstrap template and reports connection-time
+provisioning as unverified. Its IP:1337 is tested as a TCP registration target;
+it is not the eventual UDP tunnel endpoint, and a TCP connection does not
+verify TLS, credentials or successful registration. Host DNS is still needed for PIA's public token/API
+hostnames. Doctor does not authenticate or register keys; inspect the running
+namespace after connecting to test the provisioned tunnel and DNS.
+
+Resolver details list the configured nameservers in the host and each namespace,
+the source file, inherited host resolver settings, and the NSS `hosts:` lookup
+chain. When available, `resolvectl dns` supplies systemd-resolved's configured
+upstreams by interface; a local stub address alone is not presented as an
+upstream. These are configuration observations rather than proof of which server
+answered a particular lookup (NSS, caching and split DNS can affect that).
+
+Doctor flags namespace use of Tailscale's device-local MagicDNS addresses,
+`100.100.100.100` and `fd7a:115c:a1e0::53`, and host loopback resolver addresses
+such as `127.0.0.53`. It also warns if namespace NSS includes `resolve`: that
+module uses a Unix socket to systemd-resolved, so namespace `resolv.conf` alone
+does not determine its DNS path. vopono normally installs a namespace-specific
+`hosts: files dns` override. See [Tailscale Quad100](https://tailscale.com/docs/reference/quad100)
+and [nss-resolve](https://www.freedesktop.org/software/systemd/man/latest/nss-resolve.html).
+Host use of MagicDNS is informational; its presence alone is not interference.
+
+Interface details include host main-table default routes, the host TCP probe's
+target, source address and destination-specific route interface, plus each
+namespace's recorded host uplink, tunnel interface(s), veth peers, live link
+states and addresses. Namespace default routes include policy tables, and route
+lookups show where its TCP probe targets would go. The host default and the
+actual probe route can differ under policy routing. NetworkManager's live
+management state is queried specifically for the vopono host veth; management of
+the normal Wi-Fi/Ethernet uplink is expected and does not trigger a warning.
+
+Doctor sends one interface-bound ICMP echo in each direction across each recorded
+IPv4/IPv6 veth pair (at most 500 ms per echo). A failed echo is a warning, since the kill switch or host
+firewall may intentionally block it; it does not establish a broken link or prove
+host-service reachability. Missing tools and exhausted budgets are skipped.
+`--offline` skips these echoes while still reading resolver and interface state;
+`--skip-ipv6` skips the IPv6 echoes. Neither diagnostic opens firewall exceptions
+or enables host access. Privileged targets come from the authenticated user's
+root-owned namespace snapshot, which is read without arming cleanup resources.
+
+Doctor reads IPv4/IPv6 forwarding settings and inspects active iptables and
+nftables snapshots. It reports default DROP policies, DROP/REJECT rules in chains
+referenced by host hooks, and hooked UFW/Docker chains. Unreferenced leftover
+chains alone do not trigger a warning. These are observations to correlate with
+the live probes, rather than proof that a packet is blocked: matching, interface
+exceptions, counters, chain priorities and NAT still need inspection. Existing
+vopono UFW/Docker exceptions can make these configurations work normally. A
+separate nftables accept verdict does not override a drop in a later base chain;
+see [Docker's nftables documentation](https://docs.docker.com/engine/network/firewall-nftables/).
+Only the selected iptables backend plus native nftables are inspected; a separate
+legacy backend may require manual inspection with `iptables-legacy-save` and
+`ip6tables-legacy-save`.
+
+For [AppArmor issue #392](https://github.com/jamesmcm/vopono/issues/392), doctor
+checks for loaded enforcing `wg`/`awg` profiles and matching denials in the last
+15 minutes of available kernel records (up to 2000 records). A loaded profile is
+a possible restriction, and an old denial does not prove the current attempt
+failed. The suggested action points to the actual denied temporary config path:
+current versions use a randomly named temporary file, so the issue's historical
+`/tmp/vopono_wg.conf` rule should not be copied blindly. vopono also stops setup
+when `wg setconf` fails and includes AppArmor evidence in WireGuard launch-failure
+reports. Doctor never edits profiles or switches them to complain mode.
+
+Privileged firewall and audit inspection uses the updated root daemon. With an
+older or unavailable daemon, doctor falls back to locally readable evidence;
+missing tools, permission failures, timeouts, and unreadable snapshots are
+explicitly skipped. Update the daemon executable and restart it when convenient
+to enable the new host inspection request. Existing namespace probes continue to
+work with older daemons. System inspection has a three-second budget and bounded
+command output, and only sanitized summaries are returned. `--offline` still
+inspects local kernel state; it never runs connectivity or DNS probes.
+
+With `--provider` and `--server`, or `--custom`, doctor instead checks the selected
+WireGuard/OpenVPN configuration structure, required keys and
 referenced files, endpoint DNS, host connectivity, and destination routes. Route
 inspection uses Linux netlink directly. `--offline` restricts diagnosis to local
 files. Network checks have short timeouts (`--timeout-ms`, default 3000, maximum
 30000). DNS errors preserve whether resolution failed or timed out; the system
 resolver does not expose a reliable DNS response code such as NXDOMAIN.
+
+Endpoint diagnostics name the declared hostname/IP and port. Literal IPs
+explicitly skip DNS. Hostnames are resolved on the host before tunnel setup,
+independently of the generic host DNS probe; a passing generic probe does not
+establish that a provider-specific hostname resolves. The report shows resolved
+addresses and a candidate's host route/interface. Endpoint extraction is attempted
+even when key/reference validation fails, provided the target can still be
+parsed safely; that does not make the configuration usable. For profiles with
+multiple remotes, individual endpoint failures do not rule out another remote.
+
+For TCP, doctor connects to the configured IP/port and reports the address that
+accepted a connection; this verifies TCP reachability, not TLS identity or VPN
+authentication. Resolved addresses share one transport-probe time budget, so a
+failed probe is not proof that every address is unreachable. For UDP, including
+WireGuard, peer reachability and key authorization remain explicitly unverified.
+ICMP or an arbitrary TCP port on that server cannot establish UDP VPN usability,
+and silent UDP responses cannot distinguish an unavailable server from rejected
+credentials. A real VPN exchange is required. Doctor does not send UDP test
+datagrams, start a VPN, rewrite endpoint addresses, or change host DNS. Use a
+normal `vopono exec` connection, inspect WireGuard handshake/OpenVPN status,
+and use `doctor`/`check` to test the resulting namespace.
 
 `--catalogue` compares WireGuard endpoints against Mullvad's or PIA's public server
 catalogue. Mullvad comparisons also check the server public key. Unsupported
@@ -1386,9 +1533,19 @@ and skipped stages do not imply failure. A catalogue warning is different from a
 successful compatibility check: `provider check` exits 1 on fetch/schema failure,
 which makes it suitable for scheduled smoke tests.
 
-`doctor` does not perform a live VPN handshake. Use `vopono check NAMESPACE --json`
-for an existing namespace. Its `connected` field means that at least one TCP probe
-succeeded; it does not prove authentication or isolation. DNS errors and transport
+`doctor --json` retains the top-level `diagnostics` array and adds a `namespaces`
+array when namespaces are discovered. Each namespace has its own `diagnostics`
+and, when probed, a `connectivity` result with separate IPv4, IPv6 and DNS outcomes.
+`host_network` contains resolver/default-route details and their diagnostics;
+each namespace's `network` contains its resolver, interfaces, routes,
+`link_probes`, and the associated diagnostics.
+A failed DNS or enabled TCP probe makes doctor exit 1, even if another probe
+passed. A skipped probe does not imply success.
+
+Neither configuration preflight nor namespace connectivity probes verify VPN
+authentication or isolation. Use `vopono check NAMESPACE --json` for custom probe
+targets and individual checks. Its `connected` field means that at least one TCP
+probe succeeded, even when DNS fails. DNS errors and transport
 failures now carry separate machine-readable reasons. Ordinary VPN setup errors
 also receive an actionable diagnostic; `exec --json` carries that diagnostic in
 its error document, including through the daemon. A missing WireGuard handshake
@@ -1412,6 +1569,22 @@ authentication or isolation. Samples older than 90 seconds are reported as
 degraded. State transitions are persisted immediately, while unchanged samples
 are refreshed by a 30-second heartbeat rather than on every probe. The GUI has
 matching launch options and displays this health information on its Status page.
+Every 60 seconds, and on the first failed connectivity/DNS sample, the monitor
+also collects doctor evidence: host DNS and resolver servers, endpoint DNS,
+namespace DNS/NSS and MagicDNS, interfaces/routes, both veth directions,
+NetworkManager management, forwarding settings, firewall hazards (including
+UFW/Docker) and AppArmor. These read-only scans share a four-second budget;
+unavailable observations are marked skipped. `health.diagnostics` contains the
+results and suggested actions, with `diagnostics_checked_at`, `daemon_version`
+and `daemon_pid` identifying their freshness and writer. The GUI displays the
+same diagnostic evidence. Run `vopono doctor` to compare the running daemon's
+version with the current CLI and obtain a fresh, fuller report.
+
+Failure of either configured IP family or namespace DNS degrades health. An IP
+family is skipped for tunnels configured without that family. Firewall warnings, host DNS
+failure and blocked veth ICMP are evidence to investigate; they do not override
+successful namespace TCP/DNS probes. The monitor does not flush or rewrite
+third-party firewall rules, change DNS, or change NetworkManager/AppArmor policy.
 Probe targets are Cloudflare's IPv4/IPv6 DNS addresses on TCP port 443 and
 `one.one.one.one` for DNS; a network that deliberately blocks them can report
 false degradation. Split tunnels may also intentionally exclude these targets.

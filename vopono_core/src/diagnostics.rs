@@ -5,8 +5,13 @@ use crate::util::wireguard::generate_public_key;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
+
+pub mod host;
+pub mod runtime;
+pub mod topology;
 
 /// Safe setup failures: values are enums or fixed local explanations, never
 /// configuration contents, filesystem error strings or provider replies.
@@ -60,6 +65,17 @@ pub enum DiagnosticCode {
     NamespaceDns,
     TunnelConnectivity,
     ProbeUnavailable,
+    HostDns,
+    HostForwarding,
+    HostFirewall,
+    AppArmor,
+    DnsConfiguration,
+    NetworkInterface,
+    HostLink,
+    TailscaleDns,
+    NetworkManager,
+    DaemonAvailability,
+    DaemonVersion,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,33 +147,70 @@ impl std::fmt::Display for DnsFailure {
 }
 impl std::error::Error for DnsFailure {}
 
+// NSS modules can remain blocked after the caller's deadline. Repeated monitor
+// lookups must never accumulate an unbounded number of resolver threads.
+static DNS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+const MAX_DNS_IN_FLIGHT: usize = 16;
+
+struct ResolverPermit<'a>(&'a AtomicUsize);
+impl<'a> ResolverPermit<'a> {
+    fn acquire(counter: &'a AtomicUsize, limit: usize) -> Option<Self> {
+        let mut count = counter.load(Ordering::Acquire);
+        loop {
+            if count >= limit {
+                return None;
+            }
+            match counter.compare_exchange_weak(
+                count,
+                count + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(Self(counter)),
+                Err(current) => count = current,
+            }
+        }
+    }
+}
+impl Drop for ResolverPermit<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Release);
+    }
+}
+
 pub fn resolve_bounded(host: &str, timeout: Duration) -> Result<Vec<IpAddr>, DnsFailure> {
     if let Ok(ip) = host.parse() {
         return Ok(vec![ip]);
     }
     // getaddrinfo has no portable per-call timeout. Bound the caller's wait;
     // the isolated resolver thread can finish later without blocking diagnosis.
+    let permit = ResolverPermit::acquire(&DNS_IN_FLIGHT, MAX_DNS_IN_FLIGHT)
+        .ok_or(DnsFailure::ResolutionFailed)?;
     let host = host.to_owned();
     let (tx, rx) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let result = (host.as_str(), 0)
-            .to_socket_addrs()
-            .map(|addrs| {
-                let mut ips: Vec<_> = addrs.map(|addr| addr.ip()).collect();
-                ips.sort();
-                ips.dedup();
-                ips
-            })
-            .map_err(|_| DnsFailure::ResolutionFailed)
-            .and_then(|ips| {
-                if ips.is_empty() {
-                    Err(DnsFailure::NoAddresses)
-                } else {
-                    Ok(ips)
-                }
-            });
-        let _ = tx.send(result);
-    });
+    let _worker = std::thread::Builder::new()
+        .name("vopono-dns".into())
+        .spawn(move || {
+            let _permit = permit;
+            let result = (host.as_str(), 0)
+                .to_socket_addrs()
+                .map(|addrs| {
+                    let mut ips: Vec<_> = addrs.map(|addr| addr.ip()).collect();
+                    ips.sort();
+                    ips.dedup();
+                    ips
+                })
+                .map_err(|_| DnsFailure::ResolutionFailed)
+                .and_then(|ips| {
+                    if ips.is_empty() {
+                        Err(DnsFailure::NoAddresses)
+                    } else {
+                        Ok(ips)
+                    }
+                });
+            let _ = tx.send(result);
+        })
+        .map_err(|_| DnsFailure::ResolutionFailed)?;
     rx.recv_timeout(timeout).unwrap_or(Err(DnsFailure::Timeout))
 }
 
@@ -170,6 +223,20 @@ pub struct Endpoint {
 
 /// Parse without echoing errors: parser errors may include private keys or inline credentials.
 pub fn validate_config(path: &Path, protocol: &Protocol) -> Result<Vec<Endpoint>, Diagnostic> {
+    validate_config_inner(path, protocol, false)
+}
+
+/// PIA's generated bootstrap profile intentionally has no server public key.
+/// Only use this alternative for an explicitly selected PIA provider.
+pub fn validate_pia_template(path: &Path) -> Result<Vec<Endpoint>, Diagnostic> {
+    validate_config_inner(path, &Protocol::Wireguard, true)
+}
+
+fn validate_config_inner(
+    path: &Path,
+    protocol: &Protocol,
+    pia_template: bool,
+) -> Result<Vec<Endpoint>, Diagnostic> {
     let fail = || {
         Diagnostic::new(
             DiagnosticCode::ProviderConfig,
@@ -191,8 +258,14 @@ pub fn validate_config(path: &Path, protocol: &Protocol) -> Result<Vec<Endpoint>
     match protocol {
         Protocol::Wireguard => {
             let config: WireguardConfig = content.parse().map_err(|_| fail())?;
+            let template = pia_template
+                && config.peer.public_key.is_empty()
+                && config.peer.endpoint.is_ip()
+                && config.peer.endpoint.port() == 1337
+                && config.interface.address.len() == 1
+                && config.interface.address[0].to_string() == "127.0.0.1/32";
             if generate_public_key(&config.interface.private_key).is_err()
-                || generate_public_key(&config.peer.public_key).is_err()
+                || !template && generate_public_key(&config.peer.public_key).is_err()
                 || config.interface.address.is_empty()
                 || config.peer.allowed_ips.is_empty()
                 || config.peer.endpoint.port() == 0
@@ -210,17 +283,27 @@ pub fn validate_config(path: &Path, protocol: &Protocol) -> Result<Vec<Endpoint>
             {
                 return Err(fail());
             }
-            // These are not represented by the current execution model; never claim validation.
-            if content
-                .lines()
-                .any(|l| l.trim().starts_with("PresharedKey"))
-            {
-                return Err(fail());
+            // The runtime preserves preshared keys in the raw wg setconf
+            // input even though WireguardConfig does not model this field.
+            for line in content.lines() {
+                if let Some((key, value)) = line.split_once('=')
+                    && key.trim() == "PresharedKey"
+                {
+                    use base64::Engine as _;
+                    if base64::engine::general_purpose::STANDARD
+                        .decode(value.split('#').next().unwrap_or_default().trim())
+                        .map_or(true, |key| key.len() != 32)
+                    {
+                        return Err(fail());
+                    }
+                }
             }
             Ok(vec![Endpoint {
                 host: config.peer.endpoint.ip_or_hostname(),
                 port: config.peer.endpoint.port(),
-                tcp: false,
+                // Before addKey, PIA's port 1337 target is the HTTPS
+                // registration API, not the eventual WireGuard UDP endpoint.
+                tcp: template,
             }])
         }
         Protocol::OpenVpn => {
@@ -245,79 +328,294 @@ pub(crate) fn valid_host(host: &str) -> bool {
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_')))
 }
 
+/// Extract declared targets even if key/reference validation fails. This does
+/// not establish that the profile is usable and never resolves a hostname.
+pub fn config_endpoints(path: &Path, protocol: &Protocol) -> Result<Vec<Endpoint>, Diagnostic> {
+    let fail = || {
+        Diagnostic::new(
+            DiagnosticCode::ProviderConfig,
+            DiagnosticState::Fail,
+            "Could not extract supported VPN endpoints from the configuration",
+            None,
+        )
+    };
+    if std::fs::metadata(path).map_or(true, |m| !m.is_file() || m.len() > 4 * 1024 * 1024) {
+        return Err(fail());
+    }
+    let content = String::from_utf8(
+        crate::util::owner_write::read_file_as_config_owner(path).map_err(|_| fail())?,
+    )
+    .map_err(|_| fail())?;
+    let endpoints = match protocol {
+        Protocol::Wireguard => {
+            let config: WireguardConfig = content.parse().map_err(|_| fail())?;
+            vec![Endpoint {
+                host: config.peer.endpoint.ip_or_hostname(),
+                port: config.peer.endpoint.port(),
+                tcp: false,
+            }]
+        }
+        Protocol::OpenVpn => {
+            crate::network::openvpn_config::endpoints(&content).map_err(|_| fail())?
+        }
+        _ => return Err(fail()),
+    };
+    if endpoints
+        .iter()
+        .any(|endpoint| endpoint.port == 0 || !valid_host(&endpoint.host))
+    {
+        return Err(fail());
+    }
+    Ok(endpoints)
+}
+
 pub fn endpoint_diagnostics(endpoint: &Endpoint, timeout: Duration) -> Vec<Diagnostic> {
+    endpoint_diagnostics_with_resolution(
+        endpoint,
+        timeout,
+        resolve_bounded(&endpoint.host, timeout),
+    )
+}
+
+fn endpoint_diagnostics_with_resolution(
+    endpoint: &Endpoint,
+    timeout: Duration,
+    resolution: Result<Vec<IpAddr>, DnsFailure>,
+) -> Vec<Diagnostic> {
     let mut report = Vec::new();
-    let ips = match resolve_bounded(&endpoint.host, timeout) {
+    let target = endpoint_label(endpoint);
+    let ips = match resolution {
         Ok(ips) => {
+            let literal = endpoint.host.parse::<IpAddr>().is_ok();
+            let addresses = ips
+                .iter()
+                .take(16)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             report.push(Diagnostic::new(
                 DiagnosticCode::EndpointDns,
-                DiagnosticState::Pass,
-                "Endpoint resolved",
+                if literal { DiagnosticState::Skipped } else { DiagnosticState::Pass },
+                &if literal {
+                    format!("VPN endpoint {target} is a literal IP address; host DNS is not required for this endpoint")
+                } else {
+                    format!("Host resolver resolved VPN endpoint {target} before tunnel setup to {addresses}{}", if ips.len() > 16 { " (additional addresses omitted from display)" } else { "" })
+                },
                 None,
             ));
             ips
         }
         Err(error) => {
-            report.push(Diagnostic::new(DiagnosticCode::EndpointDns, DiagnosticState::Fail, &error.to_string(), Some("Check host DNS and the configured server; use the public catalogue to check for retired servers")));
+            report.push(Diagnostic::new(DiagnosticCode::EndpointDns, DiagnosticState::Fail,
+                &format!("Host cannot resolve VPN endpoint {target} before tunnel setup: {error}. Tunnel DNS cannot bootstrap this initial lookup; private/tunnel-only DNS, a retired name or host DNS failure are possible, not established causes"),
+                Some("Check this exact endpoint name using host DNS. Prefer a provider-generated IP-address profile or a publicly resolvable endpoint from its current catalogue; preserve VPN certificate/public-key verification. Changing namespace DNS does not fix a pre-tunnel lookup. Doctor does not change host DNS or rewrite the config")));
             return report;
         }
     };
     // A route lookup sends no packet and validates the actual destination rather than a default alone.
-    let reachable = ips
+    let route = ips
         .iter()
-        .any(|ip| crate::network::route::lookup(*ip).is_ok());
+        .find_map(|ip| topology::route_interface(*ip).map(|interface| (*ip, interface)));
     report.push(Diagnostic::new(
         DiagnosticCode::NamespaceRouting,
-        if reachable {
+        if route.is_some() {
             DiagnosticState::Pass
         } else {
             DiagnosticState::Fail
         },
-        if reachable {
-            "Host has a route to the endpoint"
-        } else {
-            "No usable host route to the endpoint could be established"
+        &match &route {
+            Some((ip, interface)) => format!("Host route to VPN endpoint candidate {} uses {interface}; a route does not establish that the VPN server is reachable", SocketAddr::new(*ip, endpoint.port)),
+            None => format!("No usable host route/interface to VPN endpoint {target} could be established"),
         },
-        (!reachable).then_some("Restore host networking or check endpoint address families"),
+        route.is_none().then_some("Inspect host routes, policy routing and endpoint address families; repair the host route before connecting"),
     ));
     report.push(if endpoint.tcp {
         // One total transport deadline across all returned addresses.
         let deadline = std::time::Instant::now() + timeout;
-        let reachable = ips.iter().any(|ip| {
+        let connected = ips.iter().find_map(|ip| {
             deadline
                 .checked_duration_since(std::time::Instant::now())
-                .is_some_and(|left| {
-                    TcpStream::connect_timeout(&SocketAddr::new(*ip, endpoint.port), left).is_ok()
+                .and_then(|left| {
+                    let address = SocketAddr::new(*ip, endpoint.port);
+                    TcpStream::connect_timeout(&address, left).ok().map(|_| address)
                 })
         });
         Diagnostic::new(
             DiagnosticCode::EndpointTransport,
-            if reachable {
+            if connected.is_some() {
                 DiagnosticState::Pass
             } else {
                 DiagnosticState::Fail
             },
-            if reachable {
-                "Endpoint TCP connection succeeded"
-            } else {
-                "Endpoint TCP connection failed; cause is not established"
+            &match connected {
+                Some(address) => format!("Host TCP connection to configured VPN endpoint {address} succeeded; VPN authentication and TLS/server identity remain unverified"),
+                None => format!("No host TCP connection to VPN endpoint {target} succeeded within the probe budget; cause is not established"),
             },
-            (!reachable).then_some("Check endpoint, port, host firewall and provider availability"),
+            connected.is_none().then_some("Check endpoint, port, host firewall and provider availability; multiple addresses share one probe budget. An ordinary VPN connection is needed to verify authentication"),
         )
     } else {
         Diagnostic::new(
             DiagnosticCode::EndpointTransport,
             DiagnosticState::Skipped,
-            "UDP reachability requires a VPN handshake; sending a datagram proves nothing",
-            None,
+            &format!("VPN UDP endpoint {target}: peer reachability and key authorization remain unverified; DNS and route checks are prerequisites, not a VPN connection test"),
+            Some("UDP endpoints can silently ignore unauthenticated traffic and ICMP; use an ordinary VPN connection and inspect WireGuard handshake/OpenVPN connection status, then check namespace connectivity with vopono doctor or vopono check"),
         )
     });
     report
 }
 
+fn endpoint_label(endpoint: &Endpoint) -> String {
+    match endpoint.host.parse::<IpAddr>() {
+        Ok(ip) => SocketAddr::new(ip, endpoint.port).to_string(),
+        Err(_) => format!("{}:{}", endpoint.host, endpoint.port),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resolver_admission_is_bounded_until_the_worker_releases_its_permit() {
+        let counter = AtomicUsize::new(0);
+        let first = ResolverPermit::acquire(&counter, 2).unwrap();
+        let second = ResolverPermit::acquire(&counter, 2).unwrap();
+        assert!(ResolverPermit::acquire(&counter, 2).is_none());
+        drop(first);
+        let replacement = ResolverPermit::acquire(&counter, 2).unwrap();
+        assert_eq!(counter.load(Ordering::Acquire), 2);
+        drop((second, replacement));
+        assert_eq!(counter.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn endpoint_bootstrap_failure_is_separate_from_general_host_dns() {
+        let endpoint = Endpoint {
+            host: "vpn.provider-only.example".into(),
+            port: 51820,
+            tcp: false,
+        };
+        assert_eq!(
+            host::host_dns(Ok(vec!["1.1.1.1".parse().unwrap()])).state,
+            DiagnosticState::Pass
+        );
+        for error in [
+            DnsFailure::Timeout,
+            DnsFailure::ResolutionFailed,
+            DnsFailure::NoAddresses,
+        ] {
+            let report = endpoint_diagnostics_with_resolution(
+                &endpoint,
+                Duration::from_millis(50),
+                Err(error),
+            );
+            assert_eq!(report.len(), 1);
+            assert_eq!(report[0].code, DiagnosticCode::EndpointDns);
+            assert_eq!(report[0].state, DiagnosticState::Fail);
+            assert!(
+                report[0]
+                    .message
+                    .contains("vpn.provider-only.example:51820")
+            );
+            assert!(report[0].message.contains(&error.to_string()));
+            assert!(report[0].message.contains("Tunnel DNS cannot bootstrap"));
+            assert!(
+                report[0]
+                    .action
+                    .as_deref()
+                    .unwrap()
+                    .contains("provider-generated IP-address profile")
+            );
+        }
+    }
+
+    #[test]
+    fn literal_udp_endpoint_needs_no_dns_and_sends_no_probe_packet() {
+        let socket = std::net::UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let endpoint = Endpoint {
+            host: "127.0.0.1".into(),
+            port: socket.local_addr().unwrap().port(),
+            tcp: false,
+        };
+        let report = endpoint_diagnostics(&endpoint, Duration::from_millis(50));
+        assert_eq!(report[0].state, DiagnosticState::Skipped);
+        assert!(report[0].message.contains("literal IP"));
+        assert_eq!(report[1].state, DiagnosticState::Pass);
+        assert!(report[1].message.contains("lo"));
+        assert_eq!(report[2].state, DiagnosticState::Skipped);
+        assert!(report[2].message.contains("remain unverified"));
+        assert!(report[2].action.as_deref().unwrap().contains("handshake"));
+        assert!(socket.recv(&mut [0u8; 1]).is_err());
+    }
+
+    #[test]
+    fn tcp_preflight_reports_the_configured_port_and_actual_successful_address_without_authentication()
+     {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let endpoint = Endpoint {
+            host: "vpn.example".into(),
+            port: address.port(),
+            tcp: true,
+        };
+        let ips = vec!["127.0.0.2".parse().unwrap(), address.ip()];
+        let report =
+            endpoint_diagnostics_with_resolution(&endpoint, Duration::from_millis(100), Ok(ips));
+        assert_eq!(report[0].state, DiagnosticState::Pass);
+        assert!(report[0].message.contains("Host resolver"));
+        assert_eq!(report[2].state, DiagnosticState::Pass);
+        assert!(report[2].message.contains(&address.to_string()));
+        assert!(
+            report[2]
+                .message
+                .contains("TLS/server identity remain unverified")
+        );
+        drop(listener);
+        let report = endpoint_diagnostics_with_resolution(
+            &endpoint,
+            Duration::from_millis(50),
+            Ok(vec![address.ip()]),
+        );
+        assert_eq!(report[2].state, DiagnosticState::Fail);
+    }
+
+    #[test]
+    fn ipv6_endpoint_labels_preserve_address_and_port_unambiguously() {
+        let endpoint = Endpoint {
+            host: "::1".into(),
+            port: 51820,
+            tcp: false,
+        };
+        assert_eq!(endpoint_label(&endpoint), "[::1]:51820");
+    }
+
+    #[test]
+    fn bad_keys_do_not_hide_a_parseable_endpoint_and_extraction_does_not_resolve_it() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "[Interface]\nPrivateKey = SECRET_INVALID_KEY\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = INVALID_PUBLIC_KEY\nEndpoint = vpn.provider-only.example:51820\nAllowedIPs = 0.0.0.0/0\n").unwrap();
+        assert!(validate_config(file.path(), &Protocol::Wireguard).is_err());
+        let endpoints = config_endpoints(file.path(), &Protocol::Wireguard).unwrap();
+        assert_eq!(endpoints[0].host, "vpn.provider-only.example");
+        assert_eq!(endpoints[0].port, 51820);
+        let report = endpoint_diagnostics_with_resolution(
+            &endpoints[0],
+            Duration::from_millis(50),
+            Err(DnsFailure::ResolutionFailed),
+        );
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains("SECRET_INVALID_KEY")
+        );
+
+        std::fs::write(file.path(), "client\ndev tun\nproto tcp-client\nremote vpn.provider-only.example 443\nauth-user-pass missing-credential-file\n").unwrap();
+        assert!(validate_config(file.path(), &Protocol::OpenVpn).is_err());
+        let endpoints = config_endpoints(file.path(), &Protocol::OpenVpn).unwrap();
+        assert!(endpoints[0].tcp);
+        assert_eq!(endpoints[0].port, 443);
+    }
     #[test]
     fn literal_addresses_need_no_dns() {
         assert_eq!(
@@ -365,5 +663,44 @@ mod tests {
                 .unwrap()
                 .contains("SUPERSECRET")
         );
+    }
+
+    #[test]
+    fn validates_runtime_supported_preshared_keys_without_disclosing_them() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let profile = format!(
+            "[Interface]\nPrivateKey = {key}\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = {key}\nPresharedKey = {{psk}}\nEndpoint = 192.0.2.1:51820\nAllowedIPs = 0.0.0.0/0\n"
+        );
+        std::fs::write(file.path(), profile.replace("{psk}", key)).unwrap();
+        assert!(validate_config(file.path(), &Protocol::Wireguard).is_ok());
+        for invalid in ["SECRET_INVALID_PSK", "AAAA"] {
+            std::fs::write(file.path(), profile.replace("{psk}", invalid)).unwrap();
+            let report = validate_config(file.path(), &Protocol::Wireguard).unwrap_err();
+            assert!(!serde_json::to_string(&report).unwrap().contains(invalid));
+        }
+    }
+
+    #[test]
+    fn pia_bootstrap_template_is_only_accepted_explicitly_and_still_validates_keys() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+        let profile = format!(
+            "[Interface]\nPrivateKey = {key}\nAddress = 127.0.0.1/32\nDNS = 127.0.0.1\n[Peer]\nPublicKey =\nEndpoint = 192.0.2.1:1337\nAllowedIPs = 0.0.0.0/0\n"
+        );
+        std::fs::write(file.path(), &profile).unwrap();
+        assert!(validate_config(file.path(), &Protocol::Wireguard).is_err());
+        let endpoints = validate_pia_template(file.path()).unwrap();
+        assert_eq!(endpoints[0].host, "192.0.2.1");
+        assert_eq!(endpoints[0].port, 1337);
+        assert!(endpoints[0].tcp);
+        for invalid in [
+            profile.replace(key, "BAD_SECRET"),
+            profile.replace(":1337", ":0"),
+            profile.replace("192.0.2.1", "private-only.test"),
+        ] {
+            std::fs::write(file.path(), invalid).unwrap();
+            assert!(validate_pia_template(file.path()).is_err());
+        }
     }
 }

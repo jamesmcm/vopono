@@ -15,8 +15,11 @@ Cloudflare Warp is also supported.
 For custom connections the OpenConnect and OpenFortiVPN protocols are
 also supported (e.g. for enterprise VPNs). See the [vopono User Guide](USERGUIDE.md) for more details.
 
-Use `vopono doctor` to diagnose configuration and endpoint failures before
-launching an application. Named profiles (`vopono exec --profile NAME`) and
+Run `vopono doctor` to discover running namespaces and diagnose their connectivity
+and DNS, plus host DNS, forwarding, firewall and AppArmor issues. Use
+`vopono doctor --namespace ID` to select one (`vopono status` lists
+IDs), or `vopono doctor --provider PROVIDER --server SERVER` to inspect a stored
+configuration before launching an application. Named profiles (`vopono exec --profile NAME`) and
 opt-in daemon monitoring (`--monitor --recover`) are described in the
 [User Guide](USERGUIDE.md#diagnose-configuration-and-connection-failures).
 

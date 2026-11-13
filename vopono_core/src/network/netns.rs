@@ -1343,7 +1343,7 @@ impl ManagedNamespaceGuard {
         .map(|pid| pid as i32)
         .collect::<Vec<_>>();
         let pids = get_pids_in_namespace(&self.name)?;
-        let processes = System::new_all();
+        let processes = System::new_all().context("Failed to initialize process information")?;
         let parents = pids
             .iter()
             .filter_map(|pid| {

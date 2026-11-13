@@ -17,9 +17,11 @@ def tcp(family):
         connection.close()
 
 
-def dns():
-    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    listener.bind(("0.0.0.0", 53))
+def dns(family):
+    listener = socket.socket(family, socket.SOCK_DGRAM)
+    if family == socket.AF_INET6:
+        listener.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    listener.bind(("::" if family == socket.AF_INET6 else "0.0.0.0", 53))
     while True:
         query, client = listener.recvfrom(4096)
         offset = 12
@@ -35,4 +37,5 @@ def dns():
 
 for family in (socket.AF_INET, socket.AF_INET6):
     threading.Thread(target=tcp, args=(family,), daemon=True).start()
-dns()
+    threading.Thread(target=dns, args=(family,), daemon=True).start()
+threading.Event().wait()

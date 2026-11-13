@@ -65,13 +65,7 @@ pub fn run(
         for path in configs {
             if *protocol == Protocol::Wireguard && *provider == VpnProvider::PrivateInternetAccess {
                 // PIA intentionally provisions the server key and addresses at connect time.
-                let config: crate::network::wireguard_config::WireguardConfig =
-                    fs::read_to_string(&path)?.parse()?;
-                crate::util::wireguard::generate_public_key(&config.interface.private_key)?;
-                ensure!(
-                    !config.peer.allowed_ips.is_empty() && config.peer.endpoint.port() != 0,
-                    "Invalid PIA configuration template"
-                );
+                crate::diagnostics::validate_pia_template(&path)?;
             } else {
                 crate::diagnostics::validate_config(&path, protocol)?;
             }

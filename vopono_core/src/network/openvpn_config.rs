@@ -131,7 +131,6 @@ fn allowed(option: &str) -> bool {
             | "tls-exit"
             | "tls-crypt-v2-allow-noncookie"
             | "auth-gen-token"
-            | "dns-updown"
     )
 }
 fn input_file(option: &str) -> bool {
@@ -379,6 +378,14 @@ fn sanitize(
             ConfigLine::Directive { raw, fields } => (raw, fields),
         };
         let option = fields[0].trim_start_matches("--");
+        if option == "dns-updown" {
+            ensure!(
+                fields.len() == 2 && fields[1] == "disable",
+                "OpenVPN DNS scripts are disabled in daemon configurations"
+            );
+            output.push_str("dns-updown disable\n");
+            continue;
+        }
         // Never permit --dev /dev/... to open an arbitrary host file or reuse
         // a host interface through --dev-node or --iproute.
         if option == "dev" {
@@ -468,6 +475,13 @@ fn sanitize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dns_updown_only_permits_disabling_scripts() {
+        assert!(sanitize("dns-updown disable", |_, _| unreachable!()).is_ok());
+        for directive in ["dns-updown force", "dns-updown /tmp/script", "dns-updown"] {
+            assert!(sanitize(directive, |_, _| unreachable!()).is_err());
+        }
+    }
     #[test]
     fn syntax_rejections_are_shared_by_freezing_and_endpoint_extraction() {
         for input in [

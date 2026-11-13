@@ -33,6 +33,19 @@ impl VoponoGuiApp {
                     if let Some(error) = &health.last_error {
                         ui.label(error);
                     }
+                    if !health.diagnostics.is_empty() {
+                        ui.collapsing("Diagnostic evidence", |ui| {
+                            for diagnostic in &health.diagnostics {
+                                ui.label(format!(
+                                    "{:?} {:?}: {}",
+                                    diagnostic.state, diagnostic.code, diagnostic.message
+                                ));
+                                if let Some(action) = &diagnostic.action {
+                                    ui.small(action);
+                                }
+                            }
+                        });
+                    }
                 } else {
                     ui.small("Health monitoring is disabled for this namespace.");
                 }

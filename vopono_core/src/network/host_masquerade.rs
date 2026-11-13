@@ -18,6 +18,10 @@ pub struct HostMasquerade {
 }
 
 impl HostMasquerade {
+    pub(crate) fn interface_name(&self) -> &str {
+        &self.interface.name
+    }
+
     pub(crate) fn recover_interface(
         &mut self,
         interface: NetworkInterface,

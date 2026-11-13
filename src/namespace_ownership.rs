@@ -256,6 +256,20 @@ pub fn load(name: &str, uid: Uid) -> anyhow::Result<NetworkNamespace> {
     Ok(namespace)
 }
 
+/// Read root-owned state without arming any namespace cleanup resources.
+pub(crate) fn diagnostic_snapshot(name: &str, uid: Uid) -> anyhow::Result<NamespaceSnapshot> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
+    let record = validated_record(name, uid)?;
+    let snapshot = match record.namespace {
+        StoredNamespace::Snapshot(snapshot) => snapshot,
+        StoredNamespace::LegacyJson(json) => serde_json::from_str(&json)?,
+    };
+    anyhow::ensure!(snapshot.name == name, "Namespace snapshot name mismatch");
+    Ok(snapshot)
+}
+
 pub fn is_persistent(name: &str, uid: Uid) -> anyhow::Result<bool> {
     let _guard = OWNER_RECORD_LOCK
         .lock()

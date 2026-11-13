@@ -188,7 +188,8 @@ for index, suffix in enumerate([" trailing-content", "#comment", "\0"]):
     os.chown(config, uid, pwd.getpwnam(user).pw_gid)
     preflight = client('doctor', '--custom', str(config), '--offline', '--json', check=False)
     assert preflight.returncode != 0
-    assert json.loads(preflight.stdout)['diagnostics'][0]['state'] == 'fail'
+    assert any(d['code'] == 'provider_config' and d['state'] == 'fail'
+               for d in json.loads(preflight.stdout)['diagnostics'])
     result = client(
         "exec", "--custom", str(config), "--protocol", "openvpn",
         "--custom-netns-name", f"reg_inline{index}", "--interface", "uplink",

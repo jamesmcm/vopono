@@ -106,6 +106,9 @@ pub fn collect(
             None,
         ));
     }
+    if matches!(protocol, Some(Protocol::Wireguard | Protocol::AmneziaWG)) {
+        diagnostics.extend(vopono_core::diagnostics::host::apparmor_diagnostics());
+    }
     anyhow::Error::new(LaunchFailure { diagnostics, code })
 }
 
