@@ -2704,7 +2704,7 @@ checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
 
 [[package]]
 name = "vopono"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "bs58",
@@ -2730,7 +2730,7 @@ dependencies = [
 
 [[package]]
 name = "vopono_core"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64",

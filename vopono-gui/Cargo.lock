@@ -4995,7 +4995,7 @@ dependencies = [
 
 [[package]]
 name = "vopono_core"
-version = "1.0.3"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
