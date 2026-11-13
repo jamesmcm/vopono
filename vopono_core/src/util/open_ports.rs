@@ -40,20 +40,42 @@ pub fn open_ports(
                                 "ACCEPT",
                             ],
                         )?;
-                        NetworkNamespace::exec(
-                            &netns.name,
-                            &[
-                                iptables_cmd,
-                                "-I",
-                                "OUTPUT",
-                                "-p",
-                                protocol,
-                                "--sport",
-                                port_str,
-                                "-j",
-                                "ACCEPT",
-                            ],
-                        )?;
+                        let ips = netns.veth_pair_ips.as_ref().and_then(|ips| {
+                            if *iptables_cmd == "iptables" {
+                                ips.ipv4.as_ref()
+                            } else {
+                                ips.ipv6.as_ref()
+                            }
+                        });
+                        if let (Some(veth), Some(ips)) = (&netns.veth_pair, ips) {
+                            // Only host-relay replies need an exception outside
+                            // the VPN. A source port alone lets applications bind
+                            // that port and originate arbitrary plaintext traffic.
+                            NetworkNamespace::exec(
+                                &netns.name,
+                                &[
+                                    iptables_cmd,
+                                    "-I",
+                                    "OUTPUT",
+                                    "-o",
+                                    &veth.source,
+                                    "-s",
+                                    &ips.namespace_ip.to_string(),
+                                    "-p",
+                                    protocol,
+                                    "--sport",
+                                    port_str,
+                                    "-m",
+                                    "conntrack",
+                                    "--ctstate",
+                                    "ESTABLISHED,RELATED",
+                                    "--ctdir",
+                                    "REPLY",
+                                    "-j",
+                                    "ACCEPT",
+                                ],
+                            )?;
+                        }
                     }
                 }
             }
@@ -70,10 +92,40 @@ pub fn open_ports(
                     input.extend([protocol, "dport", port_str, "counter", "accept"]);
                     NetworkNamespace::exec(&netns.name, &input)?;
 
-                    let mut output = vec!["nft", "insert", "rule", "inet", &netns.name, "output"];
-                    output.extend(family.iter().copied());
-                    output.extend([protocol, "sport", port_str, "counter", "accept"]);
-                    NetworkNamespace::exec(&netns.name, &output)?;
+                    if let (Some(veth), Some(ips)) = (&netns.veth_pair, &netns.veth_pair_ips) {
+                        for (family, ips) in [("ip", ips.ipv4.as_ref()), ("ip6", ips.ipv6.as_ref())]
+                        {
+                            if let Some(ips) = ips {
+                                NetworkNamespace::exec(
+                                    &netns.name,
+                                    &[
+                                        "nft",
+                                        "insert",
+                                        "rule",
+                                        "inet",
+                                        &netns.name,
+                                        "output",
+                                        "oifname",
+                                        &veth.source,
+                                        family,
+                                        "saddr",
+                                        &ips.namespace_ip.to_string(),
+                                        protocol,
+                                        "sport",
+                                        port_str,
+                                        "ct",
+                                        "direction",
+                                        "reply",
+                                        "ct",
+                                        "state",
+                                        "established,related",
+                                        "counter",
+                                        "accept",
+                                    ],
+                                )?;
+                            }
+                        }
+                    }
                 }
             }
         }

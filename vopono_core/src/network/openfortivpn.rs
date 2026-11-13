@@ -213,7 +213,15 @@ impl OpenFortiVpn {
 
             let dns = get_dns(&buffer)?;
             let suffixes: Vec<&str> = dns.1.iter().map(|x| x.as_str()).collect();
-            netns.dns_config(&dns.0, &suffixes, hosts_entries, allow_host_access)?;
+            let interface = super::firewall::wait_for_tunnel_interface(&netns.name, &["ppp"], 1)?
+                .context("Could not identify the OpenFortiVPN DNS egress interface")?;
+            netns.dns_config_with_interface(
+                &dns.0,
+                &suffixes,
+                hosts_entries,
+                allow_host_access,
+                Some(&interface),
+            )?;
             if let Some(opens) = open_ports {
                 crate::util::open_ports(netns, opens.as_slice(), firewall)?;
             }

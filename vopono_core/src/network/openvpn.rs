@@ -14,6 +14,7 @@ use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 const OPENVPN_STARTUP_TIMEOUT: Duration = Duration::from_secs(120);
+const OPENVPN_FWMARK: &str = "51821";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenVpn {
@@ -96,6 +97,10 @@ impl OpenVpn {
             "dns-updown",
             "--dns-updown",
             "disable",
+            // Only OpenVPN's encrypted transport may use the endpoint
+            // exception. Applications cannot set this socket mark.
+            "--mark",
+            OPENVPN_FWMARK,
         ])
         .to_vec();
 
@@ -415,6 +420,8 @@ pub fn killswitch(
 ) -> anyhow::Result<()> {
     debug!("Setting OpenVPN killswitch....");
     let endpoints = resolve_remote_endpoints(remotes, disable_ipv6)?;
+    let tunnel_interface = super::firewall::wait_for_tunnel_interface(&netns.name, &["tun"], 1)?
+        .context("Could not identify the OpenVPN tunnel interface")?;
 
     match firewall {
         Firewall::IpTables => {
@@ -449,7 +456,15 @@ pub fn killswitch(
                 )?;
                 NetworkNamespace::exec(
                     &netns.name,
-                    &[ipcmd, "-A", "INPUT", "-i", "tun+", "-j", "ACCEPT"],
+                    &[
+                        ipcmd,
+                        "-A",
+                        "INPUT",
+                        "-i",
+                        &tunnel_interface,
+                        "-j",
+                        "ACCEPT",
+                    ],
                 )?;
                 NetworkNamespace::exec(
                     &netns.name,
@@ -483,6 +498,10 @@ pub fn killswitch(
                             address.as_str(),
                             "--dport",
                             port.as_str(),
+                            "-m",
+                            "mark",
+                            "--mark",
+                            OPENVPN_FWMARK,
                             "-j",
                             "ACCEPT",
                         ],
@@ -495,7 +514,15 @@ pub fn killswitch(
 
                 NetworkNamespace::exec(
                     &netns.name,
-                    &[ipcmd, "-A", "OUTPUT", "-o", "tun+", "-j", "ACCEPT"],
+                    &[
+                        ipcmd,
+                        "-A",
+                        "OUTPUT",
+                        "-o",
+                        &tunnel_interface,
+                        "-j",
+                        "ACCEPT",
+                    ],
                 )?;
                 let reject_type = if *ipcmd == "ip6tables" {
                     "icmp6-no-route"
@@ -546,7 +573,7 @@ pub fn killswitch(
                     &netns.name,
                     "input",
                     "iifname",
-                    "\"tun*\"",
+                    &tunnel_interface,
                     "counter",
                     "accept",
                 ],
@@ -574,6 +601,9 @@ pub fn killswitch(
                         "inet",
                         &netns.name,
                         "output",
+                        "meta",
+                        "mark",
+                        OPENVPN_FWMARK,
                         address_family,
                         "daddr",
                         address.as_str(),
@@ -596,7 +626,7 @@ pub fn killswitch(
                     &netns.name,
                     "output",
                     "oifname",
-                    "\"tun*\"",
+                    &tunnel_interface,
                     "counter",
                     "accept",
                 ],

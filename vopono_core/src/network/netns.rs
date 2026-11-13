@@ -31,6 +31,7 @@ use std::fs::File;
 use std::io::Write;
 use std::net::IpAddr;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -627,12 +628,25 @@ impl ManagedNamespaceGuard {
             sudo_string.unwrap_or_else(|| String::from("")),
             command.join(" ")
         );
+        if user.is_some() {
+            // Provider callbacks run as the authenticated user, with the
+            // same privilege-gain restriction as namespace applications.
+            unsafe {
+                handle.pre_exec(|| {
+                    nix::sys::prctl::set_no_new_privs()?;
+                    Ok(())
+                });
+            }
+        }
         let handle = handle.args(command).spawn()?;
         Ok(handle)
     }
 
     pub fn exec(netns_name: &str, command: &[&str]) -> anyhow::Result<()> {
-        Self::exec_no_block(netns_name, command, None, None, false, false, false, None)?.wait()?;
+        let status =
+            Self::exec_no_block(netns_name, command, None, None, false, false, false, None)?
+                .wait()?;
+        anyhow::ensure!(status.success(), "Namespace command failed ({status})");
         Ok(())
     }
 
@@ -1294,9 +1308,10 @@ impl ManagedNamespaceGuard {
         add rule inet {ns_name} input iifname \"lo\" accept
         add rule inet {ns_name} output oifname \"lo\" accept
 
-        # Allow return traffic for established connections
+        # Input replies are safe to accept. Output must still traverse the
+        # protocol kill switch: established app flows can otherwise escape
+        # over the veth when a tunnel route disappears during recovery.
         add rule inet {ns_name} input ct state related,established accept
-        add rule inet {ns_name} output ct state related,established accept
         ",
             ns_name = self.name
         );

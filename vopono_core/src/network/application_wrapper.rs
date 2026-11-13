@@ -464,6 +464,15 @@ impl ApplicationWrapper {
             _ => {}
         }
 
+        // A setuid/file-capability helper must not give an application
+        // CAP_NET_ADMIN or CAP_NET_RAW inside this namespace. Either can
+        // defeat the firewall (including forging transport socket marks).
+        unsafe {
+            handle.pre_exec(|| {
+                nix::sys::prctl::set_no_new_privs()?;
+                Ok(())
+            });
+        }
         let child = handle.spawn()?;
         Ok((child, etc_overlay))
     }

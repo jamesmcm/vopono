@@ -1598,6 +1598,22 @@ new IP may still require an explicit
 reconnect. Attempts are exponentially spaced, with at most five
 per continuous outage; a changed host route or endpoint resets that budget.
 The existing application keeps running and the kill switch remains installed.
+Applications cannot gain privileges from setuid binaries or file capabilities
+(`no_new_privs`); helpers that require that elevation must be launched separately.
+WireGuard/OpenVPN transport exceptions require privileged VPN socket marks;
+WARP/OpenConnect/OpenFortiVPN endpoint exceptions require root-owned sockets. Ordinary application traffic,
+including established connections, must still pass the kill switch when tunnel
+routes or devices disappear. Opened ports permit incoming connections and their
+replies, rather than authorizing new outbound connections from those source ports.
+
+After upgrading from a build with older firewall rules, stop and recreate existing
+namespaces to install the updated policy. Restarting the daemon preserves their
+existing kernel firewall rules. These protections apply with the kill switch
+enabled; explicit routing exceptions such as `--open-hosts`, `--allow-host-access`
+and host forwarding permit the requested traffic. A network namespace does not
+sandbox host IPC, files or privileged applications: an application that delegates
+networking to a process outside the namespace can use that process's network.
+
 Recovery never provisions a device or rotates keys. Retired servers and revoked
 credentials still require diagnosis or an explicit sync.
 Monitoring is selected when the daemon first takes ownership of a namespace;
@@ -1889,6 +1905,12 @@ OpenVPN TLS peers cover dual-stack connectivity, blocked underlay traffic,
 shared application lifetime, daemon restart/crash, relay and lease renewal,
 resource limits, DNS endpoint rotation, host interface replacement, OpenVPN
 process recovery, authentication/TLS failures and host DNS preservation.
+Unprivileged applications continuously send identifiable TCP/UDP payloads while
+raw packet capture checks the host veth for plaintext during route/device loss,
+endpoint rotation and recovery with both firewall backends. A positive control
+verifies that the capture detects a leak; additional checks cover source-port
+bypasses, bootstrap DNS, file capabilities, failed kill-switch installation and
+failed endpoint-firewall repair followed by retry.
 The suite also checks stop/name reuse, rejected OpenVPN directives and
 failed-setup cleanup, plus MCP jobs, profile restrictions, output limits,
 literal argv, timeouts, descendant cancellation and client-disconnect cleanup.

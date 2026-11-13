@@ -16,7 +16,7 @@ use std::str::FromStr;
 use tempfile::NamedTempFile;
 
 const DEFAULT_PERSISTENT_KEEPALIVE_SECS: &str = "25";
-const WIREGUARD_FWMARK: &str = "51820";
+pub(crate) const WIREGUARD_FWMARK: &str = "51820";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Wireguard {
@@ -208,6 +208,9 @@ impl Wireguard {
                     "inet",
                     &namespace.name,
                     "output",
+                    "meta",
+                    "mark",
+                    WIREGUARD_FWMARK,
                     ip_family,
                     "daddr",
                     &peer_ip_str,

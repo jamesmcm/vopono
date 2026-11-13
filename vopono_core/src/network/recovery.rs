@@ -226,6 +226,10 @@ fn iptables_endpoint_rule_args(ip: IpAddr, port: u16, insert: bool) -> (String, 
             &ip.to_string(),
             "--dport",
             &port.to_string(),
+            "-m",
+            "mark",
+            "--mark",
+            super::wireguard::WIREGUARD_FWMARK,
             "-j",
             "ACCEPT",
         ]
@@ -296,7 +300,8 @@ fn endpoint_rule(name: &str, ip: IpAddr, port: u16) -> anyhow::Result<()> {
             ));
         }
     }
-    batch.push_str(&format!("insert rule inet {name} output {family} daddr {ip} udp dport {port} accept comment \"vopono-recovery-endpoint\"\ninsert rule inet {name} input {family} saddr {ip} udp sport {port} accept comment \"vopono-recovery-endpoint\"\n"));
+    let mark = super::wireguard::WIREGUARD_FWMARK;
+    batch.push_str(&format!("insert rule inet {name} output meta mark {mark} {family} daddr {ip} udp dport {port} accept comment \"vopono-recovery-endpoint\"\ninsert rule inet {name} input {family} saddr {ip} udp sport {port} accept comment \"vopono-recovery-endpoint\"\n"));
     let mut file = tempfile::NamedTempFile::new_in("/run")?;
     file.write_all(batch.as_bytes())?;
     checked(
@@ -325,6 +330,7 @@ mod tests {
         assert_eq!(&args[..3], ["-I", "OUTPUT", "1"]);
         assert!(args.windows(2).any(|pair| pair == ["-d", "192.0.2.10"]));
         assert!(args.windows(2).any(|pair| pair == ["--dport", "51820"]));
+        assert!(args.windows(2).any(|pair| pair == ["--mark", "51820"]));
 
         let (command, args) = iptables_endpoint_rule_args(v6, 51820, false);
         assert_eq!(command, "ip6tables");

@@ -833,11 +833,15 @@ fn run_protocol_in_netns(
                 })
                 .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
-            ns.dns_config(
+            // Bootstrap DNS is needed before the VPN's routes exist. Do not
+            // install a lasting, unrestricted DNS destination exception:
+            // applications start only after the tunnel policy is installed.
+            ns.dns_config_with_interface(
                 &dns,
                 &[],
                 parsed_command.hosts.as_ref(),
                 parsed_command.allow_host_access,
+                (!parsed_command.no_killswitch).then_some("lo"),
             )?;
             let config_path = config_file
                 .as_ref()
@@ -884,12 +888,24 @@ fn run_protocol_in_netns(
                         &dns
                     };
                 ns.preserve_dns_files_for_reconfiguration();
+                let dns_interface = if parsed_command.no_killswitch {
+                    None
+                } else {
+                    Some(
+                        vopono_core::network::firewall::wait_for_tunnel_interface(
+                            &ns.name,
+                            &["tun"],
+                            1,
+                        )?
+                        .context("Could not identify the OpenVPN DNS egress interface")?,
+                    )
+                };
                 ns.dns_config_with_interface(
                     effective_dns,
                     &[],
                     parsed_command.hosts.as_ref(),
                     parsed_command.allow_host_access,
-                    (!parsed_command.no_killswitch).then_some("tun+"),
+                    dns_interface.as_deref(),
                 )?;
             }
         }
@@ -938,11 +954,12 @@ fn run_protocol_in_netns(
                 .dns
                 .clone()
                 .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
-            ns.dns_config(
+            ns.dns_config_with_interface(
                 &dns,
                 &[],
                 parsed_command.hosts.as_ref(),
                 parsed_command.allow_host_access,
+                (!parsed_command.no_killswitch).then_some("lo"),
             )?;
             ns.run_openconnect(
                 config_file
@@ -991,11 +1008,12 @@ fn run_protocol_in_netns(
                 .dns
                 .clone()
                 .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
-            ns.dns_config(
+            ns.dns_config_with_interface(
                 &dns,
                 &[],
                 parsed_command.hosts.as_ref(),
                 parsed_command.allow_host_access,
+                (!parsed_command.no_killswitch).then_some("lo"),
             )?;
             ns.run_ssh_proxy(
                 &parsed_command.server,

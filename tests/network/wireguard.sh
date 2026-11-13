@@ -174,6 +174,7 @@ python3 "$test_dir/capacity.py" "$binary" "$scratch" "$user"
 python3 "$test_dir/forwarding.py" "$binary" "$scratch" "$user"
 python3 "$test_dir/openvpn.py" "$binary" "$scratch" "$user"
 python3 "$test_dir/mcp.py" "$binary" "$scratch" "$user"
+python3 "$test_dir/isolation.py" "$binary" "$scratch" "$user"
 python3 "$test_dir/recovery.py" "$binary" "$scratch" "$user"
 # Failed setup must release its veth, namespace and ownership record as well.
 [[ $(ip netns list | wc -l) == 1 ]]
