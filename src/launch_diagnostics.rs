@@ -8,10 +8,14 @@ use vopono_core::diagnostics::{Diagnostic, DiagnosticCode as Code, DiagnosticSta
 #[derive(Debug)]
 pub struct LaunchFailure {
     pub diagnostics: Vec<Diagnostic>,
+    pub original: Option<anyhow::Error>,
     pub code: crate::errors::ErrorCode,
 }
 impl std::fmt::Display for LaunchFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(error) = &self.original {
+            writeln!(formatter, "{error:#}")?;
+        }
         for (index, diagnostic) in self.diagnostics.iter().enumerate() {
             if index > 0 {
                 writeln!(formatter)?;
@@ -34,39 +38,26 @@ pub fn collect(
     error: anyhow::Error,
     path: Option<&Path>,
     protocol: Option<&Protocol>,
+    openvpn_auth: Option<&Path>,
 ) -> anyhow::Error {
     if error.downcast_ref::<LaunchFailure>().is_some() {
         return error;
     }
     let setup = error.downcast_ref::<vopono_core::diagnostics::SetupError>();
-    let typed = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<crate::errors::CliError>());
-    let code = setup
-        .map(crate::errors::ErrorCode::from_setup)
-        .or_else(|| typed.map(crate::errors::CliError::code))
-        .unwrap_or(crate::errors::ErrorCode::VpnConnectionFailed);
-    let primary = error.downcast_ref::<Diagnostic>().cloned().unwrap_or_else(|| {
-        // Only typed local failures can supply their explanation. Preserve a
-        // typed CLI category without copying its potentially tainted context.
-        let message = setup.map(ToString::to_string).unwrap_or_else(|| match code {
-            crate::errors::ErrorCode::ProtocolNotSupported => "Provider does not support the selected protocol".into(),
-            crate::errors::ErrorCode::ServerNotFound => "No synchronized configuration matches the selected server".into(),
-            crate::errors::ErrorCode::NamespaceNotFound => "The requested namespace does not exist".into(),
-            _ => "VPN setup failed; authentication and protection have not been established".into(),
-        });
-        Diagnostic::new(
-            if setup.is_none() && typed.is_none() && matches!(protocol, Some(Protocol::Wireguard | Protocol::AmneziaWG)) {
-                Code::TunnelHandshake
-            } else { Code::ProviderConfig },
-            State::Fail, &message,
-            Some("Inspect the diagnostic evidence below; use vopono doctor for additional checks"),
-        )
+    let primary = error.downcast_ref::<Diagnostic>().cloned().or_else(|| {
+        setup.map(|setup| {
+            Diagnostic::new(Code::ProviderConfig, State::Fail, &setup.to_string(), None)
+        })
     });
-    let mut diagnostics = vec![primary];
+    if primary.is_none() && (path.is_none() || protocol.is_none()) {
+        return error;
+    }
+    let code = crate::errors::ErrorCode::from_anyhow(&error);
+    let original = primary.is_none().then_some(error);
+    let mut diagnostics: Vec<_> = primary.into_iter().collect();
     let deadline = Instant::now() + Duration::from_secs(2);
     if let (Some(path), Some(protocol)) = (path, protocol) {
-        match vopono_core::diagnostics::validate_config(path, protocol) {
+        match vopono_core::diagnostics::validate_config_for_launch(path, protocol, openvpn_auth) {
             Ok(endpoints) => {
                 diagnostics.push(Diagnostic::new(
                     Code::ProviderConfig,
@@ -109,7 +100,11 @@ pub fn collect(
     if matches!(protocol, Some(Protocol::Wireguard | Protocol::AmneziaWG)) {
         diagnostics.extend(vopono_core::diagnostics::host::apparmor_diagnostics());
     }
-    anyhow::Error::new(LaunchFailure { diagnostics, code })
+    anyhow::Error::new(LaunchFailure {
+        diagnostics,
+        original,
+        code,
+    })
 }
 
 pub fn command_failure(command: &ExecCommand, error: anyhow::Error) -> anyhow::Error {
@@ -125,7 +120,12 @@ pub fn command_failure(command: &ExecCommand, error: anyhow::Error) -> anyhow::E
     let protocol = connection
         .as_ref()
         .and_then(|connection| connection.detected_protocol().ok());
-    collect(error, path, protocol.as_ref())
+    collect(
+        error,
+        path,
+        protocol.as_ref(),
+        command.auth_user_pass.as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -169,6 +169,7 @@ mod tests {
                 anyhow::anyhow!("private context NEVER_SHARE").context(failure),
                 None,
                 None,
+                None,
             );
             assert_eq!(ErrorCode::from_anyhow(&error), expected);
             assert!(error.to_string().contains(message));
@@ -179,16 +180,40 @@ mod tests {
                     .contains("NEVER_SHARE")
             );
         }
+    }
+
+    #[test]
+    fn missing_server_prefix_keeps_the_lookup_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let error =
+            vopono_core::util::get_config_from_alias(directory.path(), "india").unwrap_err();
+        let error = collect(error, None, Some(&Protocol::Wireguard), None);
+        let message = "Could not find config matching server prefix \"india\"";
+        assert_eq!(format!("{error:#}"), message);
+        let value = crate::errors::error_json_value(&error);
+        assert_eq!(value["error"]["code"], "server_not_found");
+        assert_eq!(value["error"]["message"], message);
+    }
+
+    #[test]
+    fn untyped_failures_keep_their_cause_alongside_preflight_evidence() {
+        let config = tempfile::NamedTempFile::new().unwrap();
         let error = collect(
-            anyhow::anyhow!("AUTH_FAILED token=NEVER_SHARE"),
+            anyhow::anyhow!("Permission denied").context("Failed to apply WireGuard routes"),
+            Some(config.path()),
+            Some(&Protocol::Wireguard),
             None,
-            Some(&Protocol::OpenVpn),
         );
         assert!(
-            !crate::errors::error_json_value(&error)
-                .to_string()
-                .contains("NEVER_SHARE")
+            format!("{error:#}").starts_with("Failed to apply WireGuard routes: Permission denied")
         );
+        let value = crate::errors::error_json_value(&error);
+        assert_eq!(
+            value["error"]["message"],
+            "Failed to apply WireGuard routes"
+        );
+        assert_eq!(value["error"]["context"][0], "Permission denied");
+        assert_eq!(value["error"]["diagnostics"][0]["code"], "provider_config");
     }
 
     #[test]
@@ -209,6 +234,7 @@ mod tests {
             anyhow::anyhow!("AUTH_FAILED token=NEVER_SHARE_THIS").context(diagnostic),
             Some(config.path()),
             Some(&Protocol::Wireguard),
+            None,
         );
         let report = error.downcast_ref::<LaunchFailure>().unwrap();
         assert_eq!(report.diagnostics[0].code, Code::TunnelAuthentication);

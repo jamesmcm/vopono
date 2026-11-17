@@ -1,6 +1,7 @@
 //! Freeze daemon OpenVPN input into a private runtime directory. Configuration
 //! options are an execution/file-I/O language, not merely network settings.
 use anyhow::{Context, ensure};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Bound the amount of attacker-controlled data copied into `/run`.
@@ -44,6 +45,7 @@ fn allowed(option: &str) -> bool {
             | "lport"
             | "port"
             | "rport"
+            | "disable-dco"
             | "persist-key"
             | "persist-tun"
             | "persist-remote-ip"
@@ -160,50 +162,62 @@ pub(crate) fn snapshot(
     runtime: &Path,
     auth: Option<&Path>,
 ) -> anyhow::Result<(PathBuf, Option<PathBuf>)> {
-    let raw = crate::util::owner_write::read_file_as_config_owner(config)?;
+    let raw = crate::util::owner_write::read_file_as_config_owner(config)
+        .context("Could not load OpenVPN profile")?;
     let content = std::str::from_utf8(&raw).context("OpenVPN config must be UTF-8")?;
     let parent = config.parent().unwrap_or(Path::new("."));
     let mut referenced_files = 0usize;
     let mut referenced_bytes = 0usize;
-    let safe = sanitize(content, |reference, index| {
-        let bytes = crate::util::owner_write::read_file_as_config_owner(&parent.join(reference))?;
+    let safe = sanitize_with_auth(content, auth.is_some(), |reference, index| {
+        let bytes = crate::util::owner_write::read_file_as_config_owner(&parent.join(reference))
+            .context("Could not load a file referenced by the OpenVPN profile")?;
         account_reference(&bytes, &mut referenced_files, &mut referenced_bytes)?;
         let path = runtime.join(format!("input-{index}"));
-        std::fs::write(&path, bytes)?;
+        crate::util::create_private_file(&path)?.write_all(&bytes)?;
         Ok(path)
     })?;
     let path = runtime.join("client.ovpn");
-    std::fs::write(&path, safe)?;
+    crate::util::create_private_file(&path)?.write_all(safe.as_bytes())?;
     let auth = auth
         .map(|auth| -> anyhow::Result<_> {
             let path = runtime.join("auth.txt");
-            std::fs::write(
-                &path,
-                crate::util::owner_write::read_file_as_config_owner(auth)?,
-            )?;
+            let bytes = crate::util::owner_write::read_file_as_config_owner(auth)
+                .context("Could not load the selected OpenVPN auth file")?;
+            crate::util::create_private_file(&path)?.write_all(&bytes)?;
             Ok(path)
         })
         .transpose()?;
     Ok((path, auth))
 }
 
-pub(crate) fn validate(content: &str, config: &Path) -> anyhow::Result<()> {
+pub(crate) fn validate(content: &str, config: &Path, auth: Option<&Path>) -> anyhow::Result<()> {
     let mut referenced_files = 0usize;
     let mut referenced_bytes = 0usize;
-    sanitize(content, |reference, _| {
+    sanitize_with_auth(content, auth.is_some(), |reference, _| {
         let path = config.parent().unwrap_or(Path::new(".")).join(reference);
         let bytes = crate::util::owner_write::read_file_as_config_owner(&path)?;
         account_reference(&bytes, &mut referenced_files, &mut referenced_bytes)?;
         Ok(path)
     })?;
+    if let Some(auth) = auth {
+        crate::util::owner_write::read_file_as_config_owner(auth)
+            .context("Could not load the selected OpenVPN auth file")?;
+    }
     Ok(())
 }
 
 /// A single syntax interpretation shared by preflight, freezing and remote
 /// extraction. Inline credentials remain opaque; connection blocks are scopes.
 enum ConfigLine<'a> {
-    Directive { raw: &'a str, fields: Vec<String> },
-    Inline(&'a str),
+    Directive {
+        raw: &'a str,
+        fields: Vec<String>,
+        number: usize,
+    },
+    Inline {
+        raw: &'a str,
+        tag: &'a str,
+    },
     ConnectionStart,
     ConnectionEnd,
 }
@@ -216,7 +230,9 @@ fn parse_lines(content: &str) -> anyhow::Result<Vec<ConfigLine<'_>>> {
     let mut output = Vec::new();
     let mut inline: Option<&str> = None;
     let mut connection = false;
-    for line in content.lines().map(str::trim) {
+    for (index, raw) in content.lines().enumerate() {
+        let number = index + 1;
+        let line = raw.trim();
         if let Some(tag) = inline {
             // OpenVPN recognizes closing-tag prefixes, including after reading
             // a long line in chunks. Reject all embedded tags and suffixes.
@@ -225,7 +241,7 @@ fn parse_lines(content: &str) -> anyhow::Result<Vec<ConfigLine<'_>>> {
                 ensure!(line == closing, "Ambiguous OpenVPN inline closing tag");
                 inline = None;
             }
-            output.push(ConfigLine::Inline(line));
+            output.push(ConfigLine::Inline { raw: line, tag });
             continue;
         }
         if line.is_empty() || line.starts_with(['#', ';']) {
@@ -246,12 +262,16 @@ fn parse_lines(content: &str) -> anyhow::Result<Vec<ConfigLine<'_>>> {
                 .context("Malformed inline OpenVPN block")?;
             ensure!(inline_file(tag), "Unsupported inline OpenVPN block");
             inline = Some(tag);
-            output.push(ConfigLine::Inline(line));
+            output.push(ConfigLine::Inline { raw: line, tag });
         } else {
             let fields = shell_words::split(line)
-                .map_err(|_| anyhow::anyhow!("Malformed OpenVPN directive"))?;
+                .map_err(|_| anyhow::anyhow!("Malformed OpenVPN directive on line {number}"))?;
             ensure!(!fields.is_empty(), "Empty OpenVPN directive");
-            output.push(ConfigLine::Directive { raw: line, fields });
+            output.push(ConfigLine::Directive {
+                raw: line,
+                fields,
+                number,
+            });
         }
     }
     ensure!(inline.is_none() && !connection, "Unclosed OpenVPN block");
@@ -273,7 +293,7 @@ pub(crate) fn endpoints(content: &str) -> anyhow::Result<Vec<crate::diagnostics:
     let mut current = 0;
     for line in parse_lines(content)? {
         let fields = match line {
-            ConfigLine::Inline(_) => continue,
+            ConfigLine::Inline { .. } => continue,
             ConfigLine::ConnectionStart => {
                 groups.push(Group {
                     tcp: groups[0].tcp,
@@ -354,17 +374,28 @@ fn valid_proto(value: &str) -> bool {
     .contains(&value)
 }
 
+#[cfg(test)]
 fn sanitize(
     content: &str,
+    copy: impl FnMut(&str, usize) -> anyhow::Result<PathBuf>,
+) -> anyhow::Result<String> {
+    sanitize_with_auth(content, false, copy)
+}
+
+fn sanitize_with_auth(
+    content: &str,
+    override_auth: bool,
     mut copy: impl FnMut(&str, usize) -> anyhow::Result<PathBuf>,
 ) -> anyhow::Result<String> {
     let mut output = String::new();
     let mut file_index = 0;
     for entry in parse_lines(content)? {
-        let (line, fields) = match entry {
-            ConfigLine::Inline(line) => {
-                output.push_str(line);
-                output.push('\n');
+        let (line, fields, number) = match entry {
+            ConfigLine::Inline { raw, tag } => {
+                if !override_auth || tag != "auth-user-pass" {
+                    output.push_str(raw);
+                    output.push('\n');
+                }
                 continue;
             }
             ConfigLine::ConnectionStart => {
@@ -375,9 +406,16 @@ fn sanitize(
                 output.push_str("</connection>\n");
                 continue;
             }
-            ConfigLine::Directive { raw, fields } => (raw, fields),
+            ConfigLine::Directive {
+                raw,
+                fields,
+                number,
+            } => (raw, fields, number),
         };
         let option = fields[0].trim_start_matches("--");
+        if override_auth && option == "auth-user-pass" {
+            continue;
+        }
         if option == "dns-updown" {
             ensure!(
                 fields.len() == 2 && fields[1] == "disable",
@@ -461,10 +499,18 @@ fn sanitize(
                 "Proxy authentication files are not supported in daemon profiles"
             );
         } else {
-            ensure!(
-                allowed(option),
-                "Unsupported or unsafe OpenVPN directive in daemon configuration; plugins, scripts, nested configs and file outputs are disabled"
-            );
+            if !allowed(option) {
+                ensure!(
+                    option.len() <= 48
+                        && option
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                    "Invalid OpenVPN directive name on line {number}"
+                );
+                anyhow::bail!(
+                    "OpenVPN directive {option:?} on line {number} is not supported by the daemon"
+                );
+            }
         }
         output.push_str(line);
         output.push('\n');
@@ -475,6 +521,14 @@ fn sanitize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_override_keeps_safe_options_and_omits_superseded_credentials() {
+        let profile = "client\ndisable-dco\nauth-user-pass missing.txt\n\
+                       <auth-user-pass>\ninline-user\ninline-password\n</auth-user-pass>\n";
+        let safe = sanitize_with_auth(profile, true, |_, _| unreachable!()).unwrap();
+        assert_eq!(safe, "client\ndisable-dco\n");
+    }
     #[test]
     fn dns_updown_only_permits_disabling_scripts() {
         assert!(sanitize("dns-updown disable", |_, _| unreachable!()).is_ok());

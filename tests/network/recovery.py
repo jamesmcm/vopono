@@ -107,7 +107,9 @@ def failed_repair_is_isolated():
     isolated()
     health = next(ns['health'] for ns in json.loads(client('status', '--json').stdout)['namespaces']
                   if ns['id'] == name)
-    return rejected.exists() and 'repair failed' in (health['last_error'] or '')
+    error = (health or {}).get('last_error') or ''
+    return (rejected.exists() and 'nft failed during network repair' in error
+            and 'exit status: 42' in error)
 
 
 wait_for(failed_repair_is_isolated)

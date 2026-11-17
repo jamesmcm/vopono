@@ -90,7 +90,16 @@ impl Job {
                 } else {
                     "failed"
                 };
-                state.error = serde_json::from_slice(&bytes).ok();
+                state.error = serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .map(|mut error| {
+                        // Preserve the existing job-level message alongside the
+                        // full daemon error document and its diagnostic context.
+                        if let Some(message) = error.pointer("/error/message").cloned() {
+                            error["message"] = message;
+                        }
+                        error
+                    });
             }
             Ok(DaemonResponse::Error(message)) => {
                 state.phase = "failed";

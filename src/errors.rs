@@ -168,7 +168,11 @@ impl ErrorCode {
 /// The top-level message plus any additional context chain entries are kept so
 /// frontends do not lose `anyhow` context.
 pub fn error_json_value(error: &Error) -> serde_json::Value {
-    let context: Vec<String> = error
+    let report = error.downcast_ref::<crate::launch_diagnostics::LaunchFailure>();
+    let displayed_error = report
+        .and_then(|report| report.original.as_ref())
+        .unwrap_or(error);
+    let context: Vec<String> = displayed_error
         .chain()
         .skip(1)
         .map(|cause| cause.to_string())
@@ -178,7 +182,7 @@ pub fn error_json_value(error: &Error) -> serde_json::Value {
         "version": crate::api::SCHEMA_VERSION,
         "error": {
             "code": ErrorCode::from_anyhow(error),
-            "message": error.to_string(),
+            "message": displayed_error.to_string(),
             "context": context,
         }
     });
@@ -191,9 +195,8 @@ pub fn error_json_value(error: &Error) -> serde_json::Value {
         value["error"]["message"] = serde_json::json!(diagnostic.to_string());
         value["error"]["context"] = serde_json::json!([]);
     }
-    if let Some(report) = error.downcast_ref::<crate::launch_diagnostics::LaunchFailure>() {
+    if let Some(report) = report {
         value["error"]["diagnostics"] = serde_json::json!(report.diagnostics);
-        value["error"]["context"] = serde_json::json!([]);
     }
     value
 }

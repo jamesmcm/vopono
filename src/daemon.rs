@@ -765,24 +765,24 @@ fn handle_client(
             cmd,
             env: forwarded_env,
         } => {
-            let _execution_slot = EXECUTION_ADMISSION
-                .acquire(uid)
-                .context("Concurrent daemon execution limit reached")?;
-            drop(client_slot);
             // Receive stdin, stdout, stderr FDs via SCM_RIGHTS (exec only)
             let [client_stdin_fd, client_stdout_fd, client_stderr_fd] =
                 recv_fds_over_unix_socket(&conn)?;
             let mut client_fds = Some((client_stdin_fd, client_stdout_fd, client_stderr_fd));
-            // Execution sessions are intentionally long lived. The bounded
-            // timeout above is only for request and descriptor admission.
-            clear_socket_timeouts(&conn)?;
-
             // Decode the command payload from the JSON bytes carried by `DaemonRequest::Execute`.
             let mut exec_command: ExecCommand = serde_json::from_slice(&cmd)?;
             exec_command.user = Some(user.name);
             exec_command.group = Some(group.name);
             let json = exec_command.json;
             let execution = (|| -> anyhow::Result<()> {
+                // Read the execution request and its descriptors before refusing
+                // admission, so the client can receive the structured error.
+                let _execution_slot = EXECUTION_ADMISSION.acquire(uid).context(
+                    "Concurrent daemon execution limit reached; wait for a running command to exit",
+                )?;
+                drop(client_slot);
+                // Execution may wait for an application for an arbitrary duration.
+                clear_socket_timeouts(&conn)?;
                 crate::profiles::prepare(&mut exec_command)?;
                 let requested_application = exec_command.application.clone();
                 let silent = exec_command.silent;
@@ -802,14 +802,20 @@ fn handle_client(
                 // without spawning an application. The client learns the namespace
                 // name and exits; `vopono stop --namespace` tears it down later.
                 if exec_command.create_netns_only {
-                    let setup = crate::exec::setup_daemon_namespace_only(exec_command)?;
-                    let proxies = if !setup.parsed_command.no_proxy
-                        && !crate::namespace_sessions::contains(&setup.ns.name)
-                    {
-                        crate::exec::restore_host_proxies(
+                    let mut setup = crate::exec::setup_daemon_namespace_only(exec_command)?;
+                    let proxies = if !setup.parsed_command.no_proxy {
+                        match crate::exec::restore_host_proxies(
                             &setup.ns,
-                            &setup.ns.state.host_forwarded_ports,
-                        )?
+                            setup.parsed_command.forward.as_deref().unwrap_or_default(),
+                        ) {
+                            Ok(proxies) => proxies,
+                            Err(error) => {
+                                if crate::namespace_sessions::contains(&setup.ns.name) {
+                                    setup.ns.detach();
+                                }
+                                return Err(error);
+                            }
+                        }
                     } else {
                         Vec::new()
                     };
@@ -846,7 +852,7 @@ fn handle_client(
                 let (mut application, ns, host_proxies): (
                     vopono_core::network::application_wrapper::ApplicationWrapper,
                     vopono_core::network::netns::NetworkNamespace,
-                    Vec<crate::tcp_proxy::TcpProxy>,
+                    crate::exec::HostProxies,
                 );
                 let mut pty_master: Option<OwnedFd> = None;
                 if client_has_tty {

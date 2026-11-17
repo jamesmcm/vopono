@@ -2,7 +2,7 @@
 
 use std::{fs, net::IpAddr, path::PathBuf, str::FromStr};
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use clap::ValueEnum;
 use config::Config;
 use log::warn;
@@ -275,7 +275,10 @@ impl ArgsConfig {
                     .and_then(|s| PathBuf::from_str(s.as_ref()).ok())
             });
 
-        let application = if command.application.is_empty() && command.profile.is_some() {
+        let application = if !command.create_netns_only
+            && command.application.is_empty()
+            && command.profile.is_some()
+        {
             config
                 .get_string("application")
                 .map_err(|_| anyhow!("Named profile requires an application"))?
@@ -292,13 +295,7 @@ impl ArgsConfig {
             application
         } else {
             shellexpand::full(&application)
-                .map_err(|e| {
-                    anyhow!(
-                        "Shell expansion error for application: {:?}, error: {:?}",
-                        command.application,
-                        e
-                    )
-                })
+                .context("Failed to expand the application command")
                 .map(|c| c.to_string())?
         };
         let custom_netns_name = command_else_config_option!(custom_netns_name, command, config);
@@ -475,29 +472,73 @@ impl ArgsConfig {
             .ok()
             .filter(|v| fs::exists(v).unwrap_or(false));
 
-        let config_path = command.vopono_config.clone().or(default_config_path);
-
+        let mut config_path = command.vopono_config.clone().or(default_config_path);
         let mut vopono_config_settings_builder = config::Config::builder();
 
-        if let Some(path) = config_path.clone() {
+        if let Some(path) = &mut config_path {
             if vopono_core::util::is_daemon_mode() {
-                let bytes = vopono_core::util::owner_write::read_file_as_config_owner(&path)?;
-                let content =
-                    String::from_utf8(bytes).map_err(|_| anyhow!("Configuration must be UTF-8"))?;
+                use config::FileFormat;
+                const FORMATS: &[(&str, FileFormat)] = &[
+                    ("toml", FileFormat::Toml),
+                    ("json", FileFormat::Json),
+                    ("yaml", FileFormat::Yaml),
+                    ("yml", FileFormat::Yaml),
+                    ("ini", FileFormat::Ini),
+                    ("ron", FileFormat::Ron),
+                    ("json5", FileFormat::Json5),
+                ];
+                let format = if path.is_file() {
+                    FORMATS
+                        .iter()
+                        .find_map(|(ext, format)| {
+                            (path.extension().and_then(|ext| ext.to_str()) == Some(ext))
+                                .then_some(*format)
+                        })
+                        .with_context(|| {
+                            format!(
+                                "Unsupported vopono configuration format for {}",
+                                path.display()
+                            )
+                        })?
+                } else {
+                    let (found, format) = FORMATS
+                        .iter()
+                        .find_map(|(ext, format)| {
+                            let mut candidate = path.as_os_str().to_owned();
+                            candidate.push(format!(".{ext}"));
+                            let candidate = PathBuf::from(candidate);
+                            candidate.is_file().then_some((candidate, *format))
+                        })
+                        .with_context(|| {
+                            format!("Vopono configuration file {} was not found", path.display())
+                        })?;
+                    *path = found;
+                    format
+                };
+                let bytes = vopono_core::util::owner_write::read_file_as_config_owner(path)?;
+                let content = String::from_utf8(bytes).with_context(|| {
+                    format!("Vopono configuration {} must be UTF-8", path.display())
+                })?;
                 vopono_config_settings_builder = vopono_config_settings_builder
-                    .add_source(config::File::from_str(&content, config::FileFormat::Toml));
+                    .add_source(config::File::from_str(&content, format));
             } else {
                 vopono_config_settings_builder =
-                    vopono_config_settings_builder.add_source(config::File::from(path));
+                    vopono_config_settings_builder.add_source(config::File::from(path.clone()));
             }
         }
 
         let settings = vopono_config_settings_builder.build().map_err(|_| {
+            let path = config_path
+                .as_deref()
+                .unwrap_or_else(|| std::path::Path::new("config.toml"));
             anyhow::Error::new(vopono_core::diagnostics::Diagnostic::new(
                 vopono_core::diagnostics::DiagnosticCode::ProviderConfig,
                 vopono_core::diagnostics::DiagnosticState::Fail,
-                "Could not read or parse the vopono configuration file",
-                Some("Check the configuration path, permissions and TOML syntax"),
+                &format!(
+                    "Could not read or parse the vopono configuration file {}",
+                    path.display()
+                ),
+                Some("Check that the file is readable and its syntax matches the file extension"),
             ))
         })?;
         crate::profiles::select(settings, command.profile.as_deref())

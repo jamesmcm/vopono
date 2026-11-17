@@ -111,6 +111,7 @@ refused = refused_server.call('run_profile', profile='fixed')
 refusal = refused_server.finish(refused)
 assert refusal['state'] == 'failed', refusal
 assert 'execution limit' in refusal['error']['message'], refusal
+assert refusal['error']['message'] == refusal['error']['error']['message'], refusal
 refused_server.close()
 ctx.client('stop', 'namespace', admission_name, '--json')
 for occupant in occupants:

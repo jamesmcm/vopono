@@ -390,7 +390,8 @@ pub fn validated_user_owned_dir(path: &Path, uid: Uid) -> anyhow::Result<PathBuf
 /// Runs a separate executable so daemon threads never change process credentials.
 pub fn read_file_as_config_owner(path: &Path) -> anyhow::Result<Vec<u8>> {
     if !super::is_daemon_mode() {
-        return read_regular_file(path);
+        return read_regular_file(path)
+            .with_context(|| format!("Could not read {}", path.display()));
     }
     let (uid, gid) =
         super::config_owner_override().context("Missing authenticated config owner")?;
@@ -409,7 +410,7 @@ pub fn read_file_as_config_owner(path: &Path) -> anyhow::Result<Vec<u8>> {
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         command.pre_exec(move || {
             nix::unistd::initgroups(&name, gid)?;
             nix::unistd::setgid(gid)?;
@@ -420,7 +421,9 @@ pub fn read_file_as_config_owner(path: &Path) -> anyhow::Result<Vec<u8>> {
     };
     anyhow::ensure!(
         output.status.success(),
-        "Configuration file is not readable by its owner"
+        "Could not read configuration file {} as the connecting user: {}",
+        path.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
     );
     Ok(output.stdout)
 }

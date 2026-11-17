@@ -48,6 +48,8 @@ pub struct NamespaceConfig {
     pub host_env_vars: std::collections::HashMap<String, String>,
 }
 
+pub(crate) type HostProxies = Vec<(u16, TcpProxy)>;
+
 /// Daemon entry that allows selecting pipe mode and passing explicit stdio FDs.
 pub fn execute_as_daemon_with_stdio(
     command: ExecCommand,
@@ -55,7 +57,7 @@ pub fn execute_as_daemon_with_stdio(
     stdio_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
     take_controlling_tty: bool,
     forwarded_env: Option<std::collections::HashMap<String, String>>,
-) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace, Vec<TcpProxy>)> {
+) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace, HostProxies)> {
     let uiclient = CliClient {};
     let silent = command.silent;
     let NamespaceConfig {
@@ -104,15 +106,20 @@ pub fn execute_as_daemon_with_stdio(
 
     // Bind the host-side --forward relays before spawning the application so a
     // bind failure aborts the request instead of orphaning a running process.
-    let host_proxies = if crate::namespace_sessions::contains(&ns.name) {
-        Vec::new()
-    } else {
-        host_forward_proxies(
-            &ns,
-            parsed_command.forward.as_deref(),
-            parsed_command.no_proxy,
-            false,
-        )?
+    let host_proxies = match host_forward_proxies(
+        &ns,
+        parsed_command.forward.as_deref(),
+        parsed_command.no_proxy,
+        false,
+    ) {
+        Ok(proxies) => proxies,
+        Err(error) => {
+            let mut ns = ns;
+            if crate::namespace_sessions::contains(&ns.name) {
+                ns.detach();
+            }
+            return Err(error);
+        }
     };
 
     let ns = ns.write_lockfile(&parsed_command.application)?;
@@ -285,7 +292,11 @@ fn setup_namespace_inner(
                 .provider
                 .get_dyn_wireguard_provider()?
                 .wireguard_dir(),
-            _ => unreachable!(),
+            _ => Err(vopono_core::diagnostics::SetupError::ProtocolNotSupported {
+                provider: parsed_command.provider.clone(),
+                protocol: parsed_command.protocol.clone(),
+            }
+            .into()),
         }?;
         let missing_configs = !cdir.exists() || cdir.read_dir()?.next().is_none();
         if missing_configs {
@@ -494,6 +505,7 @@ fn setup_namespace_inner(
                         .as_deref()
                         .or(parsed_command.custom.as_deref()),
                     Some(&parsed_command.protocol),
+                    parsed_command.auth_user_pass.as_deref(),
                 )
             })?;
         ns.set_config_file(config_file);
@@ -574,17 +586,25 @@ fn host_forward_proxies(
     forward: Option<&[u16]>,
     no_proxy: bool,
     allow_privileged_ports: bool,
-) -> anyhow::Result<Vec<TcpProxy>> {
+) -> anyhow::Result<HostProxies> {
     if no_proxy {
         return Ok(Vec::new());
     }
-    let Some(f) = forward.filter(|f| !f.is_empty()) else {
+    let Some(forward) = forward.filter(|ports| !ports.is_empty()) else {
         return Ok(Vec::new());
     };
+    let retained = crate::namespace_sessions::relay_ports(&ns.name);
+    let mut ports = forward.to_vec();
+    ports.sort_unstable();
+    ports.dedup();
+    ports.retain(|port| !retained.contains(port));
     anyhow::ensure!(
-        f.len() <= MAX_HOST_FORWARD_PORTS,
-        "At most {MAX_HOST_FORWARD_PORTS} host-forwarded ports may be requested"
+        retained.len() + ports.len() <= MAX_HOST_FORWARD_PORTS,
+        "At most {MAX_HOST_FORWARD_PORTS} host-forwarded ports may be active per namespace"
     );
+    if ports.is_empty() {
+        return Ok(Vec::new());
+    }
     let namespace_ip = ns
         .veth_pair_ips
         .as_ref()
@@ -594,10 +614,17 @@ fn host_forward_proxies(
         .context("No IPv4 veth pair IP available for --forward")?
         .namespace_ip;
     let mut proxies = Vec::new();
-    for p in f {
-        validate_host_forward_port(*p, allow_privileged_ports)?;
-        debug!("Forwarding port: {}, {}", p, namespace_ip);
-        proxies.push(TcpProxy::new(*p, SocketAddr::new(namespace_ip, *p), false)?);
+    for port in ports {
+        validate_host_forward_port(port, allow_privileged_ports)?;
+        let target = SocketAddr::new(namespace_ip, port);
+        debug!("Forwarding port: {port}, {target}");
+        let proxy = TcpProxy::new(port, target, false).with_context(|| {
+            format!(
+                "Could not bind host TCP port {port} for namespace {}",
+                ns.name
+            )
+        })?;
+        proxies.push((port, proxy));
     }
     Ok(proxies)
 }
@@ -605,7 +632,7 @@ fn host_forward_proxies(
 pub(crate) fn restore_host_proxies(
     ns: &NetworkNamespace,
     ports: &[u16],
-) -> anyhow::Result<Vec<TcpProxy>> {
+) -> anyhow::Result<HostProxies> {
     host_forward_proxies(ns, Some(ports), false, false)
 }
 

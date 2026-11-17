@@ -61,7 +61,7 @@ class Context:
             raise KeyError(name)
         return result
 
-    def restart(self, abrupt=False):
+    def restart(self, abrupt=False, *, umask=-1):
         pid = json.loads(self.client('daemon', 'status', '--json').stdout)['pid']
         os.kill(pid, signal.SIGKILL if abrupt else signal.SIGTERM)
 
@@ -73,7 +73,7 @@ class Context:
         with (self.scratch / 'daemon.log').open('a') as log:
             daemon = subprocess.Popen([self.binary, 'daemon'], stdout=log,
                                       stderr=subprocess.STDOUT,
-                                      env={**os.environ, 'RUST_LOG': 'debug'})
+                                      env={**os.environ, 'RUST_LOG': 'debug'}, umask=umask)
         wait_for(lambda: json.loads(self.client('daemon', 'status', '--json').stdout)['pid'] == daemon.pid)
         return daemon
 

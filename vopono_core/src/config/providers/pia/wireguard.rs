@@ -65,7 +65,7 @@ pub enum PiaToken {
     #[serde(rename = "OK")]
     Ok { token: String },
     #[serde(rename = "ERROR")]
-    Err { message: String },
+    Err {},
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,7 +74,7 @@ pub enum WireguardServerInfoRequest {
     #[serde(rename = "OK")]
     Ok(WireguardServerInfo),
     #[serde(rename = "ERROR")]
-    Err { message: String },
+    Err {},
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,11 +108,12 @@ impl PrivateInternetAccess {
             .get("https://www.privateinternetaccess.com/gtoken/generateToken")
             .basic_auth(user, Some(pass))
             .send()?
-            .json()?;
+            .json()
+            .map_err(|_| anyhow!("Could not decode PIA authentication response"))?;
 
         match token {
             PiaToken::Ok { token } => Ok(token),
-            PiaToken::Err { message } => Err(anyhow!("{}", message)),
+            PiaToken::Err {} => Err(anyhow!("PIA rejected VPN authentication")),
         }
     }
 
@@ -146,10 +147,18 @@ impl PrivateInternetAccess {
         let params = [("pt", token), ("pubkey", pubkey)];
         let url = Url::parse_with_params(&url, params)?;
 
-        let server_info: WireguardServerInfoRequest = key_client.get(url).send()?.json()?;
+        // The addKey URL carries the VPN token in its query string.
+        let server_info: WireguardServerInfoRequest = key_client
+            .get(url)
+            .send()
+            .map_err(reqwest::Error::without_url)?
+            .json()
+            .map_err(|_| anyhow!("Could not decode PIA Wireguard key registration response"))?;
         match server_info {
             WireguardServerInfoRequest::Ok(server_info) => Ok(server_info),
-            WireguardServerInfoRequest::Err { message } => Err(anyhow!("{}", message)),
+            WireguardServerInfoRequest::Err {} => {
+                Err(anyhow!("PIA rejected Wireguard key registration"))
+            }
         }
     }
 

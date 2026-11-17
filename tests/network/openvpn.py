@@ -93,6 +93,38 @@ preflight = json.loads(ctx.client('doctor', '--custom', str(profile), '--offline
 assert any(d['code'] == 'provider_config' and d['state'] == 'pass'
            for d in preflight['diagnostics'])
 valid_profile = profile.read_text()
+# The installed service normally inherits umask 022. A private runtime
+# directory must also be created under that umask.
+ctx.restart(umask=0o022)
+auth_override = ctx.user_file('override-auth.txt', 'fixture-user\nfixture-password\n')
+contents = valid_profile + 'auth-user-pass missing-profile-auth.txt\n'
+help_text = command('openvpn', '--help', check=False).stdout
+if '--disable-dco' in help_text:
+    contents += 'disable-dco\n'
+override_profile = ctx.user_file('override-auth-client.ovpn', contents)
+override_name = ctx.namespace('auth_override')
+override_application = ctx.spawn([
+    'exec', '--custom', str(override_profile), '--protocol', 'openvpn',
+    '--auth-user-pass', str(auth_override), '--interface', 'uplink', '--firewall', 'nftables',
+    '--custom-netns-name', 'auth_override', 'sleep 180',
+], 'auth-override.log')
+wait_for(lambda: application_pid(ctx.status(override_name)))
+[runtime] = Path('/run').glob('vopono-openvpn-*')
+assert runtime.stat().st_mode & 0o777 == 0o700
+for item in [runtime / 'auth.txt', *runtime.glob('input-*')]:
+    assert item.stat().st_mode & 0o777 == 0o600
+ctx.client('stop', 'namespace', override_name, '--json')
+override_application.wait(timeout=15)
+rejected_profile = ctx.user_file('unsupported-client.ovpn', valid_profile + 'plugin SECRET_ARGUMENT\n')
+rejected = ctx.client(
+    'exec', '--custom', str(rejected_profile), '--protocol', 'openvpn', '--interface',
+    'uplink', '--firewall', 'nftables', '--json', 'true', check=False,
+)
+assert rejected.returncode != 0
+assert 'OpenVPN directive "plugin" on line' in json.loads(rejected.stdout)['error']['message']
+assert 'SECRET_ARGUMENT' not in rejected.stdout + rejected.stderr
+print('PASS: OpenVPN uses private inputs with umask 022, honors auth overrides and reports rejected directives', flush=True)
+
 tcp_server = scratch / 'tcp-server.ovpn'
 tcp_server.write_text(server.read_text().replace('proto udp', 'proto tcp-server')
                       .replace('port 1194', 'port 1196').replace('dev tun', 'dev tun_tcp')

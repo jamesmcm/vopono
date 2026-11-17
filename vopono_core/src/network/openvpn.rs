@@ -59,6 +59,7 @@ impl OpenVpn {
         // it into a privileged file write.
         let runtime_dir = tempfile::Builder::new()
             .prefix("vopono-openvpn-")
+            .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
             // Do not use the inherited TMPDIR after privilege escalation: its
             // parent may be controlled by the invoking user.
             .tempdir_in("/run")
@@ -225,20 +226,24 @@ impl OpenVpn {
             // process exit as a generic startup failure.
             if x == 0 && supervised && runtime_dir.path().join("child-exited").exists() {
                 terminate_startup(&mut handle);
-                return Err(anyhow!("OpenVPN exited before the tunnel was established"));
+                let status = std::fs::read_to_string(runtime_dir.path().join("child-exited"))
+                    .unwrap_or_else(|_| "unknown exit status".to_owned());
+                return Err(anyhow!(
+                    "OpenVPN exited before the tunnel was established ({status})"
+                ));
             }
             if x == 0
                 && let Some(status) = handle.try_wait()?
             {
                 return Err(anyhow!(
-                    "OpenVPN exited with {status} before the tunnel was established, use -v for full log output"
+                    "OpenVPN startup process exited with {status} before the tunnel was established"
                 ));
             }
 
             if Instant::now() >= startup_deadline {
                 terminate_startup(&mut handle);
                 return Err(anyhow!(
-                    "OpenVPN did not establish the tunnel within {} seconds, use -v for full log output",
+                    "OpenVPN did not establish the tunnel within {} seconds",
                     OPENVPN_STARTUP_TIMEOUT.as_secs()
                 ));
             }
@@ -272,7 +277,11 @@ impl OpenVpn {
                     crate::diagnostics::DiagnosticCode::TunnelAuthentication,
                     crate::diagnostics::DiagnosticState::Fail,
                     "OpenVPN authentication rejected by the server",
-                    Some("Verify provider-specific VPN credentials; ProtonVPN uses separate OpenVPN credentials")).into());
+                    Some(if provider_hint.is_empty() {
+                        "Verify the VPN credentials in the selected auth file; ProtonVPN uses separate OpenVPN credentials"
+                    } else {
+                        provider_hint.trim()
+                    })).into());
             }
             Some(OpenVpnStartupState::TlsFailed) => {
                 terminate_startup(&mut handle);
@@ -289,7 +298,9 @@ impl OpenVpn {
                 error!(
                     "OpenVPN rejected configuration options; raw input is excluded from diagnostic output"
                 );
-                return Err(anyhow!("OpenVPN options error, use -v for full log output"));
+                return Err(anyhow!(
+                    "OpenVPN reported an options error. Check the selected profile against the installed OpenVPN version"
+                ));
             }
             Some(OpenVpnStartupState::Connected) => {}
             None => unreachable!("startup loop only exits with a terminal state"),
@@ -849,7 +860,7 @@ pub fn get_remotes_from_config(path: &Path) -> anyhow::Result<Vec<Remote>> {
     let content =
         std::fs::read_to_string(path).context("Reading OpenVPN endpoint configuration")?;
     let endpoints = super::openvpn_config::endpoints(&content)
-        .map_err(|_| anyhow!("Invalid or unsupported OpenVPN remote configuration"))?;
+        .context("Could not parse OpenVPN remote configuration")?;
     endpoints
         .into_iter()
         .map(|endpoint| {

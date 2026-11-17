@@ -47,12 +47,20 @@ pub fn signature(state: &NamespaceSnapshot) -> Option<(IpAddr, Vec<u8>)> {
 }
 
 fn checked(name: &str, args: &[&str]) -> anyhow::Result<()> {
-    ensure!(
-        NetworkNamespace::exec_with_output(name, args)?
-            .status
-            .success(),
-        "Network repair command failed"
-    );
+    let output = NetworkNamespace::exec_with_output(name, args)
+        .with_context(|| format!("Could not run {} during network repair", args[0]))?;
+    if !output.status.success() {
+        let stderr: String = String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .chars()
+            .take(512)
+            .collect();
+        anyhow::bail!(
+            "{} failed during network repair in {name} ({}): {stderr}",
+            args[0],
+            output.status
+        );
+    }
     Ok(())
 }
 
@@ -90,10 +98,9 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
             .as_mut()
             .context("Missing frozen WireGuard endpoint")?;
         let endpoint = SocketAddr::new(address, peer.port);
-        // Recovery may follow a gateway/preferred-source change on the same
-        // interface. Invalidate exactly this tunnel's old NAT tuple on every
-        // repair; interface-name comparisons cannot detect those changes.
-        {
+        // A new destination already uses a different conntrack tuple. For an
+        // unchanged destination, discard the old mapping after an underlay change.
+        if address == peer.address {
             let output = NetworkNamespace::exec_with_output(
                 &state.name,
                 &[&wg.executable_wg, "show", &wg.if_name, "listen-port"],
@@ -115,10 +122,19 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
                     .and_then(|ips| ips.ipv6.as_ref())
             }
             .context("Missing tunnel underlay source")?;
-            super::conntrack::delete_udp(
+            if let Err(error) = super::conntrack::delete_udp(
                 SocketAddr::new(source.namespace_ip, port),
                 SocketAddr::new(peer.address, peer.port),
-            )?;
+            ) {
+                // Some kernels do not expose conntrack deletion. A new local UDP
+                // port makes a fresh mapping without touching firewall policy.
+                checked(&state.name, &[&wg.executable_wg, "set", &wg.if_name, "listen-port", "0"])
+                    .with_context(|| format!("Could not renew the WireGuard UDP socket after conntrack deletion failed: {error:#}"))?;
+                log::info!(
+                    "Renewed the WireGuard UDP socket in {} after conntrack deletion failed: {error:#}",
+                    state.name
+                );
+            }
         }
         if address != peer.address {
             let family = if address.is_ipv4() { "-4" } else { "-6" };
@@ -162,7 +178,6 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
                     )?;
                 }
             }
-            peer.address = address;
         }
         // Reinstall even an unchanged destination: WireGuard must discard the
         // cached source address/route after the host underlay has changed.
@@ -190,6 +205,7 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
                 "25",
             ],
         )?;
+        peer.address = address;
     } else if let Some(openvpn) = &state.openvpn {
         // OpenVPN restarts from the frozen configuration. Automatic endpoint
         // DNS rotation currently only updates WireGuard kill-switch rules;

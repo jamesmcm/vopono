@@ -48,6 +48,7 @@ pub struct Monitor {
     stop: mpsc::Sender<()>,
     finished: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
+    recover: Arc<AtomicBool>,
 }
 impl Monitor {
     pub fn stop_handle(&self) -> MonitorStop {
@@ -56,7 +57,17 @@ impl Monitor {
             finished: self.finished.clone(),
         }
     }
+    pub fn recovery_enabled(&self) -> bool {
+        self.recover.load(Ordering::Acquire)
+    }
+
+    pub fn enable_recovery(&self) {
+        self.recover.store(true, Ordering::Release);
+    }
+
     pub fn start(ns: &NetworkNamespace, recover: bool) -> Self {
+        let recover = Arc::new(AtomicBool::new(recover));
+        let worker_recover = recover.clone();
         let name = ns.name.clone();
         let wg = ns
             .wireguard
@@ -94,6 +105,7 @@ impl Monitor {
             let mut last_write: Option<Instant> = None;
             let mut last_written_state = None;
             let mut failures = 0u32;
+            let mut recovery_was_enabled = worker_recover.load(Ordering::Acquire);
             let mut last_diagnostics: Option<Instant> = None;
             let mut observations = Vec::new();
             let mut previous_failure = false;
@@ -104,7 +116,11 @@ impl Monitor {
                 if receiver.try_recv().is_ok() || !Path::new("/run/netns").join(&name).exists() {
                     break;
                 }
+                let recover = worker_recover.load(Ordering::Acquire);
                 if recover {
+                    if !recovery_was_enabled {
+                        failures = 0;
+                    }
                     let next = recovery_state
                         .as_ref()
                         .and_then(vopono_core::network::recovery::signature);
@@ -113,6 +129,7 @@ impl Monitor {
                         route_signature = next;
                     }
                 }
+                recovery_was_enabled = recover;
                 let status = crate::check::probe_namespace(
                     &name,
                     crate::check::DEFAULT_V4_HOST,
@@ -185,8 +202,11 @@ impl Monitor {
                             *state = candidate;
                             Ok(())
                         })();
-                        if repair.is_err() {
-                            health.last_error = Some("Automatic underlay/tunnel repair failed; kill switch and namespace were preserved".into());
+                        if let Err(error) = repair {
+                            let message =
+                                format!("Automatic underlay/tunnel repair failed: {error:#}");
+                            log::warn!("{name}: {message}");
+                            health.last_error = Some(message);
                         }
                     }
                 }
@@ -220,6 +240,7 @@ impl Monitor {
             stop,
             finished,
             worker: Some(worker),
+            recover,
         }
     }
 }

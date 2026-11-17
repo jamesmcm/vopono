@@ -39,7 +39,6 @@ use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
 use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM, SIGTSTP};
 use signal_hook::iterator::Signals;
 use std::io::IoSlice;
-use std::io::Write;
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 use sync::{sync_menu, synch};
 use vopono_core::util::clean_dead_locks;
@@ -117,7 +116,10 @@ fn main() -> anyhow::Result<()> {
                         std::process::exit(1);
                     }
                     Ok(DaemonForward::ExecutionError(message)) => {
-                        return Err(anyhow!("Daemon execution failed: {message}"));
+                        return handle_result(
+                            Err(anyhow!("Daemon execution failed: {message}")),
+                            json,
+                        );
                     }
                     Err(e) => {
                         info!("Falling back to sudo (daemon forward failed): {e}");
@@ -519,60 +521,69 @@ fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonFo
              the application will run as the connecting group"
         );
     }
+    let result = forward_connected_execute(&mut conn, cmd, silent);
+    Ok(result.unwrap_or_else(|error| {
+        if cmd.json {
+            DaemonForward::JsonError(errors::error_json_value(&error))
+        } else {
+            DaemonForward::ExecutionError(format!("{error:#}"))
+        }
+    }))
+}
+
+fn forward_connected_execute(
+    conn: &mut interprocess::local_socket::Stream,
+    cmd: &ExecCommand,
+    silent: bool,
+) -> anyhow::Result<DaemonForward> {
+    use anyhow::Context as _;
     let request = daemon_client::prepare_execute(cmd.clone(), silent)?;
     let bytes = wincode::serialize(&request)?;
-    conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
-    conn.write_all(&bytes)?;
+    let mut sigs = Signals::new([SIGINT, SIGQUIT, SIGTERM, SIGTSTP])?;
+    let mut conn_ctrl = conn.try_clone()?;
 
-    // Send our stdio FDs to the daemon using SCM_RIGHTS
     let fds = [
         std::io::stdin().as_raw_fd(),
         std::io::stdout().as_raw_fd(),
         std::io::stderr().as_raw_fd(),
     ];
-    send_fds_over_unix_socket(&conn, &fds)?;
-
-    // Keep the user's TTY in cooked mode; rely on daemon PTY + signal forwarding.
-
-    // Spawn a signal forwarder thread to deliver user signals to the daemon/child
-    let mut sigs = Signals::new([SIGINT, SIGQUIT, SIGTERM, SIGTSTP])?;
-    let mut conn_ctrl = conn.try_clone()?;
-    std::thread::spawn(move || {
-        for sig in &mut sigs {
-            let ctrl = daemon::DaemonControl::Signal(sig);
-            let req = daemon::DaemonRequest::Control(ctrl);
-            if let Ok(bytes) = wincode::serialize(&req) {
-                let _ = conn_ctrl.write_all(&(bytes.len() as u32).to_be_bytes());
-                let _ = conn_ctrl.write_all(&bytes);
+    let dispatch = daemon::write_framed(conn, &bytes)
+        .context("Could not send the execution request to the daemon")
+        .and_then(|()| {
+            send_fds_over_unix_socket(conn, &fds)
+                .context("Could not send standard input and output to the daemon")
+        });
+    if dispatch.is_ok() {
+        std::thread::spawn(move || {
+            for signal in &mut sigs {
+                let request = daemon::DaemonRequest::Control(daemon::DaemonControl::Signal(signal));
+                if let Ok(bytes) = wincode::serialize(&request) {
+                    let _ = daemon::write_framed(&mut conn_ctrl, &bytes);
+                }
             }
-        }
-    });
-
-    // Read a single final response (length-prefixed) containing the exit code
-    let buffer = match daemon::read_framed(&mut conn, daemon::MAX_FRAME_LEN) {
-        Ok(buffer) => buffer,
-        Err(_) => {
-            // The request may already have spawned an application. Falling
-            // back to sudo here would launch it a second time after a restart.
-            let error = anyhow!(
-                "Daemon disconnected; the application may still be running. Check vopono status before relaunching"
-            );
-            return Ok(if cmd.json {
-                DaemonForward::JsonError(errors::error_json_value(&error))
-            } else {
-                DaemonForward::ExecutionError(error.to_string())
-            });
-        }
-    };
-
-    match wincode::deserialize::<daemon::DaemonResponse>(&buffer)? {
-        daemon::DaemonResponse::Exit(code) => Ok(DaemonForward::Exit(code)),
-        daemon::DaemonResponse::Error(message) => Ok(DaemonForward::ExecutionError(message)),
-        daemon::DaemonResponse::Json(payload) => {
-            Ok(DaemonForward::JsonError(serde_json::from_slice(&payload)?))
-        }
-        _ => Err(anyhow!("Unexpected daemon response to exec request")),
+        });
     }
+
+    let response = (|| -> anyhow::Result<_> {
+        let buffer = daemon::read_framed(conn, daemon::MAX_FRAME_LEN)?;
+        match wincode::deserialize::<daemon::DaemonResponse>(&buffer)? {
+            daemon::DaemonResponse::Exit(code) => Ok(DaemonForward::Exit(code)),
+            daemon::DaemonResponse::Error(message) => Ok(DaemonForward::ExecutionError(message)),
+            daemon::DaemonResponse::Json(payload) => {
+                Ok(DaemonForward::JsonError(serde_json::from_slice(&payload)?))
+            }
+            _ => Err(anyhow!("Unexpected daemon response to exec request")),
+        }
+    })();
+    // A daemon can reply with a refusal while the client is still sending
+    // descriptors. Prefer its explanation, and never retry execution locally
+    // after dispatch because the daemon may already have started the command.
+    response.or_else(|error| {
+        dispatch?;
+        Err(error.context(
+            "Could not read the daemon's execution result. The application may still be running. Check vopono status before relaunching"
+        ))
+    })
 }
 
 fn resolve_custom_path_for_daemon(cmd: &mut ExecCommand, client_working_dir: &std::path::Path) {

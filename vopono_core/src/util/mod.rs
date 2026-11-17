@@ -585,7 +585,9 @@ pub fn get_configs_from_alias(list_path: &Path, alias: &str) -> Vec<PathBuf> {
 pub fn get_config_from_alias(list_path: &Path, alias: &str) -> anyhow::Result<PathBuf> {
     let paths = get_configs_from_alias(list_path, alias);
     if paths.is_empty() {
-        Err(anyhow!("Could not find config file for alias {}", alias))
+        Err(anyhow!(
+            "Could not find config matching server prefix {alias:?}"
+        ))
     } else {
         let config = paths
             .choose(&mut rand::rng())

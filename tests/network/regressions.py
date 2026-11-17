@@ -5,6 +5,7 @@ from pathlib import Path
 import pwd
 import pty
 import selectors
+import socket
 import subprocess
 import sys
 import time
@@ -65,6 +66,82 @@ for args, code, message in [
     assert message in report['message'], report
 print('PASS: launch diagnostics preserve configuration/protocol reasons and error categories', flush=True)
 
+# A synchronized provider can still have no config matching the requested prefix.
+air_configs = scratch / "config/vopono/air/wireguard"
+air_configs.mkdir(parents=True)
+(air_configs / "se-fixture.conf").touch()
+account = pwd.getpwnam(user)
+for path in [air_configs.parent, air_configs, air_configs / "se-fixture.conf"]:
+    os.chown(path, uid, account.pw_gid)
+args = ['exec', '--provider', 'airvpn', '--protocol', 'wireguard', '--server', 'india',
+        '--interface', 'uplink', '--firewall', 'nftables', 'true']
+expected = 'Could not find config matching server prefix "india"'
+result = client(*args, check=False)
+assert result.returncode != 0 and f'Daemon execution failed: {expected}' in result.stderr, result.stderr
+result = client(*args[:-1], '--json', args[-1], check=False)
+report = json.loads(result.stdout)['error']
+assert result.returncode != 0 and report['code'] == 'server_not_found', report
+assert expected in report['message'], report
+print('PASS: daemon reports a missing server prefix in terminal and JSON output', flush=True)
+
+# Exercise both settings formats through the daemon and create-only profiles
+# without requiring an application command.
+yaml = scratch / 'fixture.yml'
+yaml.write_text('provider: None\n')
+os.chown(yaml, uid, account.pw_gid)
+for settings in [yaml, yaml.with_suffix('')]:
+    result = client('exec', '--vopono-config', str(settings), '--interface', 'uplink',
+                    '--firewall', 'nftables', 'printf yaml-supported')
+    assert result.stdout == 'yaml-supported', result
+profile = scratch / 'attach-profile.toml'
+profile.write_text('[profiles.attach]\nprovider="none"\ncreate-netns-only=true\n'
+                   'custom-netns-name="late_relay"\n')
+os.chown(profile, uid, account.pw_gid)
+client('exec', '--vopono-config', str(profile), '--profile', 'attach',
+       '--interface', 'uplink', '--firewall', 'nftables')
+name = f'late_relay-u{uid}'
+port = 43158
+application = subprocess.Popen(
+    base + ['exec', '--existing-netns', name, '--interface', 'uplink', '--monitor',
+            '--forward', str(port), f'python3 -m http.server {port} --bind 0.0.0.0'],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+
+
+def relay_responds():
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=.25) as stream:
+            stream.sendall(b'HEAD / HTTP/1.0\r\n\r\n')
+            return b'200 OK' in stream.recv(4096)
+    except OSError:
+        return False
+
+
+try:
+    wait_for(relay_responds)
+    def monitor_appears():
+        status = json.loads(client('status', '--json').stdout)
+        return next(ns.get('health') for ns in status['namespaces'] if ns['id'] == name)
+
+    wait_for(monitor_appears)
+    client('exec', '--existing-netns', name, '--interface', 'uplink', '--forward',
+           str(port), 'true')
+    assert relay_responds()
+    with socket.socket(socket.AF_INET6) as reserved:
+        reserved.bind(('::', 0))
+        reserved.listen()
+        busy_port = str(reserved.getsockname()[1])
+        result = client('exec', '--existing-netns', name, '--interface', 'uplink',
+                        '--forward', busy_port, '--json', 'true', check=False)
+        error = json.loads(result.stdout)['error']
+        assert result.returncode != 0 and f'Could not bind host TCP port {busy_port}' in error['message']
+        assert any('Address already in use' in cause for cause in error['context']), error
+        assert relay_responds(), 'Failed attach removed the running relay'
+finally:
+    client('stop', 'namespace', name, '--json')
+    application.wait(timeout=15)
+print('PASS: daemon YAML settings, create-only profile, late relay and monitor, and bind errors', flush=True)
+
 # More completed persistent requests than the per-user execution limit must
 # leave admission available. Each capture must finish before namespace stop.
 names = [f"reg_slot{n}-u{uid}" for n in range(9)]
@@ -98,6 +175,9 @@ wait_for(all_clients_visible)
 rejected = client(*attach(names[0], "true"), check=False)
 assert rejected.returncode != 0
 assert "execution limit" in rejected.stderr
+rejected = client(*attach(names[0], "true", "--json"), check=False)
+assert rejected.returncode != 0
+assert "execution limit" in json.loads(rejected.stdout)["error"]["message"]
 client("stop", "namespace", names[0], "--json")
 for child in children:
     child.communicate(timeout=15)

@@ -166,6 +166,31 @@ pub fn save_runtime(name: &str, uid: Uid, runtime: RuntimeSettings) -> anyhow::R
     persist_record(name, &record)
 }
 
+pub fn update_runtime_options(
+    name: &str,
+    uid: Uid,
+    monitor: bool,
+    recover: bool,
+    host_ports: Vec<u16>,
+) -> anyhow::Result<()> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
+    let mut record = validated_record(name, uid)?;
+    let runtime = record
+        .runtime
+        .as_mut()
+        .context("Missing namespace runtime settings")?;
+    if runtime.monitor != monitor || runtime.recover != recover || runtime.host_ports != host_ports
+    {
+        runtime.monitor = monitor;
+        runtime.recover = recover;
+        runtime.host_ports = host_ports;
+        persist_record(name, &record)?;
+    }
+    Ok(())
+}
+
 pub fn update_snapshot(name: &str, uid: Uid, snapshot: NamespaceSnapshot) -> anyhow::Result<()> {
     anyhow::ensure!(snapshot.name == name, "Namespace snapshot name mismatch");
     let _guard = OWNER_RECORD_LOCK
@@ -262,11 +287,19 @@ pub(crate) fn diagnostic_snapshot(name: &str, uid: Uid) -> anyhow::Result<Namesp
         .lock()
         .expect("owner record lock poisoned");
     let record = validated_record(name, uid)?;
-    let snapshot = match record.namespace {
+    let mut snapshot = match record.namespace {
         StoredNamespace::Snapshot(snapshot) => snapshot,
         StoredNamespace::LegacyJson(json) => serde_json::from_str(&json)?,
     };
     anyhow::ensure!(snapshot.name == name, "Namespace snapshot name mismatch");
+    if let Some(runtime) = record.runtime {
+        snapshot
+            .state
+            .host_forwarded_ports
+            .extend(runtime.host_ports);
+        snapshot.state.host_forwarded_ports.sort_unstable();
+        snapshot.state.host_forwarded_ports.dedup();
+    }
     Ok(snapshot)
 }
 

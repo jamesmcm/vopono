@@ -223,19 +223,29 @@ pub struct Endpoint {
 
 /// Parse without echoing errors: parser errors may include private keys or inline credentials.
 pub fn validate_config(path: &Path, protocol: &Protocol) -> Result<Vec<Endpoint>, Diagnostic> {
-    validate_config_inner(path, protocol, false)
+    validate_config_for_launch(path, protocol, None)
+}
+
+/// Validate the same credentials that OpenVPN will use at launch.
+pub fn validate_config_for_launch(
+    path: &Path,
+    protocol: &Protocol,
+    openvpn_auth: Option<&Path>,
+) -> Result<Vec<Endpoint>, Diagnostic> {
+    validate_config_inner(path, protocol, false, openvpn_auth)
 }
 
 /// PIA's generated bootstrap profile intentionally has no server public key.
 /// Only use this alternative for an explicitly selected PIA provider.
 pub fn validate_pia_template(path: &Path) -> Result<Vec<Endpoint>, Diagnostic> {
-    validate_config_inner(path, &Protocol::Wireguard, true)
+    validate_config_inner(path, &Protocol::Wireguard, true, None)
 }
 
 fn validate_config_inner(
     path: &Path,
     protocol: &Protocol,
     pia_template: bool,
+    openvpn_auth: Option<&Path>,
 ) -> Result<Vec<Endpoint>, Diagnostic> {
     let fail = || {
         Diagnostic::new(
@@ -306,10 +316,16 @@ fn validate_config_inner(
                 tcp: template,
             }])
         }
-        Protocol::OpenVpn => {
-            crate::network::openvpn_config::validate(&content, path).map_err(|_| fail())?;
-            crate::network::openvpn_config::endpoints(&content).map_err(|_| fail())
-        }
+        Protocol::OpenVpn => crate::network::openvpn_config::validate(&content, path, openvpn_auth)
+            .and_then(|()| crate::network::openvpn_config::endpoints(&content))
+            .map_err(|error| {
+                Diagnostic::new(
+                    DiagnosticCode::ProviderConfig,
+                    DiagnosticState::Fail,
+                    &format!("{}: {error:#}", path.display()),
+                    None,
+                )
+            }),
         _ => Err(Diagnostic::new(
             DiagnosticCode::ProviderConfig,
             DiagnosticState::Skipped,

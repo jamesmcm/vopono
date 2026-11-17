@@ -61,10 +61,19 @@ pub fn try_lock_namespace(name: &str) -> Option<Transition> {
 pub struct SetupGuard;
 impl Drop for SetupGuard {
     fn drop(&mut self) {
-        if let Some(transition) = SETUP_TRANSITION.with(|slot| slot.borrow_mut().take())
-            && !contains(&transition.0)
-        {
-            release_resources(&transition.0);
+        if let Some(transition) = SETUP_TRANSITION.with(|slot| slot.borrow_mut().take()) {
+            let sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(entry) = sessions.get(&transition.0) {
+                if let Some((_, reserved_monitor)) = RESOURCES
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get_mut(&transition.0)
+                {
+                    *reserved_monitor = entry.monitor.is_some();
+                }
+            } else {
+                release_resources(&transition.0);
+            }
         }
     }
 }
@@ -112,31 +121,36 @@ fn reserve_resources(name: &str, uid: Uid, monitor: bool) -> anyhow::Result<()> 
                 Some("Stop an unused namespace before creating another")
             )
         );
-        if monitor {
-            anyhow::ensure!(
-                resources.values().filter(|(_, enabled)| *enabled).count() < MAX_MONITORS
-                    && resources
-                        .values()
-                        .filter(|(owner, enabled)| *owner == uid && *enabled)
-                        .count()
-                        < MAX_MONITORS_PER_UID,
-                vopono_core::diagnostics::Diagnostic::new(
-                    vopono_core::diagnostics::DiagnosticCode::ProviderConfig,
-                    vopono_core::diagnostics::DiagnosticState::Fail,
-                    "Namespace monitor limit reached (8 per user, 32 total)",
-                    Some("Stop an unused monitored namespace")
-                )
-            );
-        }
-        resources.insert(name.to_owned(), (uid, monitor));
     }
+    let reserved_monitor = resources.get(name).is_some_and(|(_, enabled)| *enabled);
+    if monitor && !reserved_monitor {
+        anyhow::ensure!(
+            resources.values().filter(|(_, enabled)| *enabled).count() < MAX_MONITORS
+                && resources
+                    .values()
+                    .filter(|(owner, enabled)| *owner == uid && *enabled)
+                    .count()
+                    < MAX_MONITORS_PER_UID,
+            vopono_core::diagnostics::Diagnostic::new(
+                vopono_core::diagnostics::DiagnosticCode::ProviderConfig,
+                vopono_core::diagnostics::DiagnosticState::Fail,
+                "Namespace monitor limit reached (8 per user, 32 total)",
+                Some("Stop an unused monitored namespace")
+            )
+        );
+    }
+    resources
+        .entry(name.to_owned())
+        .and_modify(|(_, enabled)| *enabled |= monitor)
+        .or_insert((uid, monitor));
     Ok(())
 }
 
 struct Entry {
     applications: usize,
     valid: Arc<AtomicBool>,
-    monitor_stop: Option<crate::health::MonitorStop>,
+    monitor: Option<crate::health::Monitor>,
+    proxies: HashMap<u16, crate::tcp_proxy::TcpProxy>,
 }
 static SESSIONS: LazyLock<Mutex<HashMap<String, Entry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -166,7 +180,7 @@ pub fn stop_monitor(name: &str) -> anyhow::Result<()> {
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .get(name)
-        .and_then(|entry| entry.monitor_stop.clone());
+        .and_then(|entry| entry.monitor.as_ref().map(|monitor| monitor.stop_handle()));
     if let Some(stop) = stop {
         stop.stop_and_wait()?;
     }
@@ -181,6 +195,29 @@ pub fn contains(name: &str) -> bool {
         .contains_key(name)
 }
 
+/// Existing relays belong to the namespace and can be reused by later launches.
+pub fn relay_ports(name: &str) -> Vec<u16> {
+    SESSIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(name)
+        .map(|entry| entry.proxies.keys().copied().collect())
+        .unwrap_or_default()
+}
+
+fn remove_session(name: &str, valid: &Arc<AtomicBool>) {
+    let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
+    if sessions
+        .get(name)
+        .is_some_and(|entry| Arc::ptr_eq(&entry.valid, valid))
+    {
+        let entry = sessions.remove(name);
+        release_resources(name);
+        drop(sessions);
+        drop(entry);
+    }
+}
+
 /// Every application holds a registration; only the first owns cleanup and leases.
 pub struct Session {
     pub ns: NetworkNamespace,
@@ -189,11 +226,7 @@ pub struct Session {
     registered: bool,
     valid: Arc<AtomicBool>,
     forwarder: Option<Box<dyn Forwarder>>,
-    monitor: Option<crate::health::Monitor>,
-    proxies: Vec<crate::tcp_proxy::TcpProxy>,
     pending_forwarder: Option<vopono_core::network::port_forwarding::ForwarderSnapshot>,
-    monitor_enabled: bool,
-    recover_enabled: bool,
 }
 impl Session {
     /// Caller must retain the namespace's transition permit across setup, spawn, and registration.
@@ -209,16 +242,21 @@ impl Session {
         let entry = sessions.entry(ns.name.clone()).or_insert_with(|| Entry {
             applications: 0,
             valid: Arc::new(AtomicBool::new(true)),
-            monitor_stop: None,
+            monitor: None,
+            proxies: HashMap::new(),
         });
         entry.applications += 1;
         let valid = entry.valid.clone();
         if !controller {
             ns.detach();
         }
-        let monitor = (controller && monitor).then(|| crate::health::Monitor::start(&ns, recover));
-        if let Some(monitor) = &monitor {
-            entry.monitor_stop = Some(monitor.stop_handle());
+        if monitor {
+            let active = entry
+                .monitor
+                .get_or_insert_with(|| crate::health::Monitor::start(&ns, recover));
+            if recover {
+                active.enable_recovery();
+            }
         }
         Self {
             ns,
@@ -227,20 +265,41 @@ impl Session {
             registered: true,
             valid,
             forwarder,
-            monitor_enabled: monitor.is_some(),
-            monitor,
-            proxies: Vec::new(),
             pending_forwarder: None,
-            recover_enabled: recover,
         }
     }
-    pub fn retain_proxies(&mut self, proxies: Vec<crate::tcp_proxy::TcpProxy>) {
-        self.proxies.extend(proxies);
+    pub fn retain_proxies(&self, proxies: crate::exec::HostProxies) {
+        if let Some(entry) = SESSIONS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(&self.ns.name)
+        {
+            entry.proxies.extend(proxies);
+        }
     }
 
     pub fn persist_options(&self) -> anyhow::Result<()> {
+        let (monitor, recover, mut host_ports) = {
+            let sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
+            let entry = &sessions[&self.ns.name];
+            (
+                entry.monitor.is_some(),
+                entry
+                    .monitor
+                    .as_ref()
+                    .is_some_and(|monitor| monitor.recovery_enabled()),
+                entry.proxies.keys().copied().collect::<Vec<_>>(),
+            )
+        };
+        host_ports.sort_unstable();
         if !self.controller {
-            return Ok(());
+            return crate::namespace_ownership::update_runtime_options(
+                &self.ns.name,
+                self.uid,
+                monitor,
+                recover,
+                host_ports,
+            );
         }
         let (_, gid) = vopono_core::util::config_owner_override()
             .ok_or_else(|| anyhow::anyhow!("Missing authenticated config owner"))?;
@@ -250,13 +309,9 @@ impl Session {
             crate::namespace_ownership::RuntimeSettings {
                 config_base: vopono_core::util::config_dir()?,
                 gid: gid.as_raw(),
-                monitor: self.monitor_enabled,
-                recover: self.recover_enabled,
-                host_ports: if self.proxies.is_empty() {
-                    Vec::new()
-                } else {
-                    self.ns.state.host_forwarded_ports.clone()
-                },
+                monitor,
+                recover,
+                host_ports,
                 forwarder: self
                     .forwarder
                     .as_ref()
@@ -275,9 +330,7 @@ impl Session {
     }
 
     fn disarm(&mut self) {
-        self.monitor.take();
         self.forwarder.take();
-        self.proxies.clear();
         self.ns.detach();
     }
 }
@@ -313,14 +366,7 @@ impl Session {
             let transition = lock_namespace(&self.ns.name);
             if !self.valid.load(Ordering::Acquire) {
                 self.disarm();
-                let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
-                if sessions
-                    .get(&self.ns.name)
-                    .is_some_and(|entry| Arc::ptr_eq(&entry.valid, &self.valid))
-                {
-                    sessions.remove(&self.ns.name);
-                    release_resources(&self.ns.name);
-                }
+                remove_session(&self.ns.name, &self.valid);
                 break;
             }
             // An explicit stop may already have removed the namespace. Disarm
@@ -330,11 +376,7 @@ impl Session {
                 .exists()
             {
                 self.disarm();
-                SESSIONS
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&self.ns.name);
-                release_resources(&self.ns.name);
+                remove_session(&self.ns.name, &self.valid);
                 break;
             }
             if let Some(snapshot) = self.pending_forwarder.as_ref()
@@ -377,7 +419,12 @@ impl Session {
             if active == 0 && !persistent && !self.ns.has_application_processes().unwrap_or(true) {
                 // Stop probes before inspecting processes during teardown,
                 // while no concurrent attach can enter setup.
-                self.monitor.take();
+                let monitor = SESSIONS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get_mut(&self.ns.name)
+                    .and_then(|entry| entry.monitor.take());
+                drop(monitor);
                 // Teardown can preserve the namespace (for example when an
                 // unknown lockfile remains), or fail partway through cleanup.
                 // Retain the owning guard, runtime files and ownership record
@@ -393,11 +440,7 @@ impl Session {
                     .is_ok_and(|exists| !exists)
                 {
                     self.disarm();
-                    SESSIONS
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .remove(&self.ns.name);
-                    release_resources(&self.ns.name);
+                    remove_session(&self.ns.name, &self.valid);
                     crate::namespace_ownership::remove(&self.ns.name);
                     break;
                 }
@@ -413,14 +456,7 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.unregister_application();
         if self.controller {
-            let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
-            if sessions
-                .get(&self.ns.name)
-                .is_some_and(|entry| Arc::ptr_eq(&entry.valid, &self.valid))
-            {
-                sessions.remove(&self.ns.name);
-                release_resources(&self.ns.name);
-            }
+            remove_session(&self.ns.name, &self.valid);
         }
         // An unwind/early return must preserve the namespace. The explicit
         // controller loop performs teardown after verifying its last user.

@@ -48,11 +48,6 @@ pub fn select(config: Config, name: Option<&str>) -> anyhow::Result<Config> {
 /// Resolve again on the daemon using its authenticated user's config tree.
 pub fn prepare(command: &mut ExecCommand) -> anyhow::Result<()> {
     let config = crate::args_config::ArgsConfig::get_config_file(command)?;
-    if command.application.is_empty() && command.profile.is_some() {
-        command.application = config
-            .get_string("application")
-            .context("Named profile requires an application")?;
-    }
     if command.working_directory.is_none() {
         command.working_directory = config
             .get_string("working_directory")
@@ -69,6 +64,14 @@ pub fn prepare(command: &mut ExecCommand) -> anyhow::Result<()> {
             .get_bool(name)
             .or_else(|_| config.get_bool(&name.replace('-', "_")))
             .unwrap_or(false);
+    }
+    if !command.create_netns_only
+        && command.application.is_empty()
+        && let Some(name) = &command.profile
+    {
+        command.application = config
+            .get_string("application")
+            .with_context(|| format!("Profile {name:?} requires an application"))?;
     }
     ensure!(
         !command.recover || command.monitor,
