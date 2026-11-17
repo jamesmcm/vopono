@@ -9,11 +9,18 @@ mod check;
 mod cli_client;
 mod control;
 mod daemon;
+mod daemon_client;
+mod doctor;
 mod errors;
 mod exec;
+mod health;
+mod launch_diagnostics;
 mod list;
 mod list_configs;
+mod mcp;
 mod namespace_ownership;
+mod namespace_sessions;
+mod profiles;
 mod providers;
 mod server_metadata;
 mod sync;
@@ -24,9 +31,7 @@ use anyhow::anyhow;
 use clap::Parser;
 use cli_client::CliClient;
 use interprocess::TryClone;
-use interprocess::local_socket::ToFsName;
 use interprocess::local_socket::prelude::*;
-use interprocess::os::unix::local_socket::FilesystemUdSocket;
 use list::{output_list, output_status};
 use list_configs::print_configs;
 use log::{LevelFilter, debug, info, warn};
@@ -34,7 +39,6 @@ use nix::sys::socket::{ControlMessage, MsgFlags, sendmsg};
 use signal_hook::consts::{SIGINT, SIGQUIT, SIGTERM, SIGTSTP};
 use signal_hook::iterator::Signals;
 use std::io::IoSlice;
-use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, RawFd};
 use sync::{sync_menu, synch};
 use vopono_core::util::clean_dead_locks;
@@ -80,6 +84,9 @@ fn main() -> anyhow::Result<()> {
         .expect("Subcommand is required when not in daemon mode.");
 
     match cmd {
+        args::Command::Mcp(command) => match command.command {
+            args::McpSubcommand::Serve(options) => mcp::serve(options)?,
+        },
         args::Command::Daemon(command) => match command.command {
             Some(args::DaemonSubcommand::Status(status)) => {
                 handle_result(daemon::print_status(status.json), status.json)?;
@@ -95,20 +102,38 @@ fn main() -> anyhow::Result<()> {
                 return daemon::start();
             }
         },
-        args::Command::Exec(cmd) => {
+        args::Command::Exec(mut cmd) => {
+            let json = cmd.json;
+            handle_result(profiles::prepare(&mut cmd), json)?;
             // If we're not root, try to forward the command to the running daemon.
             if !nix::unistd::getuid().is_root() {
                 match forward_to_daemon(&cmd, app.silent) {
                     Ok(DaemonForward::Exit(exit_code)) => {
                         std::process::exit(exit_code);
                     }
+                    Ok(DaemonForward::JsonError(error)) => {
+                        api::print_json(&error)?;
+                        std::process::exit(1);
+                    }
                     Ok(DaemonForward::ExecutionError(message)) => {
-                        return Err(anyhow!("Daemon execution failed: {message}"));
+                        return handle_result(
+                            Err(anyhow!("Daemon execution failed: {message}")),
+                            json,
+                        );
                     }
                     Err(e) => {
                         info!("Falling back to sudo (daemon forward failed): {e}");
                     }
                 }
+            }
+
+            if cmd.monitor {
+                handle_result(
+                    Err(anyhow!(
+                        "Connectivity monitoring requires execution through the running vopono daemon; start it with sudo vopono daemon and launch as your user"
+                    )),
+                    cmd.json,
+                )?;
             }
 
             // If we are root, or if the daemon isn't running, execute directly.
@@ -117,7 +142,14 @@ fn main() -> anyhow::Result<()> {
             let verbose = app.verbose && !app.silent;
             elevate_privileges(app.askpass)?;
             clean_dead_namespaces()?;
-            let exit_code = exec::exec(cmd, &uiclient, verbose, app.silent)?;
+            let json = cmd.json;
+            let exit_code = match exec::exec(cmd, &uiclient, verbose, app.silent) {
+                Ok(code) => code,
+                Err(error) => {
+                    handle_result(Err(error), json)?;
+                    unreachable!();
+                }
+            };
             std::process::exit(exit_code);
         }
         args::Command::List(listcmd) => {
@@ -130,6 +162,15 @@ fn main() -> anyhow::Result<()> {
         args::Command::Status(status) => {
             handle_result(output_status(status.json), status.json)?;
         }
+        args::Command::Profiles(command) => {
+            profiles::run(command)?;
+        }
+        args::Command::Doctor(command) => {
+            let code = doctor::run(command)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         args::Command::Check(check) => {
             handle_check(check, app.askpass)?;
         }
@@ -137,6 +178,12 @@ fn main() -> anyhow::Result<()> {
             // Hidden helper: always runs in-place (the daemon launches it
             // inside the target namespace); never forward or escalate.
             check::run_probe(probe)?;
+        }
+        args::Command::ReadUserFile { path } => {
+            vopono_core::util::owner_write::run_owner_read(&path)?;
+        }
+        args::Command::OpenVpnSupervisor { path } => {
+            vopono_core::network::openvpn_supervisor::run(&path)?;
         }
         args::Command::WriteUserFile => {
             // Hidden helper spawned by the daemon with the connecting user's
@@ -151,6 +198,13 @@ fn main() -> anyhow::Result<()> {
             )?;
         }
         args::Command::Provider(providercmd) => match providercmd.command {
+            args::ProviderSubcommand::Check(command) => {
+                let code =
+                    providers::check_public(command.vpn_provider.to_variant(), command.json)?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
             args::ProviderSubcommand::Status(status) => {
                 handle_result(
                     providers::print_provider_status(status.vpn_provider.to_variant(), status.json),
@@ -266,11 +320,14 @@ fn handle_check(command: args::CheckCommand, askpass: bool) -> anyhow::Result<()
     } else {
         match forward_check_to_daemon(&command, &v4_host, &v6_host, &dns_host) {
             Ok(status) => status,
-            Err(forward_error) => {
+            Err(CheckForwardError::Retry(forward_error)) => {
                 info!("Falling back to sudo (daemon check forward failed): {forward_error}");
                 clean_dead_locks()?;
                 elevate_privileges(askpass)?;
                 local()
+            }
+            Err(CheckForwardError::Reported(error)) => {
+                return handle_result(Err(error), command.json);
             }
         }
     };
@@ -286,20 +343,25 @@ fn handle_check(command: args::CheckCommand, askpass: bool) -> anyhow::Result<()
     Ok(())
 }
 
+enum CheckForwardError {
+    /// The request never produced a daemon result; local/sudo retry is safe.
+    Retry(anyhow::Error),
+    /// The daemon answered, so retrying through sudo would bypass its policy.
+    Reported(anyhow::Error),
+}
+
 /// Route a connectivity check through the root daemon over `/run/vopono.sock`.
-/// Returns `Err` when the daemon is unreachable so the caller can fall back;
-/// daemon-side failures are reported as a disconnected result.
+/// Transport failures permit a local fallback; daemon-reported errors do not.
 fn forward_check_to_daemon(
     command: &args::CheckCommand,
     v4_host: &str,
     v6_host: &str,
     dns_host: &str,
-) -> anyhow::Result<check::ConnectivityStatus> {
-    let name = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?;
-    let mut conn =
-        LocalSocketStream::connect(name).map_err(|e| anyhow!("Daemon not running: {e}"))?;
-    daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_STOP_TIMEOUT_SECONDS)?;
-    daemon::exchange_versions_with_daemon(&mut conn);
+) -> Result<check::ConnectivityStatus, CheckForwardError> {
+    let mut conn = daemon_client::connect(daemon_client::Compatibility::Warn)
+        .map_err(CheckForwardError::Retry)?;
+    daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_STOP_TIMEOUT_SECONDS)
+        .map_err(CheckForwardError::Retry)?;
 
     let request = daemon::DaemonRequest::CheckNamespace(daemon::CheckNamespaceRequest {
         id: command.id.clone(),
@@ -312,14 +374,23 @@ fn forward_check_to_daemon(
         dns_host: Some(dns_host.to_string()),
         skip_dns: Some(command.skip_dns),
     });
-    let bytes = wincode::serialize(&request)?;
-    daemon::write_framed(&mut conn, &bytes)?;
+    let bytes =
+        wincode::serialize(&request).map_err(|error| CheckForwardError::Retry(error.into()))?;
+    daemon::write_framed(&mut conn, &bytes).map_err(CheckForwardError::Retry)?;
 
-    let response_bytes = daemon::read_framed(&mut conn, daemon::MAX_FRAME_LEN)?;
-    match wincode::deserialize::<daemon::DaemonResponse>(&response_bytes)? {
-        daemon::DaemonResponse::Json(payload) => Ok(serde_json::from_slice(&payload)?),
-        daemon::DaemonResponse::Error(message) => Err(anyhow!("Daemon reported: {message}")),
-        _ => Err(anyhow!("Unexpected daemon response to check request")),
+    let response_bytes =
+        daemon::read_framed(&mut conn, daemon::MAX_FRAME_LEN).map_err(CheckForwardError::Retry)?;
+    match wincode::deserialize::<daemon::DaemonResponse>(&response_bytes)
+        .map_err(|error| CheckForwardError::Reported(error.into()))?
+    {
+        daemon::DaemonResponse::Json(payload) => serde_json::from_slice(&payload)
+            .map_err(|error| CheckForwardError::Reported(error.into())),
+        daemon::DaemonResponse::Error(message) => Err(CheckForwardError::Reported(anyhow!(
+            "Daemon reported: {message}"
+        ))),
+        _ => Err(CheckForwardError::Reported(anyhow!(
+            "Unexpected daemon response to check request"
+        ))),
     }
 }
 
@@ -370,14 +441,10 @@ fn run_stop_locally(request: StopRequest, json: bool, askpass: bool) -> anyhow::
 /// must be reported without retrying, since the daemon may still be tearing
 /// down the requested process or namespace.
 fn forward_stop_to_daemon(request: StopRequest, json: bool) -> Result<i32, StopForwardError> {
-    let name = SOCKET_PATH
-        .to_fs_name::<FilesystemUdSocket>()
-        .map_err(|error| StopForwardError::Retry(error.into()))?;
-    let mut conn = LocalSocketStream::connect(name)
-        .map_err(|_| StopForwardError::Retry(anyhow!("Daemon not running")))?;
+    let mut conn = daemon_client::connect(daemon_client::Compatibility::Warn)
+        .map_err(StopForwardError::Retry)?;
     daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_STOP_TIMEOUT_SECONDS)
         .map_err(StopForwardError::Retry)?;
-    daemon::exchange_versions_with_daemon(&mut conn);
 
     let daemon_request = daemon::DaemonRequest::Stop(daemon::DaemonStopRequest {
         target: request.daemon_target(),
@@ -435,14 +502,11 @@ enum StopForwardError {
 enum DaemonForward {
     Exit(i32),
     ExecutionError(String),
+    JsonError(serde_json::Value),
 }
 
 fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonForward> {
-    let name = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?;
-    let mut conn = match LocalSocketStream::connect(name) {
-        Ok(c) => c,
-        Err(_) => return Err(anyhow!("Daemon not running")),
-    };
+    let mut conn = daemon_client::connect(daemon_client::Compatibility::Warn)?;
 
     debug!("Connected to daemon, forwarding command.");
     if let Some(user) = &cmd.user {
@@ -457,89 +521,123 @@ fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonFo
              the application will run as the connecting group"
         );
     }
-    daemon::exchange_versions_with_daemon(&mut conn);
-    let mut daemon_cmd = cmd.clone();
-    let client_working_dir = std::env::current_dir()?;
-    resolve_custom_path_for_daemon(&mut daemon_cmd, &client_working_dir);
-    // Match the sudo/CLI path, where the application inherits the client's
-    // working directory when --working-directory is not given.
-    if daemon_cmd.working_directory.is_none() {
-        daemon_cmd.working_directory = Some(client_working_dir.to_string_lossy().into_owned());
-    }
-    daemon_cmd.silent = silent;
+    let result = forward_connected_execute(&mut conn, cmd, silent);
+    Ok(result.unwrap_or_else(|error| {
+        if cmd.json {
+            DaemonForward::JsonError(errors::error_json_value(&error))
+        } else {
+            DaemonForward::ExecutionError(format!("{error:#}"))
+        }
+    }))
+}
 
-    // Forward the client's environment so daemon-launched applications match the
-    // sudo/CLI path, where the child inherits the invoking user's environment.
-    // The daemon only applies these to the child process (which runs as the
-    // authenticated connecting user) and re-applies its own VOPONO_* variables
-    // afterwards, so nothing here affects the daemon's own execution.
-    let mut fwd_env: std::collections::HashMap<String, String> = std::env::vars().collect();
-    // The daemon cannot ask pactl about the authenticated user's session:
-    // running it there would inspect the daemon's (root) audio session. Ask
-    // in the client context and forward the effective PulseAudio endpoint,
-    // including PipeWire's PulseAudio compatibility server, when the client
-    // has not explicitly set PULSE_SERVER.
-    if !fwd_env.contains_key("PULSE_SERVER")
-        && let Ok(server) = vopono_core::util::pulseaudio::get_pulseaudio_server()
-    {
-        fwd_env.insert("PULSE_SERVER".to_string(), server);
-    }
-    let request = daemon::DaemonRequest::Execute {
-        // Encode `ExecCommand` as JSON bytes carried inside the wincode daemon frame.
-        cmd: serde_json::to_vec(&daemon_cmd)?,
-        env: fwd_env,
-    };
+fn forward_connected_execute(
+    conn: &mut interprocess::local_socket::Stream,
+    cmd: &ExecCommand,
+    silent: bool,
+) -> anyhow::Result<DaemonForward> {
+    use anyhow::Context as _;
+    let request = daemon_client::prepare_execute(cmd.clone(), silent)?;
     let bytes = wincode::serialize(&request)?;
-    conn.write_all(&(bytes.len() as u32).to_be_bytes())?;
-    conn.write_all(&bytes)?;
+    let mut sigs = Signals::new([SIGINT, SIGQUIT, SIGTERM, SIGTSTP])?;
+    let mut conn_ctrl = conn.try_clone()?;
 
-    // Send our stdio FDs to the daemon using SCM_RIGHTS
     let fds = [
         std::io::stdin().as_raw_fd(),
         std::io::stdout().as_raw_fd(),
         std::io::stderr().as_raw_fd(),
     ];
-    send_fds_over_unix_socket(&conn, &fds)?;
-
-    // Keep the user's TTY in cooked mode; rely on daemon PTY + signal forwarding.
-
-    // Spawn a signal forwarder thread to deliver user signals to the daemon/child
-    let mut sigs = Signals::new([SIGINT, SIGQUIT, SIGTERM, SIGTSTP])?;
-    let mut conn_ctrl = conn.try_clone()?;
-    std::thread::spawn(move || {
-        for sig in &mut sigs {
-            let ctrl = daemon::DaemonControl::Signal(sig);
-            let req = daemon::DaemonRequest::Control(ctrl);
-            if let Ok(bytes) = wincode::serialize(&req) {
-                let _ = conn_ctrl.write_all(&(bytes.len() as u32).to_be_bytes());
-                let _ = conn_ctrl.write_all(&bytes);
+    let dispatch = daemon::write_framed(conn, &bytes)
+        .context("Could not send the execution request to the daemon")
+        .and_then(|()| {
+            send_fds_over_unix_socket(conn, &fds)
+                .context("Could not send standard input and output to the daemon")
+        });
+    if dispatch.is_ok() {
+        std::thread::spawn(move || {
+            for signal in &mut sigs {
+                let request = daemon::DaemonRequest::Control(daemon::DaemonControl::Signal(signal));
+                if let Ok(bytes) = wincode::serialize(&request) {
+                    let _ = daemon::write_framed(&mut conn_ctrl, &bytes);
+                }
             }
-        }
-    });
-
-    // Read a single final response (length-prefixed) containing the exit code
-    let mut len_bytes = [0u8; 4];
-    conn.read_exact(&mut len_bytes)?;
-    let len = u32::from_be_bytes(len_bytes) as usize;
-    let mut buffer = vec![0; len];
-    conn.read_exact(&mut buffer)?;
-
-    match wincode::deserialize::<daemon::DaemonResponse>(&buffer)? {
-        daemon::DaemonResponse::Exit(code) => Ok(DaemonForward::Exit(code)),
-        daemon::DaemonResponse::Error(message) => Ok(DaemonForward::ExecutionError(message)),
-        _ => Err(anyhow!("Unexpected daemon response to exec request")),
+        });
     }
+
+    let response = (|| -> anyhow::Result<_> {
+        let buffer = daemon::read_framed(conn, daemon::MAX_FRAME_LEN)?;
+        match wincode::deserialize::<daemon::DaemonResponse>(&buffer)? {
+            daemon::DaemonResponse::Exit(code) => Ok(DaemonForward::Exit(code)),
+            daemon::DaemonResponse::Error(message) => Ok(DaemonForward::ExecutionError(message)),
+            daemon::DaemonResponse::Json(payload) => {
+                Ok(DaemonForward::JsonError(serde_json::from_slice(&payload)?))
+            }
+            _ => Err(anyhow!("Unexpected daemon response to exec request")),
+        }
+    })();
+    // A daemon can reply with a refusal while the client is still sending
+    // descriptors. Prefer its explanation, and never retry execution locally
+    // after dispatch because the daemon may already have started the command.
+    response.or_else(|error| {
+        dispatch?;
+        Err(error.context(
+            "Could not read the daemon's execution result. The application may still be running. Check vopono status before relaunching"
+        ))
+    })
 }
 
 fn resolve_custom_path_for_daemon(cmd: &mut ExecCommand, client_working_dir: &std::path::Path) {
-    for path in [&mut cmd.custom, &mut cmd.vopono_config]
-        .into_iter()
-        .flatten()
+    for path in [
+        &mut cmd.custom,
+        &mut cmd.vopono_config,
+        &mut cmd.auth_user_pass,
+        &mut cmd.trojan_config,
+    ]
+    .into_iter()
+    .flatten()
     {
-        if path.is_relative() {
-            *path = client_working_dir.join(&*path);
-        }
+        let expanded = shellexpand::full(&path.to_string_lossy())
+            .map(|expanded| std::path::PathBuf::from(expanded.into_owned()))
+            .unwrap_or_else(|_| path.clone());
+        *path = if expanded.is_relative() {
+            client_working_dir.join(expanded)
+        } else {
+            expanded
+        };
     }
+    resolve_daemon_path_string(&mut cmd.working_directory, client_working_dir, false);
+    for value in [
+        &mut cmd.postup,
+        &mut cmd.predown,
+        &mut cmd.port_forwarding_callback,
+    ] {
+        resolve_daemon_path_string(value, client_working_dir, true);
+    }
+}
+
+fn resolve_daemon_path_string(
+    value: &mut Option<String>,
+    client_working_dir: &std::path::Path,
+    commands_only: bool,
+) {
+    let Some(raw) = value.as_deref() else {
+        return;
+    };
+    let expanded = shellexpand::full(raw)
+        .map(|expanded| expanded.into_owned())
+        .unwrap_or_else(|_| raw.to_owned());
+    let is_path_like = if commands_only {
+        (expanded.contains('/') || expanded.starts_with('.'))
+            && !expanded.chars().any(char::is_whitespace)
+    } else {
+        true
+    };
+    let path = std::path::Path::new(&expanded);
+    *value = Some(if is_path_like && path.is_relative() {
+        client_working_dir.join(path).to_string_lossy().into_owned()
+    } else {
+        expanded
+    });
 }
 
 fn send_fds_over_unix_socket(conn: &LocalSocketStream, fds: &[RawFd]) -> anyhow::Result<()> {
@@ -573,6 +671,44 @@ mod tests {
         assert_eq!(
             command.custom.as_deref(),
             Some(Path::new("/home/example/./foo.conf"))
+        );
+    }
+
+    #[test]
+    fn resolves_all_relative_daemon_paths_but_leaves_commands_alone() {
+        let app = args::App::try_parse_from([
+            "vopono",
+            "exec",
+            "--working-directory",
+            "work",
+            "--trojan-config",
+            "./trojan.json",
+            "--postup",
+            "./up.sh",
+            "--predown",
+            "down.sh",
+            "--port-forwarding-callback",
+            "hooks/port.sh",
+            "firefox",
+        ])
+        .unwrap();
+        let args::Command::Exec(mut command) = app.cmd.unwrap() else {
+            panic!("expected exec command");
+        };
+        resolve_custom_path_for_daemon(&mut command, Path::new("/home/example"));
+        assert_eq!(
+            command.working_directory.as_deref(),
+            Some("/home/example/work")
+        );
+        assert_eq!(
+            command.trojan_config.as_deref(),
+            Some(Path::new("/home/example/./trojan.json"))
+        );
+        assert_eq!(command.postup.as_deref(), Some("/home/example/./up.sh"));
+        assert_eq!(command.predown.as_deref(), Some("down.sh"));
+        assert_eq!(
+            command.port_forwarding_callback.as_deref(),
+            Some("/home/example/hooks/port.sh")
         );
     }
 }

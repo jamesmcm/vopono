@@ -4,7 +4,6 @@ use dialoguer::MultiSelect;
 use log::info;
 use vopono_core::config::providers::{UiClient, VpnProvider};
 use vopono_core::config::vpn::Protocol;
-use vopono_core::util::set_config_permissions;
 
 use crate::args::WrappedArg;
 use crate::providers::record_sync;
@@ -46,20 +45,79 @@ pub fn synch(
     protocol: &Option<Protocol>,
     uiclient: &dyn UiClient,
 ) -> anyhow::Result<()> {
-    let provider_to_record = provider.clone();
+    // The sudo fallback may discover missing provider data after elevation.
+    // Keep generation and publication under the user's filesystem identity.
+    if nix::unistd::geteuid().is_root()
+        && let (Some(uid), Some(gid)) = vopono_core::util::resolve_config_owner()?
+        && !uid.is_root()
+    {
+        use std::os::unix::process::CommandExt;
+        let user = nix::unistd::User::from_uid(uid)?
+            .ok_or_else(|| anyhow::anyhow!("Unknown config owner"))?;
+        let account = std::ffi::CString::new(user.name)?;
+        let mut child = std::process::Command::new(std::env::current_exe()?);
+        child
+            .arg("sync")
+            .arg(provider.id())
+            .env("HOME", &user.dir)
+            .env("XDG_CONFIG_HOME", vopono_core::util::config_dir()?);
+        if let Some(protocol) = protocol {
+            child.args(["--protocol", protocol.id()]);
+        }
+        unsafe {
+            child.pre_exec(move || {
+                nix::unistd::initgroups(&account, gid)?;
+                nix::unistd::setgid(gid)?;
+                nix::unistd::setuid(uid)?;
+                Ok(())
+            });
+        }
+        anyhow::ensure!(
+            child.status()?.success(),
+            "Provider synchronization failed; installed files were preserved"
+        );
+        return Ok(());
+    }
+    let protocols = match protocol {
+        Some(protocol) => vec![protocol.clone()],
+        None => provider.supported_sync_protocols(),
+    };
+    anyhow::ensure!(
+        protocols
+            .iter()
+            .all(|p| matches!(p, Protocol::OpenVpn | Protocol::Wireguard)),
+        "Synchronization is only supported for provider-managed OpenVPN and WireGuard configurations"
+    );
+    vopono_core::config::providers::transaction::run(
+        &provider,
+        &protocols,
+        || generate(provider.clone(), protocol, uiclient),
+        || {
+            for protocol in &protocols {
+                record_sync(&provider, protocol.clone())?;
+            }
+            Ok(())
+        },
+    )?;
+    Ok(())
+}
+
+fn generate(
+    provider: VpnProvider,
+    protocol: &Option<Protocol>,
+    uiclient: &dyn UiClient,
+) -> anyhow::Result<()> {
     match protocol {
         Some(Protocol::OpenVpn) => {
             info!("Starting OpenVPN configuration...");
             let provider = provider.get_dyn_openvpn_provider()?;
             provider.create_openvpn_config(uiclient)?;
-            record_sync(&provider_to_record, Protocol::OpenVpn)?;
             // downcast?
         }
         Some(Protocol::Wireguard) => {
             info!("Starting Wireguard configuration...");
             let provider = provider.get_dyn_wireguard_provider()?;
             provider.create_wireguard_config(uiclient)?;
-            record_sync(&provider_to_record, Protocol::Wireguard)?;
         }
         Some(Protocol::AmneziaWG) => {
             bail!("vopono sync not supported for AmneziaWG protocol");
@@ -84,17 +142,14 @@ pub fn synch(
             if let Ok(p) = provider.get_dyn_openvpn_provider() {
                 info!("Starting OpenVPN configuration...");
                 p.create_openvpn_config(uiclient)?;
-                record_sync(&provider_to_record, Protocol::OpenVpn)?;
             }
             if let Ok(p) = provider.get_dyn_wireguard_provider() {
                 info!("Starting Wireguard configuration...");
                 p.create_wireguard_config(uiclient)?;
-                record_sync(&provider_to_record, Protocol::Wireguard)?;
             }
         }
     }
 
-    set_config_permissions()?;
     Ok(())
 }
 

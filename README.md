@@ -15,6 +15,18 @@ Cloudflare Warp is also supported.
 For custom connections the OpenConnect and OpenFortiVPN protocols are
 also supported (e.g. for enterprise VPNs). See the [vopono User Guide](USERGUIDE.md) for more details.
 
+Run `vopono doctor` to discover running namespaces and diagnose their connectivity
+and DNS, plus host DNS, forwarding, firewall and AppArmor issues. Use
+`vopono doctor --namespace ID` to select one (`vopono status` lists
+IDs), or `vopono doctor --provider PROVIDER --server SERVER` to inspect a stored
+configuration before launching an application. Named profiles (`vopono exec --profile NAME`) and
+opt-in daemon monitoring (`--monitor --recover`) are described in the
+[User Guide](USERGUIDE.md#diagnose-configuration-and-connection-failures).
+
+LLM agents can use the installable [vopono skill](skills/vopono/SKILL.md) or
+`vopono mcp serve`. See [agent setup and traffic boundaries](USERGUIDE.md#use-vopono-from-llm-agents):
+these integrations route launched workloads, not the harness's unrelated tools.
+
 ## Screenshot
 
 Screenshot showing an example with firefox, google-chrome-stable and

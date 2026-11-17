@@ -2,7 +2,7 @@ use anyhow::Context;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::{self, File, create_dir_all};
+use std::fs::{File, create_dir_all};
 use strum::IntoEnumIterator;
 use vopono_core::config::providers::VpnProvider;
 use vopono_core::config::vpn::Protocol;
@@ -58,6 +58,30 @@ struct SyncMetadata {
 struct SyncProtocolMetadata {
     last_sync: String,
     server_count: usize,
+    #[serde(default)]
+    configurations: BTreeMap<String, ConfigSyncMetadata>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ConfigSyncMetadata {
+    last_synced: String,
+    fingerprint: String,
+}
+
+pub fn configuration_last_synced(
+    provider: &VpnProvider,
+    protocol: &Protocol,
+    path: &std::path::Path,
+) -> Option<String> {
+    let metadata = read_sync_metadata(provider).ok()??;
+    let filename = path.file_name()?.to_str()?;
+    let config = metadata
+        .protocols
+        .get(protocol.id())?
+        .configurations
+        .get(filename)?;
+    (vopono_core::diagnostics::config_fingerprint(path).ok()? == config.fingerprint)
+        .then(|| config.last_synced.clone())
 }
 
 pub fn print_providers(json: bool) -> anyhow::Result<()> {
@@ -210,15 +234,34 @@ pub fn record_sync(provider: &VpnProvider, protocol: Protocol) -> anyhow::Result
     let mut metadata = read_sync_metadata(provider)?.unwrap_or_default();
     let timestamp = Utc::now().to_rfc3339();
     metadata.last_sync = Some(timestamp.clone());
+    let directory = match protocol {
+        Protocol::Wireguard => provider.get_dyn_wireguard_provider()?.wireguard_dir()?,
+        Protocol::OpenVpn => provider.get_dyn_openvpn_provider()?.openvpn_dir()?,
+        _ => anyhow::bail!("Sync metadata requires a provider-managed protocol"),
+    };
+    let configurations = get_configs_from_alias(&directory, "")
+        .into_iter()
+        .filter_map(|path| {
+            let filename = path.file_name()?.to_str()?.to_owned();
+            let fingerprint = vopono_core::diagnostics::config_fingerprint(&path).ok()?;
+            Some((
+                filename,
+                ConfigSyncMetadata {
+                    last_synced: timestamp.clone(),
+                    fingerprint,
+                },
+            ))
+        })
+        .collect();
     metadata.protocols.insert(
         protocol.id().to_string(),
         SyncProtocolMetadata {
             last_sync: timestamp.clone(),
             server_count: config_count(provider, protocol.clone())?,
+            configurations,
         },
     );
-    let file = File::create(metadata_path)?;
-    serde_json::to_writer_pretty(file, &metadata)?;
+    atomic_metadata(&metadata_path, &serde_json::to_string_pretty(&metadata)?)?;
 
     // Global completion stamp so frontends can watch a single file (with e.g.
     // a FileView) instead of polling `providers --json` for new configs.
@@ -228,8 +271,22 @@ pub fn record_sync(provider: &VpnProvider, protocol: Protocol) -> anyhow::Result
         "protocol": protocol.id().to_string(),
     });
     let stamp_path = vopono_core::util::vopono_dir()?.join(".last-sync");
-    fs::write(&stamp_path, serde_json::to_vec_pretty(&stamp)?)
+    atomic_metadata(&stamp_path, &serde_json::to_string_pretty(&stamp)?)
         .with_context(|| format!("Failed to write sync stamp {}", stamp_path.display()))?;
+    Ok(())
+}
+
+fn atomic_metadata(path: &std::path::Path, body: &str) -> anyhow::Result<()> {
+    if vopono_core::util::write_file_as_config_owner(path, body, Some(0o600))? {
+        return Ok(());
+    }
+    use std::io::Write;
+    let mut temporary = tempfile::NamedTempFile::new_in(
+        path.parent()
+            .context("Metadata requires a parent directory")?,
+    )?;
+    temporary.write_all(body.as_bytes())?;
+    temporary.persist(path)?;
     Ok(())
 }
 
@@ -261,9 +318,62 @@ fn config_count(provider: &VpnProvider, protocol: Protocol) -> anyhow::Result<us
     Ok(get_configs_from_alias(&directory, "").len())
 }
 
+/// A dedicated smoke command needs neither local configs nor an active subscription.
+pub fn check_public(provider: VpnProvider, json: bool) -> anyhow::Result<i32> {
+    use vopono_core::diagnostics::{Diagnostic, DiagnosticCode, DiagnosticState};
+    let result = vopono_core::config::providers::diagnostics::public_catalogue(
+        &provider,
+        std::time::Duration::from_secs(10),
+    );
+    let (diagnostic, count) = match result {
+        Ok(Some(servers)) => (
+            Diagnostic::new(
+                DiagnosticCode::ProviderCatalogue,
+                DiagnosticState::Pass,
+                "Public provider schema and active endpoint metadata validated",
+                None,
+            ),
+            servers.len(),
+        ),
+        Ok(None) => (
+            Diagnostic::new(
+                DiagnosticCode::ProviderCatalogue,
+                DiagnosticState::Skipped,
+                "No public catalogue adapter is implemented for this provider",
+                None,
+            ),
+            0,
+        ),
+        Err(_) => (
+            Diagnostic::new(
+                DiagnosticCode::ProviderCatalogue,
+                DiagnosticState::Fail,
+                "Public provider catalogue request or schema validation failed",
+                Some("Retry later; report persistent compatibility failures"),
+            ),
+            0,
+        ),
+    };
+    let failed = diagnostic.state == DiagnosticState::Fail;
+    if json {
+        crate::api::print_json(
+            &serde_json::json!({"version": crate::api::SCHEMA_VERSION, "provider": provider.id(), "server_count": count, "diagnostics": [diagnostic]}),
+        )?;
+    } else {
+        println!(
+            "{}\t{:?}\t{}\tservers={count}",
+            provider.id(),
+            diagnostic.state,
+            diagnostic.message
+        );
+    }
+    Ok(i32::from(failed))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn provider_ids_are_stable_and_cli_friendly() {
@@ -329,7 +439,24 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         vopono_core::util::set_config_dir_override(Some(dir.clone()));
 
+        let wg_dir = VpnProvider::AirVPN
+            .get_dyn_wireguard_provider()
+            .unwrap()
+            .wireguard_dir()
+            .unwrap();
+        fs::create_dir_all(&wg_dir).unwrap();
+        let server = wg_dir.join("fixture.conf");
+        fs::write(&server, "fixture configuration").unwrap();
         let result = record_sync(&VpnProvider::AirVPN, Protocol::Wireguard);
+        assert!(
+            configuration_last_synced(&VpnProvider::AirVPN, &Protocol::Wireguard, &server)
+                .is_some()
+        );
+        fs::write(&server, "modified configuration").unwrap();
+        assert!(
+            configuration_last_synced(&VpnProvider::AirVPN, &Protocol::Wireguard, &server)
+                .is_none()
+        );
         vopono_core::util::set_config_dir_override(None);
         result.unwrap();
 

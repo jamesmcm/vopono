@@ -52,6 +52,7 @@ pub struct NamespaceStatus {
     pub protocol: String,
     pub uptime: String,
     pub applications: Vec<ApplicationStatus>,
+    pub health: Option<vopono_core::network::health::Health>,
 }
 
 #[derive(Clone, Debug)]
@@ -101,6 +102,7 @@ fn read_status_inner() -> anyhow::Result<StatusSnapshot> {
         applications.sort_by(|a, b| a.command.cmp(&b.command));
 
         snapshot.namespaces.push(NamespaceStatus {
+            health: vopono_core::network::health::read_health(&name),
             name,
             provider: first_lock.ns.provider.to_string(),
             protocol: first_lock.ns.protocol.to_string(),

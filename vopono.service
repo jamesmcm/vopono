@@ -8,6 +8,9 @@ Type=simple
 ExecStart=/usr/bin/vopono daemon
 Restart=on-failure
 RestartSec=2s
+# Restart only the supervisor. Applications and protocol helpers stay protected
+# inside their namespaces and are adopted from root-owned records on startup.
+KillMode=process
 # Optional: enable structured logs
 Environment=RUST_LOG=info
 

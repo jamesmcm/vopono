@@ -373,3 +373,18 @@ fn request_port(uiclient: &dyn UiClient) -> anyhow::Result<u16> {
     })?;
     Ok(port)
 }
+
+pub(crate) fn diagnostic_catalogue(
+    body: &str,
+) -> anyhow::Result<Vec<super::super::diagnostics::CatalogueServer>> {
+    let relays: Vec<WireguardRelay> = serde_json::from_str(body)?;
+    Ok(relays
+        .into_iter()
+        .filter(|r| r.active)
+        .map(|r| super::super::diagnostics::CatalogueServer {
+            id: r.hostname,
+            addresses: vec![r.ipv4_addr_in.into(), r.ipv6_addr_in.into()],
+            public_key: Some(r.pubkey),
+        })
+        .collect())
+}

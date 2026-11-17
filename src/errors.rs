@@ -82,6 +82,16 @@ impl CliError {
 }
 
 impl ErrorCode {
+    pub fn from_setup(error: &vopono_core::diagnostics::SetupError) -> Self {
+        use vopono_core::diagnostics::SetupError;
+        match error {
+            SetupError::Configuration(_) => Self::InternalError,
+            SetupError::ProviderNotConfigured { .. } => Self::ProviderNotConfigured,
+            SetupError::ProtocolNotSupported { .. } => Self::ProtocolNotSupported,
+            SetupError::DependencyMissing(_) => Self::DependencyMissing,
+        }
+    }
+
     /// Classify a legacy `anyhow` error into a stable code.
     ///
     /// Typed [`CliError`]s are matched first; everything else falls through to
@@ -96,6 +106,19 @@ impl ErrorCode {
             .find_map(|cause| cause.downcast_ref::<CliError>().map(CliError::code))
         {
             return code;
+        }
+
+        if let Some(report) = error.downcast_ref::<crate::launch_diagnostics::LaunchFailure>() {
+            return report.code;
+        }
+        if let Some(setup) = error.downcast_ref::<vopono_core::diagnostics::SetupError>() {
+            return Self::from_setup(setup);
+        }
+        if error
+            .downcast_ref::<vopono_core::diagnostics::Diagnostic>()
+            .is_some()
+        {
+            return Self::VpnConnectionFailed;
         }
 
         let message = error.to_string().to_ascii_lowercase();
@@ -145,25 +168,61 @@ impl ErrorCode {
 /// The top-level message plus any additional context chain entries are kept so
 /// frontends do not lose `anyhow` context.
 pub fn error_json_value(error: &Error) -> serde_json::Value {
-    let context: Vec<String> = error
+    let report = error.downcast_ref::<crate::launch_diagnostics::LaunchFailure>();
+    let displayed_error = report
+        .and_then(|report| report.original.as_ref())
+        .unwrap_or(error);
+    let context: Vec<String> = displayed_error
         .chain()
         .skip(1)
         .map(|cause| cause.to_string())
         .take(5)
         .collect();
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "version": crate::api::SCHEMA_VERSION,
         "error": {
             "code": ErrorCode::from_anyhow(error),
-            "message": error.to_string(),
+            "message": displayed_error.to_string(),
             "context": context,
         }
-    })
+    });
+    if let Some(setup) = error.downcast_ref::<vopono_core::diagnostics::SetupError>() {
+        value["error"]["message"] = serde_json::json!(setup.to_string());
+        value["error"]["context"] = serde_json::json!([]);
+    }
+    if let Some(diagnostic) = error.downcast_ref::<vopono_core::diagnostics::Diagnostic>() {
+        value["error"]["diagnostics"] = serde_json::json!([diagnostic]);
+        value["error"]["message"] = serde_json::json!(diagnostic.to_string());
+        value["error"]["context"] = serde_json::json!([]);
+    }
+    if let Some(report) = report {
+        value["error"]["diagnostics"] = serde_json::json!(report.diagnostics);
+    }
+    value
 }
 
 #[cfg(test)]
 mod tests {
     use super::{CliError, ErrorCode, error_json_value};
+
+    #[test]
+    fn structured_vpn_errors_are_shareable_without_raw_protocol_context() {
+        use vopono_core::diagnostics::{Diagnostic, DiagnosticCode, DiagnosticState};
+        let diagnostic = Diagnostic::new(
+            DiagnosticCode::TunnelAuthentication,
+            DiagnosticState::Fail,
+            "OpenVPN authentication rejected by the server",
+            None,
+        );
+        let error = anyhow::anyhow!("provider reply: token=secret").context(diagnostic);
+        let value = error_json_value(&error);
+        assert_eq!(value["error"]["code"], "vpn_connection_failed");
+        assert_eq!(
+            value["error"]["diagnostics"][0]["code"],
+            "tunnel_authentication"
+        );
+        assert!(!value.to_string().contains("token=secret"));
+    }
 
     #[test]
     fn typed_control_errors_produce_stable_codes() {

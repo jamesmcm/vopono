@@ -16,8 +16,8 @@ pub enum Firewall {
 ///
 /// Once the VPN client is running and its tunnel interface is up, all
 /// input/output in the namespace is dropped except loopback, the tunnel
-/// interface, return traffic and the resolved VPN server endpoints (the
-/// client needs those to keep its session alive). Without this policy the
+/// interface, input replies and privileged VPN control traffic to the resolved
+/// server endpoints. Without this policy the
 /// namespace keeps a working default route through the host veth/NAT path,
 /// so any tunnel failure silently bypasses the VPN.
 ///
@@ -91,21 +91,14 @@ pub fn tunnel_only_killswitch_rules(
                         "OUTPUT".into(),
                         "-d".into(),
                         endpoint.to_string(),
+                        "-m".into(),
+                        "owner".into(),
+                        "--uid-owner".into(),
+                        "0".into(),
                         "-j".into(),
                         "ACCEPT".into(),
                     ]);
                 }
-                rules.push(vec![
-                    ipcmd.into(),
-                    "-A".into(),
-                    "OUTPUT".into(),
-                    "-m".into(),
-                    "conntrack".into(),
-                    "--ctstate".into(),
-                    "RELATED,ESTABLISHED".into(),
-                    "-j".into(),
-                    "ACCEPT".into(),
-                ]);
                 if let Some(iface) = tunnel_iface {
                     rules.push(vec![
                         ipcmd.into(),
@@ -172,6 +165,9 @@ pub fn tunnel_only_killswitch_rules(
                     "inet".into(),
                     ns_name.into(),
                     "output".into(),
+                    "meta".into(),
+                    "skuid".into(),
+                    "0".into(),
                     family.into(),
                     "daddr".into(),
                     endpoint.to_string(),
@@ -349,12 +345,13 @@ pub fn wait_for_tunnel_interface(
 ) -> anyhow::Result<Option<String>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     while std::time::Instant::now() < deadline {
-        let output = NetworkNamespace::exec_with_output(netns_name, &["ip", "-o", "link"])?;
+        let output =
+            NetworkNamespace::exec_with_output(netns_name, &["ip", "-j", "-d", "link", "show"])?;
         if output.status.success()
-            && let Some(iface) = parse_tunnel_interface_from_ip_link(
+            && let Some(iface) = parse_tunnel_interface_from_json(
                 &String::from_utf8_lossy(&output.stdout),
                 expected_prefixes,
-            )
+            )?
         {
             info!("Detected tunnel interface {iface} in {netns_name}");
             return Ok(Some(iface));
@@ -365,6 +362,32 @@ pub fn wait_for_tunnel_interface(
         "Timed out waiting for a tunnel interface in {netns_name}; applying endpoint-only killswitch"
     );
     Ok(None)
+}
+
+fn parse_tunnel_interface_from_json(
+    output: &str,
+    expected_prefixes: &[&str],
+) -> anyhow::Result<Option<String>> {
+    let links: serde_json::Value = serde_json::from_str(output)?;
+    let links = links.as_array().context("Invalid interface listing")?;
+    Ok(links.iter().find_map(|link| {
+        let name = link.get("ifname")?.as_str()?;
+        // A custom namespace named "tunnel" produces a veth beginning
+        // "tun". A prefix alone must never make that underlay a VPN device.
+        if name == "lo"
+            || link.pointer("/linkinfo/info_kind").and_then(|s| s.as_str()) == Some("veth")
+            || name.len() >= libc::IFNAMSIZ
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+        {
+            return None;
+        }
+        expected_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            .then(|| name.to_owned())
+    }))
 }
 
 pub fn disable_ipv6(netns: &NetworkNamespace, firewall: Firewall) -> anyhow::Result<()> {
@@ -516,12 +539,12 @@ mod tests {
         assert!(
             joined
                 .iter()
-                .any(|r| r == "iptables -A OUTPUT -d 198.51.100.7 -j ACCEPT")
+                .any(|r| r == "iptables -A OUTPUT -d 198.51.100.7 -m owner --uid-owner 0 -j ACCEPT")
         );
         assert!(
-            joined
-                .iter()
-                .any(|r| r == "ip6tables -A OUTPUT -d 2001:db8::53 -j ACCEPT")
+            joined.iter().any(
+                |r| r == "ip6tables -A OUTPUT -d 2001:db8::53 -m owner --uid-owner 0 -j ACCEPT"
+            )
         );
         assert!(
             joined
@@ -534,6 +557,7 @@ mod tests {
                 .any(|r| r.starts_with("iptables -A OUTPUT -j REJECT")),
             "final output rule must reject"
         );
+        assert!(joined.iter().all(|r| !r.contains("OUTPUT -m conntrack")));
     }
 
     #[test]
@@ -560,11 +584,8 @@ mod tests {
                 .iter()
                 .any(|r| r == "nft add rule inet vo_t input iifname \"ppp0\" accept")
         );
-        assert!(
-            joined
-                .iter()
-                .any(|r| r == "nft add rule inet vo_t output ip daddr 198.51.100.7 counter accept")
-        );
+        assert!(joined.iter().any(|r| r
+            == "nft add rule inet vo_t output meta skuid 0 ip daddr 198.51.100.7 counter accept"));
         let last_input = joined
             .iter()
             .rev()
@@ -599,6 +620,21 @@ mod tests {
         );
         assert_eq!(parse_tunnel_interface_from_ip_link(sample, &["ppp"]), None);
         assert_eq!(parse_tunnel_interface_from_ip_link("", &["tun"]), None);
+    }
+
+    #[test]
+    fn tunnel_detection_rejects_custom_veth_names_that_match_tun_prefix() {
+        let links = r#"[{"ifname":"lo"},{"ifname":"tun-u1000_s","linkinfo":{"info_kind":"veth"}},{"ifname":"tun0","linkinfo":{"info_kind":"ovpn"}}]"#;
+        assert_eq!(
+            parse_tunnel_interface_from_json(links, &["tun"]).unwrap(),
+            Some("tun0".into())
+        );
+        let links = r#"[{"ifname":"tun-u1000_s","linkinfo":{"info_kind":"veth"}}]"#;
+        assert!(
+            parse_tunnel_interface_from_json(links, &["tun"])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

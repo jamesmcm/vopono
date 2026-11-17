@@ -2,3 +2,4 @@
 /vopono-gui/target
 dialoguer
 test.sh
+__pycache__/

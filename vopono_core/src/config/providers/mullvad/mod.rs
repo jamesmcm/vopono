@@ -1,3 +1,4 @@
+pub(super) use wireguard::diagnostic_catalogue;
 mod wireguard;
 
 use std::fmt::Display;

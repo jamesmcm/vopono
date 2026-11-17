@@ -32,6 +32,7 @@ pub struct NamespaceEntry {
     pub port_forwarding: Option<PortForwardingEntry>,
     pub open_ports: Vec<u16>,
     pub host_forwarded_ports: Vec<u16>,
+    pub health: Option<crate::health::Health>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -184,6 +185,7 @@ fn namespace_entry(
     let namespace = &metadata.ns;
 
     Ok(NamespaceEntry {
+        health: crate::health::read_health(id),
         id: id.to_string(),
         provider: namespace.provider.id().to_string(),
         protocol: namespace.protocol.id().to_string(),
@@ -288,6 +290,9 @@ fn flatten_applications(namespaces: &[NamespaceEntry]) -> Vec<ApplicationListEnt
 fn print_human_status(status: &StatusDocument) {
     println!("{}", status.daemon.human_line());
     print_namespaces(&status.namespaces);
+    if !status.namespaces.is_empty() {
+        println!("\nRun vopono doctor to check connectivity and DNS in these namespaces.");
+    }
     if !status.errors.is_empty() {
         for error in &status.errors {
             eprintln!("status warning: {error}");

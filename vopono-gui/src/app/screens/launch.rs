@@ -96,6 +96,16 @@ impl VoponoGuiApp {
                 "Gamepad controls",
             );
         });
+        ui.checkbox(
+            &mut self.gui_config.launch.monitor,
+            "Monitor connection health",
+        );
+        ui.add_enabled_ui(self.gui_config.launch.monitor, |ui| {
+            ui.checkbox(
+                &mut self.gui_config.launch.recover,
+                "Repair network or tunnel after connectivity failures",
+            );
+        });
         if self.gui_config.launch.port_forwarding {
             match &self.provider_forwarded_port {
                 Some(status) => {

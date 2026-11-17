@@ -305,10 +305,12 @@ impl FromStr for WireguardConfig {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (remaining, parsed_sections) = parse_config(s.trim())
-            .map_err(|e| anyhow!("Failed to parse Wireguard config: {}", e))?;
+            .map_err(|_| anyhow!("Invalid Wireguard configuration syntax"))?;
 
         if !remaining.trim().is_empty() {
-            return Err(anyhow!("Unexpected trailing data in config: {}", remaining));
+            return Err(anyhow!(
+                "Unexpected trailing data in Wireguard configuration"
+            ));
         }
 
         let mut interface = None;
@@ -681,6 +683,16 @@ AllowedIPs =
 
         let config = WireguardConfig::from_str(config).unwrap();
         assert!(config.peer.allowed_ips.is_empty());
+    }
+
+    #[test]
+    fn syntax_errors_omit_configuration_contents() {
+        let config = "[Interface]\nPrivateKey = NEVER_SHARE_KEY\nAddress 192.0.2.1/32\n";
+        let error = WireguardConfig::from_str(config).unwrap_err();
+        assert_eq!(
+            format!("{error:#}"),
+            "Invalid Wireguard configuration syntax"
+        );
     }
 
     #[test]

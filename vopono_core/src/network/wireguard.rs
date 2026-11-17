@@ -5,7 +5,7 @@ use crate::network::wireguard_config::WireguardConfig;
 use crate::util::sudo_command;
 use anyhow::{Context, anyhow};
 use ipnet::IpNet;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -16,7 +16,7 @@ use std::str::FromStr;
 use tempfile::NamedTempFile;
 
 const DEFAULT_PERSISTENT_KEEPALIVE_SECS: &str = "25";
-const WIREGUARD_FWMARK: &str = "51820";
+pub(crate) const WIREGUARD_FWMARK: &str = "51820";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Wireguard {
@@ -29,6 +29,8 @@ pub struct Wireguard {
     pub firewall: Firewall,
     pub if_name: String,
     pub interface_addresses: Vec<IpAddr>,
+    #[serde(default)]
+    pub(crate) recovery: Option<super::recovery::Peer>,
 }
 
 impl Wireguard {
@@ -58,12 +60,11 @@ impl Wireguard {
         let executable_wg = executable_wg.unwrap_or("wg").to_string();
         let ip_link_type = ip_link_type.unwrap_or("wireguard").to_string();
 
-        if let Err(x) = which::which(&executable_wg) {
-            error!("{executable_wg} binary not found. Is wireguard-tools installed and on PATH?");
-            return Err(anyhow!(
-                "{executable_wg} binary not found. Is wireguard-tools installed and on PATH?: {:?}",
-                x
-            ));
+        if which::which(&executable_wg).is_err() {
+            return Err(crate::diagnostics::SetupError::DependencyMissing(
+                if executable_wg == "awg" { "awg" } else { "wg" },
+            )
+            .into());
         }
 
         let mut config_string = std::fs::read_to_string(&config_file)
@@ -138,6 +139,13 @@ impl Wireguard {
         );
         let peer_endpoint =
             SocketAddr::new(peer_endpoint_ip, config.peer.endpoint.port()).to_string();
+        let recovery = super::recovery::Peer {
+            host: config.peer.endpoint.ip_or_hostname(),
+            port: config.peer.endpoint.port(),
+            public_key: config.peer.public_key.clone(),
+            address: peer_endpoint_ip,
+            disable_ipv6,
+        };
         let endpoint_line = Regex::new(r"(?m)^Endpoint\s*=.*$")?;
         config_string = endpoint_line
             .replace_all(&config_string, format!("Endpoint = {peer_endpoint}"))
@@ -200,6 +208,9 @@ impl Wireguard {
                     "inet",
                     &namespace.name,
                     "output",
+                    "meta",
+                    "mark",
+                    WIREGUARD_FWMARK,
                     ip_family,
                     "daddr",
                     &peer_ip_str,
@@ -242,13 +253,14 @@ impl Wireguard {
         )?;
 
         let wg_temp_path = wg_temp_file.path().to_string_lossy();
-        NetworkNamespace::exec(
+        let configured = NetworkNamespace::exec_with_output(
             &namespace.name,
             &[&executable_wg, "setconf", &if_name, &wg_temp_path],
         )
         .context(format!(
             "Failed to run {executable_wg} setconf - is wireguard-tools installed?"
         ))?;
+        ensure_setconf_succeeded(configured.status.success())?;
 
         if config.peer.keepalive.is_none() {
             info!(
@@ -596,8 +608,21 @@ impl Wireguard {
             firewall,
             if_name,
             interface_addresses,
+            recovery: Some(recovery),
         })
     }
+}
+
+fn ensure_setconf_succeeded(success: bool) -> anyhow::Result<()> {
+    if !success {
+        return Err(crate::diagnostics::Diagnostic::new(
+            crate::diagnostics::DiagnosticCode::TunnelHandshake,
+            crate::diagnostics::DiagnosticState::Fail,
+            "WireGuard setconf failed; the tunnel configuration was not applied",
+            Some("Run vopono doctor to check configuration and AppArmor evidence; inspect sudo journalctl -k --since '-15 min' for wg/awg DENIED records (issue #392). Configuration contents and raw tool output are omitted"),
+        ).into());
+    }
+    Ok(())
 }
 
 /// Whether `address` falls inside any of `allowed_ips`.
@@ -1017,6 +1042,18 @@ impl Wireguard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_setconf_stops_setup_and_provides_diagnostic_guidance() {
+        assert!(ensure_setconf_succeeded(true).is_ok());
+        let error = ensure_setconf_succeeded(false).unwrap_err();
+        let diagnostic = error
+            .downcast_ref::<crate::diagnostics::Diagnostic>()
+            .unwrap();
+        assert_eq!(diagnostic.state, crate::diagnostics::DiagnosticState::Fail);
+        assert!(diagnostic.message.contains("not applied"));
+        assert!(diagnostic.action.as_deref().unwrap().contains("AppArmor"));
+    }
 
     fn networks(values: &[&str]) -> Vec<IpNet> {
         values.iter().map(|value| value.parse().unwrap()).collect()

@@ -1,12 +1,11 @@
 [package]
 name = "vopono"
 description = "Launch applications via VPN tunnels using temporary network namespaces"
-version = "1.0.3"
+version = "1.1.0"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/jamesmcm/vopono"
-homepage = "https://github.com/jamesmcm/vopono"
 readme = "README.md"
 keywords = ["vopono", "vpn", "wireguard", "openvpn", "netns"]
 
@@ -23,10 +22,11 @@ pretty_env_logger = "0.5"
 clap = { version = "4", features = ["derive"] }
 dialoguer = "0.12"
 compound_duration = "2"
+console = "0.16"
 signal-hook = "0.4"
 chrono = "0.4"
 bs58 = "0.5"
-nix = { version = "0.31", features = ["signal", "process", "socket", "uio", "mount", "term"] }
+nix = { version = "0.31", features = ["signal", "process", "socket", "net", "uio", "mount", "term"] }
 config = "0.15"
 serde = { version = "1", features = ["derive", "std"] }
 serde_json = "1"

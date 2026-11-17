@@ -108,6 +108,8 @@ pub struct App {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    #[clap(name = "mcp", about = "Expose local vopono tools over MCP stdio")]
+    Mcp(McpCommand),
     #[clap(
         name = "daemon",
         about = "Run or inspect the privileged root vopono daemon"
@@ -120,9 +122,22 @@ pub enum Command {
     Exec(ExecCommand),
     #[clap(
         name = "check",
-        about = "Check network connectivity of a running namespace"
+        about = "Check IPv4, IPv6 and DNS in a running namespace (find IDs with status)",
+        after_help = "For automatic discovery and diagnosis of running namespaces, run: vopono doctor"
     )]
     Check(CheckCommand),
+    #[clap(
+        name = "doctor",
+        about = "Diagnose DNS, interfaces, host links, firewalls and VPN configurations",
+        long_about = "Check daemon availability and CLI/daemon versions, host and namespace DNS servers,\ndefaults, interfaces and local veth links, plus Internet connectivity, forwarding,\nfirewall rules, Tailscale/NetworkManager interference and AppArmor.\nUse --namespace to select one running namespace. The root daemon supplies\nprivileged read-only evidence without a sudo prompt. With --provider or --custom,\ninspect a stored configuration and its host endpoint instead.\nNo tunnel is created and no configuration, firewall or AppArmor policy is changed.",
+        after_help = "Examples:\n  vopono doctor\n  vopono doctor --namespace vo_ar_romania\n  vopono doctor --namespace vo_ar_romania --dns-host example.com\n  vopono doctor --provider mullvad --server sweden\n  vopono doctor --custom /path/to/vpn.conf --offline\n  vopono doctor --plain\n  vopono doctor --json\n\nTables use colour on terminals; --color always|never overrides detection. Use --plain for tab-separated agent output or --json for structured reports. Use vopono status to list namespace IDs."
+    )]
+    Doctor(DoctorCommand),
+    #[clap(
+        name = "profiles",
+        about = "List named profiles or export a desktop launcher"
+    )]
+    Profiles(ProfilesCommand),
     #[clap(
         name = "__connectivity-probe",
         about = "Internal TCP probe executed inside a network namespace",
@@ -135,6 +150,10 @@ pub enum Command {
         hide = true
     )]
     WriteUserFile,
+    #[clap(name = "__read-user-file", hide = true)]
+    ReadUserFile { path: PathBuf },
+    #[clap(name = "__openvpn-supervisor", hide = true)]
+    OpenVpnSupervisor { path: PathBuf },
     #[clap(
         name = "list",
         about = "List running vopono namespaces and applications"
@@ -161,6 +180,37 @@ pub enum Command {
         about = "List possible server configs for VPN provider, beginning with prefix"
     )]
     Servers(ServersCommand),
+}
+
+#[derive(Parser, Debug)]
+pub struct McpCommand {
+    #[clap(subcommand)]
+    pub command: McpSubcommand,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum McpSubcommand {
+    /// Run as your ordinary user; the privileged daemon must already be running for jobs.
+    Serve(McpServeCommand),
+}
+
+#[derive(Parser, Debug, Clone)]
+pub struct McpServeCommand {
+    /// Configuration file containing the named profiles exposed to this server.
+    #[clap(long)]
+    pub vopono_config: Option<PathBuf>,
+    /// Restrict profile access to these names (repeatable; default: all configured profiles).
+    #[clap(long = "allow-profile")]
+    pub allow_profiles: Vec<String>,
+    /// Let run_profile replace a profile's application with an explicit argv array.
+    #[clap(long)]
+    pub allow_command: bool,
+    /// Maximum simultaneously active jobs in this MCP session.
+    #[clap(long, default_value_t = 4, value_parser = clap::value_parser!(u8).range(1..=8))]
+    pub max_jobs: u8,
+    /// Maximum job lifetime, including VPN setup; cancellation is requested on expiry.
+    #[clap(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..=3600))]
+    pub max_job_seconds: u64,
 }
 
 #[derive(Parser, Debug)]
@@ -211,6 +261,11 @@ pub struct ProviderCommand {
 pub enum ProviderSubcommand {
     #[clap(name = "status", about = "Show provider configuration state")]
     Status(ProviderStatusCommand),
+    #[clap(
+        name = "check",
+        about = "Check a public provider catalogue without credentials"
+    )]
+    Check(ProviderStatusCommand),
 }
 
 #[derive(Parser, Debug)]
@@ -281,8 +336,29 @@ pub struct ExecCommand {
     #[clap(long = "server", short = 's')]
     pub server: Option<String>,
 
-    /// Application to run (should be on PATH or full path to binary)
+    /// Application to run (defaults to the named profile's application).
+    #[clap(default_value = "")]
     pub application: String,
+
+    /// Internal: MCP has already quoted a literal argv; do not expand environment variables.
+    #[clap(skip)]
+    #[serde(default)]
+    pub literal_application: bool,
+
+    /// Named application profile from [profiles.NAME] in config.toml.
+    #[clap(long)]
+    #[serde(default)]
+    pub profile: Option<String>,
+
+    /// Monitor namespace TCP/DNS health through the daemon.
+    #[clap(long)]
+    #[serde(default)]
+    pub monitor: bool,
+
+    /// Refresh an existing WireGuard peer's keepalive after repeated failures.
+    #[clap(long, requires = "monitor")]
+    #[serde(default)]
+    pub recover: bool,
 
     /// User with which to run the application (default is current user)
     #[clap(long = "user", short = 'u')]
@@ -462,7 +538,7 @@ pub struct CheckCommand {
     pub port: u16,
 
     /// Connection timeout in milliseconds per family
-    #[clap(long = "timeout-ms", default_value_t = crate::check::DEFAULT_TIMEOUT_MS)]
+    #[clap(long = "timeout-ms", default_value_t = crate::check::DEFAULT_TIMEOUT_MS, value_parser = clap::value_parser!(u64).range(1..=30000))]
     pub timeout_ms: u64,
 
     /// IPv4 target to connect to
@@ -508,7 +584,7 @@ pub struct ProbeCommand {
     #[clap(long = "port")]
     pub port: u16,
 
-    #[clap(long = "timeout-ms")]
+    #[clap(long = "timeout-ms", value_parser = clap::value_parser!(u64).range(1..=30000))]
     pub timeout_ms: u64,
 
     #[clap(long = "dns-host")]
@@ -734,6 +810,71 @@ mod tests {
     }
 
     #[test]
+    fn doctor_selects_namespaces_and_rejects_mixed_modes() {
+        let app = App::try_parse_from([
+            "vopono",
+            "doctor",
+            "--namespace",
+            "vo_ar_romania",
+            "--dns-host",
+            "example.com",
+            "--skip-ipv6",
+            "--json",
+        ])
+        .unwrap();
+        let Command::Doctor(command) = app.cmd.unwrap() else {
+            panic!("expected doctor command");
+        };
+        assert_eq!(command.namespace.as_deref(), Some("vo_ar_romania"));
+        assert_eq!(command.dns_host.as_deref(), Some("example.com"));
+        assert!(command.skip_ipv6);
+        assert!(command.json);
+
+        for extra in [
+            vec!["--provider", "airvpn"],
+            vec!["--custom", "/tmp/vpn.conf"],
+            vec!["--protocol", "wireguard"],
+        ] {
+            let mut argv = vec!["vopono", "doctor", "--namespace", "vo_ar_romania"];
+            argv.extend(extra);
+            assert!(App::try_parse_from(argv).is_err());
+        }
+        for argv in [
+            vec![
+                "vopono",
+                "doctor",
+                "--provider",
+                "airvpn",
+                "--dns-host",
+                "example.com",
+            ],
+            vec![
+                "vopono",
+                "doctor",
+                "--custom",
+                "/tmp/vpn.conf",
+                "--skip-ipv6",
+            ],
+            vec!["vopono", "doctor", "--offline", "--dns-host", "example.com"],
+            vec!["vopono", "doctor", "--protocol", "wireguard"],
+        ] {
+            assert!(App::try_parse_from(argv).is_err());
+        }
+        assert!(
+            App::try_parse_from([
+                "vopono",
+                "doctor",
+                "--custom",
+                "/tmp/vpn.conf",
+                "--protocol",
+                "wireguard",
+                "--offline"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn provider_values_parse_case_insensitively() {
         for spelling in ["airvpn", "AirVPN", "AIRVPN", "aIrVpN"] {
             let app =
@@ -747,4 +888,73 @@ mod tests {
             );
         }
     }
+}
+
+#[derive(Parser, Debug)]
+#[clap(group = clap::ArgGroup::new("configuration").args(["provider", "custom"]))]
+pub struct DoctorCommand {
+    /// Diagnose one running namespace instead of discovering all of them (IDs: vopono status).
+    #[clap(long, value_name = "ID", conflicts_with_all = ["provider", "protocol", "custom", "server", "catalogue"])]
+    pub namespace: Option<String>,
+    /// Hostname to resolve using each namespace's DNS configuration.
+    #[clap(long, value_name = "HOST", conflicts_with_all = ["provider", "custom", "offline"])]
+    pub dns_host: Option<String>,
+    /// Skip IPv6 probes when IPv6 is intentionally disabled in the namespace.
+    #[clap(long, conflicts_with_all = ["provider", "custom", "offline"])]
+    pub skip_ipv6: bool,
+    /// Inspect a provider's stored configuration instead of running namespaces.
+    #[clap(value_enum, long, ignore_case = true, conflicts_with = "custom")]
+    pub provider: Option<WrappedArg<VpnProvider>>,
+    /// Protocol of the selected configuration.
+    #[clap(value_enum, long, ignore_case = true, requires = "configuration")]
+    pub protocol: Option<WrappedArg<Protocol>>,
+    /// Stored configuration selector (use a unique server name).
+    #[clap(long, requires = "provider")]
+    pub server: Option<String>,
+    /// Inspect this configuration file instead of running namespaces.
+    #[clap(long)]
+    pub custom: Option<PathBuf>,
+    /// Inspect local configuration and system state without network probes (including host DNS).
+    #[clap(long, conflicts_with = "catalogue")]
+    pub offline: bool,
+    /// Fetch the public WireGuard catalogue (Mullvad/PIA); never authenticates or provisions keys.
+    #[clap(long, requires = "provider")]
+    pub catalogue: bool,
+    /// Timeout in milliseconds per network probe.
+    #[clap(long, default_value_t = 3000, value_parser = clap::value_parser!(u64).range(1..=30000))]
+    pub timeout_ms: u64,
+    /// Emit undecorated tab-separated diagnostics with stable check/state names (alias: --plaintext).
+    #[clap(long, visible_alias = "plaintext", conflicts_with = "json")]
+    pub plain: bool,
+    /// Colour table output; auto honours NO_COLOR, TERM=dumb and redirected stdout.
+    #[clap(long, value_enum, default_value_t = DoctorColor::Auto)]
+    pub color: DoctorColor,
+    /// Emit a versioned report with per-namespace diagnostics and connectivity results.
+    #[clap(long)]
+    pub json: bool,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default)]
+pub enum DoctorColor {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+#[derive(Parser, Debug)]
+pub struct ProfilesCommand {
+    #[clap(long, global = true)]
+    pub vopono_config: Option<PathBuf>,
+    #[clap(subcommand)]
+    pub command: ProfileSubcommand,
+}
+#[derive(Subcommand, Debug)]
+pub enum ProfileSubcommand {
+    List(JsonCommand),
+    Export {
+        name: String,
+        #[clap(long)]
+        output: PathBuf,
+    },
 }

@@ -18,8 +18,10 @@ pub struct Natpmpc {
     pub local_port: u16,
     loop_thread_handle: Option<JoinHandle<()>>,
     send_channel: Sender<bool>,
+    params: ThreadParamsImpl,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ThreadParamsImpl {
     pub netns_name: String,
     pub locks_dir: std::path::PathBuf,
@@ -104,6 +106,11 @@ impl Natpmpc {
         let output =
             NetworkNamespace::exec_with_output(&ns.name, &["natpmpc", "-g", &gateway_str])?;
         if !output.status.success() {
+            log::debug!(
+                "NAT-PMP gateway probe failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
             log::error!(
                 "natpmpc failed - likely that this server does not support port forwarding, please choose another server"
             );
@@ -122,12 +129,17 @@ impl Natpmpc {
             ),
         };
 
+        Self::resume(params)
+    }
+
+    pub fn resume(params: ThreadParamsImpl) -> anyhow::Result<Self> {
         let port = Self::refresh_port(&params)?;
         Self::callback_command(&params, port);
 
         let (send, recv) = mpsc::channel::<bool>();
 
         let owner_write_context = crate::util::capture_owner_write_context()?;
+        let retained = params.clone();
         let handle = std::thread::spawn(move || {
             crate::util::install_owner_write_context(&owner_write_context);
             Self::thread_loop(params, recv);
@@ -138,6 +150,7 @@ impl Natpmpc {
             local_port: port,
             loop_thread_handle: Some(handle),
             send_channel: send,
+            params: retained,
         })
     }
 }
@@ -195,5 +208,8 @@ impl Drop for Natpmpc {
 impl Forwarder for Natpmpc {
     fn forwarded_port(&self) -> u16 {
         self.local_port
+    }
+    fn snapshot(&self) -> Option<super::ForwarderSnapshot> {
+        Some(super::ForwarderSnapshot::Natpmp(self.params.clone()))
     }
 }
