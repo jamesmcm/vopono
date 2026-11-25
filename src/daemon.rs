@@ -1204,14 +1204,17 @@ fn handle_client(
                         crate::namespace_sessions::stop_monitor(&id)?;
                         crate::control::stop_namespace(&id, Some(uid))
                     })();
-                    if result.is_ok() {
-                        crate::namespace_sessions::invalidate(&id);
-                    }
+                    let released = result
+                        .as_ref()
+                        .ok()
+                        .and_then(|_| crate::namespace_sessions::invalidate(&id));
                     drop(_transition);
-                    if result.is_ok() {
-                        crate::namespace_sessions::wait_released(&id)?;
-                    }
-                    result
+                    result.and_then(|result| {
+                        if let Some(released) = released {
+                            crate::namespace_sessions::wait_released(&released)?;
+                        }
+                        Ok(result)
+                    })
                 }
             };
             let payload = match outcome {

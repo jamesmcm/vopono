@@ -638,8 +638,10 @@ fn host_forward_proxies(
     ports.sort_unstable();
     ports.dedup();
     ports.retain(|port| !retained.contains(port));
+    let desired = crate::namespace_sessions::desired_relay_ports(&ns.name);
     anyhow::ensure!(
-        retained.len() + ports.len() <= MAX_HOST_FORWARD_PORTS,
+        desired.len() + ports.iter().filter(|port| !desired.contains(port)).count()
+            <= MAX_HOST_FORWARD_PORTS,
         "At most {MAX_HOST_FORWARD_PORTS} host-forwarded ports may be active per namespace"
     );
     if ports.is_empty() {

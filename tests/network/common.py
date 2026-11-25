@@ -61,7 +61,7 @@ class Context:
             raise KeyError(name)
         return result
 
-    def restart(self, abrupt=False, *, umask=-1):
+    def restart(self, abrupt=False, *, umask=-1, after_exit=None):
         pid = json.loads(self.client('daemon', 'status', '--json').stdout)['pid']
         os.kill(pid, signal.SIGKILL if abrupt else signal.SIGTERM)
 
@@ -70,6 +70,8 @@ class Context:
             return not path.exists() or 'State:\tZ' in path.read_text()
 
         wait_for(exited)
+        if after_exit is not None:
+            after_exit()
         with (self.scratch / 'daemon.log').open('a') as log:
             daemon = subprocess.Popen([self.binary, 'daemon'], stdout=log,
                                       stderr=subprocess.STDOUT,

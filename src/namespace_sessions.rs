@@ -149,6 +149,7 @@ fn reserve_resources(name: &str, uid: Uid, monitor: bool) -> anyhow::Result<()> 
 struct Entry {
     applications: usize,
     valid: Arc<AtomicBool>,
+    released: Arc<AtomicBool>,
     monitor: Option<crate::health::Monitor>,
     forwarder_stop: Option<std::sync::mpsc::Sender<bool>>,
     proxies: HashMap<u16, crate::tcp_proxy::TcpProxy>,
@@ -158,15 +159,16 @@ static SESSIONS: LazyLock<Mutex<HashMap<String, Entry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Called after an authorized explicit stop, while holding this namespace's transition permit.
-pub fn invalidate(name: &str) {
-    if let Some(entry) = SESSIONS.lock().unwrap_or_else(|p| p.into_inner()).get(name) {
-        entry.valid.store(false, Ordering::Release);
-    }
+pub fn invalidate(name: &str) -> Option<Arc<AtomicBool>> {
+    let sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
+    let entry = sessions.get(name)?;
+    entry.valid.store(false, Ordering::Release);
+    Some(entry.released.clone())
 }
 
-pub fn wait_released(name: &str) -> anyhow::Result<()> {
+pub fn wait_released(released: &AtomicBool) -> anyhow::Result<()> {
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
-    while contains(name) {
+    while !released.load(Ordering::Acquire) {
         anyhow::ensure!(
             std::time::Instant::now() < deadline,
             "Namespace workers are still releasing resources"
@@ -236,16 +238,27 @@ pub fn relay_ports(name: &str) -> Vec<u16> {
         .unwrap_or_default()
 }
 
+pub fn desired_relay_ports(name: &str) -> Vec<u16> {
+    SESSIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(name)
+        .map(|entry| entry.desired_host_ports.iter().copied().collect())
+        .unwrap_or_default()
+}
+
 fn remove_session(name: &str, valid: &Arc<AtomicBool>) {
     let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
     if sessions
         .get(name)
         .is_some_and(|entry| Arc::ptr_eq(&entry.valid, valid))
     {
-        let entry = sessions.remove(name);
+        let entry = sessions.remove(name).expect("matched session entry");
+        let released = entry.released.clone();
         release_resources(name);
         drop(sessions);
         drop(entry);
+        released.store(true, Ordering::Release);
     }
 }
 
@@ -273,6 +286,7 @@ impl Session {
         let entry = sessions.entry(ns.name.clone()).or_insert_with(|| Entry {
             applications: 0,
             valid: Arc::new(AtomicBool::new(true)),
+            released: Arc::new(AtomicBool::new(false)),
             monitor: None,
             forwarder_stop: None,
             proxies: HashMap::new(),
@@ -324,6 +338,19 @@ impl Session {
             .get_mut(&self.ns.name)
         {
             entry.desired_host_ports.extend(ports.iter().copied());
+        }
+    }
+
+    fn restore_missing_relays(&self) {
+        let active = relay_ports(&self.ns.name);
+        for port in desired_relay_ports(&self.ns.name) {
+            if active.contains(&port) {
+                continue;
+            }
+            match crate::exec::restore_host_proxies(&self.ns, &[port]) {
+                Ok(proxies) => self.retain_proxies(proxies),
+                Err(error) => log::warn!("{error:#}; will retry host relay"),
+            }
         }
     }
 
@@ -415,7 +442,9 @@ impl Session {
         // Respond to the client before entering this loop. The namespace and
         // provider renewal task outlive any individual client/application.
         let mut lease_retry_at = std::time::Instant::now();
-        let mut teardown_retry_at = std::time::Instant::now();
+        let mut relay_retry_at = std::time::Instant::now();
+        let mut cleanup_retry_at = std::time::Instant::now();
+        let mut primary_removed = false;
         loop {
             let transition = lock_namespace(&self.ns.name);
             if !self.valid.load(Ordering::Acquire) {
@@ -432,6 +461,10 @@ impl Session {
                 self.disarm();
                 remove_session(&self.ns.name, &self.valid);
                 break;
+            }
+            if std::time::Instant::now() >= relay_retry_at {
+                self.restore_missing_relays();
+                relay_retry_at = std::time::Instant::now() + Duration::from_secs(5);
             }
             if let Some(snapshot) = self.pending_forwarder.as_ref()
                 && std::time::Instant::now() >= lease_retry_at
@@ -486,9 +519,23 @@ impl Session {
                 .unwrap_or(0);
             let persistent =
                 crate::namespace_ownership::is_persistent(&self.ns.name, self.uid).unwrap_or(true);
+            if primary_removed
+                && (active > 0 || persistent)
+                && std::time::Instant::now() >= cleanup_retry_at
+            {
+                // Re-publish status in the controller's configuration tree after reattachment.
+                match self.ns.write_lockfile_in_place("") {
+                    Ok(()) => primary_removed = false,
+                    Err(error) => log::warn!(
+                        "Could not restore primary lock for {}: {error:#}",
+                        self.ns.name
+                    ),
+                }
+                cleanup_retry_at = std::time::Instant::now() + Duration::from_secs(2);
+            }
             if active == 0
                 && !persistent
-                && std::time::Instant::now() >= teardown_retry_at
+                && std::time::Instant::now() >= cleanup_retry_at
                 && !self.ns.has_application_processes().unwrap_or(true)
             {
                 let mut can_teardown = true;
@@ -502,6 +549,20 @@ impl Session {
                     .unwrap_or(false)
                     {
                         can_teardown = false;
+                        // Release our application status while keeping the controller,
+                        // ownership record and resources available for a later retry.
+                        let primary = lock_dir.join(own_lock);
+                        if primary.exists() && !vopono_core::status::has_client_lockfiles(&lock_dir)
+                        {
+                            match vopono_core::util::owner_write::remove_file_as_config_owner(
+                                &primary,
+                            ) {
+                                Ok(()) => primary_removed = true,
+                                Err(error) => log::warn!(
+                                    "Could not remove idle namespace lock {primary:?}: {error:#}"
+                                ),
+                            }
+                        }
                     }
                 }
                 if can_teardown {
@@ -547,7 +608,7 @@ impl Session {
                         }
                     }
                 }
-                teardown_retry_at = std::time::Instant::now() + Duration::from_secs(2);
+                cleanup_retry_at = std::time::Instant::now() + Duration::from_secs(2);
             }
             drop(transition);
             std::thread::sleep(Duration::from_millis(250));
@@ -599,18 +660,6 @@ pub fn restore_all() -> anyhow::Result<()> {
                     return Ok(None);
                 }
                 let mut ns = crate::namespace_ownership::load(&name, uid)?;
-                // Restore host proxies on a best-effort basis: a transient bind
-                // failure must not abandon the namespace's lifecycle controller
-                // or wipe the recorded desired host ports on disk.
-                let proxies = match crate::exec::restore_host_proxies(&ns, &runtime.host_ports) {
-                    Ok(proxies) => proxies,
-                    Err(error) => {
-                        log::warn!(
-                            "Could not rebind host proxies for restored namespace {name}: {error:#}"
-                        );
-                        Vec::new()
-                    }
-                };
                 // Write the new primary lockfile BEFORE removing the previous daemon PID's
                 // lockfile so status visibility is continuous across daemon restarts.
                 // Detach on error so dropping `ns` cannot tear down a live persistent namespace.
@@ -626,7 +675,6 @@ pub fn restore_all() -> anyhow::Result<()> {
                 let mut session =
                     Session::register(ns, uid, None, runtime.monitor, runtime.recover);
                 session.retain_desired_host_ports(&runtime.host_ports);
-                session.retain_proxies(proxies);
                 session.pending_forwarder = runtime.forwarder;
                 // A failure to refresh restart bookkeeping must not drop a
                 // persistent controller while the startup transition is held.
@@ -695,13 +743,17 @@ mod tests {
         assert_eq!(first.forwarded_port(), Some(1234));
         drop(second);
         assert!(!dropped.get());
-        invalidate(&first.ns.name);
+        let released = invalidate(&first.ns.name).unwrap();
+        assert!(!released.load(Ordering::Acquire));
         first.run_until_unused();
         let replacement = Session::register(ns(), Uid::current(), None, false, false);
+        assert!(released.load(Ordering::Acquire));
+        wait_released(&released).unwrap();
         assert!(replacement.controller);
         assert!(dropped.get());
         assert!(replacement.valid.load(Ordering::Acquire));
-        invalidate(&replacement.ns.name);
+        let released = invalidate(&replacement.ns.name).unwrap();
         replacement.run_until_unused();
+        wait_released(&released).unwrap();
     }
 }

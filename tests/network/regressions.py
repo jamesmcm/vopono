@@ -206,6 +206,7 @@ assert owner.exists(), "Skipped teardown discarded the ownership record"
 # Persistence makes the explicit-stop retry deterministic after removing the
 # obstacle, rather than racing the controller's next automatic cleanup pass.
 client(*attach(name, "true", "--keep-alive"))
+wait_for(lambda: any(p.name.isdecimal() for p in lock_dir.iterdir()))
 leftover.unlink()
 client("stop", "namespace", name, "--json")
 assert not (Path("/run/netns") / name).exists()
