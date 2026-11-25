@@ -94,6 +94,10 @@ probe = LeakProbe(Context(binary, scratch_arg, user), name,
                   [('192.0.2.2', 51820), ('192.0.2.3', 51820)])
 probe.wait_for_tunnel()
 probe.wait_for_tunnel(ipv6=True)
+# The peer listens on every address. Restrict this TCP target to the underlay
+# so a connection through WireGuard cannot be mistaken for plaintext traffic.
+underlay_only = ('-i', 'wgpeer', '-d', '192.0.2.2', '-p', 'tcp', '--dport', '443', '-j', 'REJECT')
+command('ip', 'netns', 'exec', 'peer', 'iptables', '-I', 'INPUT', *underlay_only)
 # Rotate the DNS endpoint and make the original literal address unusable.
 # Removing a primary IPv4 address may also remove secondary addresses in its
 # subnet. Add the replacement after removal so it becomes the new primary.
@@ -150,6 +154,8 @@ command('ip', '-n', 'peer', 'addr', 'add', '192.0.2.2/32', 'dev', 'lo')
 command('ip', '-n', 'peer', 'addr', 'add', '192.0.2.3/32', 'dev', 'lo')
 command('ip', 'link', 'delete', 'uplink')
 command('ip', 'route', 'replace', 'default', 'via', '192.0.3.2', 'dev', 'uplink2')
+with socket.create_connection(('192.0.2.2', 443), timeout=1):
+    pass  # The host can still reach the plaintext target over the new underlay.
 # Poll leakage throughout repair, not merely once after the connection returns.
 def recovered():
     isolated()
@@ -213,5 +219,6 @@ for table in ('vopono_nat', 'vopono_bridge'):
     assert removed.returncode != 0, f'Recovery leaked nftables table {table}'
 print('PASS: DNS rotation, underlay replacement and repeated recovery preserve firewall rules, namespace/app identity and isolation', flush=True)
 
+command('ip', 'netns', 'exec', 'peer', 'iptables', '-D', 'INPUT', *underlay_only)
 os.environ['PATH'] = original_path
 context.restart()

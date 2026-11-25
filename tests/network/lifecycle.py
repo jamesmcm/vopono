@@ -39,6 +39,8 @@ for abrupt in (False, True):
                 blocker.listen()
 
             ctx.restart(after_exit=occupy_relay_port)
+            wait_for(lambda: 'Could not bind host TCP port 43130' in
+                     (ctx.scratch / 'daemon.log').read_text())
             # A conflict on one port must not take the other relay offline.
             wait_for(echo)
         # Releasing the port must restore the relay without another restart.
