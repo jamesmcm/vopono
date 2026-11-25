@@ -1,14 +1,14 @@
 use crate::network::health::{HEALTH_FILE, is_health_sidecar};
 use crate::network::netns::LockfileStatus;
+use crate::util::owner_write;
 use crate::util::{
-    check_process_running, chown_to_config_owner, config_dir, create_private_file,
-    ensure_dir_as_config_owner, write_file_as_config_owner,
+    check_process_running, chown_to_config_owner, config_dir, ensure_dir_as_config_owner,
+    write_file_as_config_owner,
 };
 use anyhow::Context;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -48,12 +48,13 @@ pub fn record_forwarded_port(locks_dir: &Path, ns_name: &str, port: u16) -> anyh
     std::fs::create_dir_all(&dir)?;
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
     chown_to_config_owner(&dir)?;
-    let tmp = dir.join(format!("{FORWARDED_PORT_SIDECAR}.tmp"));
-    let mut file = create_private_file(&tmp)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(contents.as_bytes())?;
-    drop(file);
-    std::fs::rename(&tmp, &path)?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".port-forwarding-")
+        .tempfile_in(&dir)?;
+    tmp.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    tmp.write_all(contents.as_bytes())?;
+    tmp.persist(&path).map_err(|e| e.error)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     chown_to_config_owner(&path)
 }
@@ -61,7 +62,10 @@ pub fn record_forwarded_port(locks_dir: &Path, ns_name: &str, port: u16) -> anyh
 /// Replace the reported forwarded port with the sidecar value when present.
 /// Provider and automatic flag still come from the embedded lockfile state.
 fn overlay_forwarded_port(locks_root: &Path, ns_name: &str, locks: &mut [LockfileStatus]) {
-    let Ok(raw) = std::fs::read(locks_root.join(ns_name).join(FORWARDED_PORT_SIDECAR)) else {
+    let Ok(raw) = owner_write::read_bounded_regular_file_nofollow(
+        &locks_root.join(ns_name).join(FORWARDED_PORT_SIDECAR),
+        64 * 1024,
+    ) else {
         return;
     };
     let Ok(sidecar) = serde_json::from_slice::<ForwardedPortSidecar>(&raw) else {
@@ -137,15 +141,15 @@ pub fn read_lock_namespaces_from_dir(
                 continue;
             }
         };
-        if !entry.path().is_file() {
+        if !entry.file_type().is_file() {
             continue;
         }
         let Some(lockfile_kind) = LockfileKind::from_path(entry.path()) else {
             continue;
         };
 
-        match File::open(entry.path()) {
-            Ok(lockfile) => match ron::de::from_reader::<_, LockfileStatus>(lockfile) {
+        match owner_write::read_regular_file_nofollow(entry.path()) {
+            Ok(bytes) => match ron::de::from_bytes::<LockfileStatus>(&bytes) {
                 Ok(lock) => {
                     let lock = if lock.application_pid.is_none()
                         && lockfile_kind == LockfileKind::Client
@@ -275,6 +279,19 @@ pub fn has_client_lockfiles(dir: &Path) -> bool {
 /// session. Any other file (including a temporary file left by an interrupted
 /// writer) is treated as state that must be preserved.
 pub fn lock_dir_has_no_session_state(dir: &Path) -> anyhow::Result<bool> {
+    lock_dir_has_only_ignored(dir, None)
+}
+
+/// Whether a lock directory contains no session state other than `own_lock_name`
+/// (typically the calling daemon's PID lockfile) and metadata sidecars.
+pub fn lock_dir_has_no_other_session_state(
+    dir: &Path,
+    own_lock_name: &str,
+) -> anyhow::Result<bool> {
+    lock_dir_has_only_ignored(dir, Some(own_lock_name))
+}
+
+fn lock_dir_has_only_ignored(dir: &Path, own_lock_name: Option<&str>) -> anyhow::Result<bool> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
@@ -285,7 +302,10 @@ pub fn lock_dir_has_no_session_state(dir: &Path) -> anyhow::Result<bool> {
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             return Ok(false);
         };
-        if name != FORWARDED_PORT_SIDECAR && !is_health_sidecar(&name) {
+        if name != FORWARDED_PORT_SIDECAR
+            && !is_health_sidecar(&name)
+            && own_lock_name != Some(name.as_str())
+        {
             return Ok(false);
         }
     }
@@ -349,10 +369,18 @@ fn prune_stale_client_lockfiles_with(
         }
         if is_stale(&path, namespace) {
             debug!("Removing stale client lockfile: {}", path.display());
-            match std::fs::remove_file(&path) {
-                Ok(()) => removed += 1,
-                // The client guard or another cleanup may have removed it.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            match owner_write::remove_file_as_config_owner_if_needed(&path) {
+                Ok(true) => removed += 1,
+                Ok(false) => match std::fs::remove_file(&path) {
+                    Ok(()) => removed += 1,
+                    // The client guard or another cleanup may have removed it.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("Could not remove stale client lockfile {}", path.display())
+                        });
+                    }
+                },
                 Err(error) => {
                     return Err(error).with_context(|| {
                         format!("Could not remove stale client lockfile {}", path.display())
@@ -369,12 +397,20 @@ fn prune_stale_client_lockfiles_with(
 /// The sidecar is not session state, but it would otherwise keep the
 /// directory non-empty and block namespace teardown.
 pub(crate) fn remove_forwarded_port_sidecar(dir: &Path) {
-    let _ = std::fs::remove_file(dir.join(FORWARDED_PORT_SIDECAR));
-    let _ = std::fs::remove_file(dir.join(HEALTH_FILE));
+    let remove = |path: &Path| {
+        if matches!(
+            owner_write::remove_file_as_config_owner_if_needed(path),
+            Ok(false)
+        ) {
+            let _ = std::fs::remove_file(path);
+        }
+    };
+    remove(&dir.join(FORWARDED_PORT_SIDECAR));
+    remove(&dir.join(HEALTH_FILE));
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             if entry.file_name().to_str().is_some_and(is_health_sidecar) {
-                let _ = std::fs::remove_file(entry.path());
+                remove(&entry.path());
             }
         }
     }
@@ -788,6 +824,22 @@ mod tests {
         assert!(!has_client_lockfiles(&dir));
         fs::write(dir.join("client-200"), status_lock("vo_m_se", "firefox", 2)).unwrap();
         assert!(has_client_lockfiles(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lock_readers_ignore_symlinked_lockfiles_and_sidecars() {
+        let dir = unique_temp_dir("symlink-lock");
+        let ns_dir = dir.join("vo_sym");
+        fs::create_dir_all(&ns_dir).unwrap();
+        let outside = dir.join("outside.ron");
+        fs::write(&outside, status_lock("vo_sym", "secret", 1)).unwrap();
+        std::os::unix::fs::symlink(&outside, ns_dir.join("100")).unwrap();
+
+        let status = read_lock_namespaces_from_dir(&dir).unwrap();
+        assert!(status.namespaces.is_empty());
+        assert!(status.metadata_for("vo_sym").is_none());
+
         let _ = fs::remove_dir_all(dir);
     }
 }

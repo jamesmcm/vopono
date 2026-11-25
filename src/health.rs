@@ -124,7 +124,7 @@ impl Monitor {
                     let next = recovery_state
                         .as_ref()
                         .and_then(vopono_core::network::recovery::signature);
-                    if next != route_signature {
+                    if next.is_some() && next != route_signature {
                         failures = 0;
                         route_signature = next;
                     }
@@ -183,6 +183,15 @@ impl Monitor {
                     {
                         health.reconnect_attempts = health.reconnect_attempts.saturating_add(1);
                         health.state = State::Reconnecting;
+                        if write_health(&path, &health).is_ok() {
+                            last_write = Some(Instant::now());
+                            last_written_state = Some((
+                                health.state,
+                                health.reconnect_attempts,
+                                health.last_error.clone(),
+                                health.diagnostics_checked_at,
+                            ));
+                        }
                         let repair = (|| -> anyhow::Result<()> {
                             let _transition = crate::namespace_sessions::try_lock_namespace(&name)
                                 .ok_or_else(|| {
@@ -190,22 +199,40 @@ impl Monitor {
                                 })?;
                             let state = recovery_state.as_mut().unwrap();
                             let mut candidate = state.inert_copy()?;
-                            vopono_core::network::recovery::repair(&mut candidate)?;
-                            if let Some((uid, _)) = owner {
-                                let replacement = candidate.inert_copy()?;
-                                crate::namespace_ownership::update_snapshot(
+                            let repair_result =
+                                vopono_core::network::recovery::repair(&mut candidate);
+                            // Always update in-memory state and persist candidate when
+                            // repair ran: underlay changes only mutate candidate after
+                            // kernel rules change, so state stays synchronized with the
+                            // kernel even if persistence or a later step fails.
+                            let persist = if let Some((uid, _)) = owner
+                                && let Ok(replacement) = candidate.inert_copy()
+                            {
+                                Some(crate::namespace_ownership::update_snapshot(
                                     &name,
                                     uid,
                                     replacement,
-                                )?;
-                            }
+                                ))
+                            } else {
+                                None
+                            };
                             *state = candidate;
-                            Ok(())
+                            if let Some(persist) = persist {
+                                if repair_result.is_ok() {
+                                    persist?;
+                                } else if let Err(err) = persist {
+                                    log::warn!(
+                                        "{name}: could not persist partial repair snapshot: {err:#}"
+                                    );
+                                }
+                            }
+                            repair_result
                         })();
                         if let Err(error) = repair {
                             let message =
                                 format!("Automatic underlay/tunnel repair failed: {error:#}");
                             log::warn!("{name}: {message}");
+                            health.state = State::Degraded;
                             health.last_error = Some(message);
                         }
                     }
@@ -327,10 +354,22 @@ fn write_health(path: &Path, health: &Health) -> anyhow::Result<()> {
         body.len() <= 64 * 1024,
         "Health telemetry exceeds the reader's size limit"
     );
-    anyhow::ensure!(
-        vopono_core::util::write_file_as_config_owner(path, &body, Some(0o600))?,
-        "Health writer requires a config owner"
-    );
+    if vopono_core::util::write_file_as_config_owner(path, &body, Some(0o600))? {
+        return Ok(());
+    }
+    // Direct root session (no privilege drop needed): write atomically with 0600 mode.
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        let mut tmp = tempfile::Builder::new()
+            .prefix("health.tmp-")
+            .tempfile_in(parent)?;
+        tmp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        tmp.write_all(body.as_bytes())?;
+        tmp.persist(path).map_err(|e| e.error)?;
+    }
     Ok(())
 }
 #[cfg(test)]

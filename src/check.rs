@@ -217,6 +217,7 @@ pub fn run_probe(command: ProbeCommand) -> anyhow::Result<()> {
 
 fn probe_family(host: &str, port: u16, timeout_ms: u64, v6: bool) -> ChildFamily {
     let started = Instant::now();
+    let deadline = started + Duration::from_millis(timeout_ms);
     let attempt = resolve_bounded(host, Duration::from_millis(timeout_ms))
         .map_err(anyhow::Error::from)
         .and_then(|ips| {
@@ -225,11 +226,12 @@ fn probe_family(host: &str, port: u16, timeout_ms: u64, v6: bool) -> ChildFamily
                 .context("No address for requested family")
         })
         .and_then(|ip| {
-            TcpStream::connect_timeout(
-                &SocketAddr::new(ip, port),
-                Duration::from_millis(timeout_ms),
-            )
-            .with_context(|| format!("TCP connect to {ip}:{port} failed"))
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|d| !d.is_zero())
+                .ok_or_else(|| anyhow!("Probe timeout exhausted before TCP connect"))?;
+            TcpStream::connect_timeout(&SocketAddr::new(ip, port), remaining)
+                .with_context(|| format!("TCP connect to {ip}:{port} failed"))
         });
     match attempt {
         Ok(_) => ChildFamily {
@@ -241,6 +243,62 @@ fn probe_family(host: &str, port: u16, timeout_ms: u64, v6: bool) -> ChildFamily
             err: Some(format!("{error:#}")),
         },
     }
+}
+
+fn format_v6_target(host: &str, port: u16) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn probe_unavailable_status(
+    id: &str,
+    v4_host: &str,
+    v6_host: &str,
+    port: u16,
+    dns_host: &str,
+    skip_ipv4: bool,
+    skip_ipv6: bool,
+    skip_dns: bool,
+    message: impl Display,
+) -> ConnectivityStatus {
+    let msg = message.to_string();
+    let mut status = ConnectivityStatus {
+        id: id.to_string(),
+        connected: false,
+        ipv4: (!skip_ipv4).then(|| FamilyStatus {
+            target: format!("{v4_host}:{port}"),
+            latency_ms: None,
+            error: Some(msg.clone()),
+            code: Some(DiagnosticCode::ProbeUnavailable),
+        }),
+        ipv6: (!skip_ipv6).then(|| FamilyStatus {
+            target: format_v6_target(v6_host, port),
+            latency_ms: None,
+            error: Some(msg.clone()),
+            code: Some(DiagnosticCode::ProbeUnavailable),
+        }),
+        dns: (!skip_dns).then(|| DnsStatus {
+            host: dns_host.to_string(),
+            resolved_ips: Vec::new(),
+            latency_ms: None,
+            error: Some(msg.clone()),
+            code: Some(DiagnosticCode::ProbeUnavailable),
+        }),
+    };
+    // Never silently drop a validation/limit error if all probes were skipped.
+    if status.ipv4.is_none() && status.ipv6.is_none() && status.dns.is_none() {
+        status.ipv4 = Some(FamilyStatus {
+            target: format!("{v4_host}:{port}"),
+            latency_ms: None,
+            error: Some(msg),
+            code: Some(DiagnosticCode::ProbeUnavailable),
+        });
+    }
+    status
 }
 
 /// Probe connectivity of an existing network namespace. Requires root.
@@ -271,28 +329,44 @@ pub fn probe_namespace(
         )
         .is_err()
     {
-        return ConnectivityStatus {
-            id: id.into(),
-            connected: false,
-            ipv4: Some(FamilyStatus::failed(
-                v4_host,
-                "Concurrent connectivity probe limit reached",
-            )),
-            ipv6: None,
-            dns: None,
-        };
+        return probe_unavailable_status(
+            id,
+            v4_host,
+            v6_host,
+            port,
+            dns_host,
+            skip_ipv4,
+            skip_ipv6,
+            skip_dns,
+            "Concurrent connectivity probe limit reached",
+        );
     }
     let _permit = Permit;
     // The namespace id reaches `ip netns exec` as argv (and would reach
     // /run/netns/<id> elsewhere); reject injection or traversal shapes.
     if let Err(error) = vopono_core::network::netns::validate_netns_name(id) {
-        return ConnectivityStatus {
-            id: id.to_string(),
-            connected: false,
-            ipv4: (!skip_ipv4).then(|| FamilyStatus::failed(&format!("{v4_host}:{port}"), error)),
-            ipv6: None,
-            dns: None,
-        };
+        return probe_unavailable_status(
+            id, v4_host, v6_host, port, dns_host, skip_ipv4, skip_ipv6, skip_dns, error,
+        );
+    }
+    for (skipped, host) in [
+        (skip_ipv4, v4_host),
+        (skip_ipv6, v6_host),
+        (skip_dns, dns_host),
+    ] {
+        if !skipped && (host.is_empty() || host.len() > 253 || host.starts_with('-')) {
+            return probe_unavailable_status(
+                id,
+                v4_host,
+                v6_host,
+                port,
+                dns_host,
+                skip_ipv4,
+                skip_ipv6,
+                skip_dns,
+                "Invalid probe host",
+            );
+        }
     }
     let outcome = probe_namespace_inner(
         id, v4_host, v6_host, port, timeout_ms, dns_host, skip_ipv4, skip_ipv6, skip_dns,
@@ -305,7 +379,7 @@ pub fn probe_namespace(
             .map(|family| family.into_status(&format!("{v4_host}:{port}"))),
         ipv6: outcome
             .ipv6
-            .map(|family| family.into_status(&format!("[{v6_host}]:{port}"))),
+            .map(|family| family.into_status(&format_v6_target(v6_host, port))),
         dns: outcome.dns,
     };
     status.connected = [&status.ipv4, &status.ipv6]
@@ -325,6 +399,7 @@ struct OutcomeView {
 struct FamilyOutcome {
     ms: Option<u64>,
     err: Option<String>,
+    code: Option<DiagnosticCode>,
 }
 
 impl FamilyOutcome {
@@ -332,11 +407,20 @@ impl FamilyOutcome {
         FamilyStatus {
             target: target.to_string(),
             latency_ms: self.ms,
-            code: self
-                .err
-                .as_ref()
-                .map(|_| DiagnosticCode::TunnelConnectivity),
+            code: self.code.or_else(|| {
+                self.err
+                    .as_ref()
+                    .map(|_| DiagnosticCode::TunnelConnectivity)
+            }),
             error: self.err,
+        }
+    }
+
+    fn unavailable(error: impl Display) -> Self {
+        Self {
+            ms: None,
+            err: Some(error.to_string()),
+            code: Some(DiagnosticCode::ProbeUnavailable),
         }
     }
 }
@@ -355,7 +439,9 @@ fn probe_namespace_inner(
 ) -> OutcomeView {
     let exe = std::env::current_exe().context("Failed to locate the vopono binary");
     let launched = exe.and_then(|exe| {
-        let mut cmd = std::process::Command::new("ip");
+        let ip_bin = vopono_core::diagnostics::host::system_tool("ip")
+            .unwrap_or_else(|| std::path::PathBuf::from("ip"));
+        let mut cmd = std::process::Command::new(ip_bin);
         cmd.args(["netns", "exec", id]).arg(&exe).args([
             "__connectivity-probe",
             "--port",
@@ -378,25 +464,72 @@ fn probe_namespace_inner(
         } else {
             cmd.arg("--skip-dns");
         }
-        cmd.output()
-            .with_context(|| format!("Failed to launch probe inside namespace '{id}'"))
+        cmd.env("RUST_LOG", "off")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let mut child = cmd
+            .spawn()
+            .with_context(|| format!("Failed to launch probe inside namespace '{id}'"))?;
+        // Drain stdout and stderr concurrently with a bounded limit so verbose child
+        // output can never fill the OS pipe buffer and deadlock before `try_wait`.
+        const MAX_PROBE_PIPE_BYTES: u64 = 256 * 1024;
+        fn read_bounded<R: std::io::Read + Send + 'static>(
+            pipe: Option<R>,
+        ) -> std::thread::JoinHandle<Vec<u8>> {
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = Vec::new();
+                if let Some(pipe) = pipe {
+                    let _ = pipe.take(MAX_PROBE_PIPE_BYTES).read_to_end(&mut buf);
+                }
+                buf
+            })
+        }
+        let stdout_thread = read_bounded(child.stdout.take());
+        let stderr_thread = read_bounded(child.stderr.take());
+        let deadline = Instant::now()
+            + Duration::from_millis(timeout_ms.saturating_mul(3).saturating_add(5000));
+        loop {
+            match child.try_wait()? {
+                Some(status) => {
+                    let stdout = stdout_thread.join().unwrap_or_default();
+                    let stderr = stderr_thread.join().unwrap_or_default();
+                    return Ok(std::process::Output {
+                        status,
+                        stdout,
+                        stderr,
+                    });
+                }
+                None if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(15));
+                }
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_thread.join();
+                    let _ = stderr_thread.join();
+                    anyhow::bail!("Connectivity probe child timed out inside namespace '{id}'");
+                }
+            }
+        }
     });
+
+    let unavailable_outcome = |error: String| OutcomeView {
+        ipv4: (!skip_ipv4 || (skip_ipv6 && skip_dns)).then(|| FamilyOutcome::unavailable(&error)),
+        ipv6: (!skip_ipv6).then(|| FamilyOutcome::unavailable(&error)),
+        dns: (!skip_dns).then(|| DnsStatus {
+            host: dns_host.to_string(),
+            resolved_ips: Vec::new(),
+            latency_ms: None,
+            error: Some(error.clone()),
+            code: Some(DiagnosticCode::ProbeUnavailable),
+        }),
+    };
 
     let output = match launched {
         Ok(output) => output,
-        Err(error) => {
-            return OutcomeView {
-                ipv4: (!skip_ipv4).then(|| FamilyOutcome::from_error(error)),
-                ipv6: (!skip_ipv6).then(|| FamilyOutcome::from_error("probe did not run")),
-                dns: (!skip_dns).then(|| DnsStatus {
-                    host: dns_host.to_string(),
-                    resolved_ips: Vec::new(),
-                    latency_ms: None,
-                    error: Some("Probe did not run".into()),
-                    code: Some(DiagnosticCode::ProbeUnavailable),
-                }),
-            };
-        }
+        Err(error) => return unavailable_outcome(error.to_string()),
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -406,7 +539,16 @@ fn probe_namespace_inner(
         child.map(|family| FamilyOutcome {
             ms: family.ms,
             err: family.err.clone(),
+            code: None,
         })
+    };
+
+    let Some(report) = parsed else {
+        let error = format!(
+            "Probe in namespace '{id}' produced no parsable output: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        return unavailable_outcome(error);
     };
 
     // The parent owns the skip decision: an absent DNS section in the child
@@ -414,60 +556,27 @@ fn probe_namespace_inner(
     let dns = if skip_dns {
         None
     } else {
-        parsed
-            .as_ref()
-            .map(|report| DnsStatus {
-                host: dns_host.to_string(),
-                resolved_ips: report.dns_addrs.clone(),
-                latency_ms: report.dns_ms,
-                error: report.dns_error.map(|error| error.to_string()).or_else(|| {
-                    report
-                        .dns_addrs
-                        .is_empty()
-                        .then(|| "DNS returned no addresses".into())
-                }),
-                code: report
+        Some(DnsStatus {
+            host: dns_host.to_string(),
+            resolved_ips: report.dns_addrs.clone(),
+            latency_ms: report.dns_ms,
+            error: report.dns_error.map(|error| error.to_string()).or_else(|| {
+                report
                     .dns_addrs
                     .is_empty()
-                    .then_some(DiagnosticCode::NamespaceDns),
-            })
-            .or_else(|| {
-                Some(DnsStatus {
-                    host: dns_host.into(),
-                    resolved_ips: Vec::new(),
-                    latency_ms: None,
-                    error: Some("Probe produced no parsable output".into()),
-                    code: Some(DiagnosticCode::ProbeUnavailable),
-                })
-            })
+                    .then(|| "DNS returned no addresses".into())
+            }),
+            code: report
+                .dns_addrs
+                .is_empty()
+                .then_some(DiagnosticCode::NamespaceDns),
+        })
     };
 
-    if parsed.is_none() {
-        let error = anyhow!(
-            "Probe in namespace '{id}' produced no parsable output: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-        return OutcomeView {
-            ipv4: (!skip_ipv4).then(|| FamilyOutcome::from_error(error)),
-            ipv6: (!skip_ipv6).then(|| FamilyOutcome::from_error("unavailable")),
-            dns,
-        };
-    }
-
-    let report = parsed.unwrap();
     OutcomeView {
         ipv4: family_outcome(report.v4.as_ref()),
         ipv6: family_outcome(report.v6.as_ref()),
         dns,
-    }
-}
-
-impl FamilyOutcome {
-    fn from_error(error: impl Display) -> Self {
-        Self {
-            ms: None,
-            err: Some(error.to_string()),
-        }
     }
 }
 

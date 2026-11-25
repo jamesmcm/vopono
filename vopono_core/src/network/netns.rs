@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::net::IpAddr;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -166,6 +166,10 @@ pub struct NamespaceState {
     /// Host ports proxied into the namespace by --forward.
     #[serde(default, alias = "forwarded_ports")]
     pub host_forwarded_ports: Vec<u16>,
+    /// Whether --allow-host-access was enabled for this namespace.
+    /// None for snapshots written before this setting was recorded.
+    #[serde(default)]
+    pub allow_host_access: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -250,6 +254,79 @@ fn has_unaccounted_processes(
     })
 }
 
+/// Build a host-side hook command (`postup` / `predown`) safely de-escalated
+/// to the authenticated session user, never vulnerable to `sudo` flag injection.
+pub fn build_hook_command(
+    argv: &[&str],
+    user: Option<&str>,
+    group: Option<&str>,
+) -> anyhow::Result<Command> {
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| anyhow!("Hook command is empty"))?;
+    let is_root = nix::unistd::geteuid().is_root();
+    if is_root && let Some(user_name) = user {
+        let target_user = unistd::User::from_name(user_name)?
+            .with_context(|| format!("Unknown hook user '{user_name}'"))?;
+        let target_gid = match group {
+            Some(group_name) => {
+                unistd::Group::from_name(group_name)?
+                    .with_context(|| format!("Unknown hook group '{group_name}'"))?
+                    .gid
+            }
+            None => target_user.gid,
+        };
+        let groups = crate::util::owner_write::supplementary_groups(&target_user.name, target_gid)?;
+        let uid = target_user.uid;
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        unsafe {
+            cmd.pre_exec(move || {
+                unistd::setgroups(&groups)?;
+                unistd::setgid(target_gid)?;
+                unistd::setuid(uid)?;
+                nix::sys::prctl::set_no_new_privs()?;
+                Ok(())
+            });
+        }
+        return Ok(cmd);
+    }
+
+    let mut sudo_args = Vec::new();
+    if let Some(user) = user {
+        sudo_args.push("--user");
+        sudo_args.push(user);
+    }
+    if let Some(group) = group {
+        sudo_args.push("--group");
+        sudo_args.push(group);
+    }
+    if !sudo_args.is_empty() {
+        let mut full = vec!["--preserve-env"];
+        full.append(&mut sudo_args);
+        full.push("--");
+        full.push(program);
+        full.extend_from_slice(args);
+        let mut cmd = Command::new("sudo");
+        cmd.args(full);
+        // Only apply PR_SET_NO_NEW_PRIVS when already root; setting it as a
+        // non-root caller disables sudo's setuid bit and makes sudo fail.
+        if is_root {
+            unsafe {
+                cmd.pre_exec(|| {
+                    nix::sys::prctl::set_no_new_privs()?;
+                    Ok(())
+                });
+            }
+        }
+        Ok(cmd)
+    } else {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        Ok(cmd)
+    }
+}
+
 /// Atomically write a namespace lockfile with the ownership and modes used by
 /// both daemon and sudo/CLI sessions.
 fn write_lockfile_data(path: &Path, contents: &str) -> anyhow::Result<()> {
@@ -267,18 +344,13 @@ fn write_lockfile_data(path: &Path, contents: &str) -> anyhow::Result<()> {
     std::fs::create_dir_all(parent)?;
     std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     chown_to_config_owner(parent)?;
-    let temporary_path = path.with_extension(format!("tmp-{}", unistd::getpid()));
-    {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary_path)?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        write!(file, "{contents}")?;
-    }
-    std::fs::rename(&temporary_path, path)?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".lock-")
+        .tempfile_in(parent)?;
+    tmp.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    write!(tmp, "{contents}")?;
+    tmp.persist(path).map_err(|e| e.error)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     chown_to_config_owner(path)
 }
@@ -575,16 +647,16 @@ impl ManagedNamespaceGuard {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn exec_no_block(
+    pub(crate) fn build_exec_command(
         netns_name: &str,
         command: &[&str],
-        user: Option<String>,
-        group: Option<String>,
+        user: Option<&str>,
+        group: Option<&str>,
         silent: bool,
         capture_output: bool,
         capture_input: bool,
-        set_dir: Option<PathBuf>,
-    ) -> anyhow::Result<std::process::Child> {
+        set_dir: Option<&Path>,
+    ) -> Command {
         let mut handle = Command::new("ip");
         handle.args(["netns", "exec", netns_name]);
         if let Some(cdir) = set_dir {
@@ -592,11 +664,11 @@ impl ManagedNamespaceGuard {
         }
 
         let mut sudo_args = Vec::new();
-        if let Some(ref user) = user {
+        if let Some(user) = user {
             sudo_args.push("--user");
             sudo_args.push(user);
         }
-        if let Some(ref group) = group {
+        if let Some(group) = group {
             sudo_args.push("--group");
             sudo_args.push(group);
         }
@@ -604,6 +676,7 @@ impl ManagedNamespaceGuard {
         let sudo_string = if !sudo_args.is_empty() {
             let mut args = vec!["sudo", "--preserve-env"];
             args.append(&mut sudo_args);
+            args.push("--");
             handle.args(args.clone());
             Some(format!(" {}", args.join(" ")))
         } else {
@@ -638,7 +711,32 @@ impl ManagedNamespaceGuard {
                 });
             }
         }
-        let handle = handle.args(command).spawn()?;
+        handle.args(command);
+        handle
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn exec_no_block(
+        netns_name: &str,
+        command: &[&str],
+        user: Option<String>,
+        group: Option<String>,
+        silent: bool,
+        capture_output: bool,
+        capture_input: bool,
+        set_dir: Option<PathBuf>,
+    ) -> anyhow::Result<std::process::Child> {
+        let mut handle = Self::build_exec_command(
+            netns_name,
+            command,
+            user.as_deref(),
+            group.as_deref(),
+            silent,
+            capture_output,
+            capture_input,
+            set_dir.as_deref(),
+        );
+        let handle = handle.spawn()?;
         Ok(handle)
     }
 
@@ -1166,10 +1264,10 @@ impl ManagedNamespaceGuard {
         }
     }
 
-    pub fn write_lockfile(self, command: &str) -> anyhow::Result<Self> {
+    pub fn write_lockfile_in_place(&self, command: &str) -> anyhow::Result<()> {
         if self.disposition != GuardDisposition::Managed {
             // Unmanaged namespaces are not vopono's to track or clean up.
-            return Ok(self);
+            return Ok(());
         }
         let mut lock_dir = config_dir()?;
         lock_dir.push(format!("vopono/locks/{}", self.name));
@@ -1197,6 +1295,11 @@ impl ManagedNamespaceGuard {
         lockfile_path.push(format!("{}", unistd::getpid()));
         write_lockfile_data(&lockfile_path, &lock_string)?;
         debug!("Lockfile written: {}", lockfile_path.display());
+        Ok(())
+    }
+
+    pub fn write_lockfile(self, command: &str) -> anyhow::Result<Self> {
+        self.write_lockfile_in_place(command)?;
         Ok(self)
     }
 
@@ -1318,8 +1421,12 @@ impl ManagedNamespaceGuard {
 
         // Use an atomically created private file: namespace names are public,
         // so a predictable /tmp path would permit symlink replacement.
-        let mut rules_file = tempfile::NamedTempFile::new()
-            .context("Failed to create temporary nftables rules file")?;
+        let mut rules_file = if nix::unistd::geteuid().is_root() {
+            tempfile::NamedTempFile::new_in("/run")
+        } else {
+            tempfile::NamedTempFile::new()
+        }
+        .context("Failed to create temporary nftables rules file")?;
         use std::io::Write as _;
         rules_file.write_all(ruleset.as_bytes())?;
         let temp_path = rules_file.path();
@@ -1402,17 +1509,14 @@ impl ManagedNamespaceGuard {
                 "Preserving daemon namespace lock while client locks remain: {}",
                 lockfile_path.display()
             );
-        } else if lockfile_path.exists() {
-            match std::fs::remove_file(&lockfile_path) {
-                Ok(_) => {}
-                Err(e) => {
-                    warn!(
-                        "Failed to remove lockfile: {}, {:?}",
-                        lockfile_path.display(),
-                        e
-                    );
-                }
-            };
+        } else if lockfile_path.exists()
+            && let Err(e) = crate::util::owner_write::remove_file_as_config_owner(&lockfile_path)
+        {
+            warn!(
+                "Failed to remove lockfile: {}, {:?}",
+                lockfile_path.display(),
+                e
+            );
         }
 
         let lockfile_path = lock_dir;
@@ -1447,47 +1551,49 @@ impl ManagedNamespaceGuard {
                 // The sidecar is not session state; drop it so the now-empty
                 // lock directory can be removed.
                 crate::status::remove_forwarded_port_sidecar(&lockfile_path);
-                std::fs::remove_dir(&lockfile_path).with_context(|| {
-                    format!(
-                        "Could not remove locks directory {}",
-                        lockfile_path.display()
-                    )
-                })?;
+                let removed =
+                    crate::util::owner_write::remove_dir_as_config_owner_if_needed(&lockfile_path)
+                        .with_context(|| {
+                            format!(
+                                "Could not remove locks directory {}",
+                                lockfile_path.display()
+                            )
+                        })?;
+                if !removed {
+                    std::fs::remove_dir(&lockfile_path).with_context(|| {
+                        format!(
+                            "Could not remove locks directory {}",
+                            lockfile_path.display()
+                        )
+                    })?;
+                }
             }
             info!("Shutting down vopono namespace - as there are no processes left running inside");
             // Run PreDown script (if any)
             if let Some(pdcmd) = self.predown.as_ref() {
                 // Extra check so we don't panic on bad predown command
                 match parse_command_str(pdcmd) {
-                    Ok(parsed_pdcmd) => {
+                    Ok(parsed_pdcmd) if !parsed_pdcmd.is_empty() => {
                         let parsed_pdcmd_ptrs: Vec<&str> =
                             parsed_pdcmd.iter().map(|s| s.as_str()).collect();
 
-                        let mut sudo_args = Vec::new();
-                        if let Some(ref predown_user) = self.predown_user {
-                            sudo_args.push("--user");
-                            sudo_args.push(predown_user);
-                        }
-                        if let Some(ref predown_group) = self.predown_group {
-                            sudo_args.push("--group");
-                            sudo_args.push(predown_group);
-                        }
-
-                        if !sudo_args.is_empty() {
-                            let mut args = vec!["--preserve-env"];
-                            args.append(&mut sudo_args);
-                            args.extend(parsed_pdcmd_ptrs);
-
-                            let mut cmd = std::process::Command::new("sudo");
-                            cmd.args(args);
+                        let cmd = build_hook_command(
+                            &parsed_pdcmd_ptrs,
+                            self.predown_user.as_deref(),
+                            self.predown_group.as_deref(),
+                        );
+                        if let Ok(mut cmd) = cmd {
                             self.add_env_vars_to_cmd(&mut cmd);
                             cmd.spawn().ok();
-                        } else {
-                            let mut cmd = std::process::Command::new(parsed_pdcmd_ptrs[0]);
-                            cmd.args(parsed_pdcmd_ptrs[1..].iter());
-                            self.add_env_vars_to_cmd(&mut cmd);
-                            cmd.spawn().ok();
+                        } else if let Err(e) = cmd {
+                            log::error!(
+                                "Failed to prepare predown command '{}' in shutdown state: {e:#}",
+                                pdcmd
+                            );
                         }
+                    }
+                    Ok(_) => {
+                        log::warn!("Skipping empty predown command in shutdown state");
                     }
                     Err(e) => {
                         log::error!(
@@ -1511,7 +1617,6 @@ impl ManagedNamespaceGuard {
             self.openconnect = None;
             self.openfortivpn = None;
             self.ssh = None;
-            self.trojan = None;
             // A concurrent teardown (e.g. `vopono stop` racing the session
             // that owns this namespace) may have removed the handle already;
             // that is success, not an error worth retrying for 4 seconds.
@@ -1725,5 +1830,28 @@ mod tests {
         let ns: NamespaceSnapshot = ron::from_str(raw).expect("legacy lockfile should parse");
         assert_eq!(ns.state.open_ports, vec![8080]);
         assert_eq!(ns.state.host_forwarded_ports, vec![9000]);
+    }
+
+    #[test]
+    fn build_hook_command_rejects_empty_and_separates_sudo_args() {
+        assert!(super::build_hook_command(&[], Some("alice"), None).is_err());
+
+        if !nix::unistd::Uid::effective().is_root() {
+            let cmd =
+                super::build_hook_command(&["-u", "root", "/bin/id"], Some("alice"), Some("staff"))
+                    .expect("hook command should build");
+            let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+            let sep = args
+                .iter()
+                .position(|arg| *arg == "--")
+                .expect("sudo invocation must include -- separator");
+            assert_eq!(args[sep + 1], "-u");
+            assert_eq!(args[sep + 2], "root");
+            assert_eq!(args[sep + 3], "/bin/id");
+        } else {
+            let cmd = super::build_hook_command(&["/bin/id"], Some("root"), None)
+                .expect("root hook command should build");
+            assert_eq!(cmd.get_program(), "/bin/id");
+        }
     }
 }

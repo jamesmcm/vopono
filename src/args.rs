@@ -203,6 +203,7 @@ pub struct McpServeCommand {
     #[clap(long = "allow-profile")]
     pub allow_profiles: Vec<String>,
     /// Let run_profile replace a profile's application with an explicit argv array.
+    /// WARNING: permits arbitrary local command execution as your user with full filesystem access.
     #[clap(long)]
     pub allow_command: bool,
     /// Maximum simultaneously active jobs in this MCP session.
@@ -899,8 +900,8 @@ pub struct DoctorCommand {
     /// Hostname to resolve using each namespace's DNS configuration.
     #[clap(long, value_name = "HOST", conflicts_with_all = ["provider", "custom", "offline"])]
     pub dns_host: Option<String>,
-    /// Skip IPv6 probes when IPv6 is intentionally disabled in the namespace.
-    #[clap(long, conflicts_with_all = ["provider", "custom", "offline"])]
+    /// Skip IPv6 probes and IPv6 host/namespace diagnostics when IPv6 is intentionally disabled.
+    #[clap(long, conflicts_with_all = ["provider", "custom"])]
     pub skip_ipv6: bool,
     /// Inspect a provider's stored configuration instead of running namespaces.
     #[clap(value_enum, long, ignore_case = true, conflicts_with = "custom")]

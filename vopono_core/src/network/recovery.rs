@@ -13,6 +13,8 @@ pub struct Peer {
     pub public_key: String,
     pub address: IpAddr,
     pub disable_ipv6: bool,
+    #[serde(default)]
+    pub persistent_keepalive: Option<String>,
 }
 
 fn destination(state: &NamespaceSnapshot) -> anyhow::Result<IpAddr> {
@@ -27,16 +29,18 @@ fn destination(state: &NamespaceSnapshot) -> anyhow::Result<IpAddr> {
                 .and_then(|vpn| vpn.recovery_host.as_deref())
         })
         .context("Protocol has no frozen endpoint recovery metadata")?;
+    let ipv6_disabled = state
+        .wireguard
+        .as_ref()
+        .and_then(|wg| wg.recovery.as_ref())
+        .is_some_and(|p| p.disable_ipv6)
+        || state
+            .veth_pair_ips
+            .as_ref()
+            .is_some_and(|ips| ips.ipv6.is_none());
     crate::diagnostics::resolve_bounded(host, Duration::from_secs(1))?
         .into_iter()
-        .filter(|ip| {
-            !ip.is_ipv6()
-                || state
-                    .wireguard
-                    .as_ref()
-                    .and_then(|wg| wg.recovery.as_ref())
-                    .is_none_or(|p| !p.disable_ipv6)
-        })
+        .filter(|ip| !ip.is_ipv6() || !ipv6_disabled)
         .find(|ip| super::route::lookup(*ip).is_ok())
         .context("No host route to a VPN endpoint")
 }
@@ -178,6 +182,21 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
                     )?;
                 }
             }
+            // Remove the previous endpoint bypass route once the new route and
+            // firewall rules are active so DNS rotation does not accumulate routes.
+            let old_family = if peer.address.is_ipv4() { "-4" } else { "-6" };
+            let _ = NetworkNamespace::exec_with_output(
+                &state.name,
+                &[
+                    "ip",
+                    old_family,
+                    "route",
+                    "del",
+                    &peer.address.to_string(),
+                    "dev",
+                    &veth.source,
+                ],
+            );
         }
         // Reinstall even an unchanged destination: WireGuard must discard the
         // cached source address/route after the host underlay has changed.
@@ -193,6 +212,7 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
                 &endpoint.to_string(),
             ],
         )?;
+        let keepalive = peer.persistent_keepalive.as_deref().unwrap_or("25");
         checked(
             &state.name,
             &[
@@ -202,7 +222,7 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
                 "peer",
                 &peer.public_key,
                 "persistent-keepalive",
-                "25",
+                keepalive,
             ],
         )?;
         peer.address = address;

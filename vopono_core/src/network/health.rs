@@ -50,11 +50,9 @@ pub fn read_health(name: &str) -> Option<Health> {
         .join("locks")
         .join(name)
         .join(HEALTH_FILE);
-    let metadata = std::fs::metadata(&path).ok()?;
-    if !metadata.is_file() || metadata.len() > 64 * 1024 {
-        return None;
-    }
-    let mut health: Health = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let bytes =
+        crate::util::owner_write::read_bounded_regular_file_nofollow(&path, 64 * 1024).ok()?;
+    let mut health: Health = serde_json::from_slice(&bytes).ok()?;
     if now().saturating_sub(health.checked_at) > HEALTH_STALE_AFTER_SECONDS {
         health.state = State::Degraded;
         health.last_error = Some("Monitoring result is stale; daemon may have stopped".into());

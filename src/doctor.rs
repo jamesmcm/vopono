@@ -169,6 +169,7 @@ pub fn run(command: DoctorCommand) -> anyhow::Result<i32> {
     let daemon = report
         .daemon
         .get_or_insert_with(|| DaemonInfo::new(crate::daemon::status()));
+    let daemon_available = daemon.status.available;
     report.diagnostics.splice(0..0, daemon.diagnostics());
     if !offline {
         report
@@ -178,7 +179,9 @@ pub fn run(command: DoctorCommand) -> anyhow::Result<i32> {
                 timeout,
             )));
     }
-    report.diagnostics.extend(host_environment(skip_ipv6));
+    report
+        .diagnostics
+        .extend(host_environment(skip_ipv6, daemon_available));
     report.host_network = Some(vopono_core::diagnostics::topology::host_network(skip_ipv6));
     let failed = report.failed();
     if json {
@@ -189,8 +192,8 @@ pub fn run(command: DoctorCommand) -> anyhow::Result<i32> {
     Ok(i32::from(failed))
 }
 
-fn host_environment(skip_ipv6: bool) -> Vec<Diagnostic> {
-    if !nix::unistd::getuid().is_root() {
+fn host_environment(skip_ipv6: bool, daemon_available: bool) -> Vec<Diagnostic> {
+    if !nix::unistd::getuid().is_root() && daemon_available {
         // New requests are appended to the wire enum. Older daemons may reject
         // this inspection; keep existing namespace checks working and fall
         // back to whatever read-only evidence the user can access locally.
@@ -213,7 +216,11 @@ fn host_environment(skip_ipv6: bool) -> Vec<Diagnostic> {
     vopono_core::diagnostics::host::inspect(skip_ipv6)
 }
 
-fn namespace_environment(id: &str, command: &DoctorCommand) -> Option<NamespaceNetwork> {
+fn namespace_environment(
+    id: &str,
+    command: &DoctorCommand,
+    daemon_available: bool,
+) -> Option<NamespaceNetwork> {
     let inspection = (|| -> anyhow::Result<NamespaceNetwork> {
         if nix::unistd::getuid().is_root() {
             let uid = vopono_core::util::resolve_config_owner()?
@@ -227,6 +234,7 @@ fn namespace_environment(id: &str, command: &DoctorCommand) -> Option<NamespaceN
                 command.timeout_ms,
             );
         }
+        anyhow::ensure!(daemon_available, "Daemon unavailable");
         let mut conn = crate::daemon_client::connect(crate::daemon_client::Compatibility::Warn)?;
         crate::daemon::set_socket_timeouts_for(&conn, 7)?;
         let request = crate::daemon::DaemonRequest::NamespaceDiagnostics {
@@ -316,7 +324,7 @@ fn configuration_report(command: DoctorCommand) -> Report {
     if let Some(path) = path {
         match validate_config(&path, &protocol) {
             Ok(found) => {
-                if protocol == Protocol::Wireguard {
+                if protocol == Protocol::Wireguard && command.catalogue {
                     public_key = std::fs::read_to_string(&path)
                         .ok()
                         .and_then(|s| {
@@ -359,23 +367,38 @@ fn configuration_report(command: DoctorCommand) -> Report {
             && let Ok(modified) = meta.modified()
             && let Ok(age) = modified.elapsed()
         {
+            let days = age.as_secs() / 86400;
             report.diagnostics.push(Diagnostic::new(
                 Code::ConfigFreshness,
-                State::Warning,
+                if days >= 30 {
+                    State::Warning
+                } else {
+                    State::Pass
+                },
                 &format!(
-                    "Configuration file age: {} days; age alone does not establish staleness",
-                    age.as_secs() / 86400
+                    "Configuration file age: {days} days; age alone does not establish staleness",
                 ),
-                Some("Use --catalogue for a current public endpoint comparison where supported"),
+                (days >= 30).then_some(
+                    "Use --catalogue for a current public endpoint comparison where supported",
+                ),
             ));
         }
-    } else if provider.is_some() {
-        report.diagnostics.push(Diagnostic::new(
-            Code::ProviderConfig,
-            State::Fail,
-            "No stored configuration matches the requested provider, protocol and server",
-            Some("Run vopono sync PROVIDER --protocol PROTOCOL as your user"),
-        ));
+    } else if let Some(provider) = &provider {
+        if !provider.supports_sync() {
+            report.diagnostics.push(Diagnostic::new(
+                Code::ProviderConfig,
+                State::Skipped,
+                "This provider/protocol does not use synchronized local configuration files",
+                Some("Pass --custom /path/to/config for custom profiles, or run vopono doctor without --provider to check running namespaces"),
+            ));
+        } else {
+            report.diagnostics.push(Diagnostic::new(
+                Code::ProviderConfig,
+                State::Fail,
+                "No stored configuration matches the requested provider, protocol and server",
+                Some("Run vopono sync PROVIDER --protocol PROTOCOL as your user"),
+            ));
+        }
     } else {
         report.diagnostics.push(Diagnostic::new(
             Code::ProviderConfig,
@@ -471,11 +494,13 @@ fn namespace_report(command: &DoctorCommand) -> Report {
                 crate::check::DEFAULT_V4_HOST,
                 crate::check::DEFAULT_V6_HOST,
                 dns_host,
+                crate::daemon_client::Compatibility::Warn,
             )
         }
     });
+    let daemon_available = report.daemon.as_ref().is_some_and(|d| d.status.available);
     for ns in &mut report.namespaces {
-        ns.network = namespace_environment(&ns.id, command);
+        ns.network = namespace_environment(&ns.id, command, daemon_available);
     }
     if !command.offline {
         report.diagnostics.insert(
@@ -698,7 +723,7 @@ pub(crate) fn connectivity_diagnostics_for_families(
                 )
             };
             diagnostics.push(Diagnostic::new(
-                Code::TunnelConnectivity,
+                family.code.unwrap_or(Code::TunnelConnectivity),
                 state,
                 &message,
                 action.as_deref(),

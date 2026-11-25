@@ -412,7 +412,7 @@ fn sanitize_with_auth(
                 number,
             } => (raw, fields, number),
         };
-        let option = fields[0].trim_start_matches("--");
+        let option = fields[0].strip_prefix("--").unwrap_or(&fields[0]);
         if override_auth && option == "auth-user-pass" {
             continue;
         }
@@ -482,7 +482,8 @@ fn sanitize_with_auth(
                     output.push_str(path);
                     if let Some(direction) = fields.get(2) {
                         ensure!(
-                            direction == "0" || direction == "1",
+                            matches!(option, "tls-auth" | "secret")
+                                && (direction == "0" || direction == "1"),
                             "Invalid TLS key direction"
                         );
                         output.push(' ');

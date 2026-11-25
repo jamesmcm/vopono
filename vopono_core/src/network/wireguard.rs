@@ -35,7 +35,9 @@ pub struct Wireguard {
 
 impl Wireguard {
     pub fn config_from_file(config_file: &Path) -> anyhow::Result<WireguardConfig> {
-        let config_string = std::fs::read_to_string(config_file)
+        let bytes = crate::util::owner_write::read_file_as_config_owner(config_file)
+            .context(format!("Reading Wireguard config file: {:?}", config_file))?;
+        let config_string = String::from_utf8(bytes)
             .context(format!("Reading Wireguard config file: {:?}", config_file))?;
 
         WireguardConfig::from_str(&config_string)
@@ -67,7 +69,9 @@ impl Wireguard {
             .into());
         }
 
-        let mut config_string = std::fs::read_to_string(&config_file)
+        let config_bytes = crate::util::owner_write::read_file_as_config_owner(&config_file)
+            .context(format!("Reading Wireguard config file: {:?}", config_file))?;
+        let mut config_string = String::from_utf8(config_bytes)
             .context(format!("Reading Wireguard config file: {:?}", config_file))?;
 
         // Replace Endpoint with Trojan server for Wireguard forwarding
@@ -145,6 +149,7 @@ impl Wireguard {
             public_key: config.peer.public_key.clone(),
             address: peer_endpoint_ip,
             disable_ipv6,
+            persistent_keepalive: config.peer.keepalive.clone(),
         };
         let endpoint_line = Regex::new(r"(?m)^Endpoint\s*=.*$")?;
         config_string = endpoint_line
@@ -173,8 +178,12 @@ impl Wireguard {
             "H3",
             "H4",
         ];
-        let mut wg_temp_file =
-            NamedTempFile::new().context("Creating temporary Wireguard config")?;
+        let mut wg_temp_file = if nix::unistd::geteuid().is_root() {
+            NamedTempFile::new_in("/run")
+        } else {
+            NamedTempFile::new()
+        }
+        .context("Creating temporary Wireguard config")?;
         write!(
             wg_temp_file,
             "{}",
@@ -219,6 +228,8 @@ impl Wireguard {
                     &peer_port,
                     "counter",
                     "accept",
+                    "comment",
+                    "vopono-recovery-endpoint",
                 ],
             )?;
 
@@ -241,6 +252,8 @@ impl Wireguard {
                     &peer_port,
                     "counter",
                     "accept",
+                    "comment",
+                    "vopono-recovery-endpoint",
                 ],
             )?;
         }
@@ -478,8 +491,12 @@ impl Wireguard {
                     pf, nftable
                 ));
 
-                let mut nft_temp_file =
-                    NamedTempFile::new().context("Creating temporary nftables rules file")?;
+                let mut nft_temp_file = if nix::unistd::geteuid().is_root() {
+                    NamedTempFile::new_in("/run")
+                } else {
+                    NamedTempFile::new()
+                }
+                .context("Creating temporary nftables rules file")?;
                 write!(nft_temp_file, "{}", nftcmd.join("\n"))?;
                 let nft_temp_path = nft_temp_file.path().to_string_lossy();
                 NetworkNamespace::exec(&namespace.name, &["nft", "-f", &nft_temp_path])?;

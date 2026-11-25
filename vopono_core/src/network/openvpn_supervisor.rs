@@ -24,7 +24,9 @@ pub(crate) fn prepare(argv: &[&str], runtime: &Path) -> anyhow::Result<Vec<Strin
     let mut device = "tun0".to_owned();
     for line in fs::read_to_string(config)?.lines() {
         if let Ok(fields) = shell_words::split(line)
-            && fields.first().is_some_and(|field| field == "dev")
+            && fields
+                .first()
+                .is_some_and(|field| field.strip_prefix("--").unwrap_or(field) == "dev")
             && let Some(value) = fields.get(1)
         {
             if value != "tun" {
@@ -58,6 +60,7 @@ pub(crate) fn prepare(argv: &[&str], runtime: &Path) -> anyhow::Result<Vec<Strin
             .context("Invalid helper path")?
             .to_owned(),
         "__openvpn-supervisor".into(),
+        "--".into(),
         plan.to_str().context("Invalid runtime path")?.to_owned(),
     ])
 }
@@ -80,15 +83,31 @@ fn spawn(plan: &Plan, runtime: &Path) -> anyhow::Result<Child> {
             "Could not remove obsolete OpenVPN device"
         );
     }
-    let child = Command::new(&plan.argv[0])
+    let mut command = Command::new(&plan.argv[0]);
+    command
         .args(&plan.argv[1..])
         .current_dir(runtime)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()?;
-    fs::write(runtime.join("child.pid"), child.id().to_string())?;
+        .process_group(0);
+    let parent = nix::unistd::getpid();
+    // Let the kernel stop this child if the supervisor is killed. Checking
+    // getppid after arming the signal also covers death before pre_exec ran.
+    unsafe {
+        command.pre_exec(move || {
+            nix::sys::prctl::set_pdeathsig(nix::sys::signal::Signal::SIGKILL)?;
+            if nix::unistd::getppid() != parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
+    let mut child = command.spawn()?;
+    if let Err(error) = fs::write(runtime.join("child.pid"), child.id().to_string()) {
+        terminate(&mut child);
+        return Err(error.into());
+    }
     Ok(child)
 }
 
@@ -150,12 +169,18 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
                         nix::sys::signal::Signal::SIGUSR1,
                     );
                 } else {
-                    child = Some(spawn(&plan, &runtime)?);
+                    match spawn(&plan, &runtime) {
+                        Ok(spawned) => child = Some(spawned),
+                        Err(error) => {
+                            log::warn!("OpenVPN supervisor could not restart child: {error:#}");
+                        }
+                    }
                 }
             } else {
                 if let Some(child) = &mut child {
                     terminate(child);
                 }
+                let _ = fs::remove_file(runtime.join("child.pid"));
                 return Ok(());
             }
         }
@@ -163,6 +188,7 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
             && let Some(status) = running.try_wait()?
         {
             child = None;
+            let _ = fs::remove_file(runtime.join("child.pid"));
             fs::write(runtime.join("child-exited"), status.to_string())?;
         }
         std::thread::sleep(Duration::from_millis(50));

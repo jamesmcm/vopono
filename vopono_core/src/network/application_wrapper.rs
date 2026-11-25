@@ -248,11 +248,11 @@ impl ApplicationWrapper {
                     handle.current_dir(&target_user.dir);
                 }
 
-                Some((
-                    target_user.uid,
+                let groups = crate::util::owner_write::supplementary_groups(
+                    &target_user.name,
                     target_group.gid,
-                    CString::new(target_user.name)?,
-                ))
+                )?;
+                Some((target_user.uid, target_group.gid, groups))
             } else {
                 if let Some(dir) = set_dir {
                     handle.current_dir(dir);
@@ -339,8 +339,8 @@ impl ApplicationWrapper {
                         }
                     }
 
-                    if let Some((uid, gid, user_name_cstr)) = &user_details {
-                        nix::unistd::initgroups(user_name_cstr, *gid)?;
+                    if let Some((uid, gid, groups)) = &user_details {
+                        nix::unistd::setgroups(groups)?;
                         nix::unistd::setgid(*gid)?;
                         nix::unistd::setuid(*uid)?;
                     }
@@ -401,6 +401,7 @@ impl ApplicationWrapper {
                 sudo_args.push("--group".to_string());
                 sudo_args.push(group_str.clone());
             }
+            sudo_args.push("--".to_string());
 
             debug!(
                 "ip netns exec {} {} {}",

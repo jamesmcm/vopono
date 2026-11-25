@@ -148,7 +148,7 @@ fn resolver_evidence(dns: &ResolverInfo, namespace: bool) -> Vec<Diagnostic> {
         && dns
             .nameservers
             .iter()
-            .any(|s| s.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()))
+            .any(|s| server_address(s).is_some_and(|ip| ip.is_loopback()))
     {
         diagnostics.push(Diagnostic::new(Code::DnsConfiguration, State::Warning,
             "Namespace DNS references a loopback stub; loopback refers to the namespace itself, not the host resolver",
@@ -158,7 +158,10 @@ fn resolver_evidence(dns: &ResolverInfo, namespace: bool) -> Vec<Diagnostic> {
 }
 
 fn server_address(server: &str) -> Option<IpAddr> {
-    server.split('#').next()?.split('%').next()?.parse().ok()
+    let head = server.split('#').next()?.split('%').next()?;
+    head.parse::<IpAddr>()
+        .ok()
+        .or_else(|| head.parse::<std::net::SocketAddr>().ok().map(|s| s.ip()))
 }
 
 fn magic_dns(server: &str) -> bool {
@@ -256,7 +259,7 @@ pub(super) fn host_network_until(skip_ipv6: bool, deadline: Instant) -> HostNetw
         && dns
             .nameservers
             .iter()
-            .any(|s| s.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback()))
+            .any(|s| server_address(s).is_some_and(|ip| ip.is_loopback()))
     {
         diagnostics.push(Diagnostic::new(Code::DnsConfiguration, State::Skipped, "Host DNS uses a local stub; its upstream nameservers could not be read from systemd-resolved", Some("Inspect resolvectl dns/status or the configuration of the local DNS service; the stub address is not the upstream DNS server")));
     }
@@ -511,6 +514,24 @@ pub(super) fn namespace_network_until(
             }
         }
     }
+    // Reserve budget for local veth link probes so many blocked open ports cannot starve them.
+    let services_deadline =
+        if !offline && state.veth_pair.is_some() && state.veth_pair_ips.is_some() {
+            deadline
+                .checked_sub(Duration::from_millis(1200))
+                .unwrap_or(deadline)
+                .max(Instant::now() + Duration::from_millis(500))
+                .min(deadline)
+        } else {
+            deadline
+        };
+    report.diagnostics.extend(super::services::inspect(
+        state,
+        offline,
+        skip_ipv6,
+        timeout_ms,
+        services_deadline,
+    ));
     if let Some(pair) = &state.veth_pair {
         if !offline && let Some(ips) = &state.veth_pair_ips {
             for ips in ips
@@ -565,12 +586,11 @@ pub(super) fn namespace_network_until(
                     };
                     let state = match &result {
                         Some((true, _)) => State::Pass,
-                        Some((false, _)) => State::Warning,
-                        None => State::Skipped,
+                        _ => State::Skipped,
                     };
                     report.diagnostics.push(Diagnostic::new(Code::HostLink, state,
-                        &format!("{direction}: ICMP to {target} over {interface} (recorded local IP {source}) {}", match state { State::Pass => "succeeded", State::Skipped => "probe unavailable or inspection budget exhausted", _ => "did not succeed" }),
-                        (state != State::Pass).then_some("ICMP can be intentionally blocked by the kill switch or host firewall; failure alone does not prove a broken veth. Compare link state, addresses and route results. --allow-host-access permits host services; doctor never changes that policy")));
+                        &format!("{direction}: ICMP to {target} over {interface} (recorded local IP {source}) {}", match result { Some((true, _)) => "succeeded", Some((false, _)) => "did not succeed; ICMP acceptance is not required by host-access or port policy", None => "probe unavailable or inspection budget exhausted" }),
+                        None));
                     report.link_probes.push(LinkProbe {
                         direction: direction.into(),
                         recorded_source: source,

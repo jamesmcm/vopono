@@ -16,7 +16,6 @@ use log::{debug, error};
 use rand::prelude::IndexedRandom;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::fs::read_to_string;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::str::FromStr;
@@ -88,7 +87,9 @@ impl Shadowsocks {
 
 pub fn uses_shadowsocks(openvpn_config: &Path) -> anyhow::Result<Option<(IpAddr, u16)>> {
     // TODO: We assume all socks-proxy are Shadowsocks
-    let config_str = read_to_string(openvpn_config)
+    let bytes = crate::util::owner_write::read_file_as_config_owner(openvpn_config)
+        .context(format!("Reading OpenVPN config file: {openvpn_config:?}"))?;
+    let config_str = String::from_utf8(bytes)
         .context(format!("Reading OpenVPN config file: {openvpn_config:?}"))?;
 
     let re = Regex::new(r"socks-proxy ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ([0-9]+)")?;
@@ -107,8 +108,10 @@ pub fn uses_shadowsocks(openvpn_config: &Path) -> anyhow::Result<Option<(IpAddr,
 }
 
 pub fn get_routes_from_config(path: &Path) -> anyhow::Result<Vec<IpAddr>> {
+    let bytes = crate::util::owner_write::read_file_as_config_owner(path)
+        .context(format!("Reading OpenVPN config file: {path:?}"))?;
     let file_string =
-        std::fs::read_to_string(path).context(format!("Reading OpenVPN config file: {path:?}"))?;
+        String::from_utf8(bytes).context(format!("Reading OpenVPN config file: {path:?}"))?;
     let mut output_vec = Vec::new();
     // Regex extract
     let re = Regex::new(

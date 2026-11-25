@@ -8,10 +8,10 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
-struct ConfigRoot(std::path::PathBuf);
+struct ConfigRoot(Option<std::path::PathBuf>);
 impl Drop for ConfigRoot {
     fn drop(&mut self) {
-        crate::util::set_config_dir_override(Some(self.0.clone()));
+        crate::util::set_config_dir_override(self.0.take());
     }
 }
 
@@ -27,7 +27,7 @@ pub fn run(
         provider.supports_sync(),
         "Provider does not support synchronization"
     );
-    let base = crate::util::config_dir()?;
+    let previous_override = crate::util::config_dir_override();
     let root = crate::util::vopono_dir()?;
     fs::create_dir_all(&root)?;
     fs::set_permissions(&root, fs::Permissions::from_mode(0o700))?;
@@ -55,7 +55,7 @@ pub fn run(
     if replacing {
         copy_tree(&live, &staged)?;
     }
-    let _restore = ConfigRoot(base);
+    let _restore = ConfigRoot(previous_override);
     crate::util::set_config_dir_override(Some(stage.path().to_owned()));
     generate()?;
     for protocol in protocols {
@@ -75,14 +75,24 @@ pub fn run(
     relocate(&staged, &staged, &live)?;
     metadata()?;
     sync_tree(&staged)?;
-    if live.try_exists()? {
-        exchange(&staged, &live)?;
+    let exchanged = if live.try_exists()? {
+        match exchange(&staged, &live, stage.path()) {
+            Ok(()) => true,
+            Err(ExchangeError::Clean(error)) => return Err(error),
+            Err(ExchangeError::RetainStage(error)) => {
+                // Keep the staging directory so the displaced previous live
+                // generation in `swap-backup` is never deleted on error.
+                let _retained = stage.keep();
+                return Err(error);
+            }
+        }
     } else {
         fs::rename(&staged, &live)?;
-    }
+        false
+    };
     if let Err(error) = parent.sync_all() {
-        let rollback = if replacing {
-            exchange(&staged, &live)
+        let rollback = if exchanged {
+            exchange(&staged, &live, stage.path()).map_err(|err| err.into_error())
         } else {
             fs::rename(&live, &staged).map_err(Into::into)
         };
@@ -108,23 +118,80 @@ pub fn run(
     Ok(())
 }
 
-fn exchange(left: &Path, right: &Path) -> anyhow::Result<()> {
-    let left = std::ffi::CString::new(left.as_os_str().as_bytes())?;
-    let right = std::ffi::CString::new(right.as_os_str().as_bytes())?;
+enum ExchangeError {
+    Clean(anyhow::Error),
+    RetainStage(anyhow::Error),
+}
+
+impl ExchangeError {
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Clean(error) | Self::RetainStage(error) => error,
+        }
+    }
+}
+
+fn exchange(left: &Path, right: &Path, stage_dir: &Path) -> Result<(), ExchangeError> {
+    let left_c = std::ffi::CString::new(left.as_os_str().as_bytes())
+        .map_err(|e| ExchangeError::Clean(e.into()))?;
+    let right_c = std::ffi::CString::new(right.as_os_str().as_bytes())
+        .map_err(|e| ExchangeError::Clean(e.into()))?;
     let result = unsafe {
         libc::renameat2(
             libc::AT_FDCWD,
-            left.as_ptr(),
+            left_c.as_ptr(),
             libc::AT_FDCWD,
-            right.as_ptr(),
+            right_c.as_ptr(),
             libc::RENAME_EXCHANGE,
         )
     };
-    if result != 0 {
-        return Err(std::io::Error::last_os_error())
-            .context("Atomically publishing provider configurations");
+    if result == 0 {
+        return Ok(());
     }
-    Ok(())
+    let err = std::io::Error::last_os_error();
+    if matches!(
+        err.raw_os_error(),
+        Some(libc::ENOSYS | libc::EINVAL | libc::EOPNOTSUPP)
+    ) {
+        // Fallback for filesystems without RENAME_EXCHANGE (e.g., eCryptfs, FUSE, CIFS).
+        // Keep the temporary swap path inside the private 0700 staging directory on the
+        // same filesystem so it is never orphaned in `root` and is preserved if rollback fails.
+        let backup = stage_dir.join("swap-backup");
+        if backup
+            .try_exists()
+            .map_err(|e| ExchangeError::Clean(e.into()))?
+        {
+            fs::remove_dir_all(&backup).map_err(|e| ExchangeError::Clean(e.into()))?;
+        }
+        fs::rename(right, &backup)
+            .context("Moving existing provider directory aside")
+            .map_err(ExchangeError::Clean)?;
+        if let Err(move_err) = fs::rename(left, right) {
+            let err = anyhow::Error::new(move_err).context("Publishing provider configurations");
+            if fs::rename(&backup, right).is_err() {
+                return Err(ExchangeError::RetainStage(err.context(
+                    "Restoring previous provider directory failed; retained staging data for recovery",
+                )));
+            }
+            return Err(ExchangeError::Clean(err));
+        }
+        if let Err(backup_err) = fs::rename(&backup, left) {
+            let err = anyhow::Error::new(backup_err)
+                .context("Preserving previous provider generation for rollback");
+            // `left` has already replaced `right`; try to restore the prior generation
+            // cleanly, and retain staging if rollback cannot complete.
+            if fs::rename(right, left).is_ok() && fs::rename(&backup, right).is_ok() {
+                return Err(ExchangeError::Clean(err));
+            }
+            return Err(ExchangeError::RetainStage(err.context(
+                "Could not restore previous provider directory; retained staging data for recovery",
+            )));
+        }
+        return Ok(());
+    }
+    Err(ExchangeError::Clean(
+        anyhow::Error::new(err).context("Atomically publishing provider configurations"),
+    ))
 }
 
 fn copy_tree(source: &Path, destination: &Path) -> anyhow::Result<()> {

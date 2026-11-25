@@ -11,6 +11,7 @@ use std::time::Duration;
 
 pub mod host;
 pub mod runtime;
+mod services;
 pub mod topology;
 
 /// Safe setup failures: values are enums or fixed local explanations, never
@@ -257,10 +258,6 @@ fn validate_config_inner(
             ),
         )
     };
-    // Bound user-controlled input before reading; symlinks are fine here: doctor runs as the user.
-    if std::fs::metadata(path).map_or(true, |m| !m.is_file() || m.len() > 4 * 1024 * 1024) {
-        return Err(fail());
-    }
     let content = String::from_utf8(
         crate::util::owner_write::read_file_as_config_owner(path).map_err(|_| fail())?,
     )
@@ -318,12 +315,12 @@ fn validate_config_inner(
         }
         Protocol::OpenVpn => crate::network::openvpn_config::validate(&content, path, openvpn_auth)
             .and_then(|()| crate::network::openvpn_config::endpoints(&content))
-            .map_err(|error| {
+            .map_err(|_| {
                 Diagnostic::new(
                     DiagnosticCode::ProviderConfig,
                     DiagnosticState::Fail,
-                    &format!("{}: {error:#}", path.display()),
-                    None,
+                    "OpenVPN configuration is unreadable, malformed, or references unsupported or missing files",
+                    Some("Check OpenVPN configuration directives, inline blocks, and referenced key/auth files"),
                 )
             }),
         _ => Err(Diagnostic::new(
@@ -355,9 +352,6 @@ pub fn config_endpoints(path: &Path, protocol: &Protocol) -> Result<Vec<Endpoint
             None,
         )
     };
-    if std::fs::metadata(path).map_or(true, |m| !m.is_file() || m.len() > 4 * 1024 * 1024) {
-        return Err(fail());
-    }
     let content = String::from_utf8(
         crate::util::owner_write::read_file_as_config_owner(path).map_err(|_| fail())?,
     )

@@ -12,6 +12,14 @@ pub trait Forwarder {
     fn snapshot(&self) -> Option<ForwarderSnapshot> {
         None
     }
+    /// Disarm external side effects (e.g., remote port-mapping deletion) when
+    /// the daemon exits while leaving the namespace alive.
+    fn disarm(&mut self) {}
+    /// Stop handle for background renewal threads so teardown can terminate
+    /// them before checking namespace processes.
+    fn stop_handle(&self) -> Option<std::sync::mpsc::Sender<bool>> {
+        None
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -41,7 +49,7 @@ impl ForwarderSnapshot {
                 netns_name,
             } => {
                 anyhow::ensure!(*netns_name == ns.name, "Forwarder namespace mismatch");
-                Ok(Box::new(azirevpn::AzireVpnPortForwarding::new(
+                Ok(Box::new(azirevpn::AzireVpnPortForwarding::restore(
                     ns,
                     access_token,
                     *local_ip,
@@ -72,17 +80,19 @@ impl CallbackCommand {
         })
     }
 
-    fn argv(&self, port: u16) -> Vec<String> {
-        let mut argv = Vec::new();
-        if let Some(user) = &self.user {
-            argv.extend(["sudo".to_string(), "--preserve-env".to_string()]);
-            if let Some(group) = &self.group {
-                argv.extend(["--group".to_string(), group.clone()]);
-            }
-            argv.extend(["--user".to_string(), user.clone()]);
-        }
-        argv.extend([self.command.clone(), port.to_string()]);
-        argv
+    fn build_command(&self, netns_name: &str, port: u16) -> std::process::Command {
+        let port_str = port.to_string();
+        let argv = [self.command.as_str(), port_str.as_str()];
+        NetworkNamespace::build_exec_command(
+            netns_name,
+            &argv,
+            self.user.as_deref(),
+            self.group.as_deref(),
+            false,
+            true,
+            false,
+            None,
+        )
     }
 }
 
@@ -95,6 +105,17 @@ pub trait ThreadParameters {
     /// because the config-dir override is thread-local and background
     /// refresh threads would otherwise resolve the wrong root.
     fn get_locks_dir(&self) -> std::path::PathBuf;
+    /// Firewall configuration so renewed ports can be opened dynamically.
+    fn get_firewall(&self) -> Option<(crate::network::firewall::Firewall, bool)> {
+        None
+    }
+    /// Initial port already opened by namespace setup so the first unchanged
+    /// renewal does not append duplicate firewall rules.
+    fn initial_opened_port(&self) -> Option<u16> {
+        None
+    }
+    /// Optional hook to update the forwarder's live port cache on renewal.
+    fn on_port_refreshed(&self, _port: u16) {}
 }
 
 fn renewal_retry_delay(normal: u64, failures: u32) -> u64 {
@@ -114,6 +135,7 @@ pub trait ThreadLoopForwarder: Forwarder {
     fn thread_loop(params: Self::ThreadParams, recv: Receiver<bool>) {
         let mut failures = 0u32;
         let mut delay = params.get_loop_delay().max(1);
+        let mut opened_port: Option<u16> = params.initial_opened_port();
         loop {
             let resp = recv.recv_timeout(std::time::Duration::from_secs(delay));
             if resp.is_ok() || matches!(resp, Err(std::sync::mpsc::RecvTimeoutError::Disconnected))
@@ -132,6 +154,29 @@ pub trait ThreadLoopForwarder: Forwarder {
                         failures = 0;
                         delay = params.get_loop_delay().max(1);
                         log::debug!("Thread refreshed port: {p}");
+                        params.on_port_refreshed(p);
+                        if opened_port != Some(p) {
+                            match params.get_firewall() {
+                                Some((firewall, ipv6_enabled)) => {
+                                    match crate::util::open_ports::open_port_in_namespace(
+                                        &params.get_netns_name(),
+                                        firewall,
+                                        ipv6_enabled,
+                                        None,
+                                        None,
+                                        p,
+                                    ) {
+                                        Ok(()) => opened_port = Some(p),
+                                        Err(e) => {
+                                            log::warn!(
+                                                "Failed to open renewed port {p} in firewall: {e:#}"
+                                            );
+                                        }
+                                    }
+                                }
+                                None => opened_port = Some(p),
+                            }
+                        }
                         // Keep the lockfile-visible status in sync so status
                         // readers see the renewed port, not the initial one.
                         if let Err(e) = crate::status::record_forwarded_port(
@@ -151,12 +196,12 @@ pub trait ThreadLoopForwarder: Forwarder {
     fn callback_command(params: &Self::ThreadParams, port: u16) -> Option<anyhow::Result<String>> {
         params.get_callback().map(|callback| {
             // The callback is attacker-controllable input relative to this
-            // process: de-elevate it to the session user (network namespaces
-            // are not a privilege boundary).
-            let command_vec = callback.argv(port);
-            let argv: Vec<&str> = command_vec.iter().map(|s| s.as_str()).collect();
-            let refresh_response =
-                NetworkNamespace::exec_with_output(&params.get_netns_name(), &argv)?;
+            // process: de-elevate it to the session user via build_exec_command so
+            // both `--` separation and PR_SET_NO_NEW_PRIVS are enforced.
+            let refresh_response = callback
+                .build_command(&params.get_netns_name(), port)
+                .spawn()?
+                .wait_with_output()?;
             if !refresh_response.status.success() {
                 log::error!(
                     "Port forwarding callback script was unsuccessful!: stdout: {:?}, stderr: {:?}, exit code: {}",
@@ -220,5 +265,38 @@ mod tests {
             vec![30, 60, 120, 240, 300, 300, 300]
         );
         assert_eq!(renewal_retry_delay(10, 5), 10);
+    }
+
+    #[test]
+    fn callback_command_argv_separates_sudo_options_from_command() {
+        let cb = CallbackCommand::for_session(
+            Some(&"-u".to_string()),
+            Some("alice".to_string()),
+            Some("staff".to_string()),
+        )
+        .unwrap();
+        let cmd = cb.build_command("vo_test", 51820);
+        assert_eq!(cmd.get_program(), "ip");
+        let args: Vec<&str> = cmd
+            .get_args()
+            .map(|arg| arg.to_str().expect("UTF-8 argv"))
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "netns",
+                "exec",
+                "vo_test",
+                "sudo",
+                "--preserve-env",
+                "--user",
+                "alice",
+                "--group",
+                "staff",
+                "--",
+                "-u",
+                "51820"
+            ]
+        );
     }
 }

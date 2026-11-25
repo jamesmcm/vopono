@@ -76,6 +76,18 @@ pub enum OwnerWriteRequest {
     RemoveFile {
         path: PathBuf,
     },
+    RemoveDir {
+        path: PathBuf,
+    },
+}
+
+/// Resolve a user's supplementary groups before `fork()` so `pre_exec` only
+/// executes async-signal-safe syscalls (`setgroups`, `setgid`, `setuid`).
+pub fn supplementary_groups(user_name: &str, gid: Gid) -> anyhow::Result<Vec<Gid>> {
+    let name_cstr = std::ffi::CString::new(user_name)?;
+    let groups = nix::unistd::getgrouplist(&name_cstr, gid)
+        .with_context(|| format!("Failed to resolve supplementary groups for '{user_name}'"))?;
+    Ok(groups)
 }
 
 /// Child-side implementation of the hidden `vopono __write-user-file` verb.
@@ -89,6 +101,11 @@ pub fn perform_owner_write(request: &OwnerWriteRequest) -> anyhow::Result<()> {
     }
     match request {
         OwnerWriteRequest::RemoveFile { path } => match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        },
+        OwnerWriteRequest::RemoveDir { path } => match std::fs::remove_dir(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
@@ -213,8 +230,8 @@ fn spawn_owner_write(request: &OwnerWriteRequest, uid: Uid, gid: Gid) -> anyhow:
         anyhow!("No helper executable configured for dropped-privilege config writes")
     })?;
     let user = User::from_uid(uid)?.ok_or_else(|| anyhow!("Unknown uid {uid}"))?;
+    let groups = supplementary_groups(&user.name, gid)?;
     let payload = serde_json::to_vec(request)?;
-    let name_cstr = std::ffi::CString::new(user.name.clone())?;
     let mut child = unsafe {
         let mut command = Command::new(&exe);
         command
@@ -225,8 +242,9 @@ fn spawn_owner_write(request: &OwnerWriteRequest, uid: Uid, gid: Gid) -> anyhow:
             .stderr(Stdio::piped());
         // Full credential transition in the child before exec: supplementary
         // groups, primary group, then user. Ordering matters - setuid last.
+        // Only async-signal-safe syscalls are called inside pre_exec.
         command.pre_exec(move || {
-            nix::unistd::initgroups(&name_cstr, gid)?;
+            nix::unistd::setgroups(&groups)?;
             nix::unistd::setgid(gid)?;
             nix::unistd::setuid(uid)?;
             Ok(())
@@ -235,13 +253,18 @@ fn spawn_owner_write(request: &OwnerWriteRequest, uid: Uid, gid: Gid) -> anyhow:
             .spawn()
             .with_context(|| format!("Failed to spawn write helper {}", exe.display()))?
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(&payload)?;
-    }
+    let write_result = if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(&payload)
+    } else {
+        Ok(())
+    };
+    // Always reap the child even if stdin hit EPIPE so we never leak a zombie
+    // and can report any stderr from the helper.
     let output = child
         .wait_with_output()
         .context("Failed to wait for write helper")?;
     if output.status.success() {
+        write_result?;
         Ok(())
     } else {
         Err(anyhow!(
@@ -253,15 +276,42 @@ fn spawn_owner_write(request: &OwnerWriteRequest, uid: Uid, gid: Gid) -> anyhow:
 }
 
 pub fn remove_file_as_config_owner(path: &Path) -> anyhow::Result<()> {
-    let (uid, gid) =
-        super::config_owner_override().context("Missing authenticated config owner")?;
+    if remove_file_as_config_owner_if_needed(path)? {
+        return Ok(());
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+pub fn remove_file_as_config_owner_if_needed(path: &Path) -> anyhow::Result<bool> {
+    let Some((uid, gid)) = super::config_write_owner()? else {
+        return Ok(false);
+    };
     spawn_owner_write(
         &OwnerWriteRequest::RemoveFile {
             path: path.to_owned(),
         },
         uid,
         gid,
-    )
+    )?;
+    Ok(true)
+}
+
+pub fn remove_dir_as_config_owner_if_needed(path: &Path) -> anyhow::Result<bool> {
+    let Some((uid, gid)) = super::config_write_owner()? else {
+        return Ok(false);
+    };
+    spawn_owner_write(
+        &OwnerWriteRequest::RemoveDir {
+            path: path.to_owned(),
+        },
+        uid,
+        gid,
+    )?;
+    Ok(true)
 }
 
 /// Write `contents` to `path` as the configured config owner.
@@ -395,24 +445,25 @@ pub fn read_file_as_config_owner(path: &Path) -> anyhow::Result<Vec<u8>> {
     }
     let (uid, gid) =
         super::config_owner_override().context("Missing authenticated config owner")?;
-    anyhow::ensure!(
-        !uid.is_root(),
-        "Unprivileged configuration reader requires a non-root owner"
-    );
+    if uid.is_root() {
+        return read_regular_file(path)
+            .with_context(|| format!("Could not read {}", path.display()));
+    }
     let exe = helper_exe_override().context("Missing config reader executable")?;
     let user = User::from_uid(uid)?.context("Unknown config owner")?;
-    let name = std::ffi::CString::new(user.name)?;
+    let groups = supplementary_groups(&user.name, gid)?;
     let output = unsafe {
         let mut command = Command::new(exe);
         command
             .arg("__read-user-file")
+            .arg("--")
             .arg(path)
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         command.pre_exec(move || {
-            nix::unistd::initgroups(&name, gid)?;
+            nix::unistd::setgroups(&groups)?;
             nix::unistd::setgid(gid)?;
             nix::unistd::setuid(uid)?;
             Ok(())
@@ -428,19 +479,43 @@ pub fn read_file_as_config_owner(path: &Path) -> anyhow::Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-fn read_regular_file(path: &Path) -> anyhow::Result<Vec<u8>> {
+pub fn read_regular_file(path: &Path) -> anyhow::Result<Vec<u8>> {
+    read_bounded_regular_file(path, 4 * 1024 * 1024)
+}
+
+pub fn read_regular_file_nofollow(path: &Path) -> anyhow::Result<Vec<u8>> {
+    read_bounded_regular_file_nofollow(path, 4 * 1024 * 1024)
+}
+
+pub fn read_bounded_regular_file(path: &Path, max_bytes: usize) -> anyhow::Result<Vec<u8>> {
+    read_bounded_regular_file_with_flags(path, max_bytes, libc::O_NONBLOCK)
+}
+
+pub fn read_bounded_regular_file_nofollow(
+    path: &Path,
+    max_bytes: usize,
+) -> anyhow::Result<Vec<u8>> {
+    read_bounded_regular_file_with_flags(path, max_bytes, libc::O_NONBLOCK | libc::O_NOFOLLOW)
+}
+
+fn read_bounded_regular_file_with_flags(
+    path: &Path,
+    max_bytes: usize,
+    flags: libc::c_int,
+) -> anyhow::Result<Vec<u8>> {
     let file = std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NONBLOCK)
+        .custom_flags(flags)
         .open(path)?;
     anyhow::ensure!(
         file.metadata()?.is_file(),
         "Configuration input must be a regular file"
     );
     let mut bytes = Vec::new();
-    file.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    file.take((max_bytes as u64).saturating_add(1))
+        .read_to_end(&mut bytes)?;
     anyhow::ensure!(
-        bytes.len() <= 4 * 1024 * 1024,
+        bytes.len() <= max_bytes,
         "Configuration file exceeds size limit"
     );
     Ok(bytes)
@@ -575,5 +650,14 @@ mod tests {
         assert!(validated_user_owned_dir(&base.join("plain"), uid).is_err());
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn root_config_owner_override_does_not_spawn_unprivileged_write_helper() {
+        let previous = crate::util::config_owner_override();
+        crate::util::set_config_owner_override(Some((Uid::from_raw(0), Gid::from_raw(0))));
+        let write_owner = crate::util::config_write_owner().unwrap();
+        crate::util::set_config_owner_override(previous);
+        assert_eq!(write_owner, None);
     }
 }

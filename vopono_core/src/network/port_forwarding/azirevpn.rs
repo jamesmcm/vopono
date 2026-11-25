@@ -19,6 +19,7 @@ pub struct AzireVpnPortForwarding {
     pub local_ip: IpAddr,
     pub access_token: String,
     pub netns_name: String,
+    cleanup_enabled: bool,
     // TODO: We could run check endpoint but it means we need to temporarily listen on this port too
     // But it would confirm success and give us our remote IP
     // TODO: Do we want to look up remote IP from ifconfig.co?
@@ -70,29 +71,39 @@ struct ApiStatus {
     message: Option<String>,
 }
 
-fn authorization_header(access_token: &str) -> String {
-    format!("Authorization: Bearer {access_token}")
+fn authorization_header_config(access_token: &str) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        !access_token.contains(['\r', '\n']),
+        "AzireVPN access token contains invalid newline characters"
+    );
+    let header = format!("Authorization: Bearer {access_token}");
+    let escaped = header.replace('\\', "\\\\").replace('"', "\\\"");
+    Ok(format!("header = \"{escaped}\"\n"))
 }
 
-fn list_command(access_token: &str, local_ip: IpAddr) -> Vec<String> {
+fn list_command(local_ip: IpAddr) -> Vec<String> {
     vec![
         "curl".to_string(),
         "-sS".to_string(),
+        "-m".to_string(),
+        "5".to_string(),
+        "-K".to_string(),
+        "-".to_string(),
         format!("https://api.azirevpn.com/v3/portforwardings?internal_ipv4={local_ip}"),
-        "-H".to_string(),
-        authorization_header(access_token),
     ]
 }
 
-fn create_command(access_token: &str, local_ip: IpAddr) -> Vec<String> {
+fn create_command(local_ip: IpAddr) -> Vec<String> {
     vec![
         "curl".to_string(),
         "-sS".to_string(),
+        "-m".to_string(),
+        "5".to_string(),
         "-X".to_string(),
         "POST".to_string(),
         "https://api.azirevpn.com/v3/portforwardings".to_string(),
-        "-H".to_string(),
-        authorization_header(access_token),
+        "-K".to_string(),
+        "-".to_string(),
         "-H".to_string(),
         "Content-Type: application/json".to_string(),
         "--data-raw".to_string(),
@@ -105,15 +116,17 @@ fn create_command(access_token: &str, local_ip: IpAddr) -> Vec<String> {
     ]
 }
 
-fn delete_command(access_token: &str, local_ip: IpAddr, port: u16) -> Vec<String> {
+fn delete_command(local_ip: IpAddr, port: u16) -> Vec<String> {
     vec![
         "curl".to_string(),
         "-sS".to_string(),
+        "-m".to_string(),
+        "5".to_string(),
         "-X".to_string(),
         "DELETE".to_string(),
         "https://api.azirevpn.com/v3/portforwardings".to_string(),
-        "-H".to_string(),
-        authorization_header(access_token),
+        "-K".to_string(),
+        "-".to_string(),
         "-H".to_string(),
         "Content-Type: application/json".to_string(),
         "--data-raw".to_string(),
@@ -144,9 +157,21 @@ fn output_to_string(operation: &str, output: Output) -> anyhow::Result<String> {
     })
 }
 
-fn exec_curl(netns_name: &str, operation: &str, command: &[String]) -> anyhow::Result<String> {
+fn exec_curl(
+    netns_name: &str,
+    operation: &str,
+    command: &[String],
+    access_token: &str,
+) -> anyhow::Result<String> {
+    use std::io::Write;
+    let auth_config = authorization_header_config(access_token)?;
     let args = command_args(command);
-    let output = NetworkNamespace::exec_with_output(netns_name, &args)?;
+    let mut child =
+        NetworkNamespace::exec_no_block(netns_name, &args, None, None, false, true, true, None)?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(auth_config.as_bytes());
+    }
+    let output = child.wait_with_output()?;
     output_to_string(operation, output)
 }
 
@@ -190,11 +215,29 @@ impl AzireVpnPortForwarding {
         access_token: &str,
         local_ip: IpAddr,
     ) -> anyhow::Result<Self> {
-        // Check if any port forwarding exists for current connection
         log::info!("Sleeping 10 seconds so connection is up before requesting port forwarding");
         std::thread::sleep(std::time::Duration::from_secs(10));
-        let cmd = list_command(access_token, local_ip);
-        let output_string = exec_curl(&netns.name, "list", &cmd)?;
+        Self::connect(netns, access_token, local_ip)
+    }
+
+    /// Resume monitoring an already-established namespace after daemon restart
+    /// without blocking the namespace transition lock for 10 seconds.
+    pub fn restore(
+        netns: &NetworkNamespace,
+        access_token: &str,
+        local_ip: IpAddr,
+    ) -> anyhow::Result<Self> {
+        Self::connect(netns, access_token, local_ip)
+    }
+
+    fn connect(
+        netns: &NetworkNamespace,
+        access_token: &str,
+        local_ip: IpAddr,
+    ) -> anyhow::Result<Self> {
+        // Check if any port forwarding exists for current connection
+        let cmd = list_command(local_ip);
+        let output_string = exec_curl(&netns.name, "list", &cmd, access_token)?;
         log::debug!("AzireVPN Port forwarding list response: {output_string}");
 
         let output_data: Option<ListResponse> = match parse_success_response("list", &output_string)
@@ -220,6 +263,7 @@ impl AzireVpnPortForwarding {
                 local_ip,
                 access_token: access_token.to_string(),
                 netns_name: netns.name.clone(),
+                cleanup_enabled: true,
             });
         }
 
@@ -228,8 +272,8 @@ impl AzireVpnPortForwarding {
 
         let mut i = 1;
         let data = loop {
-            let cmd = create_command(access_token, local_ip);
-            let output_string = exec_curl(&netns.name, "create", &cmd)?;
+            let cmd = create_command(local_ip);
+            let output_string = exec_curl(&netns.name, "create", &cmd, access_token)?;
 
             log::debug!("AzireVPN Port forwarding creation response: {output_string}");
             let maybe_data: anyhow::Result<CreateResponse> =
@@ -259,6 +303,7 @@ impl AzireVpnPortForwarding {
             local_ip,
             access_token: access_token.to_string(),
             netns_name: netns.name.clone(),
+            cleanup_enabled: true,
         })
     }
 }
@@ -274,22 +319,20 @@ impl Forwarder for AzireVpnPortForwarding {
             netns_name: self.netns_name.clone(),
         })
     }
+    fn disarm(&mut self) {
+        self.cleanup_enabled = false;
+    }
 }
 
 impl Drop for AzireVpnPortForwarding {
     fn drop(&mut self) {
-        let cmd = delete_command(&self.access_token, self.local_ip, self.port);
+        if !self.cleanup_enabled {
+            return;
+        }
+        let cmd = delete_command(self.local_ip, self.port);
 
         // Note this must run BEFORE the network namespace is destroyed
-        let output = std::process::Command::new("ip")
-            .arg("netns")
-            .arg("exec")
-            .arg(&self.netns_name)
-            .args(&cmd)
-            .output()
-            .expect("Failed to destroy AzireVPN Port Forwarding");
-
-        match output_to_string("delete", output) {
+        match exec_curl(&self.netns_name, "delete", &cmd, &self.access_token) {
             Ok(output_string) => log::info!("AzireVPN Port forwarding destroyed: {output_string}"),
             Err(e) => log::error!("Failed to destroy AzireVPN Port Forwarding: {e:?}"),
         }
@@ -303,16 +346,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn create_command_uses_post_with_json_body() {
-        let command = create_command("token", IpAddr::V4(Ipv4Addr::new(10, 0, 16, 181)));
+    fn create_command_uses_post_with_json_body_and_stdin_auth() {
+        let command = create_command(IpAddr::V4(Ipv4Addr::new(10, 0, 16, 181)));
 
         assert_eq!(command[0], "curl");
         assert!(command.windows(2).any(|args| args == ["-X", "POST"]));
+        assert!(command.windows(2).any(|args| args == ["-m", "5"]));
+        assert!(command.windows(2).any(|args| args == ["-K", "-"]));
+        assert!(!command.iter().any(|arg| arg.contains("Bearer")));
         assert!(
-            command
-                .windows(2)
-                .any(|args| args == ["-H", "Authorization: Bearer token"])
+            authorization_header_config("token")
+                .unwrap()
+                .contains("Authorization: Bearer token")
         );
+        assert!(authorization_header_config("bad\r\ntoken").is_err());
         assert!(
             command
                 .windows(2)
@@ -328,30 +375,23 @@ mod tests {
 
     #[test]
     fn list_command_uses_get_with_internal_ipv4_query() {
-        let command = list_command("token", IpAddr::V4(Ipv4Addr::new(10, 0, 16, 181)));
+        let command = list_command(IpAddr::V4(Ipv4Addr::new(10, 0, 16, 181)));
 
         assert_eq!(command[0], "curl");
         assert!(command.iter().any(|arg| {
             arg == "https://api.azirevpn.com/v3/portforwardings?internal_ipv4=10.0.16.181"
         }));
         assert!(!command.iter().any(|arg| arg == "-X"));
-        assert!(
-            command
-                .windows(2)
-                .any(|args| args == ["-H", "Authorization: Bearer token"])
-        );
+        assert!(command.windows(2).any(|args| args == ["-K", "-"]));
     }
 
     #[test]
     fn delete_command_uses_delete_with_json_body() {
-        let command = delete_command("token", IpAddr::V4(Ipv4Addr::new(10, 0, 16, 181)), 58532);
+        let command = delete_command(IpAddr::V4(Ipv4Addr::new(10, 0, 16, 181)), 58532);
 
         assert!(command.windows(2).any(|args| args == ["-X", "DELETE"]));
-        assert!(
-            command
-                .windows(2)
-                .any(|args| args == ["-H", "Authorization: Bearer token"])
-        );
+        assert!(command.windows(2).any(|args| args == ["-m", "5"]));
+        assert!(command.windows(2).any(|args| args == ["-K", "-"]));
         assert!(
             command
                 .windows(2)

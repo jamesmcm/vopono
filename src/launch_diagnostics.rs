@@ -43,12 +43,26 @@ pub fn collect(
     if error.downcast_ref::<LaunchFailure>().is_some() {
         return error;
     }
-    let setup = error.downcast_ref::<vopono_core::diagnostics::SetupError>();
-    let primary = error.downcast_ref::<Diagnostic>().cloned().or_else(|| {
-        setup.map(|setup| {
-            Diagnostic::new(Code::ProviderConfig, State::Fail, &setup.to_string(), None)
+    let setup = error
+        .downcast_ref::<vopono_core::diagnostics::SetupError>()
+        .or_else(|| {
+            error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<vopono_core::diagnostics::SetupError>())
+        });
+    let primary = error
+        .downcast_ref::<Diagnostic>()
+        .or_else(|| {
+            error
+                .chain()
+                .find_map(|cause| cause.downcast_ref::<Diagnostic>())
         })
-    });
+        .cloned()
+        .or_else(|| {
+            setup.map(|setup| {
+                Diagnostic::new(Code::ProviderConfig, State::Fail, &setup.to_string(), None)
+            })
+        });
     if primary.is_none() && (path.is_none() || protocol.is_none()) {
         return error;
     }
@@ -87,7 +101,22 @@ pub fn collect(
                     }
                 }
             }
-            Err(diagnostic) => diagnostics.push(diagnostic),
+            Err(diagnostic) => {
+                // Avoid emitting a false ProviderConfig [Fail] for PIA WireGuard
+                // bootstrap templates, which intentionally omit PublicKey until addKey.
+                if *protocol == Protocol::Wireguard
+                    && vopono_core::diagnostics::validate_pia_template(path).is_ok()
+                {
+                    diagnostics.push(Diagnostic::new(
+                        Code::ProviderConfig,
+                        State::Pass,
+                        "PIA WireGuard bootstrap template passed local preflight validation",
+                        None,
+                    ));
+                } else {
+                    diagnostics.push(diagnostic);
+                }
+            }
         }
     } else {
         diagnostics.push(Diagnostic::new(
@@ -108,12 +137,22 @@ pub fn collect(
 }
 
 pub fn command_failure(command: &ExecCommand, error: anyhow::Error) -> anyhow::Error {
+    command_failure_with_env(command, error, None)
+}
+
+pub fn command_failure_with_env(
+    command: &ExecCommand,
+    error: anyhow::Error,
+    client_env: Option<&std::collections::HashMap<String, String>>,
+) -> anyhow::Error {
     if error.downcast_ref::<LaunchFailure>().is_some() {
         return error;
     }
     let connection = crate::args_config::ArgsConfig::get_config_file(command)
         .ok()
-        .and_then(|config| crate::args_config::ConnectionSettings::read(command, &config).ok());
+        .and_then(|config| {
+            crate::args_config::ConnectionSettings::read_with_env(command, &config, client_env).ok()
+        });
     let path = connection
         .as_ref()
         .and_then(|connection| connection.custom.as_deref());

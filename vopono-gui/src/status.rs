@@ -73,30 +73,36 @@ pub fn read_status() -> StatusSnapshot {
 
 fn read_status_inner() -> anyhow::Result<StatusSnapshot> {
     let status = vopono_core::status::read_lock_namespaces()?;
-    let namespaces = status.namespaces;
-    let errors = status.errors;
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let mut snapshot = StatusSnapshot {
         namespaces: Vec::new(),
-        errors,
+        errors: status.errors.clone(),
     };
 
-    let mut names = namespaces.keys().cloned().collect::<Vec<_>>();
+    let mut names = status.namespaces.keys().cloned().collect::<Vec<_>>();
     names.sort();
 
     for name in names {
-        let Some(locks) = namespaces.get(&name) else {
+        let Some(locks) = status.namespaces.get(&name) else {
             continue;
         };
         let Some(first_lock) = locks.first() else {
             continue;
         };
-        let start = locks.iter().map(|lock| lock.start).min().unwrap_or(now);
+        let metadata = status.metadata_for(&name).unwrap_or(first_lock);
+        let start = status
+            .metadata_for(&name)
+            .map(|lock| lock.start)
+            .unwrap_or_else(|| locks.iter().map(|lock| lock.start).min().unwrap_or(now));
         let mut applications = locks
             .iter()
-            .map(|lock| ApplicationStatus {
-                command: lock.command.clone(),
-                uptime: format_duration(now.saturating_sub(lock.start)),
+            .filter(|lock| vopono_core::status::lockfile_application_is_live(lock))
+            .map(|lock| {
+                let app_start = lock.application_started_at.unwrap_or(lock.start);
+                ApplicationStatus {
+                    command: lock.command.clone(),
+                    uptime: format_duration(now.saturating_sub(app_start)),
+                }
             })
             .collect::<Vec<_>>();
         applications.sort_by(|a, b| a.command.cmp(&b.command));
@@ -104,8 +110,8 @@ fn read_status_inner() -> anyhow::Result<StatusSnapshot> {
         snapshot.namespaces.push(NamespaceStatus {
             health: vopono_core::network::health::read_health(&name),
             name,
-            provider: first_lock.ns.provider.to_string(),
-            protocol: first_lock.ns.protocol.to_string(),
+            provider: metadata.ns.provider.to_string(),
+            protocol: metadata.ns.protocol.to_string(),
             uptime: format_duration(now.saturating_sub(start)),
             applications,
         });

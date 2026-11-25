@@ -10,7 +10,7 @@ fi
 [[ $$ == 1 ]] || { echo "Refusing to run outside a fresh PID namespace"; exit 2; }
 binary=$(realpath "${2:?Pass the built vopono binary}")
 test_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-for dependency in ip wg nft openvpn openssl natpmpc python3 runuser; do command -v "$dependency" >/dev/null; done
+for dependency in ip wg nft iptables ss ping openvpn openssl natpmpc python3 runuser; do command -v "$dependency" >/dev/null; done
 mount --make-rprivate /
 scratch=$(mktemp -d /tmp/vopono-network.XXXXXX)
 chmod 755 "$scratch"

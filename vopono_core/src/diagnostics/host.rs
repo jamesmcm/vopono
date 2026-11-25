@@ -114,7 +114,13 @@ fn iptables_diagnostics(text: &str, family: &str) -> Option<Vec<Diagnostic>> {
     let mut policies = BTreeSet::new();
     let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for line in text.lines() {
-        let words = shell_words::split(line).ok()?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Ok(words) = shell_words::split(trimmed) else {
+            continue;
+        };
         if words.len() > 1
             && [":INPUT", ":OUTPUT", ":FORWARD"].contains(&words[0].as_str())
             && words[1] == "DROP"
@@ -191,9 +197,9 @@ fn rule_evidence(
         )
     } else {
         (
-            State::Warning,
+            State::Skipped,
             format!(
-                "{label}: {}; these rules may be intentional and do not establish interference",
+                "{label}: {}; context only, packet interference is unverified; use the live connectivity and enabled service probes to identify failures",
                 observations.join("; ")
             ),
         )
@@ -316,7 +322,11 @@ fn apparmor_profiles(enabled: Option<&str>, profiles: Option<&str>) -> Diagnosti
             line.split_once(" (").is_some_and(|(name, mode)| {
                 matches!(
                     name,
-                    "wg" | "/usr/bin/wg" | "/usr/sbin/wg" | "awg" | "/usr/bin/awg"
+                    "wg" | "/usr/bin/wg"
+                        | "/usr/sbin/wg"
+                        | "awg"
+                        | "/usr/bin/awg"
+                        | "/usr/sbin/awg"
                 ) && matches!(mode, "enforce)" | "kill)")
             })
         }) {
@@ -364,7 +374,9 @@ fn apparmor_denials(logs: Option<&str>) -> Diagnostic {
                         | "profile=wg"
                         | "profile=awg"
                         | "profile=/usr/bin/wg"
+                        | "profile=/usr/sbin/wg"
                         | "profile=/usr/bin/awg"
+                        | "profile=/usr/sbin/awg"
                 )
             })
     });
@@ -381,7 +393,10 @@ fn apparmor_denials(logs: Option<&str>) -> Diagnostic {
 }
 
 /// Fixed system tools only, with bounded time and output. No shell or sudo.
-pub(super) fn system_tool(tool: &str) -> Option<std::path::PathBuf> {
+pub fn system_tool(tool: &str) -> Option<std::path::PathBuf> {
+    if tool.is_empty() || tool.contains('/') || tool == "." || tool == ".." {
+        return None;
+    }
     ["/usr/sbin", "/usr/bin", "/sbin", "/bin"]
         .iter()
         .map(|dir| Path::new(dir).join(tool))
@@ -411,6 +426,8 @@ pub(super) fn command_result(
         .process_group(0)
         .spawn()
         .ok()?;
+    let mut reaped = false;
+    let mut reached_eof = false;
     let result = (|| {
         let mut stdout = child.stdout.take()?;
         let flags = OFlag::from_bits_truncate(fcntl(&stdout, FcntlArg::F_GETFL).ok()?);
@@ -420,7 +437,10 @@ pub(super) fn command_result(
         loop {
             loop {
                 match stdout.read(&mut buffer) {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        reached_eof = true;
+                        break;
+                    }
                     Ok(count) => {
                         if bytes.len() + count > LIMIT {
                             return None;
@@ -436,18 +456,36 @@ pub(super) fn command_result(
                 }
             }
             if let Some(status) = child.try_wait().ok()? {
-                // A final drain is needed if the child exited after the read.
-                stdout
-                    .take((LIMIT + 1 - bytes.len()) as u64)
-                    .read_to_end(&mut bytes)
-                    .ok()?;
-                return (bytes.len() <= LIMIT)
-                    .then(|| {
-                        String::from_utf8(bytes)
-                            .ok()
-                            .map(|text| (status.success(), text))
-                    })
-                    .flatten();
+                reaped = true;
+                // Bounded non-blocking drain in case output was buffered or a grandchild
+                // inherited stdout briefly after the direct child exited.
+                if !reached_eof {
+                    loop {
+                        match stdout.read(&mut buffer) {
+                            Ok(0) => {
+                                reached_eof = true;
+                                break;
+                            }
+                            Ok(count) => {
+                                if bytes.len() + count > LIMIT {
+                                    return None;
+                                }
+                                bytes.extend_from_slice(&buffer[..count]);
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                if Instant::now() >= deadline {
+                                    return None;
+                                }
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(_) => return None,
+                        }
+                    }
+                }
+                return String::from_utf8(bytes)
+                    .ok()
+                    .map(|text| (status.success(), text));
             }
             if Instant::now() >= deadline {
                 return None;
@@ -455,13 +493,15 @@ pub(super) fn command_result(
             std::thread::sleep(Duration::from_millis(5));
         }
     })();
-    if result.is_none() && child.try_wait().ok().flatten().is_none() {
+    if result.is_none() && (!reaped || !reached_eof) {
         let _ = nix::sys::signal::killpg(
             nix::unistd::Pid::from_raw(child.id() as i32),
             nix::sys::signal::Signal::SIGKILL,
         );
     }
-    let _ = child.wait();
+    if !reaped {
+        let _ = child.wait();
+    }
     result
 }
 
@@ -492,9 +532,10 @@ mod tests {
 
     #[test]
     fn hooked_ufw_docker_and_drop_policies_are_reported_without_raw_rules() {
-        let text = "*filter\n:INPUT ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\n:FORWARD DROP [0:0]\n:DOCKER-USER - [0:0]\n:ufw-before-forward - [0:0]\n-A FORWARD -j DOCKER-USER\n-A FORWARD -j ufw-before-forward\n-A ufw-before-forward -m comment --comment SECRET_RULE -j REJECT\nCOMMIT\n";
+        let text = "# Don't edit this generated file\n*filter\n:INPUT ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\n:FORWARD DROP [0:0]\n:DOCKER-USER - [0:0]\n:ufw-before-forward - [0:0]\n-A FORWARD -j DOCKER-USER\n-A FORWARD -j ufw-before-forward\n-A ufw-before-forward -m comment --comment SECRET_RULE -j REJECT\nCOMMIT\n";
         let found = iptables_diagnostics(text, "IPv4").unwrap();
-        assert_eq!(found[0].state, State::Warning);
+        assert_eq!(found[0].state, State::Skipped);
+        assert!(found[0].message.contains("interference is unverified"));
         for observation in ["FORWARD", "UFW", "Docker", "DROP/REJECT"] {
             assert!(found[0].message.contains(observation), "{observation}");
         }
@@ -515,7 +556,7 @@ mod tests {
         let text = text.replace("COMMIT", "-A FORWARD -j ufw-before-forward\nCOMMIT");
         assert_eq!(
             iptables_diagnostics(&text, "IPv4").unwrap()[0].state,
-            State::Warning
+            State::Skipped
         );
     }
 
@@ -529,7 +570,7 @@ mod tests {
             {"rule":{"family":"ip","table":"filter","chain":"ufw-before-forward","comment":"SECRET_RULE","expr":[{"drop":null}]}}
         ]});
         let found = nft_diagnostics(&snapshot.to_string(), false).unwrap();
-        assert_eq!(found[0].state, State::Warning);
+        assert_eq!(found[0].state, State::Skipped);
         assert!(found[0].message.contains("ip forward"));
         assert!(found[0].message.contains("UFW"));
         assert!(found[0].message.contains("DROP/REJECT"));

@@ -54,8 +54,13 @@ pub fn synch(
         use std::os::unix::process::CommandExt;
         let user = nix::unistd::User::from_uid(uid)?
             .ok_or_else(|| anyhow::anyhow!("Unknown config owner"))?;
-        let account = std::ffi::CString::new(user.name)?;
+        let groups = vopono_core::util::owner_write::supplementary_groups(&user.name, gid)?;
         let mut child = std::process::Command::new(std::env::current_exe()?);
+        if log::log_enabled!(log::Level::Debug) {
+            child.arg("--verbose");
+        } else if !log::log_enabled!(log::Level::Error) {
+            child.arg("--silent");
+        }
         child
             .arg("sync")
             .arg(provider.id())
@@ -66,15 +71,16 @@ pub fn synch(
         }
         unsafe {
             child.pre_exec(move || {
-                nix::unistd::initgroups(&account, gid)?;
+                nix::unistd::setgroups(&groups)?;
                 nix::unistd::setgid(gid)?;
                 nix::unistd::setuid(uid)?;
                 Ok(())
             });
         }
+        let status = child.status()?;
         anyhow::ensure!(
-            child.status()?.success(),
-            "Provider synchronization failed; installed files were preserved"
+            status.success(),
+            "Provider synchronization failed ({status}); installed files were preserved"
         );
         return Ok(());
     }

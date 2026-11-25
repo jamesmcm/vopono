@@ -40,7 +40,7 @@ try:
         current = health()
         if (current['state'] != 'connected'
                 and current['diagnostics_checked_at'] > initial['diagnostics_checked_at']
-                and any(d['code'] == 'host_firewall' and d['state'] == 'warning'
+                and any(d['code'] == 'host_firewall' and d['state'] == 'skipped'
                         and 'DROP/REJECT' in d['message'] for d in current['diagnostics'])):
             return current
 

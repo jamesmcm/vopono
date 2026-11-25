@@ -57,7 +57,13 @@ pub(crate) fn delete_udp(source: SocketAddr, destination: SocketAddr) -> anyhow:
         MsgFlags::empty(),
     )?;
     let mut bytes = [0u8; 4096];
-    let length = recv(fd.as_raw_fd(), &mut bytes, MsgFlags::empty())?;
+    let length = loop {
+        match recv(fd.as_raw_fd(), &mut bytes, MsgFlags::empty()) {
+            Ok(len) => break len,
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(err) => return Err(err.into()),
+        }
+    };
     ensure!(
         length >= 20
             && u16::from_ne_bytes(bytes[4..6].try_into()?) == 2
@@ -66,7 +72,7 @@ pub(crate) fn delete_udp(source: SocketAddr, destination: SocketAddr) -> anyhow:
     );
     let error = i32::from_ne_bytes(bytes[16..20].try_into()?);
     if error < 0 && error != -libc::ENOENT {
-        return Err(std::io::Error::from_raw_os_error(-error).into());
+        return Err(std::io::Error::from_raw_os_error(error.saturating_neg()).into());
     }
     Ok(())
 }

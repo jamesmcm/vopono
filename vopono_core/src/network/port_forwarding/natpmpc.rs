@@ -16,6 +16,7 @@ static MAPPED_PORT_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Used to provide port forwarding for ProtonVPN
 pub struct Natpmpc {
     pub local_port: u16,
+    current_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
     loop_thread_handle: Option<JoinHandle<()>>,
     send_channel: Sender<bool>,
     params: ThreadParamsImpl,
@@ -26,6 +27,12 @@ pub struct ThreadParamsImpl {
     pub netns_name: String,
     pub locks_dir: std::path::PathBuf,
     pub callback: Option<CallbackCommand>,
+    #[serde(default)]
+    pub firewall: Option<crate::network::firewall::Firewall>,
+    #[serde(default)]
+    pub ipv6_enabled: bool,
+    #[serde(skip)]
+    pub current_port: Option<std::sync::Arc<std::sync::atomic::AtomicU16>>,
 }
 
 impl ThreadParameters for ThreadParamsImpl {
@@ -40,6 +47,19 @@ impl ThreadParameters for ThreadParamsImpl {
     }
     fn get_locks_dir(&self) -> std::path::PathBuf {
         self.locks_dir.clone()
+    }
+    fn get_firewall(&self) -> Option<(crate::network::firewall::Firewall, bool)> {
+        self.firewall.map(|fw| (fw, self.ipv6_enabled))
+    }
+    fn initial_opened_port(&self) -> Option<u16> {
+        self.current_port
+            .as_ref()
+            .map(|current| current.load(std::sync::atomic::Ordering::Acquire))
+    }
+    fn on_port_refreshed(&self, port: u16) {
+        if let Some(current) = &self.current_port {
+            current.store(port, std::sync::atomic::Ordering::Release);
+        }
     }
 }
 
@@ -64,8 +84,9 @@ impl Natpmpc {
                     &ns.name,
                     &[
                         "iptables",
-                        "-A",
+                        "-I",
                         "OUTPUT",
+                        "1",
                         "-p",
                         "udp",
                         "-d",
@@ -82,7 +103,7 @@ impl Natpmpc {
                     &ns.name,
                     &[
                         "nft",
-                        "add",
+                        "insert",
                         "rule",
                         "inet",
                         &ns.name,
@@ -119,6 +140,11 @@ impl Natpmpc {
             )
         }
 
+        let ipv6_enabled = ns
+            .veth_pair_ips
+            .as_ref()
+            .and_then(|ips| ips.ipv6.as_ref())
+            .is_some();
         let params = ThreadParamsImpl {
             netns_name: ns.name.clone(),
             locks_dir: crate::util::config_dir()?.join("vopono").join("locks"),
@@ -127,13 +153,18 @@ impl Natpmpc {
                 ns.predown_user.clone(),
                 ns.predown_group.clone(),
             ),
+            firewall: Some(ns.firewall),
+            ipv6_enabled,
+            current_port: None,
         };
 
         Self::resume(params)
     }
 
-    pub fn resume(params: ThreadParamsImpl) -> anyhow::Result<Self> {
+    pub fn resume(mut params: ThreadParamsImpl) -> anyhow::Result<Self> {
         let port = Self::refresh_port(&params)?;
+        let current_port = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(port));
+        params.current_port = Some(current_port.clone());
         Self::callback_command(&params, port);
 
         let (send, recv) = mpsc::channel::<bool>();
@@ -148,6 +179,7 @@ impl Natpmpc {
         log::info!("ProtonVPN forwarded local port: {port}");
         Ok(Self {
             local_port: port,
+            current_port,
             loop_thread_handle: Some(handle),
             send_channel: send,
             params: retained,
@@ -207,9 +239,12 @@ impl Drop for Natpmpc {
 
 impl Forwarder for Natpmpc {
     fn forwarded_port(&self) -> u16 {
-        self.local_port
+        self.current_port.load(std::sync::atomic::Ordering::Acquire)
     }
     fn snapshot(&self) -> Option<super::ForwarderSnapshot> {
         Some(super::ForwarderSnapshot::Natpmp(self.params.clone()))
+    }
+    fn stop_handle(&self) -> Option<std::sync::mpsc::Sender<bool>> {
+        Some(self.send_channel.clone())
     }
 }

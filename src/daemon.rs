@@ -7,6 +7,7 @@ use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{ListenerOptions, ToFsName};
 use interprocess::os::unix::local_socket::FilesystemUdSocket;
 use log::{error, info, warn};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::pty::openpty;
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::unistd::isatty as nix_isatty;
@@ -20,10 +21,11 @@ use signal_hook::{
     consts::{SIGINT, SIGQUIT, SIGTERM},
     iterator::Signals,
 };
+use std::fs::{File, OpenOptions};
 use std::io::IoSliceMut;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
@@ -31,6 +33,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread;
+use std::time::{Duration, Instant};
 
 // Do not change user's terminal modes; rely on PTY + signal/control forwarding
 
@@ -46,13 +49,11 @@ impl Drop for ClientLockfileGuard {
         let Some(path) = self.0.take() else {
             return;
         };
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => log::warn!(
+        if let Err(error) = vopono_core::util::owner_write::remove_file_as_config_owner(&path) {
+            log::warn!(
                 "Failed to remove client lockfile {}: {error}",
                 path.display()
-            ),
+            );
         }
     }
 }
@@ -169,16 +170,31 @@ fn classify_version_skew(peer: &str, own: &str) -> VersionSkew {
     }
 }
 
+fn sanitize_version_for_log(version: &str) -> String {
+    version
+        .chars()
+        .take(64)
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
 /// Daemon side: warn when a client's version differs from this daemon's.
 fn warn_on_client_version_mismatch(client_version: &str) {
     let own = env!("CARGO_PKG_VERSION");
+    let safe_client = sanitize_version_for_log(client_version);
     match classify_version_skew(client_version, own) {
         VersionSkew::Match => {}
         VersionSkew::MinorMismatch => warn!(
-            "Client vopono version {client_version} differs from daemon version {own}; consider restarting the daemon ('sudo systemctl restart vopono') to match."
+            "Client vopono version {safe_client} differs from daemon version {own}; consider restarting the daemon ('sudo systemctl restart vopono') to match."
         ),
         VersionSkew::MajorMismatch => error!(
-            "Client vopono version {client_version} is incompatible with daemon version {own}; requests may fail unexpectedly. Update vopono and restart the daemon."
+            "Client vopono version {safe_client} is incompatible with daemon version {own}; requests may fail unexpectedly. Update vopono and restart the daemon."
         ),
     }
 }
@@ -511,9 +527,9 @@ pub fn start() -> anyhow::Result<()> {
         .with_context(|| format!("Failed to bind to socket at {}", SOCKET_PATH))?;
 
     let mut perms = std::fs::metadata(SOCKET_PATH)?.permissions();
-    // Set permissions to 777 to allow any user to connect to the daemon socket.
-    // The daemon itself will then check the user's credentials upon connection.
-    perms.set_mode(0o777);
+    // Set permissions to 666 to allow any local user to connect to the daemon socket
+    // (execute bits are unnecessary on Unix sockets). The daemon checks SO_PEERCRED.
+    perms.set_mode(0o666);
     std::fs::set_permissions(SOCKET_PATH, perms)?;
     info!("Daemon listening on {}", SOCKET_PATH);
 
@@ -584,25 +600,166 @@ fn get_peer_credentials(stream: &LocalSocketStream) -> anyhow::Result<(Uid, Gid)
     Ok((Uid::from_raw(creds.uid()), Gid::from_raw(creds.gid())))
 }
 
+struct PtyOutput {
+    file: File,
+    socket: bool,
+}
+
+impl PtyOutput {
+    fn new(file: File) -> std::io::Result<Self> {
+        let kind = file.metadata()?.file_type();
+        let flags = OFlag::from_bits_truncate(fcntl(&file, FcntlArg::F_GETFL)?);
+        let access = flags & OFlag::O_ACCMODE;
+        if flags.intersects(OFlag::O_PATH) || !matches!(access, OFlag::O_WRONLY | OFlag::O_RDWR) {
+            return Err(std::io::Error::from_raw_os_error(nix::libc::EBADF));
+        }
+        let file = if kind.is_fifo() || kind.is_char_device() {
+            // dup() shares status flags with the client. Open a separate file
+            // description so relay writes can never set its stdout nonblocking.
+            OpenOptions::new()
+                .write(true)
+                .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+                .open(format!("/proc/self/fd/{}", file.as_raw_fd()))?
+        } else {
+            // Keep the shared file offset and append semantics for regular files.
+            file
+        };
+        Ok(Self {
+            file,
+            socket: kind.is_socket(),
+        })
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.socket {
+            Ok(nix::sys::socket::send(
+                self.file.as_raw_fd(),
+                bytes,
+                MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL,
+            )?)
+        } else {
+            self.file.write(bytes)
+        }
+    }
+
+    fn write_all_bounded(&mut self, mut bytes: &[u8], timeout: Duration) -> std::io::Result<()> {
+        let deadline = Instant::now() + timeout;
+        while !bytes.is_empty() {
+            match self.write(bytes) {
+                Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero)),
+                Ok(count) => bytes = &bytes[count..],
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+                    };
+                    let wait_ms = remaining.as_millis().clamp(1, 25) as i32;
+                    fd_writable(self.file.as_raw_fd(), wait_ms);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
+fn write_client_notice(fd: OwnedFd, bytes: &[u8]) {
+    if let Ok(mut out) = PtyOutput::new(File::from(fd)) {
+        let _ = out.write_all_bounded(bytes, Duration::from_millis(250));
+    }
+}
+
+fn copy_pty_output(mut reader: File, mut output: PtyOutput, prefix: &[u8], done: &AtomicBool) {
+    let mut buffer = [0; 4096];
+    let mut prefix = prefix;
+    let mut pending = 0..0;
+    let mut deadline = None;
+    loop {
+        if done.load(Ordering::Acquire)
+            && Instant::now()
+                >= *deadline.get_or_insert_with(|| Instant::now() + Duration::from_millis(250))
+        {
+            return;
+        }
+        if prefix.is_empty() && pending.is_empty() {
+            if !fd_readable(reader.as_raw_fd(), 50) {
+                if deadline.is_some() {
+                    return;
+                }
+                continue;
+            }
+            match reader.read(&mut buffer) {
+                Ok(0) => return,
+                Ok(count) => pending = 0..count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => return,
+            }
+        }
+        let bytes = if prefix.is_empty() {
+            &buffer[pending.clone()]
+        } else {
+            prefix
+        };
+        match output.write(bytes) {
+            Ok(0) => return,
+            Ok(count) if !prefix.is_empty() => prefix = &prefix[count..],
+            Ok(count) => pending.start += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                fd_writable(output.file.as_raw_fd(), 25);
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+fn write_pty_input(terminal: &mut File, mut bytes: &[u8], done: &AtomicBool) -> bool {
+    while !bytes.is_empty() && !done.load(Ordering::Acquire) {
+        match terminal.write(bytes) {
+            Ok(0) => return false,
+            Ok(count) => bytes = &bytes[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                fd_writable(terminal.as_raw_fd(), 25);
+            }
+            Err(_) => return false,
+        }
+    }
+    bytes.is_empty()
+}
+
 /// Wait for an application, bridging terminal I/O only for interactive clients.
 fn wait_for_application(
     child: &mut std::process::Child,
     conn: &LocalSocketStream,
     pty_master: Option<OwnedFd>,
     client_fds: Option<&(OwnedFd, OwnedFd, OwnedFd)>,
+    launch_notice: Option<String>,
 ) -> anyhow::Result<std::process::ExitStatus> {
     let Some(master_fd) = pty_master else {
         return Ok(child.wait()?);
     };
     let mut exit_status = None;
-    use std::io::{Read as _, Write as _};
     // Duplicate client FDs so we don't close the originals when Files drop
     let (client_stdin_fd, client_stdout_fd, _) = client_fds.expect("PTY client fds retained");
     let client_stdin_dup: OwnedFd = nix::unistd::dup(client_stdin_fd.as_fd())?;
     let client_stdout_dup: OwnedFd = nix::unistd::dup(client_stdout_fd.as_fd())?;
-    let client_stdin = std::fs::File::from(client_stdin_dup);
-    let client_stdout = std::fs::File::from(client_stdout_dup);
-    let pty_master_file_r = std::fs::File::from(master_fd);
+    let client_stdin = File::from(client_stdin_dup);
+    let client_stdout = File::from(client_stdout_dup);
+    let pty_master_file_r = File::from(master_fd);
+    // The master belongs to the daemon, so its clones can share nonblocking mode.
+    let flags = OFlag::from_bits_truncate(fcntl(&pty_master_file_r, FcntlArg::F_GETFL)?);
+    fcntl(
+        &pty_master_file_r,
+        FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK),
+    )?;
     let pty_master_file_w = pty_master_file_r.try_clone()?;
 
     // Do not change user terminal modes; inject control bytes into PTY on signals
@@ -611,13 +768,21 @@ fn wait_for_application(
     let ctrl_conn = conn.try_clone()?;
     let pty_writer_for_ctrl = pty_master_file_w.try_clone()?;
     let child_pgid = nix::unistd::Pid::from_raw(-(child.id() as i32));
-    thread::spawn(move || forward_terminal_signals(ctrl_conn, pty_writer_for_ctrl, child_pgid));
+    let child_done = Arc::new(AtomicBool::new(false));
+    let child_done_for_ctrl = Arc::clone(&child_done);
+    let ctrl_thread = thread::spawn(move || {
+        forward_terminal_signals(
+            ctrl_conn,
+            pty_writer_for_ctrl,
+            child_pgid,
+            child_done_for_ctrl,
+        )
+    });
 
     // stdin copier: client stdin -> pty master
     let mut stdin_reader = client_stdin;
     let mut pty_writer = pty_master_file_w;
     let child_pgid_for_stdin = child_pgid; // Pid is Copy; used for optional SIGHUP on EOF
-    let child_done = Arc::new(AtomicBool::new(false));
     let child_done_for_stdin = Arc::clone(&child_done);
     let stdin_copier = thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -631,33 +796,30 @@ fn wait_for_application(
             if n == 0 {
                 // Client reached EOF (Ctrl-D in cooked mode or client closed input).
                 // Inject EOT into the child's TTY so interactive shells exit cleanly.
-                let _ = pty_writer.write_all(&[0x04]); // EOT
-                let _ = pty_writer.flush();
+                if !write_pty_input(&mut pty_writer, &[0x04], &child_done_for_stdin) {
+                    break;
+                }
                 // Optional: also send SIGHUP to the child's process group
                 let _ =
                     nix::sys::signal::kill(child_pgid_for_stdin, nix::sys::signal::Signal::SIGHUP);
                 break;
             }
-            if pty_writer.write_all(&buf[..n]).is_err() {
+            if !write_pty_input(&mut pty_writer, &buf[..n], &child_done_for_stdin) {
                 break;
             }
         }
     });
 
     // output copier: pty master -> client stdout (stderr merges on TTY)
-    let mut pty_reader = pty_master_file_r;
-    let mut stdout_writer = client_stdout;
-    thread::spawn(move || {
-        let mut buf = [0u8; 4096];
-        while let Ok(n) = pty_reader.read(&mut buf) {
-            if n == 0 {
-                break;
-            }
-            if stdout_writer.write_all(&buf[..n]).is_err() {
-                break;
-            }
-            let _ = stdout_writer.flush();
-        }
+    let child_done_for_output = Arc::clone(&child_done);
+    let output_copier = thread::spawn(move || match PtyOutput::new(client_stdout) {
+        Ok(output) => copy_pty_output(
+            pty_master_file_r,
+            output,
+            launch_notice.as_deref().unwrap_or_default().as_bytes(),
+            &child_done_for_output,
+        ),
+        Err(error) => log::debug!("Could not open client PTY output: {error}"),
     });
 
     // Wait for child to exit.
@@ -674,43 +836,83 @@ fn wait_for_application(
             }
         }
     }
-    // Stop and join the terminal reader before replying to the client. Leaving this
-    // thread alive would let it steal terminal-query responses from the caller's
-    // shell after the command has completed.
+    // Stop and join all PTY helper threads before replying to the client:
+    // - stdin_copier must stop so it cannot steal input from the caller's shell.
+    // - ctrl_thread must stop so a kept-open socket cannot send signals after
+    //   PID reuse or leak threads/FDs past admission limits.
+    // - output_copier must drain remaining PTY output so fast commands don't truncate.
     child_done.store(true, Ordering::Release);
     let _ = stdin_copier.join();
+    let _ = ctrl_thread.join();
+    let _ = output_copier.join();
     match exit_status {
         Some(status) => Ok(status),
         None => Ok(child.wait()?),
     }
 }
 
-/// Preserve terminal-generated signals and forward other signals to the process group.
+/// Preserve terminal-generated signals and forward allowlisted signals to the process group.
 fn forward_terminal_signals(
-    mut conn: LocalSocketStream,
+    conn: LocalSocketStream,
     mut terminal: std::fs::File,
     group: nix::unistd::Pid,
+    done: Arc<AtomicBool>,
 ) {
-    while let Ok(bytes) = read_framed(&mut conn, MAX_CONTROL_FRAME_LEN) {
-        let Ok(DaemonRequest::Control(DaemonControl::Signal(signal))) =
-            wincode::deserialize::<DaemonRequest>(&bytes)
-        else {
+    let LocalSocketStream::UdSocket(ref sock) = conn;
+    let raw_fd = sock.as_fd().as_raw_fd();
+    let mut pending = Vec::new();
+    let mut chunk = [0u8; 256];
+    while !done.load(Ordering::Acquire) {
+        if !fd_readable(raw_fd, 50) {
             continue;
-        };
-        let Ok(signal) = nix::sys::signal::Signal::try_from(signal) else {
-            continue;
-        };
-        let control_byte = match signal {
-            nix::sys::signal::Signal::SIGINT => Some(0x03),
-            nix::sys::signal::Signal::SIGTSTP => Some(0x1A),
-            nix::sys::signal::Signal::SIGQUIT => Some(0x1C),
-            _ => None,
-        };
-        if let Some(byte) = control_byte {
-            let _ = terminal.write_all(&[byte]);
-            let _ = terminal.flush();
-        } else {
-            let _ = nix::sys::signal::kill(group, signal);
+        }
+        // Use non-blocking per-call recv so a stalled partial frame cannot block
+        // ctrl_thread.join() after the child exits, without mutating shared socket flags.
+        match nix::sys::socket::recv(raw_fd, &mut chunk, MsgFlags::MSG_DONTWAIT) {
+            Ok(0) => break,
+            Ok(n) => pending.extend_from_slice(&chunk[..n]),
+            Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => continue,
+            Err(_) => break,
+        }
+        while pending.len() >= 4 {
+            let len = u32::from_be_bytes([pending[0], pending[1], pending[2], pending[3]]) as usize;
+            if len > MAX_CONTROL_FRAME_LEN {
+                return;
+            }
+            if pending.len() < 4 + len {
+                break;
+            }
+            let bytes: Vec<u8> = pending.drain(..4 + len).skip(4).collect();
+            if done.load(Ordering::Acquire) {
+                return;
+            }
+            let Ok(DaemonRequest::Control(DaemonControl::Signal(signal))) =
+                wincode::deserialize::<DaemonRequest>(&bytes)
+            else {
+                continue;
+            };
+            let Ok(signal) = nix::sys::signal::Signal::try_from(signal) else {
+                continue;
+            };
+            let control_byte = match signal {
+                nix::sys::signal::Signal::SIGINT => Some(0x03),
+                nix::sys::signal::Signal::SIGTSTP => Some(0x1A),
+                nix::sys::signal::Signal::SIGQUIT => Some(0x1C),
+                _ => None,
+            };
+            if let Some(byte) = control_byte {
+                let _ = write_pty_input(&mut terminal, &[byte], &done);
+            } else if matches!(
+                signal,
+                nix::sys::signal::Signal::SIGTERM
+                    | nix::sys::signal::Signal::SIGHUP
+                    | nix::sys::signal::Signal::SIGCONT
+                    | nix::sys::signal::Signal::SIGWINCH
+                    | nix::sys::signal::Signal::SIGUSR1
+                    | nix::sys::signal::Signal::SIGUSR2
+            ) {
+                let _ = nix::sys::signal::kill(group, signal);
+            }
         }
     }
 }
@@ -790,19 +992,16 @@ fn handle_client(
                 let monitor = exec_command.monitor;
                 let recover = exec_command.recover;
                 let transition = crate::namespace_sessions::begin_setup();
-                let client_report_out = if silent {
-                    None
-                } else {
-                    Some(nix::unistd::dup(
-                        client_fds.as_ref().expect("client fds present").1.as_fd(),
-                    )?)
-                };
 
                 // `--create-netns-only`: bring up the namespace and leave it alive
                 // without spawning an application. The client learns the namespace
                 // name and exits; `vopono stop --namespace` tears it down later.
                 if exec_command.create_netns_only {
-                    let mut setup = crate::exec::setup_daemon_namespace_only(exec_command)?;
+                    let mut setup = crate::exec::setup_daemon_namespace_only(
+                        exec_command,
+                        Some(forwarded_env.clone()),
+                    )?;
+                    let existing_session = crate::namespace_sessions::contains(&setup.ns.name);
                     let proxies = if !setup.parsed_command.no_proxy {
                         match crate::exec::restore_host_proxies(
                             &setup.ns,
@@ -810,7 +1009,7 @@ fn handle_client(
                         ) {
                             Ok(proxies) => proxies,
                             Err(error) => {
-                                if crate::namespace_sessions::contains(&setup.ns.name) {
+                                if existing_session {
                                     setup.ns.detach();
                                 }
                                 return Err(error);
@@ -819,7 +1018,23 @@ fn handle_client(
                     } else {
                         Vec::new()
                     };
-                    crate::namespace_ownership::mark_persistent(&setup.ns.name, uid)?;
+                    if existing_session && !proxies.is_empty() {
+                        let new_ports: Vec<u16> = proxies.iter().map(|(port, _)| *port).collect();
+                        if let Err(error) =
+                            vopono_core::util::open_ports(&setup.ns, &new_ports, setup.ns.firewall)
+                        {
+                            setup.ns.detach();
+                            return Err(error);
+                        }
+                    }
+                    if let Err(error) =
+                        crate::namespace_ownership::mark_persistent(&setup.ns.name, uid)
+                    {
+                        if existing_session {
+                            setup.ns.detach();
+                        }
+                        return Err(error);
+                    }
                     let session = session.insert(crate::namespace_sessions::Session::register(
                         setup.ns,
                         uid,
@@ -834,10 +1049,10 @@ fn handle_client(
                     // this branch, so take ownership and close all three locally.
                     let (_client_stdin, client_stdout, _client_stderr) =
                         client_fds.take().expect("client fds present");
-                    let mut out = std::fs::File::from(client_stdout);
-                    let _ = writeln!(out, "Created namespace {}", session.ns.name);
-                    let _ = out.flush();
-                    drop(out);
+                    write_client_notice(
+                        client_stdout,
+                        format!("Created namespace {}\n", session.ns.name).as_bytes(),
+                    );
                     write_response(&mut conn, &DaemonResponse::Exit(0))?;
                     return Ok(());
                 }
@@ -849,6 +1064,13 @@ fn handle_client(
                 let client_has_tty =
                     nix_isatty(client_fds.as_ref().expect("client fds present").0.as_fd())
                         .unwrap_or(false);
+                let client_report_out = if !client_has_tty && (!silent || json) {
+                    Some(nix::unistd::dup(
+                        client_fds.as_ref().expect("client fds present").1.as_fd(),
+                    )?)
+                } else {
+                    None
+                };
                 let (mut application, ns, host_proxies): (
                     vopono_core::network::application_wrapper::ApplicationWrapper,
                     vopono_core::network::netns::NetworkNamespace,
@@ -900,18 +1122,36 @@ fn handle_client(
                     monitor,
                     recover,
                 ));
+                if keep_alive {
+                    info!(
+                        "Keep-alive flag active - marking network namespace {} persistent",
+                        session.ns.name
+                    );
+                    crate::namespace_ownership::mark_persistent(&session.ns.name, uid)?;
+                }
                 session.retain_proxies(host_proxies);
                 session.persist_options()?;
+                let forwarded_port = session.forwarded_port();
+                let mut launch_notice = if json {
+                    let report = crate::exec::launch_report_for_daemon(
+                        &session.ns,
+                        application.handle.id(),
+                        forwarded_port,
+                    );
+                    Some(format!("{report}\n"))
+                } else if !silent {
+                    forwarded_port.map(|port| format!("Port Forwarding on port {port}\n"))
+                } else {
+                    None
+                };
                 drop(transition);
-                // Inform the client about the forwarded port too (not only daemon logs);
-                // suppressed by --silent along with the rest of the app output.
-                if !silent
-                    && let Some(port) = session.forwarded_port()
-                    && let Some(dup_fd) = client_report_out
+                // Write launch summary / forwarded port notice AFTER releasing the
+                // namespace transition lock so a stalled client pipe cannot deadlock
+                // operations on this namespace.
+                if let Some(dup_fd) = client_report_out
+                    && let Some(notice) = launch_notice.take()
                 {
-                    let mut out = std::fs::File::from(dup_fd);
-                    let _ = writeln!(out, "Port Forwarding on port {}", port);
-                    let _ = out.flush();
+                    write_client_notice(dup_fd, notice.as_bytes());
                 }
 
                 let status = wait_for_application(
@@ -919,15 +1159,9 @@ fn handle_client(
                     &conn,
                     pty_master,
                     client_fds.as_ref(),
+                    launch_notice,
                 )?;
 
-                if keep_alive {
-                    info!(
-                        "Keep-alive flag active - leaving network namespace {} alive",
-                        session.ns.name
-                    );
-                    crate::namespace_ownership::mark_persistent(&session.ns.name, uid)?;
-                }
                 // Remove this application's status before the namespace controller
                 // waits for other clients, detached children or explicit persistence.
                 drop(_client_lock);
@@ -1110,7 +1344,10 @@ fn adopt_client_config_base(
     uid: Uid,
 ) -> anyhow::Result<PathBuf> {
     let home_candidate = user.dir.join(".config");
-    let provided_candidate = provided.map(PathBuf::from);
+    // Per XDG Base Directory spec, empty or relative XDG_CONFIG_HOME is ignored.
+    let provided_candidate = provided
+        .filter(|path| !path.is_empty() && Path::new(path).is_absolute())
+        .map(PathBuf::from);
     let candidates = [provided_candidate.as_ref(), Some(&home_candidate)];
 
     for candidate in candidates.into_iter().flatten() {
@@ -1125,13 +1362,31 @@ fn adopt_client_config_base(
     }
 
     // Missing (rather than invalid) candidates: try to create them as the
-    // client before giving up.
+    // client before giving up. Failure on an uncreatable XDG_CONFIG_HOME
+    // falls through to ~/.config rather than aborting immediately.
     for candidate in candidates.into_iter().flatten() {
-        if !candidate.exists()
-            && vopono_core::util::ensure_dir_as_config_owner(candidate, None)?
-            && let Ok(dir) = vopono_core::util::validated_user_owned_dir(candidate, uid)
-        {
-            return Ok(dir);
+        if !candidate.exists() {
+            match vopono_core::util::ensure_dir_as_config_owner(candidate, None) {
+                Ok(true) => {
+                    if let Ok(dir) = vopono_core::util::validated_user_owned_dir(candidate, uid) {
+                        return Ok(dir);
+                    }
+                }
+                Ok(false) => {
+                    if (!nix::unistd::geteuid().is_root() || uid.is_root())
+                        && std::fs::create_dir_all(candidate).is_ok()
+                        && let Ok(dir) = vopono_core::util::validated_user_owned_dir(candidate, uid)
+                    {
+                        return Ok(dir);
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        "Could not create client config dir {}: {error}",
+                        candidate.display()
+                    );
+                }
+            }
         }
     }
 
@@ -1145,6 +1400,16 @@ fn fd_readable(fd: RawFd, timeout_ms: i32) -> bool {
     let mut poll_fd = nix::libc::pollfd {
         fd,
         events: nix::libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll_fd points to one initialized pollfd for the duration of this call.
+    unsafe { nix::libc::poll(&mut poll_fd, 1, timeout_ms) > 0 }
+}
+
+fn fd_writable(fd: RawFd, timeout_ms: i32) -> bool {
+    let mut poll_fd = nix::libc::pollfd {
+        fd,
+        events: nix::libc::POLLOUT,
         revents: 0,
     };
     // SAFETY: poll_fd points to one initialized pollfd for the duration of this call.
@@ -1431,6 +1696,131 @@ mod tests {
                 Some("/tmp/stop-xdg")
             );
             assert!(request_client_config_home(&DaemonRequest::Version).is_none());
+        }
+    }
+
+    #[test]
+    fn pty_child_exit_does_not_wait_for_a_full_stdout_pipe() {
+        use super::{File, OwnedFd, PtyOutput};
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
+        use std::os::unix::net::UnixStream;
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+
+        let (stdin, _stdin_writer) = nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+        let (stdout_reader, stdout) = nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+        let stdout = File::from(stdout);
+        let mut filling_writer = PtyOutput::new(stdout.try_clone().unwrap()).unwrap();
+        let capacity = fcntl(&stdout, FcntlArg::F_GETPIPE_SZ).unwrap() as usize;
+        assert_eq!(
+            filling_writer.write(&vec![b'x'; capacity]).unwrap(),
+            capacity
+        );
+        assert!(
+            !OFlag::from_bits_truncate(fcntl(&stdout, FcntlArg::F_GETFL).unwrap())
+                .contains(OFlag::O_NONBLOCK)
+        );
+        drop(filling_writer);
+
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "printf output; sleep 0.2"])
+            .stdout(Stdio::from(pty.slave))
+            .spawn()
+            .unwrap();
+        let (server, _client) = UnixStream::pair().unwrap();
+        let server: OwnedFd = server.into();
+        let conn = super::LocalSocketStream::UdSocket(server.into());
+        let client_fds = (
+            stdin,
+            stdout.into(),
+            File::open("/dev/null").unwrap().into(),
+        );
+        let (finished, result) = std::sync::mpsc::channel();
+        let handler = std::thread::spawn(move || {
+            let result = super::wait_for_application(
+                &mut child,
+                &conn,
+                Some(pty.master),
+                Some(&client_fds),
+                Some("launch notice\n".into()),
+            );
+            let _ = finished.send(result);
+        });
+        let status = result.recv_timeout(Duration::from_secs(3));
+        // Release any blocked output write before joining even if the check fails.
+        drop(stdout_reader);
+        handler.join().unwrap();
+        assert!(
+            status
+                .expect("PTY handler blocked on stdout")
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[test]
+    fn partial_control_frame_does_not_block_terminal_signal_shutdown() {
+        use super::{
+            Arc, AtomicBool, LocalSocketStream, Ordering, OwnedFd, Write, forward_terminal_signals,
+            thread,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("ctrl.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let mut client = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let server_fd: OwnedFd = server.into();
+        let stream = LocalSocketStream::UdSocket(server_fd.into());
+        let terminal = std::fs::File::open("/dev/null").unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = Arc::clone(&done);
+        let handle = thread::spawn(move || {
+            forward_terminal_signals(stream, terminal, nix::unistd::Pid::from_raw(-1), done_clone);
+        });
+        // Send only 2 bytes of a 4-byte length prefix and keep the socket open.
+        client.write_all(&[0x00, 0x00]).unwrap();
+        thread::sleep(std::time::Duration::from_millis(60));
+        done.store(true, Ordering::Release);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !handle.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            handle.is_finished(),
+            "forward_terminal_signals blocked on stalled partial frame"
+        );
+        handle.join().unwrap();
+        drop(client);
+    }
+
+    #[test]
+    fn pty_output_rejects_non_writable_and_accmode_fds() {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("target");
+        std::fs::write(&path, "ok").unwrap();
+
+        let readonly = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            super::PtyOutput::new(readonly)
+                .err()
+                .unwrap()
+                .raw_os_error(),
+            Some(nix::libc::EBADF)
+        );
+
+        // Linux mode 3 (O_ACCMODE = O_WRONLY | O_RDWR) opens an FD that is
+        // neither readable nor writable; PtyOutput must reject it.
+        if let Ok(mode3) = std::fs::OpenOptions::new()
+            .custom_flags(nix::libc::O_ACCMODE)
+            .open(&path)
+        {
+            assert_eq!(
+                super::PtyOutput::new(mode3).err().unwrap().raw_os_error(),
+                Some(nix::libc::EBADF)
+            );
         }
     }
 }

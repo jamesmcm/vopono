@@ -180,7 +180,8 @@ impl OpenVpn {
         )
         .context("Failed to launch OpenVPN - is openvpn installed?")?;
         let id = handle.id();
-        let mut buffer = String::with_capacity(16384);
+        const MAX_STARTUP_LOG_BYTES: usize = 4 * 1024 * 1024;
+        let mut line_buffer = String::with_capacity(4096);
 
         let mut logfile = BufReader::with_capacity(64, File::open(log_file_str)?);
         let mut pos: usize = 0;
@@ -194,16 +195,31 @@ impl OpenVpn {
         let mut connect_state: Option<OpenVpnStartupState> = None;
         let startup_deadline = Instant::now() + OPENVPN_STARTUP_TIMEOUT;
         loop {
-            let start = pos;
-            let x = logfile.read_line(&mut buffer)?;
+            line_buffer.clear();
+            let remaining = MAX_STARTUP_LOG_BYTES.saturating_sub(pos);
+            let x = match std::io::Read::take(&mut logfile, (remaining as u64).saturating_add(1))
+                .read_line(&mut line_buffer)
+            {
+                Ok(n) => n,
+                Err(error) => {
+                    terminate_startup(&mut handle);
+                    return Err(error.into());
+                }
+            };
 
             if x > 0 {
-                debug!("{}", buffer[pos..].trim_end());
+                debug!("{}", line_buffer.trim_end());
             }
 
-            pos += x;
+            pos = pos.saturating_add(x);
+            if pos > MAX_STARTUP_LOG_BYTES {
+                terminate_startup(&mut handle);
+                return Err(anyhow!(
+                    "OpenVPN startup log exceeded maximum size ({MAX_STARTUP_LOG_BYTES} bytes)"
+                ));
+            }
 
-            for ip in parse_openvpn_dns_servers(&buffer[start..pos], &dns_regex) {
+            for ip in parse_openvpn_dns_servers(&line_buffer, &dns_regex) {
                 if (ip.is_ipv4() || !(disable_ipv6 || ipv6_disabled))
                     && !openvpn_dns_servers.contains(&ip)
                 {
@@ -212,7 +228,7 @@ impl OpenVpn {
                 }
             }
 
-            if let Some(state) = parse_openvpn_startup_state(&buffer[start..pos]) {
+            if let Some(state) = parse_openvpn_startup_state(&line_buffer) {
                 debug!("OpenVPN startup state: {state:?}");
                 connect_state = Some(state);
             }
@@ -374,29 +390,62 @@ impl Drop for OpenVpn {
         if !self.cleanup_enabled {
             return;
         }
+        let pid = nix::unistd::Pid::from_raw(self.pid as i32);
         if self.supervised {
             if let Some(runtime) = &self.runtime_dir
                 && super::openvpn_supervisor::matches(self.pid, runtime)
             {
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(self.pid as i32),
-                    nix::sys::signal::Signal::SIGTERM,
-                );
+                let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
+                let mut exited = false;
                 for _ in 0..40 {
+                    match nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
+                        Ok(nix::sys::wait::WaitStatus::StillAlive) => {}
+                        Ok(_) => {
+                            exited = true;
+                            break;
+                        }
+                        Err(_) => {
+                            if !super::openvpn_supervisor::matches(self.pid, runtime) {
+                                exited = true;
+                                break;
+                            }
+                        }
+                    }
                     if !super::openvpn_supervisor::matches(self.pid, runtime) {
+                        // Supervisor may have become a zombie; reap if we are its parent.
+                        let _ = nix::sys::wait::waitpid(
+                            pid,
+                            Some(nix::sys::wait::WaitPidFlag::WNOHANG),
+                        );
+                        exited = true;
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(50));
                 }
+                if !exited {
+                    // The kernel delivers the armed parent-death signal to
+                    // the OpenVPN child when its supervisor dies.
+                    let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+                    while matches!(
+                        nix::sys::wait::waitpid(pid, None),
+                        Err(nix::errno::Errno::EINTR)
+                    ) {}
+                }
+            } else {
+                // Reap any already-exited zombie child supervisor.
+                let _ = nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG));
             }
         } else {
-            match nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(self.pid as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            ) {
+            match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
                 Ok(_) => debug!("Killed OpenVPN (pid: {})", self.pid),
                 Err(e) => error!("Failed to kill OpenVPN (pid: {}): {:?}", self.pid, e),
             }
+            // Wait synchronously so direct children do not linger as zombies;
+            // returns ECHILD immediately if this process is not the parent.
+            while matches!(
+                nix::sys::wait::waitpid(pid, None),
+                Err(nix::errno::Errno::EINTR)
+            ) {}
         }
 
         match std::fs::remove_file(&self.logfile) {

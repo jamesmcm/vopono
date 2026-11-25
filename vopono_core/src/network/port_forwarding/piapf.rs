@@ -32,6 +32,10 @@ pub struct ThreadParamsImpl {
     pub gateway: String,
     pub pia_cert_path: String,
     pub callback: Option<CallbackCommand>,
+    #[serde(default)]
+    pub firewall: Option<crate::network::firewall::Firewall>,
+    #[serde(default)]
+    pub ipv6_enabled: bool,
 }
 
 #[derive(Deserialize)]
@@ -66,6 +70,14 @@ impl ThreadParameters for ThreadParamsImpl {
 
     fn get_locks_dir(&self) -> std::path::PathBuf {
         self.locks_dir.clone()
+    }
+
+    fn get_firewall(&self) -> Option<(crate::network::firewall::Firewall, bool)> {
+        self.firewall.map(|fw| (fw, self.ipv6_enabled))
+    }
+
+    fn initial_opened_port(&self) -> Option<u16> {
+        Some(self.port)
     }
 }
 
@@ -148,7 +160,7 @@ impl Piapf {
             )
         }
 
-        let get_response = NetworkNamespace::exec_with_output(
+        let get_response = exec_curl_with_stdin(
             &ns.name,
             &[
                 "curl",
@@ -156,14 +168,18 @@ impl Piapf {
                 "-m",
                 "5",
                 "--connect-to",
-                &format!("{vpn_hostname}::{vpn_gateway}:").to_string(),
+                &format!("{vpn_hostname}::{vpn_gateway}:"),
                 "--cacert",
                 &pia_cert_path,
                 "-G",
-                "--data-urlencode",
-                &format!("token={pia_token}").to_string(),
-                &format!("https://{vpn_hostname}:19999/getSignature").to_string(),
+                "-K",
+                "-",
+                &format!("https://{vpn_hostname}:19999/getSignature"),
             ],
+            &format!(
+                "data-urlencode = {}\n",
+                curl_quote(&format!("token={pia_token}"))
+            ),
         )?;
         if !get_response.status.success() {
             log::error!("Could not obtain signature for port forward from PIA API");
@@ -188,6 +204,11 @@ impl Piapf {
             serde_json::from_slice(&decoded).context("Invalid PIA signature payload")?;
         let port = parsed.port;
 
+        let ipv6_enabled = ns
+            .veth_pair_ips
+            .as_ref()
+            .and_then(|ips| ips.ipv6.as_ref())
+            .is_some();
         let params = ThreadParamsImpl {
             netns_name: ns.name.clone(),
             locks_dir: crate::util::config_dir()?.join("vopono").join("locks"),
@@ -202,6 +223,8 @@ impl Piapf {
                 ns.predown_user.clone(),
                 ns.predown_group.clone(),
             ),
+            firewall: Some(ns.firewall),
+            ipv6_enabled,
         };
         Self::resume(params)
     }
@@ -227,11 +250,34 @@ impl Piapf {
     }
 }
 
+fn curl_quote(value: &str) -> String {
+    let escaped = value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
+    format!("\"{escaped}\"")
+}
+
+fn exec_curl_with_stdin(
+    netns_name: &str,
+    argv: &[&str],
+    stdin_config: &str,
+) -> anyhow::Result<std::process::Output> {
+    use std::io::Write;
+    let mut child =
+        NetworkNamespace::exec_no_block(netns_name, argv, None, None, false, true, true, None)?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(stdin_config.as_bytes());
+    }
+    child.wait_with_output().map_err(Into::into)
+}
+
 impl ThreadLoopForwarder for Piapf {
     type ThreadParams = ThreadParamsImpl;
 
     fn refresh_port(params: &Self::ThreadParams) -> anyhow::Result<u16> {
-        let bind_response = NetworkNamespace::exec_with_output(
+        let bind_response = exec_curl_with_stdin(
             &params.netns_name,
             &[
                 "curl",
@@ -239,15 +285,18 @@ impl ThreadLoopForwarder for Piapf {
                 "-m",
                 "5",
                 "--connect-to",
-                &format!("{}::{}:", params.hostname, params.gateway).to_string(),
+                &format!("{}::{}:", params.hostname, params.gateway),
                 "--cacert",
                 &params.pia_cert_path,
-                "--data-urlencode",
-                &format!("payload={}", params.payload).to_string(),
-                "--data-urlencode",
-                &format!("signature={}", params.signature).to_string(),
-                &format!("https://{}:19999/bindPort", params.hostname).to_string(),
+                "-K",
+                "-",
+                &format!("https://{}:19999/bindPort", params.hostname),
             ],
+            &format!(
+                "data-urlencode = {}\ndata-urlencode = {}\n",
+                curl_quote(&format!("payload={}", params.payload)),
+                curl_quote(&format!("signature={}", params.signature))
+            ),
         )?;
         if !bind_response.status.success() {
             log::error!("Could not bind port forward from PIA API");
@@ -284,5 +333,8 @@ impl Forwarder for Piapf {
     }
     fn snapshot(&self) -> Option<super::ForwarderSnapshot> {
         Some(super::ForwarderSnapshot::Pia(self.params.clone()))
+    }
+    fn stop_handle(&self) -> Option<std::sync::mpsc::Sender<bool>> {
+        Some(self.send_channel.clone())
     }
 }

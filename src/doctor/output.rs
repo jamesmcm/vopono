@@ -91,39 +91,38 @@ fn health(health: Option<&crate::health::Health>) -> (&'static str, String) {
     (state, details)
 }
 
+fn push_plain_rows(output: &mut String, scope: &str, diagnostics: &[Diagnostic]) {
+    for d in diagnostics {
+        writeln!(
+            output,
+            "{}\t{}\t{}\t{}\t{}",
+            escaped(scope),
+            code(d.code),
+            state(d.state),
+            escaped(&d.message),
+            escaped(d.action.as_deref().unwrap_or(""))
+        )
+        .unwrap();
+    }
+}
+
 fn plaintext(report: &Report) -> String {
     let mut output = String::from("scope\tcheck\tstate\tmessage\taction\n");
-    let mut rows = |scope: &str, diagnostics: &[Diagnostic]| {
-        for d in diagnostics {
-            writeln!(
-                output,
-                "{}\t{}\t{}\t{}\t{}",
-                escaped(scope),
-                code(d.code),
-                state(d.state),
-                escaped(&d.message),
-                escaped(d.action.as_deref().unwrap_or(""))
-            )
-            .unwrap();
-        }
-    };
-    rows("host", &report.diagnostics);
+    push_plain_rows(&mut output, "host", &report.diagnostics);
     if let Some(network) = &report.host_network {
-        rows("host", &network.diagnostics);
+        push_plain_rows(&mut output, "host", &network.diagnostics);
     }
     for ns in &report.namespaces {
         let scope = format!("namespace:{}", ns.id);
-        rows(&scope, &ns.diagnostics);
+        push_plain_rows(&mut output, &scope, &ns.diagnostics);
         if let Some(network) = &ns.network {
-            rows(&scope, &network.diagnostics);
+            push_plain_rows(&mut output, &scope, &network.diagnostics);
         }
-    }
-    for ns in &report.namespaces {
         let (state, message) = health(ns.health.as_ref());
         writeln!(
             output,
-            "namespace:{}\tmonitor_health\t{state}\t{}\t",
-            escaped(&ns.id),
+            "{}\tmonitor_health\t{state}\t{}\t",
+            escaped(&scope),
             escaped(&message)
         )
         .unwrap();
@@ -180,7 +179,13 @@ fn pretty(report: &Report, width: usize, color: bool) -> String {
             .chain(ns.network.iter().flat_map(|n| &n.diagnostics))
             .collect::<Vec<_>>();
         table(&mut output, &rows, width, color);
-        writeln!(output, "Details: vopono check {} --json", escaped(&ns.id)).unwrap();
+        writeln!(
+            output,
+            "Details: vopono doctor --namespace {} --json | vopono check {} --json",
+            escaped(&ns.id),
+            escaped(&ns.id)
+        )
+        .unwrap();
     }
     output
 }

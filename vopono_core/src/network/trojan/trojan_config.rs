@@ -42,15 +42,21 @@ pub struct TrojanConfig {
 
 impl TrojanConfig {
     pub fn new(override_path: Option<&Path>) -> anyhow::Result<TrojanConfig> {
-        let override_config_str = override_path.map(|path| {
-            std::fs::read_to_string(path)
-                .unwrap_or_else(|_| panic!("Failed to read config file: {path:?}"))
-        });
+        let override_config_str = match override_path {
+            Some(path) => {
+                let bytes = crate::util::owner_write::read_file_as_config_owner(path)
+                    .with_context(|| format!("Failed to read Trojan config {}", path.display()))?;
+                Some(String::from_utf8(bytes).with_context(|| {
+                    format!("Trojan config {} is not valid UTF-8", path.display())
+                })?)
+            }
+            None => None,
+        };
 
         let config_str = override_config_str.as_deref().unwrap_or(FORWARD_TEMPLATE);
 
         let config: TrojanConfig = serde_json::from_str(config_str)
-            .with_context(|| format!("Failed to parse JSON from {config_str:?}"))?;
+            .context("Failed to parse Trojan JSON configuration")?;
         Ok(config)
     }
 
@@ -137,5 +143,16 @@ mod tests {
         assert!(config.ssl.verify);
         assert_eq!(config.ssl.sni, "");
         assert_eq!(config.tcp.fast_open_qlen, 20);
+    }
+
+    #[test]
+    fn trojan_config_returns_err_without_leaking_file_contents() {
+        let missing = Path::new("/nonexistent/vopono/trojan_config_missing.json");
+        assert!(TrojanConfig::new(Some(missing)).is_err());
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "SECRET_TROJAN_PASSWORD_VALUE not json").unwrap();
+        let err = TrojanConfig::new(Some(file.path())).unwrap_err();
+        assert!(!format!("{err:#}").contains("SECRET_TROJAN_PASSWORD_VALUE"));
     }
 }

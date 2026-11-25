@@ -13,20 +13,20 @@ jobs:
     outputs:
       version: ${{ steps.rustversion.outputs.rustversion }}
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - run: cargo check
     - run: cargo pkgid
     - run: 'echo "$(cargo pkgid | cut -d# -f2)"'
     - id: rustversion
-      run: 'echo "::set-output name=rustversion::$(cargo pkgid | cut -d# -f2)"'
+      run: 'echo "rustversion=$(cargo pkgid | cut -d# -f2)" >> "$GITHUB_OUTPUT"'
   clippy:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Install Clippy
       run: rustup component add clippy rustfmt
     - name: Clippy
-      run: cargo clippy -- -D warnings
+      run: cargo clippy --workspace --all-features --all-targets -- -D warnings
     - name: Rustfmt
       run: cargo fmt --all -- --check
     - name: Test

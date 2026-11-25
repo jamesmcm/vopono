@@ -30,6 +30,7 @@ pub(crate) fn connect(policy: Compatibility) -> anyhow::Result<LocalSocketStream
         Compatibility::Exact => {
             daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_HANDSHAKE_TIMEOUT_SECONDS)?;
             let version = daemon::client_handshake(&mut conn)?;
+            let _ = daemon::clear_socket_timeouts(&conn);
             ensure!(
                 version == env!("CARGO_PKG_VERSION"),
                 "MCP requires a matching daemon version; restart or update the daemon"
@@ -39,24 +40,34 @@ pub(crate) fn connect(policy: Compatibility) -> anyhow::Result<LocalSocketStream
     Ok(conn)
 }
 
-pub(crate) fn prepare_execute(
+pub(crate) fn prepare_execute(command: ExecCommand, silent: bool) -> anyhow::Result<DaemonRequest> {
+    let env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    prepare_execute_with_env(command, silent, env)
+}
+
+pub(crate) fn prepare_execute_with_env(
     mut command: ExecCommand,
     silent: bool,
+    mut env: std::collections::HashMap<String, String>,
 ) -> anyhow::Result<DaemonRequest> {
     let working_dir = std::env::current_dir()?;
-    crate::resolve_custom_path_for_daemon(&mut command, &working_dir);
+    crate::resolve_custom_path_for_daemon(&mut command, &working_dir, &env);
     if command.working_directory.is_none() {
         command.working_directory = Some(working_dir.to_string_lossy().into_owned());
     }
     command.silent = silent;
     // Expansion belongs to the invoking user's environment, never root's.
     if !command.literal_application && !command.application.is_empty() {
-        command.application = shellexpand::full(&command.application)
-            .map_err(|_| anyhow::anyhow!("Shell expansion failed for the application command"))?
-            .into_owned();
+        let home = env.get("HOME").cloned();
+        command.application = shellexpand::full_with_context(
+            &command.application,
+            || home.clone(),
+            |var| -> Result<Option<String>, std::env::VarError> { Ok(env.get(var).cloned()) },
+        )
+        .map_err(|_| anyhow::anyhow!("Shell expansion failed for the application command"))?
+        .into_owned();
         command.literal_application = true;
     }
-    let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
     if !env.contains_key("PULSE_SERVER")
         && let Ok(server) = vopono_core::util::pulseaudio::get_pulseaudio_server()
     {
@@ -102,5 +113,34 @@ mod tests {
         assert_eq!(command.application, "printf '$HOME'");
         assert!(command.literal_application && command.silent);
         assert_eq!(env.get("HOME"), std::env::var("HOME").ok().as_ref());
+    }
+
+    #[test]
+    fn preparation_with_filtered_env_never_expands_unlisted_host_vars() {
+        let app = crate::args::App::try_parse_from([
+            "vopono",
+            "exec",
+            "--custom",
+            "/$PATH/vpn.conf",
+            "--postup",
+            "echo $PATH",
+            "true",
+        ])
+        .unwrap();
+        let crate::args::Command::Exec(command) = app.cmd.unwrap() else {
+            unreachable!()
+        };
+        // Empty env does not include host PATH, so it must never expand from std::env.
+        let DaemonRequest::Execute { cmd, .. } =
+            prepare_execute_with_env(command, false, std::collections::HashMap::new()).unwrap()
+        else {
+            unreachable!()
+        };
+        let command: ExecCommand = serde_json::from_slice(&cmd).unwrap();
+        assert_eq!(
+            command.custom.as_deref(),
+            Some(std::path::Path::new("/$PATH/vpn.conf"))
+        );
+        assert_eq!(command.postup.as_deref(), Some("echo $PATH"));
     }
 }

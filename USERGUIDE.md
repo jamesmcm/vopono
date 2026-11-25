@@ -205,7 +205,7 @@ anything inside the namespace themselves.
 application has started:
 
 ```json
-{"version":1,"event":"launched","namespace":"vo_ar_romania","pid":183041,"forwarded_port":null}
+{"version":1,"event":"launched","namespace":"vo_ar_romania","pid":183041,"forwarded_port":null,"open_ports":[],"host_forwarded_ports":[]}
 ```
 
 Scan stdout for `"event":"launched"` rather than assuming it is the first
@@ -1388,13 +1388,15 @@ is redirected, `NO_COLOR` is nonempty, or `TERM=dumb`. Use `--color always` or
 
 For agents and logs, `--plain` (alias `--plaintext`) emits one tab-separated
 record per diagnostic, with the header `scope`, `check`, `state`, `message`,
-`action`. Check/state names are stable snake_case; backslashes and control
-characters in values are escaped, so each record stays on one line. This mode
-never includes ANSI colours or table borders, even with `--color always`.
-Use `--json` for complete structured network and cached monitor data; it is
-mutually exclusive with `--plain`. All formats preserve the same exit status:
-failed diagnostics return 1. Namespace reports label monitor state as cached,
-separately from this invocation's fresh probes.
+`action`. Diagnostic check/state names are stable snake_case (`pass`, `warning`,
+`fail`, `skipped`); each namespace section also includes a `monitor_health` row
+whose `state` is `connected`, `degraded`, `reconnecting`, or `unavailable`.
+Backslashes and control characters in values are escaped, so each record stays
+on one line. This mode never includes ANSI colours or table borders, even with
+`--color always`. Use `--json` for complete structured network and cached
+monitor data; it is mutually exclusive with `--plain`. All formats preserve the
+same exit status: failed diagnostics return 1. Namespace reports label monitor
+state as cached, separately from this invocation's fresh probes.
 
 ```sh
 vopono doctor --plain
@@ -1471,18 +1473,43 @@ management state is queried specifically for the vopono host veth; management of
 the normal Wi-Fi/Ethernet uplink is expected and does not trigger a warning.
 
 Doctor sends one interface-bound ICMP echo in each direction across each recorded
-IPv4/IPv6 veth pair (at most 500 ms per echo). A failed echo is a warning, since the kill switch or host
-firewall may intentionally block it; it does not establish a broken link or prove
-host-service reachability. Missing tools and exhausted budgets are skipped.
+IPv4/IPv6 veth pair (at most 500 ms per echo). A failed echo is inconclusive and
+reported as skipped: neither host access nor opened ports promise ICMP acceptance.
+The kill switch or host firewall can intentionally block it. It does not establish
+a broken link or prove host-service reachability. Missing tools and exhausted budgets are skipped.
 `--offline` skips these echoes while still reading resolver and interface state;
 `--skip-ipv6` skips the IPv6 echoes. Neither diagnostic opens firewall exceptions
 or enables host access. Privileged targets come from the authenticated user's
 root-owned namespace snapshot, which is read without arming cleanup resources.
 
+For namespaces created with `--allow-host-access`, doctor temporarily binds a TCP
+listener to each recorded host veth address, connects from the namespace, then
+closes it. A failed connection warns about that expected service path. Older
+snapshots without recorded host-access policy are explicitly skipped; recreate
+the namespace with the updated binary to record the setting. A successful probe
+does not guarantee access to every host service or port, and failure on the
+reported ephemeral port does not prove all host services are blocked: host
+firewall policies can differ by port. No application data is sent.
+
+For `--open-ports`, `--forward` and provider-forwarded ports, doctor reads TCP/UDP
+listener bindings with `ss`. If a TCP listener accepts the namespace veth address,
+doctor tests that host-to-namespace path; a failure warns. Loopback-only and
+tunnel-address-only bindings cannot serve the TCP `--forward` relay. A host
+listener with no matching namespace TCP backend warns; an absent host listener
+is skipped because `--no-proxy` may be intentional. Host listener ownership and
+relay data transfer remain unverified. Dual-stack listeners are recognized using
+their `v6only` setting. Missing listeners on opened ports and UDP reachability are
+inconclusive, rather than firewall failures. Public VPN ingress and provider port
+mappings require a probe from outside the VPN and are explicitly unverified.
+`--offline` retains listener inspection but skips TCP connections and temporary
+listeners. Service checks share the namespace inspection deadline, use at most
+500 ms per TCP connection, and inspect at most 64 configured ports.
+
 Doctor reads IPv4/IPv6 forwarding settings and inspects active iptables and
 nftables snapshots. It reports default DROP policies, DROP/REJECT rules in chains
-referenced by host hooks, and hooked UFW/Docker chains. Unreferenced leftover
-chains alone do not trigger a warning. These are observations to correlate with
+referenced by host hooks, and hooked UFW/Docker chains. Filtering observations
+are context with an unverified/skipped result, rather than warnings merely for
+having a firewall. These are observations to correlate with
 the live probes, rather than proof that a packet is blocked: matching, interface
 exceptions, counters, chain priorities and NAT still need inspection. Existing
 vopono UFW/Docker exceptions can make these configurations work normally. A
@@ -1560,8 +1587,9 @@ and, when probed, a `connectivity` result with separate IPv4, IPv6 and DNS outco
 `host_network` contains resolver/default-route details and their diagnostics;
 each namespace's `network` contains its resolver, interfaces, routes,
 `link_probes`, and the associated diagnostics.
-A failed DNS or enabled TCP probe makes doctor exit 1, even if another probe
-passed. A skipped probe does not imply success.
+A failed DNS or enabled VPN TCP probe makes doctor exit 1, even if another probe
+passed. Local service-path failures warn and do not change the exit status.
+A skipped probe does not imply success.
 
 Neither configuration preflight nor namespace connectivity probes verify VPN
 authentication or isolation. Use `vopono check NAMESPACE --json` for custom probe
@@ -1881,7 +1909,8 @@ among parallel commands, use one profile application that manages those commands
 The default limit is four active jobs, configurable with `--max-jobs` up to
 eight. The default job lifetime is 300 seconds, including tunnel setup; set
 `--max-job-seconds` up to 3600 to change the upper bound. Each call can request a
-shorter `timeout_seconds`. Expiry requests cancellation. VPN setup may still be
+shorter `timeout_seconds`. Expiry requests cancellation and sets `timed_out: true`
+in `job_status`. VPN setup may still be
 in progress when cancellation is requested. The `finished` flag means tracking
 has ended; `indeterminate` or `cleanup_pending: true` still requires inspection.
 Each session retains up to 64 recent jobs; completed jobs are
@@ -1899,7 +1928,7 @@ include the CLI launch report as well as application output. **Application
 output is untrusted and is not redacted**; it may contain secrets. It never
 becomes MCP protocol messages or controls job identity.
 
-Normal completion, cancellation, timeout, stdin EOF, SIGINT and SIGTERM request
+Normal completion, cancellation, timeout, stdin EOF, SIGHUP, SIGINT and SIGTERM request
 cleanup of the job's namespace, including profiles configured with keep-alive.
 This makes MCP jobs unsuitable for services intended to outlive the MCP session;
 launch those separately through the normal CLI. Inspect `cleanup_pending` and
@@ -1940,7 +1969,7 @@ sudo unshare --mount --net --pid --fork --mount-proc \
   tests/network/wireguard.sh --isolated "$PWD/target/debug/vopono"
 ```
 
-Requires Linux with WireGuard support, iproute2, wireguard-tools, OpenVPN,
+Requires Linux with WireGuard support, iproute2, iputils-ping (`ping`), wireguard-tools, OpenVPN,
 nftables, iptables, Python 3, OpenSSL, natpmpc and runuser. Local WireGuard and
 OpenVPN TLS peers cover dual-stack connectivity, blocked underlay traffic,
 shared application lifetime, daemon restart/crash, relay and lease renewal,

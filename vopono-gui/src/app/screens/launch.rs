@@ -98,7 +98,7 @@ impl VoponoGuiApp {
         });
         ui.checkbox(
             &mut self.gui_config.launch.monitor,
-            "Monitor connection health",
+            "Monitor connection health (requires daemon)",
         );
         ui.add_enabled_ui(self.gui_config.launch.monitor, |ui| {
             ui.checkbox(

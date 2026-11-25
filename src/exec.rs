@@ -10,7 +10,7 @@ use log::{debug, error, info, warn};
 use signal_hook::iterator::SignalsInfo;
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::{
     fs::create_dir_all,
@@ -65,7 +65,7 @@ pub fn execute_as_daemon_with_stdio(
         parsed_command,
         forwarder,
         host_env_vars,
-    } = setup_namespace(command, &uiclient, true, false)?; // daemon: do not auto-sync
+    } = setup_namespace_with_env(command, &uiclient, true, false, forwarded_env.as_ref())?; // daemon: do not auto-sync
 
     // Do not pass through an audio endpoint discovered in the daemon's root
     // session. The client forwards its effective PULSE_SERVER when pactl can
@@ -84,26 +84,20 @@ pub fn execute_as_daemon_with_stdio(
             .or_insert_with(|| format!("/run/user/{}", user.uid.as_raw()));
     }
 
-    // Merge all client-forwarded environment variables into the child setup.
+    // Merge client-forwarded environment variables into the child setup without
+    // overriding SSH SOCKS5 proxy variables injected by setup_namespace.
+    let preserve_ssh_proxy = parsed_command.protocol == Protocol::Ssh;
     if let Some(fwd) = forwarded_env.as_ref() {
         for (k, v) in fwd {
+            if preserve_ssh_proxy && matches!(k.as_str(), "ALL_PROXY" | "all_proxy") {
+                continue;
+            }
             host_env_vars.insert(k.clone(), v.clone());
         }
     }
 
-    // Machine-readable launch summary for frontend integrations, written to
-    // the client's stdout before any application output. Duplicate the
-    // descriptor up-front because ApplicationWrapper transfers the original
-    // descriptor to the spawned child.
-    let report_out: Option<OwnedFd> = if parsed_command.json {
-        stdio_fds
-            .as_ref()
-            .map(|(_, stdout_fd, _)| nix::unistd::dup(stdout_fd.as_fd()))
-            .transpose()?
-    } else {
-        None
-    };
-
+    let existing_session = crate::namespace_sessions::contains(&ns.name);
+    let mut ns = ns;
     // Bind the host-side --forward relays before spawning the application so a
     // bind failure aborts the request instead of orphaning a running process.
     let host_proxies = match host_forward_proxies(
@@ -114,16 +108,26 @@ pub fn execute_as_daemon_with_stdio(
     ) {
         Ok(proxies) => proxies,
         Err(error) => {
-            let mut ns = ns;
-            if crate::namespace_sessions::contains(&ns.name) {
+            if existing_session {
                 ns.detach();
             }
             return Err(error);
         }
     };
+    // When attaching to an existing namespace with new --forward ports,
+    // open them in the namespace firewall so the new host relays can connect.
+    if existing_session && !host_proxies.is_empty() {
+        let new_ports: Vec<u16> = host_proxies.iter().map(|(port, _)| *port).collect();
+        if let Err(error) = vopono_core::util::open_ports(&ns, &new_ports, ns.firewall) {
+            ns.detach();
+            return Err(error);
+        }
+    }
 
-    let ns = ns.write_lockfile(&parsed_command.application)?;
-    let application = ApplicationWrapper::new(
+    if !existing_session {
+        ns = ns.write_lockfile(&parsed_command.application)?;
+    }
+    let application = match ApplicationWrapper::new(
         &ns,
         &parsed_command.application,
         parsed_command.user.clone(),
@@ -135,25 +139,55 @@ pub fn execute_as_daemon_with_stdio(
         pipe_io,
         stdio_fds,
         take_controlling_tty,
-    )?;
-    let pid = application.handle.id();
-    ns.update_lockfile_application_pid(pid)?;
-
-    if let Some(report_out) = report_out {
-        let report = launch_report(&ns, pid, application.port_forwarding.as_deref());
-        let mut out = std::fs::File::from(report_out);
-        let _ = writeln!(out, "{report}");
-        let _ = out.flush();
+    ) {
+        Ok(app) => app,
+        Err(error) => {
+            if existing_session {
+                ns.detach();
+            }
+            return Err(error);
+        }
+    };
+    if !existing_session {
+        let pid = application.handle.id();
+        ns.update_lockfile_application_pid(pid)?;
     }
-
     Ok((application, ns, host_proxies))
 }
 
+pub(crate) fn launch_report_for_daemon(
+    ns: &NetworkNamespace,
+    pid: u32,
+    forwarded_port: Option<u16>,
+) -> String {
+    let mut host_forwarded_ports = ns.state.host_forwarded_ports.clone();
+    for port in crate::namespace_sessions::relay_ports(&ns.name) {
+        if !host_forwarded_ports.contains(&port) {
+            host_forwarded_ports.push(port);
+        }
+    }
+    host_forwarded_ports.sort_unstable();
+    launch_report_value(
+        &ns.name,
+        pid,
+        &ns.state.open_ports,
+        &host_forwarded_ports,
+        forwarded_port,
+    )
+    .to_string()
+}
+
 /// Setup without spawning an application; the caller retains all namespace resources.
-pub fn setup_daemon_namespace_only(command: ExecCommand) -> anyhow::Result<NamespaceConfig> {
+pub fn setup_daemon_namespace_only(
+    command: ExecCommand,
+    forwarded_env: Option<std::collections::HashMap<String, String>>,
+) -> anyhow::Result<NamespaceConfig> {
     let uiclient = CliClient {};
-    let mut setup = setup_namespace(command, &uiclient, true, false)?;
-    setup.ns = setup.ns.write_lockfile(&setup.parsed_command.application)?;
+    let mut setup =
+        setup_namespace_with_env(command, &uiclient, true, false, forwarded_env.as_ref())?;
+    if !crate::namespace_sessions::contains(&setup.ns.name) {
+        setup.ns = setup.ns.write_lockfile(&setup.parsed_command.application)?;
+    }
     Ok(setup)
 }
 
@@ -221,9 +255,26 @@ fn setup_namespace(
     verbose: bool,
     auto_sync_if_missing: bool,
 ) -> anyhow::Result<NamespaceConfig> {
+    setup_namespace_with_env(command, uiclient, verbose, auto_sync_if_missing, None)
+}
+
+fn setup_namespace_with_env(
+    command: ExecCommand,
+    uiclient: &dyn UiClient,
+    verbose: bool,
+    auto_sync_if_missing: bool,
+    client_env: Option<&std::collections::HashMap<String, String>>,
+) -> anyhow::Result<NamespaceConfig> {
     let diagnostic_command = command.clone();
-    setup_namespace_inner(command, uiclient, verbose, auto_sync_if_missing)
-        .map_err(|error| crate::launch_diagnostics::command_failure(&diagnostic_command, error))
+    setup_namespace_inner(command, uiclient, verbose, auto_sync_if_missing, client_env).map_err(
+        |error| {
+            crate::launch_diagnostics::command_failure_with_env(
+                &diagnostic_command,
+                error,
+                client_env,
+            )
+        },
+    )
 }
 
 fn setup_namespace_inner(
@@ -231,6 +282,7 @@ fn setup_namespace_inner(
     uiclient: &dyn UiClient,
     verbose: bool,
     auto_sync_if_missing: bool,
+    client_env: Option<&std::collections::HashMap<String, String>>,
 ) -> anyhow::Result<NamespaceConfig> {
     // In daemon mode this runs as root: create the client config dir via the
     // dropped-privilege helper so it stays user-owned. A plain
@@ -265,6 +317,7 @@ fn setup_namespace_inner(
             .contains_key(&netns);
         info!("Attaching to existing network namespace: {netns}");
         command.custom_netns_name = Some(netns);
+        command.custom = None;
         command.provider = Some(WrappedArg::new(VpnProvider::None));
         command.protocol = Some(WrappedArg::new(Protocol::None));
     }
@@ -272,7 +325,8 @@ fn setup_namespace_inner(
     let vopono_config_settings = ArgsConfig::get_config_file(&command)?;
     let mut host_env_vars = vopono_core::util::env_vars::get_host_env_vars();
 
-    let mut parsed_command = ArgsConfig::get_cli_or_config_args(command, vopono_config_settings)?;
+    let mut parsed_command =
+        ArgsConfig::get_cli_or_config_args_with_env(command, vopono_config_settings, client_env)?;
     if parsed_command.protocol == Protocol::Ssh {
         let proxy = format!("socks5h://127.0.0.1:{}", parsed_command.ssh_proxy_port);
         host_env_vars.insert("ALL_PROXY".to_owned(), proxy.clone());
@@ -414,6 +468,7 @@ fn setup_namespace_inner(
             parsed_command.open_ports.as_deref(),
             parsed_command.forward.as_deref(),
         );
+        ns.state.allow_host_access = Some(parsed_command.allow_host_access);
         ns.add_loopback()?;
         ns.add_veth_pair()?;
 
@@ -533,33 +588,18 @@ fn setup_namespace_inner(
         forwarder = setup.forwarder;
 
         if let Some(pucmd) = parsed_command.postup.clone() {
-            let mut sudo_args = Vec::new();
-            if let Some(ref user) = parsed_command.user {
-                sudo_args.push("--user");
-                sudo_args.push(user);
-            }
-            if let Some(ref group) = parsed_command.group {
-                sudo_args.push("--group");
-                sudo_args.push(group);
-            }
-
             let parsed_pucmd = parse_command_str(&pucmd)?;
-            let parsed_pucmd_ptrs: Vec<&str> = parsed_pucmd.iter().map(|s| s.as_str()).collect();
-
-            let mut cmd = if !sudo_args.is_empty() {
-                let mut args = vec!["sudo", "--preserve-env"];
-                args.append(&mut sudo_args);
-                args.extend(parsed_pucmd_ptrs);
-                let mut cmd = std::process::Command::new(args[0]);
-                cmd.args(&args[1..]);
-                cmd
-            } else {
-                let mut cmd = std::process::Command::new(parsed_pucmd_ptrs[0]);
-                cmd.args(&parsed_pucmd_ptrs[1..]);
-                cmd
-            };
-            set_env_vars(&ns, forwarder.as_deref(), &mut cmd, &host_env_vars);
-            cmd.spawn()?;
+            if !parsed_pucmd.is_empty() {
+                let parsed_pucmd_ptrs: Vec<&str> =
+                    parsed_pucmd.iter().map(|s| s.as_str()).collect();
+                let mut cmd = vopono_core::network::netns::build_hook_command(
+                    &parsed_pucmd_ptrs,
+                    parsed_command.user.as_deref(),
+                    parsed_command.group.as_deref(),
+                )?;
+                set_env_vars(&ns, forwarder.as_deref(), &mut cmd, &host_env_vars);
+                cmd.spawn()?;
+            }
         }
     }
 

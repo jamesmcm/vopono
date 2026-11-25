@@ -41,6 +41,14 @@ pub fn select(config: Config, name: Option<&str>) -> anyhow::Result<Config> {
             .set_override(key.replace('_', "-"), value.clone())?
             .set_override(underscored, value.clone())?;
     }
+    let profile_sets_non_custom_provider = profile
+        .get("provider")
+        .and_then(|v| v.clone().into_string().ok())
+        .is_some_and(|p| !p.eq_ignore_ascii_case("custom"));
+    if profile_sets_non_custom_provider && !profile.contains_key("custom") {
+        // Prevent a top-level `custom` default from overriding a profile's explicit `provider`.
+        builder = builder.set_override("custom", "")?;
+    }
     Ok(builder.build()?)
 }
 
@@ -54,15 +62,58 @@ pub fn prepare(command: &mut ExecCommand) -> anyhow::Result<()> {
             .or_else(|_| config.get_string("working-directory"))
             .ok();
     }
+    // Pull path-bearing profile/config options onto the command so client-side
+    // resolution against the invoking user's CWD/HOME applies before daemon forwarding.
+    if command.existing_netns.is_none()
+        && command.custom.is_none()
+        && command
+            .provider
+            .as_ref()
+            .is_none_or(|p| p.to_variant() == vopono_core::config::providers::VpnProvider::Custom)
+        && let Ok(path) = config.get_string("custom")
+        && !path.is_empty()
+    {
+        command.custom = Some(std::path::PathBuf::from(path));
+    }
+    for (slot, key) in [
+        (&mut command.auth_user_pass, "auth_user_pass"),
+        (&mut command.trojan_config, "trojan_config"),
+    ] {
+        if slot.is_none()
+            && let Ok(path) = config
+                .get_string(key)
+                .or_else(|_| config.get_string(&key.replace('_', "-")))
+            && !path.is_empty()
+        {
+            *slot = Some(std::path::PathBuf::from(path));
+        }
+    }
+    for (slot, key) in [
+        (&mut command.postup, "postup"),
+        (&mut command.predown, "predown"),
+        (
+            &mut command.port_forwarding_callback,
+            "port_forwarding_callback",
+        ),
+    ] {
+        if slot.is_none()
+            && let Ok(val) = config
+                .get_string(key)
+                .or_else(|_| config.get_string(&key.replace('_', "-")))
+            && !val.is_empty()
+        {
+            *slot = Some(val);
+        }
+    }
     for (flag, name) in [
         (&mut command.monitor, "monitor"),
         (&mut command.recover, "recover"),
-        (&mut command.keep_alive, "keep-alive"),
-        (&mut command.create_netns_only, "create-netns-only"),
+        (&mut command.keep_alive, "keep_alive"),
+        (&mut command.create_netns_only, "create_netns_only"),
     ] {
         *flag |= config
             .get_bool(name)
-            .or_else(|_| config.get_bool(&name.replace('-', "_")))
+            .or_else(|_| config.get_bool(&name.replace('_', "-")))
             .unwrap_or(false);
     }
     if !command.create_netns_only
@@ -81,21 +132,30 @@ pub fn prepare(command: &mut ExecCommand) -> anyhow::Result<()> {
 }
 
 pub fn run(command: ProfilesCommand) -> anyhow::Result<()> {
+    let explicit_config = command.vopono_config.is_some();
     let path = command
         .vopono_config
         .unwrap_or(vopono_core::util::vopono_dir()?.join("config.toml"));
-    let path = path.canonicalize()?;
-    let config = Config::builder()
-        .add_source(config::File::from(path.clone()))
-        .build()?;
     match command.command {
         ProfileSubcommand::List(format) => {
-            let mut names: Vec<_> = config
-                .get_table("profiles")
-                .unwrap_or_default()
-                .into_keys()
-                .collect();
-            names.sort();
+            let names = if !explicit_config && !path.exists() {
+                Vec::new()
+            } else {
+                let path = path.canonicalize().with_context(|| {
+                    format!("Configuration file {} was not found", path.display())
+                })?;
+                let config = Config::builder()
+                    .add_source(config::File::from(path))
+                    .build()?;
+                let mut names: Vec<_> = config
+                    .get_table("profiles")
+                    .unwrap_or_default()
+                    .into_keys()
+                    .filter(|name| valid_name(name))
+                    .collect();
+                names.sort();
+                names
+            };
             if format.json {
                 crate::api::print_json(
                     &serde_json::json!({"version": crate::api::SCHEMA_VERSION, "profiles": names}),
@@ -107,6 +167,12 @@ pub fn run(command: ProfilesCommand) -> anyhow::Result<()> {
             }
         }
         ProfileSubcommand::Export { name, output } => {
+            let path = path
+                .canonicalize()
+                .with_context(|| format!("Configuration file {} was not found", path.display()))?;
+            let config = Config::builder()
+                .add_source(config::File::from(path.clone()))
+                .build()?;
             let selected = select(config, Some(&name))?;
             ensure!(
                 !selected.get_string("application")?.is_empty(),
@@ -211,6 +277,30 @@ mod tests {
         assert!(select(config.clone(), Some("missing")).is_err());
         assert!(select(config, Some("../../escape")).is_err());
     }
+    #[test]
+    fn prepare_does_not_inherit_custom_for_existing_netns() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "custom = \"/tmp/default.conf\"\n").unwrap();
+        let Some(crate::args::Command::Exec(mut command)) = crate::args::App::try_parse_from([
+            "vopono",
+            "exec",
+            "--vopono-config",
+            config.to_str().unwrap(),
+            "--existing-netns",
+            "vo_existing",
+            "true",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            unreachable!()
+        };
+        prepare(&mut command).unwrap();
+        assert!(command.custom.is_none());
+    }
+
     #[test]
     fn desktop_export_keeps_shell_metacharacters_and_field_codes_literal() {
         let entry = desktop_entry(

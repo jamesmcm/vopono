@@ -150,7 +150,9 @@ struct Entry {
     applications: usize,
     valid: Arc<AtomicBool>,
     monitor: Option<crate::health::Monitor>,
+    forwarder_stop: Option<std::sync::mpsc::Sender<bool>>,
     proxies: HashMap<u16, crate::tcp_proxy::TcpProxy>,
+    desired_host_ports: std::collections::BTreeSet<u16>,
 }
 static SESSIONS: LazyLock<Mutex<HashMap<String, Entry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -174,15 +176,44 @@ pub fn wait_released(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Stop active probes before an authorized namespace teardown inspects remaining PIDs.
+/// Stop active probes and port-renewal threads before an authorized namespace
+/// teardown inspects remaining PIDs.
 pub fn stop_monitor(name: &str) -> anyhow::Result<()> {
-    let stop = SESSIONS
+    let stop_handle = SESSIONS
         .lock()
         .unwrap_or_else(|p| p.into_inner())
         .get(name)
-        .and_then(|entry| entry.monitor.as_ref().map(|monitor| monitor.stop_handle()));
-    if let Some(stop) = stop {
-        stop.stop_and_wait()?;
+        .and_then(|entry| {
+            entry
+                .monitor
+                .as_ref()
+                .map(crate::health::Monitor::stop_handle)
+        });
+    if let Some(handle) = stop_handle {
+        // Wait for the monitor to stop before removing tracking or stopping
+        // port renewal; on timeout the session retains ownership and Monitor::drop
+        // is not invoked for a second wait.
+        handle.stop_and_wait()?;
+    }
+    let (monitor, forwarder_stop) = {
+        let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(entry) = sessions.get_mut(name) {
+            (entry.monitor.take(), entry.forwarder_stop.take())
+        } else {
+            (None, None)
+        }
+    };
+    if monitor.is_some()
+        && let Some((_, reserved_monitor)) = RESOURCES
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(name)
+    {
+        *reserved_monitor = false;
+    }
+    drop(monitor);
+    if let Some(stop) = forwarder_stop {
+        let _ = stop.send(true);
     }
     Ok(())
 }
@@ -243,9 +274,14 @@ impl Session {
             applications: 0,
             valid: Arc::new(AtomicBool::new(true)),
             monitor: None,
+            forwarder_stop: None,
             proxies: HashMap::new(),
+            desired_host_ports: std::collections::BTreeSet::new(),
         });
         entry.applications += 1;
+        if let Some(stop) = forwarder.as_ref().and_then(|f| f.stop_handle()) {
+            entry.forwarder_stop = Some(stop);
+        }
         let valid = entry.valid.clone();
         if !controller {
             ns.detach();
@@ -274,24 +310,38 @@ impl Session {
             .unwrap_or_else(|p| p.into_inner())
             .get_mut(&self.ns.name)
         {
+            entry
+                .desired_host_ports
+                .extend(proxies.iter().map(|(port, _)| *port));
             entry.proxies.extend(proxies);
         }
     }
 
+    fn retain_desired_host_ports(&self, ports: &[u16]) {
+        if let Some(entry) = SESSIONS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(&self.ns.name)
+        {
+            entry.desired_host_ports.extend(ports.iter().copied());
+        }
+    }
+
     pub fn persist_options(&self) -> anyhow::Result<()> {
-        let (monitor, recover, mut host_ports) = {
+        let (monitor, recover, host_ports) = {
             let sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
             let entry = &sessions[&self.ns.name];
+            let mut ports: std::collections::BTreeSet<u16> = entry.desired_host_ports.clone();
+            ports.extend(entry.proxies.keys().copied());
             (
                 entry.monitor.is_some(),
                 entry
                     .monitor
                     .as_ref()
                     .is_some_and(|monitor| monitor.recovery_enabled()),
-                entry.proxies.keys().copied().collect::<Vec<_>>(),
+                ports.into_iter().collect::<Vec<_>>(),
             )
         };
-        host_ports.sort_unstable();
         if !self.controller {
             return crate::namespace_ownership::update_runtime_options(
                 &self.ns.name,
@@ -330,6 +380,9 @@ impl Session {
     }
 
     fn disarm(&mut self) {
+        if let Some(forwarder) = self.forwarder.as_mut() {
+            forwarder.disarm();
+        }
         self.forwarder.take();
         self.ns.detach();
     }
@@ -362,6 +415,7 @@ impl Session {
         // Respond to the client before entering this loop. The namespace and
         // provider renewal task outlive any individual client/application.
         let mut lease_retry_at = std::time::Instant::now();
+        let mut teardown_retry_at = std::time::Instant::now();
         loop {
             let transition = lock_namespace(&self.ns.name);
             if !self.valid.load(Ordering::Acquire) {
@@ -385,6 +439,22 @@ impl Session {
                 match snapshot.restore(&self.ns) {
                     Ok(forwarder) => {
                         let port = forwarder.forwarded_port();
+                        if let Some(stop) = forwarder.stop_handle()
+                            && let Some(entry) = SESSIONS
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .get_mut(&self.ns.name)
+                        {
+                            entry.forwarder_stop = Some(stop);
+                        }
+                        if let Err(error) =
+                            vopono_core::util::open_ports(&self.ns, &[port], self.ns.firewall)
+                        {
+                            log::warn!(
+                                "Could not open restored forwarded port {port} in {}: {error:#}",
+                                self.ns.name
+                            );
+                        }
                         self.forwarder = Some(forwarder);
                         self.pending_forwarder = None;
                         if let Some(state) = &mut self.ns.state.port_forwarding {
@@ -416,34 +486,68 @@ impl Session {
                 .unwrap_or(0);
             let persistent =
                 crate::namespace_ownership::is_persistent(&self.ns.name, self.uid).unwrap_or(true);
-            if active == 0 && !persistent && !self.ns.has_application_processes().unwrap_or(true) {
-                // Stop probes before inspecting processes during teardown,
-                // while no concurrent attach can enter setup.
-                let monitor = SESSIONS
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .get_mut(&self.ns.name)
-                    .and_then(|entry| entry.monitor.take());
-                drop(monitor);
-                // Teardown can preserve the namespace (for example when an
-                // unknown lockfile remains), or fail partway through cleanup.
-                // Retain the owning guard, runtime files and ownership record
-                // until removal is verified, so an explicit stop can retry.
-                let teardown = crate::namespace_ownership::load(&self.ns.name, self.uid)
-                    .and_then(NetworkNamespace::teardown);
-                if let Err(error) = teardown {
-                    log::warn!("Could not tear down namespace {}: {error:#}", self.ns.name);
+            if active == 0
+                && !persistent
+                && std::time::Instant::now() >= teardown_retry_at
+                && !self.ns.has_application_processes().unwrap_or(true)
+            {
+                let mut can_teardown = true;
+                if let Ok(base) = vopono_core::util::vopono_dir() {
+                    let lock_dir = base.join("locks").join(&self.ns.name);
+                    let _ = vopono_core::status::prune_stale_client_lockfiles(&lock_dir);
+                    let own_lock = std::process::id().to_string();
+                    if !vopono_core::status::lock_dir_has_no_other_session_state(
+                        &lock_dir, &own_lock,
+                    )
+                    .unwrap_or(false)
+                    {
+                        can_teardown = false;
+                    }
                 }
-                if std::path::Path::new("/run/netns")
-                    .join(&self.ns.name)
-                    .try_exists()
-                    .is_ok_and(|exists| !exists)
-                {
-                    self.disarm();
-                    remove_session(&self.ns.name, &self.valid);
-                    crate::namespace_ownership::remove(&self.ns.name);
-                    break;
+                if can_teardown {
+                    match crate::namespace_ownership::load(&self.ns.name, self.uid) {
+                        Ok(owned) => match stop_monitor(&self.ns.name) {
+                            Ok(()) => {
+                                // Drop live forwarder before teardown so renewal threads stop
+                                // and external mappings (e.g. AzireVPN) are deleted while netns exists.
+                                self.forwarder.take();
+                                // Teardown can preserve the namespace (for example when an
+                                // unknown lockfile remains), or fail partway through cleanup.
+                                // Retain the owning guard, runtime files and ownership record
+                                // until removal is verified, so an explicit stop can retry.
+                                if let Err(error) = owned.teardown() {
+                                    log::warn!(
+                                        "Could not tear down namespace {}: {error:#}",
+                                        self.ns.name
+                                    );
+                                }
+                                if std::path::Path::new("/run/netns")
+                                    .join(&self.ns.name)
+                                    .try_exists()
+                                    .is_ok_and(|exists| !exists)
+                                {
+                                    self.disarm();
+                                    remove_session(&self.ns.name, &self.valid);
+                                    crate::namespace_ownership::remove(&self.ns.name);
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                log::warn!(
+                                    "Could not stop monitor for namespace {}: {error:#}",
+                                    self.ns.name
+                                );
+                            }
+                        },
+                        Err(error) => {
+                            log::warn!(
+                                "Could not load ownership record for namespace {}: {error:#}",
+                                self.ns.name
+                            );
+                        }
+                    }
                 }
+                teardown_retry_at = std::time::Instant::now() + Duration::from_secs(2);
             }
             drop(transition);
             std::thread::sleep(Duration::from_millis(250));
@@ -485,29 +589,43 @@ pub fn restore_all() -> anyhow::Result<()> {
                 )));
                 vopono_core::util::set_helper_exe_override(std::env::current_exe().ok());
                 let lock_dir = vopono_core::util::vopono_dir()?.join("locks").join(&name);
-                vopono_core::util::owner_write::remove_file_as_config_owner(
-                    &lock_dir.join(runtime.daemon_pid.to_string()),
-                )?;
                 if crate::namespace_ownership::is_stopping(&name, uid)? {
+                    if runtime.daemon_pid != std::process::id() {
+                        let _ = vopono_core::util::owner_write::remove_file_as_config_owner(
+                            &lock_dir.join(runtime.daemon_pid.to_string()),
+                        );
+                    }
                     crate::control::stop_namespace(&name, Some(uid))?;
                     return Ok(None);
                 }
                 let mut ns = crate::namespace_ownership::load(&name, uid)?;
-                // Errors during restoration must preserve existing protection.
-                let restored = (|| -> anyhow::Result<_> {
-                    let proxies = crate::exec::restore_host_proxies(&ns, &runtime.host_ports)?;
-                    Ok(proxies)
-                })();
-                let proxies = match restored {
+                // Restore host proxies on a best-effort basis: a transient bind
+                // failure must not abandon the namespace's lifecycle controller
+                // or wipe the recorded desired host ports on disk.
+                let proxies = match crate::exec::restore_host_proxies(&ns, &runtime.host_ports) {
                     Ok(proxies) => proxies,
                     Err(error) => {
-                        ns.detach();
-                        return Err(error);
+                        log::warn!(
+                            "Could not rebind host proxies for restored namespace {name}: {error:#}"
+                        );
+                        Vec::new()
                     }
                 };
-                ns = ns.write_lockfile("")?;
+                // Write the new primary lockfile BEFORE removing the previous daemon PID's
+                // lockfile so status visibility is continuous across daemon restarts.
+                // Detach on error so dropping `ns` cannot tear down a live persistent namespace.
+                if let Err(error) = ns.write_lockfile_in_place("") {
+                    ns.detach();
+                    return Err(error);
+                }
+                if runtime.daemon_pid != std::process::id() {
+                    let _ = vopono_core::util::owner_write::remove_file_as_config_owner(
+                        &lock_dir.join(runtime.daemon_pid.to_string()),
+                    );
+                }
                 let mut session =
                     Session::register(ns, uid, None, runtime.monitor, runtime.recover);
+                session.retain_desired_host_ports(&runtime.host_ports);
                 session.retain_proxies(proxies);
                 session.pending_forwarder = runtime.forwarder;
                 // A failure to refresh restart bookkeeping must not drop a

@@ -81,6 +81,12 @@ impl CliError {
     }
 }
 
+fn find_typed_error<T: std::error::Error + Send + Sync + 'static>(error: &Error) -> Option<&T> {
+    error
+        .downcast_ref::<T>()
+        .or_else(|| error.chain().find_map(|cause| cause.downcast_ref::<T>()))
+}
+
 impl ErrorCode {
     pub fn from_setup(error: &vopono_core::diagnostics::SetupError) -> Self {
         use vopono_core::diagnostics::SetupError;
@@ -101,24 +107,29 @@ impl ErrorCode {
     /// both sides together. Follow-up: introduce typed errors in `vopono_core`
     /// at these boundaries and delete the string matching entirely.
     pub fn from_anyhow(error: &Error) -> Self {
-        if let Some(code) = error
-            .chain()
-            .find_map(|cause| cause.downcast_ref::<CliError>().map(CliError::code))
-        {
-            return code;
+        if let Some(cli) = find_typed_error::<CliError>(error) {
+            return cli.code();
         }
 
-        if let Some(report) = error.downcast_ref::<crate::launch_diagnostics::LaunchFailure>() {
+        if let Some(report) = find_typed_error::<crate::launch_diagnostics::LaunchFailure>(error) {
             return report.code;
         }
-        if let Some(setup) = error.downcast_ref::<vopono_core::diagnostics::SetupError>() {
+        if let Some(setup) = find_typed_error::<vopono_core::diagnostics::SetupError>(error) {
             return Self::from_setup(setup);
         }
-        if error
-            .downcast_ref::<vopono_core::diagnostics::Diagnostic>()
-            .is_some()
-        {
-            return Self::VpnConnectionFailed;
+        if let Some(diagnostic) = find_typed_error::<vopono_core::diagnostics::Diagnostic>(error) {
+            use vopono_core::diagnostics::DiagnosticCode as Code;
+            return match diagnostic.code {
+                Code::TunnelAuthentication
+                | Code::TunnelTls
+                | Code::TunnelHandshake
+                | Code::TunnelConnectivity
+                | Code::EndpointDns
+                | Code::EndpointTransport
+                | Code::NamespaceRouting
+                | Code::NamespaceDns => Self::VpnConnectionFailed,
+                _ => Self::InternalError,
+            };
         }
 
         let message = error.to_string().to_ascii_lowercase();
@@ -168,7 +179,7 @@ impl ErrorCode {
 /// The top-level message plus any additional context chain entries are kept so
 /// frontends do not lose `anyhow` context.
 pub fn error_json_value(error: &Error) -> serde_json::Value {
-    let report = error.downcast_ref::<crate::launch_diagnostics::LaunchFailure>();
+    let report = find_typed_error::<crate::launch_diagnostics::LaunchFailure>(error);
     let displayed_error = report
         .and_then(|report| report.original.as_ref())
         .unwrap_or(error);
@@ -186,11 +197,11 @@ pub fn error_json_value(error: &Error) -> serde_json::Value {
             "context": context,
         }
     });
-    if let Some(setup) = error.downcast_ref::<vopono_core::diagnostics::SetupError>() {
+    if let Some(setup) = find_typed_error::<vopono_core::diagnostics::SetupError>(error) {
         value["error"]["message"] = serde_json::json!(setup.to_string());
         value["error"]["context"] = serde_json::json!([]);
     }
-    if let Some(diagnostic) = error.downcast_ref::<vopono_core::diagnostics::Diagnostic>() {
+    if let Some(diagnostic) = find_typed_error::<vopono_core::diagnostics::Diagnostic>(error) {
         value["error"]["diagnostics"] = serde_json::json!([diagnostic]);
         value["error"]["message"] = serde_json::json!(diagnostic.to_string());
         value["error"]["context"] = serde_json::json!([]);
@@ -222,6 +233,21 @@ mod tests {
             "tunnel_authentication"
         );
         assert!(!value.to_string().contains("token=secret"));
+
+        let wrapped = anyhow::Error::new(vopono_core::diagnostics::Diagnostic::new(
+            DiagnosticCode::ProviderConfig,
+            DiagnosticState::Fail,
+            "Invalid config",
+            None,
+        ))
+        .context("outer wrapper");
+        let wrapped_value = error_json_value(&wrapped);
+        assert_eq!(wrapped_value["error"]["code"], "internal_error");
+        assert_eq!(
+            wrapped_value["error"]["message"],
+            "ProviderConfig: Invalid config"
+        );
+        assert_eq!(wrapped_value["error"]["context"], serde_json::json!([]));
     }
 
     #[test]

@@ -60,6 +60,10 @@ pub fn set_config_dir_override(path: Option<PathBuf>) {
     CONFIG_DIR_OVERRIDE.with(|ov| *ov.borrow_mut() = path);
 }
 
+pub fn config_dir_override() -> Option<PathBuf> {
+    CONFIG_DIR_OVERRIDE.with(|ov| ov.borrow().clone())
+}
+
 pub fn set_config_owner_override(owner: Option<(Uid, Gid)>) {
     CONFIG_OWNER_OVERRIDE.with(|ov| *ov.borrow_mut() = owner);
 }
@@ -158,7 +162,7 @@ pub fn resolve_config_owner() -> anyhow::Result<(Option<Uid>, Option<Gid>)> {
 /// explicit override; the sudo path derives the invoking account from NSS.
 pub(crate) fn config_write_owner() -> anyhow::Result<Option<(Uid, Gid)>> {
     if let Some(owner) = config_owner_override() {
-        return Ok(Some(owner));
+        return Ok((!owner.0.is_root()).then_some(owner));
     }
     if nix::unistd::geteuid().is_root() {
         let user = effective_user()?;
@@ -342,6 +346,7 @@ pub fn get_running_process_pids(process_name: &str) -> Vec<u32> {
 /// `readlink(2)` on `/run/netns/<name>` bind mounts returns `EINVAL` on
 /// several kernels.
 pub fn process_is_in_network_namespace(pid: u32, ns_name: &str) -> anyhow::Result<bool> {
+    crate::network::netns::validate_netns_name(ns_name)?;
     let process_namespace = fs::metadata(format!("/proc/{pid}/ns/net"))
         .with_context(|| format!("Could not inspect network namespace for PID {pid}"))?;
     let target_namespace = fs::metadata(format!("/var/run/netns/{ns_name}"))
@@ -424,20 +429,30 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
 /// Owns the `vopono/locks` layout so callers (e.g. the lifecycle control
 /// commands) do not need to know where lockfiles live on disk.
 pub fn remove_lock_files(namespace: &str) -> anyhow::Result<()> {
+    crate::network::netns::validate_netns_name(namespace)?;
     let mut lock_dir = config_dir()?;
     lock_dir.push(format!("vopono/locks/{namespace}"));
-    if !lock_dir.exists() {
+    let Ok(meta) = std::fs::symlink_metadata(&lock_dir) else {
+        return Ok(());
+    };
+    if !meta.is_dir() {
         return Ok(());
     }
     for entry in std::fs::read_dir(&lock_dir)? {
         let entry = entry?;
-        if entry.path().is_file() {
-            debug!("Removing lockfile: {}", entry.path().display());
-            std::fs::remove_file(entry.path())?;
+        if entry.file_type()?.is_file() {
+            let path = entry.path();
+            debug!("Removing lockfile: {}", path.display());
+            owner_write::remove_file_as_config_owner(&path)?;
         }
     }
     // Best-effort: only succeeds when the directory is now empty.
-    std::fs::remove_dir(&lock_dir).ok();
+    if matches!(
+        owner_write::remove_dir_as_config_owner_if_needed(&lock_dir),
+        Ok(false)
+    ) {
+        std::fs::remove_dir(&lock_dir).ok();
+    }
     Ok(())
 }
 
@@ -599,7 +614,14 @@ pub fn get_config_from_alias(list_path: &Path, alias: &str) -> anyhow::Result<Pa
 }
 
 pub fn get_config_file_protocol(config_file: &Path) -> anyhow::Result<Protocol> {
-    let content = fs::read_to_string(config_file).map_err(|e| {
+    let bytes = owner_write::read_file_as_config_owner(config_file).map_err(|e| {
+        anyhow!(
+            "Failed to read VPN config file: {}, err: {}",
+            config_file.to_string_lossy(),
+            e
+        )
+    })?;
+    let content = String::from_utf8(bytes).map_err(|e| {
         anyhow!(
             "Failed to read VPN config file: {}, err: {}",
             config_file.to_string_lossy(),

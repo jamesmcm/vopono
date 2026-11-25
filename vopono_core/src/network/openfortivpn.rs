@@ -17,16 +17,36 @@ const MAX_STARTUP_OUTPUT: usize = 1024 * 1024;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct OpenFortiVpn {
     pub(crate) pid: u32,
-    #[serde(skip)]
-    _runtime_dir: Option<tempfile::TempDir>,
+    #[serde(default)]
+    runtime_dir: Option<PathBuf>,
     #[serde(skip)]
     cleanup_enabled: bool,
 }
 
-fn validate_unprivileged_config(config_file: &Path) -> anyhow::Result<()> {
-    const EXECUTION_DIRECTIVES: &[&str] = &["pinentry", "pppd-plugin", "pppd-call", "ppp-system"];
-    let contents = std::fs::read_to_string(config_file)
+fn read_config_as_owner(config_file: &Path) -> anyhow::Result<String> {
+    let bytes = crate::util::owner_write::read_file_as_config_owner(config_file)
         .with_context(|| format!("Failed to read {}", config_file.display()))?;
+    String::from_utf8(bytes).with_context(|| {
+        format!(
+            "OpenFortiVPN config {} is not valid UTF-8",
+            config_file.display()
+        )
+    })
+}
+
+fn validate_unprivileged_config_str(contents: &str) -> anyhow::Result<()> {
+    const EXECUTION_DIRECTIVES: &[&str] = &[
+        "pinentry",
+        "pppd-plugin",
+        "pppd-call",
+        "ppp-system",
+        "ca-file",
+        "user-cert",
+        "user-key",
+        "pppd-use-peerdns",
+        "pppd-ipparam",
+        "pppd-log",
+    ];
     for (line_number, line) in contents.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -42,9 +62,13 @@ fn validate_unprivileged_config(config_file: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+fn validate_unprivileged_config(config_file: &Path) -> anyhow::Result<()> {
+    validate_unprivileged_config_str(&read_config_as_owner(config_file)?)
+}
+
 pub fn server_from_config(config_file: &Path) -> anyhow::Result<String> {
-    let contents = std::fs::read_to_string(config_file)
-        .with_context(|| format!("Failed to read {}", config_file.display()))?;
+    let contents = read_config_as_owner(config_file)?;
     contents
         .lines()
         .map(str::trim)
@@ -102,18 +126,33 @@ impl OpenFortiVpn {
             ));
         }
 
+        let contents = read_config_as_owner(&config_file)?;
         if crate::util::is_daemon_mode() {
-            validate_unprivileged_config(&config_file)?;
+            validate_unprivileged_config_str(&contents)?;
         }
 
         info!("Launching OpenFortiVPN...");
         let runtime_dir = super::etc_overlay::trusted_runtime_dir("openfortivpn-")?;
+        // Freeze the validated config into a root-owned 0600 file inside runtime_dir
+        // to eliminate TOCTOU races against a user-writable config path.
+        let frozen_config = runtime_dir.path().join("config");
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .mode(0o600)
+                .open(&frozen_config)?;
+            file.write_all(contents.as_bytes())?;
+        }
         let pppd_log = runtime_dir.path().join("pppd.log");
         // Must run as root - https://github.com/adrienverge/openfortivpn/issues/650
         let command_vec = ([
             "openfortivpn",
             "-c",
-            config_file.to_str().expect("Invalid config path"),
+            frozen_config
+                .to_str()
+                .context("Invalid frozen OpenFortiVPN config path")?,
             "--no-dns",
             "--pppd-log",
             pppd_log.to_str().context("Invalid PPP log path")?,
@@ -239,7 +278,7 @@ impl OpenFortiVpn {
 
         Ok(Self {
             pid: id,
-            _runtime_dir: Some(runtime_dir),
+            runtime_dir: Some(runtime_dir.keep()),
             cleanup_enabled: true,
         })
     }
@@ -250,12 +289,17 @@ impl Drop for OpenFortiVpn {
         if !self.cleanup_enabled {
             return;
         }
-        match nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(self.pid as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        ) {
+        let pid = nix::unistd::Pid::from_raw(self.pid as i32);
+        match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
             Ok(_) => debug!("Killed OpenFortiVPN (pid: {})", self.pid),
             Err(e) => error!("Failed to kill OpenFortiVPN (pid: {}): {:?}", self.pid, e),
+        }
+        while matches!(
+            nix::sys::wait::waitpid(pid, None),
+            Err(nix::errno::Errno::EINTR)
+        ) {}
+        if let Some(runtime) = &self.runtime_dir {
+            let _ = std::fs::remove_dir_all(runtime);
         }
     }
 }
@@ -347,7 +391,18 @@ mod tests {
 
     #[test]
     fn daemon_config_rejects_execution_directives() {
-        for directive in ["pinentry", "pppd-plugin", "pppd-call", "ppp-system"] {
+        for directive in [
+            "pinentry",
+            "pppd-plugin",
+            "pppd-call",
+            "ppp-system",
+            "ca-file",
+            "user-cert",
+            "user-key",
+            "pppd-use-peerdns",
+            "pppd-ipparam",
+            "pppd-log",
+        ] {
             let mut config = tempfile::NamedTempFile::new().unwrap();
             writeln!(config, "host = vpn.example.com\n{directive} = /tmp/evil").unwrap();
             let error = validate_unprivileged_config(config.path())

@@ -94,7 +94,7 @@ pub fn print_providers(json: bool) -> anyhow::Result<()> {
     }
 
     println!(
-        "id\tname\tprotocols\tconfigured\tlast_sync\tport_forwarding\tautomatic_port_forwarding\tserver_count"
+        "id\tname\tprotocols\tconfigured\tlast_sync\tport_forwarding\tautomatic_port_forwarding\tport_forwarding_by_protocol\tserver_count"
     );
     for provider in providers {
         let pf_by_protocol = provider

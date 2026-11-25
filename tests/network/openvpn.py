@@ -193,6 +193,15 @@ for backend, transport in [('nftables', 'udp'), ('iptables', 'udp'),
     probe.wait_for_tunnel()
     probe.close()
     probe.assert_isolated()
+    if backend == 'iptables' and transport == 'tcp-client':
+        # The OpenVPN process must exit even when its supervisor cannot run
+        # normal shutdown. The application remains available for explicit stop.
+        supervisor_pid = record['namespace']['openvpn']['pid']
+        child_pid = int((runtime / 'child.pid').read_text())
+        os.kill(supervisor_pid, signal.SIGKILL)
+        wait_for(lambda: not Path(f'/proc/{child_pid}').exists()
+                 or 'State:\tZ' in Path(f'/proc/{child_pid}/status').read_text())
+        assert Path(f'/proc/{app_pid}').exists()
     ctx.client('stop', 'namespace', name, '--json')
     assert not runtime.exists()
     assert Path('/etc/resolv.conf').read_bytes() == host_dns

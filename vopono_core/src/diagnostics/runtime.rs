@@ -172,11 +172,13 @@ pub fn handshake_age(name: &str, executable: &str, interface: &str) -> Option<u6
         .filter_map(|line| line.split_whitespace().nth(1)?.parse::<u64>().ok())
         .filter(|n| *n > 0)
         .max()?;
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_secs()
-        .checked_sub(last)
+    Some(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()?
+            .as_secs()
+            .saturating_sub(last),
+    )
 }
 
 #[cfg(test)]

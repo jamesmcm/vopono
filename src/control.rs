@@ -51,6 +51,8 @@ pub fn stop_application(
         .into());
     };
 
+    vopono_core::network::netns::validate_netns_name(&namespace_id)?;
+
     // Lockfiles live in a user-writable directory and PIDs can be recycled:
     // in daemon mode the request may come from any local user, so only
     // signal processes owned by the authenticated requester.
@@ -87,7 +89,22 @@ pub fn stop_application(
 
     send_signal(pid, Signal::SIGTERM)?;
     wait_for_process(pid)?;
-    let namespace_removed = wait_for_namespace_removal(&namespace_id)?;
+    // Do not stall 10 seconds waiting for teardown if the namespace is explicitly
+    // persistent or still hosts other live applications.
+    let kept_alive = requester_uid.is_some_and(|uid| {
+        crate::namespace_ownership::is_persistent(&namespace_id, uid).unwrap_or(false)
+    }) || status.namespaces.get(&namespace_id).is_some_and(|locks| {
+        locks.iter().any(|lock| {
+            lock.application_pid.is_some_and(|other| {
+                other != pid && vopono_core::status::lockfile_application_is_live(lock)
+            })
+        })
+    });
+    let namespace_removed = if kept_alive {
+        !namespace_exists(&namespace_id)?
+    } else {
+        wait_for_namespace_removal(&namespace_id)?
+    };
 
     Ok(StopResult {
         version: SCHEMA_VERSION,
