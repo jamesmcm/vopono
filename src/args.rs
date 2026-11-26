@@ -53,7 +53,7 @@ impl<T: IntoEnumIterator + Clone + Display> WrappedArg<T> {
     }
 }
 
-impl<T: IntoEnumIterator + Clone + Display> ValueEnum for WrappedArg<T> {
+impl<T: IntoEnumIterator + Clone + Display + Send + Sync + 'static> ValueEnum for WrappedArg<T> {
     fn from_str(input: &str, ignore_case: bool) -> core::result::Result<Self, String> {
         let use_input = input.trim().to_string();
         let found = if ignore_case {
@@ -69,16 +69,39 @@ impl<T: IntoEnumIterator + Clone + Display> ValueEnum for WrappedArg<T> {
     }
 
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
-        let name: &'static str = Box::leak(self.variant.to_string().into_boxed_str());
+        use std::collections::HashSet;
+        use std::sync::{LazyLock, Mutex};
+
+        static INTERNED: LazyLock<Mutex<HashSet<&'static str>>> =
+            LazyLock::new(|| Mutex::new(HashSet::new()));
+        let value = self.variant.to_string();
+        let mut interned = INTERNED.lock().unwrap_or_else(|p| p.into_inner());
+        let name: &'static str = if let Some(&existing) = interned.get(value.as_str()) {
+            existing
+        } else {
+            let leaked: &'static str = Box::leak(value.into_boxed_str());
+            interned.insert(leaked);
+            leaked
+        };
         Some(clap::builder::PossibleValue::new(name))
     }
 
     fn value_variants<'a>() -> &'a [Self] {
-        Box::leak(Box::new(
-            T::iter()
-                .map(|x| WrappedArg { variant: x })
-                .collect::<Vec<Self>>(),
-        ))
+        use std::any::{Any, TypeId};
+        use std::collections::HashMap;
+        use std::sync::{LazyLock, Mutex};
+
+        static CACHE: LazyLock<Mutex<HashMap<TypeId, &'static (dyn Any + Send + Sync)>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+        let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        let entry = cache.entry(TypeId::of::<T>()).or_insert_with(|| {
+            let variants: Vec<Self> = T::iter().map(|x| WrappedArg { variant: x }).collect();
+            Box::leak(Box::new(variants))
+        });
+        entry
+            .downcast_ref::<Vec<Self>>()
+            .expect("cached enum variants type match")
+            .as_slice()
     }
 }
 
@@ -319,7 +342,7 @@ pub struct SynchCommand {
     pub json: bool,
 }
 
-#[derive(Parser, Clone, Serialize, Deserialize, Debug)]
+#[derive(Parser, Clone, Default, Serialize, Deserialize, Debug)]
 pub struct ExecCommand {
     /// VPN Provider (must be given unless using custom config)
     #[clap(value_enum, long = "provider", short = 'p', ignore_case = true)]
@@ -408,7 +431,7 @@ pub struct ExecCommand {
 
     /// List of ports to open on network namespace (to allow port forwarding through the tunnel,
     /// e.g. for BitTorrent, etc.)
-    #[clap(long = "open-ports", short = 'o')]
+    #[clap(long = "open-ports", short = 'o', value_delimiter = ',')]
     pub open_ports: Option<Vec<u16>>,
 
     /// List of ports to forward from network namespace to host - useful for running servers and daemons

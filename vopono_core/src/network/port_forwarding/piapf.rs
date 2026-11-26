@@ -101,24 +101,30 @@ impl Piapf {
 
         let traceroute_response = NetworkNamespace::exec_with_output(
             &ns.name,
-            &["traceroute", "-n", "-m", "1", "privateinternetaccess.com"],
+            &[
+                "traceroute",
+                "-4",
+                "-n",
+                "-m",
+                "1",
+                "privateinternetaccess.com",
+            ],
         )?;
         if !traceroute_response.status.success() {
             log::error!("Could not locate gateway with traceroute");
             anyhow::bail!("Could not locate gateway with traceroute")
         }
-        let re = Regex::new(r" *1 *(?P<gateway>\d{1,3}.\d{1,3}.\d{1,3}.\d{1,3}).*")
+        let re = Regex::new(r" *1 *(?P<gateway>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*")
             .expect("Unable to compile regex");
         let result = String::from_utf8_lossy(&traceroute_response.stdout);
         let second_line = result
             .lines()
             .nth(1)
-            .expect("Missing second line (first hop) in traceroute");
+            .context("Missing first-hop line in PIA traceroute output")?;
         let vpn_gateway = re
             .captures(second_line)
-            .expect("No captures from traceroute output")
-            .get(1)
-            .expect("No matching IP group in traceroute")
+            .and_then(|caps| caps.name("gateway"))
+            .context("Could not extract PIA gateway IP from traceroute output")?
             .as_str()
             .to_string();
 
@@ -147,7 +153,25 @@ impl Piapf {
         //log::info!("PIA u/p: {} / {}", pia_user, pia_pass);
 
         let pia_token = PrivateInternetAccess::get_pia_token(&pia_user, &pia_pass)?;
-        let pia_cert_path = pia.pia_cert_path()?.display().to_string();
+        let raw_cert_path = pia.pia_cert_path()?;
+        let pia_cert_path = if crate::util::is_daemon_mode() {
+            // Freeze the PIA CA certificate into a root-owned runtime directory
+            // so root `curl --cacert` never opens a user-writable path directly.
+            let cert_bytes = crate::util::owner_write::read_file_as_config_owner(&raw_cert_path)
+                .with_context(|| {
+                    format!(
+                        "Failed to read PIA CA certificate {}",
+                        raw_cert_path.display()
+                    )
+                })?;
+            let runtime_dir = crate::network::etc_overlay::trusted_runtime_dir("piapf-")?.keep();
+            let frozen_cert = runtime_dir.join("ca.rsa.4096.crt");
+            let mut file = crate::util::create_private_file(&frozen_cert)?;
+            std::io::Write::write_all(&mut file, &cert_bytes)?;
+            frozen_cert.display().to_string()
+        } else {
+            raw_cert_path.display().to_string()
+        };
 
         log::info!("PIA pia_cert_path: {pia_cert_path}");
 

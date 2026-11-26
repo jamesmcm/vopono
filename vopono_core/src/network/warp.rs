@@ -118,13 +118,15 @@ impl Drop for Warp {
         if !self.cleanup_enabled {
             return;
         }
-        match nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(self.pid as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        ) {
+        let pid = nix::unistd::Pid::from_raw(self.pid as i32);
+        match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
             Ok(_) => debug!("Killed warp-svc (pid: {})", self.pid),
             Err(e) => error!("Failed to kill warp-svc (pid: {}): {:?}", self.pid, e),
         }
+        while matches!(
+            nix::sys::wait::waitpid(pid, None),
+            Err(nix::errno::Errno::EINTR)
+        ) {}
     }
 }
 

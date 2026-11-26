@@ -101,7 +101,7 @@ impl Job {
             Ok(DaemonResponse::Json(bytes)) => {
                 // An explicit stop can make a keep-alive handler reject
                 // its final persistence update. Confirmed cleanup still
-                // completes cancellation; retain the daemon's diagnosis.
+                // completes cancellation; retain only safe, reviewed error fields.
                 state.phase = if self.cancel.load(Ordering::Acquire) && cleaned {
                     "cancelled"
                 } else {
@@ -109,14 +109,7 @@ impl Job {
                 };
                 state.error = Some(
                     serde_json::from_slice::<Value>(&bytes)
-                        .map(|mut error| {
-                            // Preserve the existing job-level message alongside the
-                            // full daemon error document and its diagnostic context.
-                            if let Some(message) = error.pointer("/error/message").cloned() {
-                                error["message"] = message;
-                            }
-                            error
-                        })
+                        .map(|raw| sanitize_daemon_json_error(&raw))
                         .unwrap_or_else(
                             |_| json!({"message": "Daemon reported an unparsable error"}),
                         ),
@@ -134,8 +127,10 @@ impl Job {
             }
         }
         state.cleanup_error = !cleaned || state.phase == "indeterminate";
-        drop(state);
+        // Set `done` while still holding `self.state` so status() and cancel()
+        // never observe a terminal phase with `done == false`.
         self.done.store(true, Ordering::Release);
+        drop(state);
     }
 
     pub fn status(&self) -> Value {
@@ -154,26 +149,37 @@ impl Job {
             "finished":self.done.load(Ordering::Acquire)})
     }
     pub fn cancel(self: &Arc<Self>) -> Value {
-        if !self.done.load(Ordering::Acquire) {
-            self.cancel.store(true, Ordering::Release);
-        } else {
-            let (needs_cleanup, is_indeterminate) = {
-                let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                (state.cleanup_error, state.phase == "indeterminate")
-            };
-            if needs_cleanup {
-                let exists = std::path::Path::new("/run/netns")
-                    .join(&self.namespace)
-                    .try_exists()
-                    .unwrap_or(true);
-                if exists {
-                    let config_home = std::env::var("XDG_CONFIG_HOME").ok();
+        let (done, needs_cleanup, is_indeterminate) = {
+            let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let done = self.done.load(Ordering::Acquire);
+            if !done {
+                self.cancel.store(true, Ordering::Release);
+            }
+            (done, state.cleanup_error, state.phase == "indeterminate")
+        };
+        if done && needs_cleanup {
+            let exists = std::path::Path::new("/run/netns")
+                .join(&self.namespace)
+                .try_exists()
+                .unwrap_or(true);
+            if exists {
+                self.cancel.store(true, Ordering::Release);
+                let config_home = std::env::var("XDG_CONFIG_HOME").ok();
+                // Respect the single-in-flight stop invariant so repeated cancels
+                // cannot pile up concurrent daemon connections.
+                if self
+                    .stop_in_flight
+                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    let guard = ClearOnDrop(Arc::clone(&self.stop_in_flight));
                     // Keep synchronous retry bounded so a slow daemon teardown cannot
                     // freeze the single-threaded MCP stdio loop for 30s.
-                    if cleanup_namespace_with_timeout(&self.namespace, config_home.clone(), 5)
-                        .is_ok()
-                    {
-                        self.cancel.store(true, Ordering::Release);
+                    let cleaned =
+                        cleanup_namespace_with_timeout(&self.namespace, config_home.clone(), 5)
+                            .is_ok();
+                    drop(guard);
+                    if cleaned {
                         self.state
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
@@ -186,20 +192,71 @@ impl Job {
                             Some(Arc::clone(self)),
                         );
                     }
-                } else if !is_indeterminate {
-                    // For a definite terminal state whose cleanup timed out while the
-                    // daemon finished tearing down, confirmed absence clears the flag.
-                    self.state
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .cleanup_error = false;
                 }
+            } else if !is_indeterminate {
+                // For a definite terminal state whose cleanup timed out while the
+                // daemon finished tearing down, confirmed absence clears the flag.
+                self.state
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .cleanup_error = false;
             }
         }
         let mut report = self.status();
         report["cancel_requested"] = json!(self.cancel.load(Ordering::Acquire));
         report
     }
+}
+
+/// Project only reviewed, safe fields from a daemon JSON error document so raw
+/// untyped `anyhow` context chains, paths, or commands never leak to MCP callers.
+fn sanitize_daemon_json_error(raw: &Value) -> Value {
+    let code = raw.pointer("/error/code").and_then(Value::as_str);
+    let diagnostics = raw.pointer("/error/diagnostics").and_then(Value::as_array);
+    let diagnostic_message = diagnostics
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("message"))
+        .and_then(Value::as_str);
+    let raw_message = raw.pointer("/error/message").and_then(Value::as_str);
+    let message = diagnostic_message.unwrap_or_else(|| {
+        if let Some(raw_msg) = raw_message {
+            let first = raw_msg.split([':', ';']).next().unwrap_or("").trim();
+            if matches!(
+                first,
+                "Concurrent daemon execution limit reached"
+                    | "No usable config directory for client"
+            ) {
+                return first;
+            }
+        }
+        match code {
+            Some("daemon_unavailable") => "Daemon is unavailable",
+            Some("provider_not_configured") => "VPN provider is not configured",
+            Some("credentials_required") => "VPN credentials are required",
+            Some("protocol_not_supported") => "VPN protocol is not supported by this provider",
+            Some("server_not_found") => "Requested VPN server configuration was not found",
+            Some("dependency_missing") => "A required VPN runtime dependency is missing",
+            Some("permission_denied") => "Permission denied while preparing VPN execution",
+            Some("application_launch_failed") => {
+                "Application failed to launch inside the namespace"
+            }
+            Some("vpn_connection_failed") => "VPN connection failed to establish",
+            Some("invalid_configuration") => "VPN or profile configuration is invalid",
+            _ => "Daemon execution failed",
+        }
+    });
+    let mut error_obj = json!({
+        "code": code.unwrap_or("internal_error"),
+        "message": message,
+    });
+    if let Some(diags) = diagnostics {
+        error_obj["diagnostics"] = Value::Array(diags.clone());
+    }
+    json!({
+        "version": raw.get("version").cloned().unwrap_or_else(|| json!(1)),
+        "message": message,
+        "error": error_obj,
+    })
 }
 
 // Raw daemon errors can contain user-controlled paths/context. Keep only
@@ -214,7 +271,7 @@ fn refusal_reason(message: &str) -> &'static str {
 
 /// Allowlist only safe runtime/desktop variables for MCP-launched jobs so agent
 /// harness secrets (API keys, cloud tokens) are never forwarded to applications.
-fn filtered_mcp_env() -> std::collections::HashMap<String, String> {
+pub(super) fn filtered_mcp_env() -> std::collections::HashMap<String, String> {
     const EXACT: &[&str] = &[
         "HOME",
         "USER",
@@ -317,6 +374,7 @@ impl Jobs {
             done: AtomicBool::new(false),
             stop_in_flight: Arc::new(AtomicBool::new(false)),
         });
+        daemon::set_socket_timeouts_for(&conn, 5)?;
         daemon::write_framed(&mut conn, &wincode::serialize(&request)?)?;
         // Once Execute has been sent, track the job immediately so any later
         // setup failure transitions to indeterminate with tracked cleanup.
@@ -330,6 +388,7 @@ impl Jobs {
                     stderr_write.as_raw_fd(),
                 ],
             )?;
+            let _ = daemon::clear_socket_timeouts(&conn);
             drop((stdin, stdout_write, stderr_write));
             conn.set_nonblocking(true)?;
             Ok(())
@@ -533,7 +592,7 @@ fn drain(file: &mut File, capture: &Mutex<Capture>) {
     }
 }
 fn supervise(
-    job: &Job,
+    job: &Arc<Job>,
     conn: &mut LocalSocketStream,
     stdout: &mut File,
     stderr: &mut File,
@@ -577,11 +636,13 @@ fn supervise(
             job.cancel.store(true, Ordering::Release);
             job.state.lock().unwrap_or_else(|p| p.into_inner()).phase = "cancelling";
             // Send stop asynchronously so pipe draining and conn reads never stall.
+            // Pass the job so a confirmed daemon stop clears cleanup_error even if
+            // supervise() already timed out into "indeterminate".
             spawn_stop_request(
                 job.namespace.clone(),
                 config_home.clone(),
                 Arc::clone(&job.stop_in_flight),
-                None,
+                Some(Arc::clone(job)),
             );
             cancellation = Some(now);
             last_stop_attempt = Some(now);
@@ -600,7 +661,7 @@ fn supervise(
                     job.namespace.clone(),
                     config_home.clone(),
                     Arc::clone(&job.stop_in_flight),
-                    None,
+                    Some(Arc::clone(job)),
                 );
                 last_stop_attempt = Some(now);
             }
@@ -625,14 +686,16 @@ pub(super) fn json_command(
 ) -> anyhow::Result<(Value, bool)> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
-    let mut child = Command::new(std::env::current_exe()?)
-        .args(args)
+    let mut cmd = Command::new(std::env::current_exe()?);
+    cmd.args(args)
+        .env_clear()
+        .envs(filtered_mcp_env())
         .env("RUST_LOG", "off")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .process_group(0)
-        .spawn()?;
+        .process_group(0);
+    let mut child = cmd.spawn()?;
     let pid = nix::unistd::Pid::from_raw(-(child.id() as i32));
     let mut bytes = Vec::new();
     let mut reaped = false;
@@ -665,9 +728,13 @@ pub(super) fn json_command(
             }
         }
     })();
-    if outcome.is_err() && !reaped {
+    if outcome.is_err() {
+        // Always terminate the whole process group (including descendants that
+        // may still hold stdout open even after the direct child was reaped).
         let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
-        let _ = child.wait();
+        if !reaped {
+            let _ = child.wait();
+        }
     }
     let status = outcome?;
     Ok((
@@ -843,5 +910,41 @@ mod tests {
             offset = next;
         }
         assert_eq!(reassembled, text);
+    }
+
+    #[test]
+    fn daemon_json_errors_project_only_safe_fields() {
+        let raw = json!({
+            "version": 1,
+            "error": {
+                "code": "internal_error",
+                "message": "Failed to read /home/alice/SECRET_PATH: SECRET_TOKEN",
+                "context": ["inner SECRET_CONTEXT"],
+            }
+        });
+        let sanitized = sanitize_daemon_json_error(&raw);
+        let serialized = sanitized.to_string();
+        assert!(!serialized.contains("SECRET_PATH"));
+        assert!(!serialized.contains("SECRET_TOKEN"));
+        assert!(!serialized.contains("SECRET_CONTEXT"));
+        assert_eq!(sanitized["error"]["code"], "internal_error");
+
+        let with_diag = json!({
+            "version": 1,
+            "error": {
+                "code": "vpn_connection_failed",
+                "message": "raw message",
+                "diagnostics": [{
+                    "code": "tunnel_authentication",
+                    "state": "fail",
+                    "message": "OpenVPN authentication rejected by the server"
+                }]
+            }
+        });
+        let sanitized_diag = sanitize_daemon_json_error(&with_diag);
+        assert_eq!(
+            sanitized_diag["message"],
+            "OpenVPN authentication rejected by the server"
+        );
     }
 }

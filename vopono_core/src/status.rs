@@ -18,6 +18,25 @@ use walkdir::WalkDir;
 /// Sidecar file next to a namespace's lockfiles holding the latest
 /// provider-assigned forwarded port, refreshed by the forwarder thread.
 pub(crate) const FORWARDED_PORT_SIDECAR: &str = "port-forwarding.json";
+pub(crate) const FORWARDED_PORT_TEMP_PREFIX: &str = "port-forwarding.tmp-";
+const FORWARDED_PORT_LEGACY_TEMP_PREFIX: &str = ".port-forwarding-";
+const MAX_LOCK_WALK_ENTRIES: usize = 4096;
+
+pub(crate) fn is_forwarded_port_sidecar(name: &str) -> bool {
+    let valid_suffix = |suffix: &str| {
+        !suffix.is_empty()
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    };
+    name == FORWARDED_PORT_SIDECAR
+        || name
+            .strip_prefix(FORWARDED_PORT_TEMP_PREFIX)
+            .is_some_and(valid_suffix)
+        || name
+            .strip_prefix(FORWARDED_PORT_LEGACY_TEMP_PREFIX)
+            .is_some_and(valid_suffix)
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ForwardedPortSidecar {
@@ -62,8 +81,18 @@ pub fn record_forwarded_port(locks_dir: &Path, ns_name: &str, port: u16) -> anyh
 /// Replace the reported forwarded port with the sidecar value when present.
 /// Provider and automatic flag still come from the embedded lockfile state.
 fn overlay_forwarded_port(locks_root: &Path, ns_name: &str, locks: &mut [LockfileStatus]) {
+    if crate::network::netns::validate_netns_name(ns_name).is_err() {
+        return;
+    }
+    let ns_dir = locks_root.join(ns_name);
+    if std::fs::symlink_metadata(&ns_dir)
+        .map(|meta| meta.file_type().is_symlink() || !meta.is_dir())
+        .unwrap_or(true)
+    {
+        return;
+    }
     let Ok(raw) = owner_write::read_bounded_regular_file_nofollow(
-        &locks_root.join(ns_name).join(FORWARDED_PORT_SIDECAR),
+        &ns_dir.join(FORWARDED_PORT_SIDECAR),
         64 * 1024,
     ) else {
         return;
@@ -117,9 +146,19 @@ impl LockNamespacesStatus {
 }
 
 pub fn read_lock_namespaces() -> anyhow::Result<LockNamespacesStatus> {
-    let mut dir = config_dir()?;
-    dir.push("vopono");
-    dir.push("locks");
+    let base = config_dir()?;
+    let vopono_dir = base.join("vopono");
+    match std::fs::symlink_metadata(&vopono_dir) {
+        Ok(meta) if meta.file_type().is_symlink() || !meta.is_dir() => {
+            return Ok(LockNamespacesStatus::default());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LockNamespacesStatus::default());
+        }
+        Err(error) => return Err(error.into()),
+        Ok(_) => {}
+    }
+    let dir = vopono_dir.join("locks");
     read_lock_namespaces_from_dir(dir)
 }
 
@@ -129,11 +168,28 @@ pub fn read_lock_namespaces_from_dir(
     let dir = dir.into();
     let mut grouped_locks: HashMap<String, LockGroup> = HashMap::new();
     let mut errors = Vec::new();
-    if !dir.exists() {
-        return Ok(LockNamespacesStatus::default());
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if !meta.file_type().is_symlink() && meta.is_dir() => {}
+        Ok(_) => return Ok(LockNamespacesStatus::default()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LockNamespacesStatus::default());
+        }
+        Err(error) => return Err(error.into()),
     }
 
-    for entry in WalkDir::new(&dir) {
+    for (seen, entry) in WalkDir::new(&dir)
+        .max_depth(2)
+        .follow_links(false)
+        .into_iter()
+        .enumerate()
+    {
+        if seen >= MAX_LOCK_WALK_ENTRIES {
+            errors.push(format!(
+                "{}: lock directory entry limit exceeded",
+                dir.display()
+            ));
+            break;
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -151,6 +207,13 @@ pub fn read_lock_namespaces_from_dir(
         match owner_write::read_regular_file_nofollow(entry.path()) {
             Ok(bytes) => match ron::de::from_bytes::<LockfileStatus>(&bytes) {
                 Ok(lock) => {
+                    if crate::network::netns::validate_netns_name(&lock.ns.name).is_err() {
+                        errors.push(format!(
+                            "{}: invalid namespace name in lockfile",
+                            entry.path().display()
+                        ));
+                        continue;
+                    }
                     let lock = if lock.application_pid.is_none()
                         && lockfile_kind == LockfileKind::Client
                     {
@@ -246,12 +309,9 @@ fn client_pid_from_lockfile_name(filename: &str) -> Option<u32> {
 impl LockfileKind {
     pub fn from_path(path: &Path) -> Option<Self> {
         let filename = path.file_name()?.to_str()?;
-        if filename.chars().all(|c| c.is_ascii_digit()) {
+        if !filename.is_empty() && filename.chars().all(|c| c.is_ascii_digit()) {
             Some(Self::Primary)
-        } else if filename
-            .strip_prefix("client-")
-            .is_some_and(|pid| pid.chars().all(|c| c.is_ascii_digit()))
-        {
+        } else if client_pid_from_lockfile_name(filename).is_some() {
             Some(Self::Client)
         } else {
             None
@@ -302,7 +362,7 @@ fn lock_dir_has_only_ignored(dir: &Path, own_lock_name: Option<&str>) -> anyhow:
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             return Ok(false);
         };
-        if name != FORWARDED_PORT_SIDECAR
+        if !is_forwarded_port_sidecar(&name)
             && !is_health_sidecar(&name)
             && own_lock_name != Some(name.as_str())
         {
@@ -409,7 +469,11 @@ pub(crate) fn remove_forwarded_port_sidecar(dir: &Path) {
     remove(&dir.join(HEALTH_FILE));
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
-            if entry.file_name().to_str().is_some_and(is_health_sidecar) {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| is_health_sidecar(name) || is_forwarded_port_sidecar(name))
+            {
                 remove(&entry.path());
             }
         }
@@ -417,6 +481,9 @@ pub(crate) fn remove_forwarded_port_sidecar(dir: &Path) {
 }
 
 fn application_pid_is_stale(pid: u32, namespace: &str) -> bool {
+    if crate::network::netns::validate_netns_name(namespace).is_err() {
+        return true;
+    }
     if !check_process_running(pid) || process_is_zombie(pid) {
         return true;
     }
@@ -822,8 +889,24 @@ mod tests {
         let dir = unique_temp_dir("client-detect");
         fs::write(dir.join("100"), status_lock("vo_m_se", "daemon-app", 1)).unwrap();
         assert!(!has_client_lockfiles(&dir));
+        // Bare "client-" without digits must never be treated as a live client lockfile.
+        assert_eq!(LockfileKind::from_path(Path::new("client-")), None);
+        assert_eq!(LockfileKind::from_path(Path::new("")), None);
+        assert!(is_forwarded_port_sidecar("port-forwarding.tmp-aB12"));
         fs::write(dir.join("client-200"), status_lock("vo_m_se", "firefox", 2)).unwrap();
         assert!(has_client_lockfiles(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lock_readers_reject_invalid_namespace_names_inside_lockfiles() {
+        let dir = unique_temp_dir("invalid-ns-lock");
+        let ns_dir = dir.join("vo_ok");
+        fs::create_dir_all(&ns_dir).unwrap();
+        fs::write(ns_dir.join("100"), status_lock("../etc", "app", 1)).unwrap();
+        let status = read_lock_namespaces_from_dir(&dir).unwrap();
+        assert!(status.namespaces.is_empty());
+        assert!(!status.errors.is_empty());
         let _ = fs::remove_dir_all(dir);
     }
 

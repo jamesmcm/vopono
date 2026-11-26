@@ -40,7 +40,20 @@ pub fn collect(
     protocol: Option<&Protocol>,
     openvpn_auth: Option<&Path>,
 ) -> anyhow::Error {
-    if error.downcast_ref::<LaunchFailure>().is_some() {
+    collect_for_provider(error, None, path, protocol, openvpn_auth)
+}
+
+pub fn collect_for_provider(
+    error: anyhow::Error,
+    provider: Option<&vopono_core::config::providers::VpnProvider>,
+    path: Option<&Path>,
+    protocol: Option<&Protocol>,
+    openvpn_auth: Option<&Path>,
+) -> anyhow::Error {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<LaunchFailure>().is_some())
+    {
         return error;
     }
     let setup = error
@@ -104,7 +117,11 @@ pub fn collect(
             Err(diagnostic) => {
                 // Avoid emitting a false ProviderConfig [Fail] for PIA WireGuard
                 // bootstrap templates, which intentionally omit PublicKey until addKey.
+                let is_pia = provider
+                    == Some(&vopono_core::config::providers::VpnProvider::PrivateInternetAccess)
+                    || (provider.is_none() && path.components().any(|c| c.as_os_str() == "pia"));
                 if *protocol == Protocol::Wireguard
+                    && is_pia
                     && vopono_core::diagnostics::validate_pia_template(path).is_ok()
                 {
                     diagnostics.push(Diagnostic::new(
@@ -145,22 +162,30 @@ pub fn command_failure_with_env(
     error: anyhow::Error,
     client_env: Option<&std::collections::HashMap<String, String>>,
 ) -> anyhow::Error {
-    if error.downcast_ref::<LaunchFailure>().is_some() {
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<LaunchFailure>().is_some())
+    {
         return error;
+    }
+    if command.existing_netns.is_some() {
+        return collect_for_provider(error, None, None, None, None);
     }
     let connection = crate::args_config::ArgsConfig::get_config_file(command)
         .ok()
         .and_then(|config| {
             crate::args_config::ConnectionSettings::read_with_env(command, &config, client_env).ok()
         });
+    let provider = connection.as_ref().and_then(|c| c.provider.as_ref());
     let path = connection
         .as_ref()
         .and_then(|connection| connection.custom.as_deref());
     let protocol = connection
         .as_ref()
         .and_then(|connection| connection.detected_protocol().ok());
-    collect(
+    collect_for_provider(
         error,
+        provider,
         path,
         protocol.as_ref(),
         command.auth_user_pass.as_deref(),

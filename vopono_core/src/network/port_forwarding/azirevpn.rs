@@ -273,11 +273,11 @@ impl AzireVpnPortForwarding {
         let mut i = 1;
         let data = loop {
             let cmd = create_command(local_ip);
-            let output_string = exec_curl(&netns.name, "create", &cmd, access_token)?;
-
-            log::debug!("AzireVPN Port forwarding creation response: {output_string}");
             let maybe_data: anyhow::Result<CreateResponse> =
-                parse_success_response("create", output_string.as_str());
+                exec_curl(&netns.name, "create", &cmd, access_token).and_then(|output_string| {
+                    log::debug!("AzireVPN Port forwarding creation response: {output_string}");
+                    parse_success_response("create", output_string.as_str())
+                });
 
             if let Ok(data) = maybe_data {
                 break Ok(data);

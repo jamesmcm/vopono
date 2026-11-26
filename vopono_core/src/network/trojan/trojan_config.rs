@@ -25,6 +25,7 @@ pub enum RunType {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
 pub struct TrojanConfig {
     run_type: RunType,
     local_addr: IpAddr,
@@ -56,8 +57,16 @@ impl TrojanConfig {
         let config_str = override_config_str.as_deref().unwrap_or(FORWARD_TEMPLATE);
 
         let config: TrojanConfig = serde_json::from_str(config_str)
-            .context("Failed to parse Trojan JSON configuration")?;
+            .map_err(|_| anyhow::anyhow!("Failed to parse Trojan JSON configuration"))?;
         Ok(config)
+    }
+
+    pub fn ssl_cert_path(&self) -> Option<&str> {
+        (!self.ssl.cert.is_empty()).then_some(self.ssl.cert.as_str())
+    }
+
+    pub fn set_cert_path(&mut self, path: &Path) {
+        self.ssl.cert = path.to_string_lossy().to_string();
     }
 
     pub fn get_local_socketaddr(&self) -> anyhow::Result<SocketAddr> {

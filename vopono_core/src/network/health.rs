@@ -12,9 +12,12 @@ pub const HEALTH_STALE_AFTER_SECONDS: u64 = 90;
 /// Whether `name` is health telemetry rather than namespace session state.
 pub fn is_health_sidecar(name: &str) -> bool {
     name == HEALTH_FILE
-        || name
-            .strip_prefix(HEALTH_TEMP_PREFIX)
-            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()))
+        || name.strip_prefix(HEALTH_TEMP_PREFIX).is_some_and(|suffix| {
+            !suffix.is_empty()
+                && suffix
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -78,5 +81,14 @@ mod tests {
         assert!(health.diagnostics_checked_at.is_none());
         assert!(health.daemon_version.is_none());
         assert!(health.daemon_pid.is_none());
+    }
+
+    #[test]
+    fn health_sidecar_matches_alphanumeric_temp_suffixes() {
+        assert!(is_health_sidecar("health.json"));
+        assert!(is_health_sidecar("health.tmp-1234"));
+        assert!(is_health_sidecar("health.tmp-aB3xYz"));
+        assert!(!is_health_sidecar("health.tmp-"));
+        assert!(!is_health_sidecar("health.tmp-../evil"));
     }
 }

@@ -41,16 +41,34 @@ pub fn run(
         .custom_flags(libc::O_NOFOLLOW)
         .open(root.join(format!(".{alias}.sync.lock")))?;
     // The file descriptor releases the lock on every return, including panic.
-    ensure!(
-        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } == 0,
-        "Could not lock provider synchronization"
-    );
+    loop {
+        let result = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) };
+        if result == 0 {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return Err(error).context("Could not lock provider synchronization");
+    }
+    let replacing = match fs::symlink_metadata(&live) {
+        Ok(meta) => {
+            ensure!(
+                !meta.file_type().is_symlink() && meta.is_dir(),
+                "Provider directory {} must be a real directory, not a symlink",
+                live.display()
+            );
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
     let stage = tempfile::Builder::new()
         .prefix(".sync-")
         .tempdir_in(&root)?;
     let staged = stage.path().join("vopono").join(&alias);
     fs::create_dir_all(&staged)?;
-    let replacing = live.try_exists()?;
     let parent = File::open(&root)?;
     if replacing {
         copy_tree(&live, &staged)?;

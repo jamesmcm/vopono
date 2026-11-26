@@ -16,8 +16,16 @@ static GLOBAL_PROXY_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
 /// Dropping the proxy stops its accept loop and all active relays.
 pub struct TcpProxy {
     stop: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+struct AliveGuard(Arc<AtomicBool>);
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 struct ConnectionSlot {
@@ -177,6 +185,10 @@ impl TcpProxy {
         Self::from_listener(listener, proxy_to)
     }
 
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+    }
+
     fn from_listener(
         listener: std::net::TcpListener,
         proxy_to: SocketAddr,
@@ -184,10 +196,13 @@ impl TcpProxy {
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
+        let alive = Arc::new(AtomicBool::new(true));
+        let thread_alive = Arc::clone(&alive);
         let active = Arc::new(AtomicUsize::new(0));
         let workers = Arc::new(Mutex::new(Vec::<JoinHandle<()>>::new()));
         let thread_workers = Arc::clone(&workers);
         let thread = std::thread::spawn(move || {
+            let _alive_guard = AliveGuard(thread_alive);
             while !thread_stop.load(Ordering::Acquire) {
                 let client = match listener.accept() {
                     Ok((client, _)) => client,
@@ -195,7 +210,35 @@ impl TcpProxy {
                         std::thread::sleep(Duration::from_millis(25));
                         continue;
                     }
-                    Err(_) => break,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::Interrupted
+                                | io::ErrorKind::ConnectionAborted
+                                | io::ErrorKind::ConnectionReset
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error)
+                        if matches!(
+                            error.raw_os_error(),
+                            Some(
+                                nix::libc::EMFILE
+                                    | nix::libc::ENFILE
+                                    | nix::libc::ENOBUFS
+                                    | nix::libc::ENOMEM
+                            )
+                        ) =>
+                    {
+                        log::warn!("Transient TCP proxy accept error: {error}; backing off");
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                    Err(error) => {
+                        log::warn!("TCP proxy accept loop exiting on fatal error: {error}");
+                        break;
+                    }
                 };
                 if !try_increment_bounded(&active, MAX_PROXY_CONNECTIONS) {
                     log::warn!(
@@ -283,6 +326,7 @@ impl TcpProxy {
         });
         Ok(Self {
             stop,
+            alive,
             thread: Some(thread),
             workers,
         })

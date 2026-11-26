@@ -86,6 +86,7 @@ pub fn collect(
                     .as_ref()
                     .and_then(|vpn| vpn.recovery_host.as_deref())
             })
+            && hostname.parse::<std::net::IpAddr>().is_err()
             && let Some(left) = deadline.checked_duration_since(Instant::now())
         {
             match super::resolve_bounded(hostname, left.min(Duration::from_millis(500))) {

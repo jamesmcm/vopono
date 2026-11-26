@@ -429,22 +429,66 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
 /// Owns the `vopono/locks` layout so callers (e.g. the lifecycle control
 /// commands) do not need to know where lockfiles live on disk.
 pub fn remove_lock_files(namespace: &str) -> anyhow::Result<()> {
+    use nix::dir::Dir;
+    use nix::fcntl::OFlag;
+    use nix::sys::stat::Mode;
+
     crate::network::netns::validate_netns_name(namespace)?;
-    let mut lock_dir = config_dir()?;
-    lock_dir.push(format!("vopono/locks/{namespace}"));
-    let Ok(meta) = std::fs::symlink_metadata(&lock_dir) else {
+    let base = config_dir()?;
+    let dir_flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let Ok(base_dir) = Dir::open(
+        &base,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    ) else {
         return Ok(());
     };
-    if !meta.is_dir() {
+    let Ok(vopono_dir) = Dir::openat(&base_dir, "vopono", dir_flags, Mode::empty()) else {
         return Ok(());
+    };
+    let Ok(locks_dir) = Dir::openat(&vopono_dir, "locks", dir_flags, Mode::empty()) else {
+        return Ok(());
+    };
+    let Ok(mut ns_dir) = Dir::openat(&locks_dir, namespace, dir_flags, Mode::empty()) else {
+        return Ok(());
+    };
+
+    let lock_dir = base.join("vopono").join("locks").join(namespace);
+    let mut dir_entries = Vec::new();
+    for entry in ns_dir.iter() {
+        dir_entries.push(entry?);
     }
-    for entry in std::fs::read_dir(&lock_dir)? {
-        let entry = entry?;
-        if entry.file_type()?.is_file() {
-            let path = entry.path();
-            debug!("Removing lockfile: {}", path.display());
-            owner_write::remove_file_as_config_owner(&path)?;
+    let mut to_remove = Vec::new();
+    for entry in dir_entries {
+        let Ok(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if name == "." || name == ".." {
+            continue;
         }
+        let is_known = status::LockfileKind::from_path(Path::new(name)).is_some()
+            || status::is_forwarded_port_sidecar(name)
+            || crate::network::health::is_health_sidecar(name);
+        if !is_known {
+            continue;
+        }
+        let is_regular = match entry.file_type() {
+            Some(nix::dir::Type::File) => true,
+            Some(_) => false,
+            None => nix::sys::stat::fstatat(
+                &ns_dir,
+                entry.file_name(),
+                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+            )
+            .is_ok_and(|stat| (stat.st_mode & libc::S_IFMT) == libc::S_IFREG),
+        };
+        if is_regular {
+            to_remove.push(lock_dir.join(name));
+        }
+    }
+    for path in to_remove {
+        debug!("Removing lockfile: {}", path.display());
+        owner_write::remove_file_as_config_owner(&path)?;
     }
     // Best-effort: only succeeds when the directory is now empty.
     if matches!(
@@ -463,6 +507,18 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
     existing_namespaces
         .into_iter()
         .filter(|namespace| {
+            if crate::network::netns::validate_netns_name(namespace).is_err() {
+                return false;
+            }
+            if !namespace.starts_with("vo_") && !namespace.starts_with("mcp-") {
+                return false;
+            }
+            if Path::new("/run/vopono/namespace-owners")
+                .join(namespace)
+                .exists()
+            {
+                return false;
+            }
             if lock_namespaces.contains_key(namespace) {
                 return false;
             }
@@ -684,17 +740,15 @@ pub fn get_lock_namespaces() -> anyhow::Result<LockNamespaces> {
 }
 
 pub fn parse_command_str(command_str: &str) -> anyhow::Result<Vec<String>> {
-    shellwords::split(command_str).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to parse command string: {}, error: {:?}",
-            command_str,
-            e
-        )
-    })
+    shellwords::split(command_str)
+        .map_err(|e| anyhow::anyhow!("Failed to parse command string: {e:?}"))
 }
 
 pub fn hostname_to_ip(hostname: &str) -> anyhow::Result<Vec<IpAddr>> {
-    let socket_addrs = format!("{hostname}:80").to_socket_addrs()?;
+    if let Ok(ip) = hostname.parse::<IpAddr>() {
+        return Ok(vec![ip]);
+    }
+    let socket_addrs = (hostname, 80).to_socket_addrs()?;
     let ip_addrs = socket_addrs.map(|addr| addr.ip()).collect();
 
     Ok(ip_addrs)
@@ -761,5 +815,17 @@ mod tests {
             .collect::<Vec<_>>();
         ross.sort();
         assert_eq!(ross, ["ca-ross.conf", "canada-ca-ross.conf"]);
+    }
+
+    #[test]
+    fn hostname_to_ip_accepts_ipv6_literals_and_parse_command_redacts_input() {
+        assert_eq!(
+            hostname_to_ip("2001:db8::1").unwrap(),
+            vec![IpAddr::V6("2001:db8::1".parse().unwrap())]
+        );
+        let err = parse_command_str("curl --header 'Authorization: SECRET_TOKEN")
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("SECRET_TOKEN"));
     }
 }

@@ -2,9 +2,8 @@
 //! daemon wire format: tools reuse the existing CLI and authenticated socket.
 mod jobs;
 
-use crate::args::{App, ExecCommand, McpServeCommand};
+use crate::args::{ExecCommand, McpServeCommand};
 use anyhow::{Context, ensure};
-use clap::Parser;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::Write;
@@ -125,11 +124,13 @@ impl Server {
                 if !TOOL_NAMES.contains(&name) {
                     return Some(rpc_error(id, -32602, "Unknown tool"));
                 }
-                let arguments = params
-                    .get("arguments")
-                    .filter(|v| !v.is_null())
-                    .cloned()
-                    .unwrap_or_else(|| json!({}));
+                let arguments = match params.get("arguments") {
+                    None | Some(Value::Null) => json!({}),
+                    Some(value) if value.is_object() => value.clone(),
+                    Some(_) => {
+                        return Some(rpc_error(id, -32602, "Tool arguments must be an object"));
+                    }
+                };
                 let result = match self.call(name, arguments) {
                     Ok((value, failed)) => tool_result(value, failed),
                     Err(error) => tool_result(
@@ -156,11 +157,11 @@ impl Server {
                     .any(|allowed| allowed == name),
             "Profile is not allowed by this MCP server"
         );
-        let command = App::try_parse_from(["vopono", "exec", "--profile", name])?;
-        let Some(crate::args::Command::Exec(mut command)) = command.cmd else {
-            unreachable!()
+        let command = ExecCommand {
+            profile: Some(name.to_owned()),
+            vopono_config: self.options.vopono_config.clone(),
+            ..ExecCommand::default()
         };
-        command.vopono_config = self.options.vopono_config.clone();
         Ok(command)
     }
     fn settings(&self, name: &str) -> anyhow::Result<config::Config> {
@@ -188,10 +189,17 @@ impl Server {
         let mut args = if let Some(profile) = input.profile {
             let settings = self.settings(&profile)?;
             let command = self.profile(&profile)?;
-            let connection = crate::args_config::ConnectionSettings::read(&command, &settings)
-                .map_err(|_| {
-                    anyhow::anyhow!("Could not resolve the profile connection settings")
-                })?;
+            let mcp_env = jobs::filtered_mcp_env();
+            let connection = crate::args_config::ConnectionSettings::read_with_env(
+                &command,
+                &settings,
+                Some(&mcp_env),
+            )
+            .map_err(|_| anyhow::anyhow!("Could not resolve the profile connection settings"))?;
+            ensure!(
+                connection.provider.is_some() || connection.custom.is_some(),
+                "Selected profile does not configure a VPN provider or custom configuration"
+            );
             connection.doctor_command(input.offline)
         } else {
             let mut args = vec![
@@ -279,11 +287,10 @@ impl Server {
             }
             "profiles_list" => {
                 let _: Empty = arguments_as(arguments)?;
-                let app = App::try_parse_from(["vopono", "exec"])?;
-                let Some(crate::args::Command::Exec(mut command)) = app.cmd else {
-                    unreachable!()
+                let command = ExecCommand {
+                    vopono_config: self.options.vopono_config.clone(),
+                    ..ExecCommand::default()
                 };
-                command.vopono_config = self.options.vopono_config.clone();
                 let settings = crate::args_config::ArgsConfig::get_config_file(&command)
                     .map_err(|_| anyhow::anyhow!("Could not read configured profiles"))?;
                 let mut profiles: Vec<_> = settings
@@ -691,13 +698,19 @@ pub fn serve(options: McpServeCommand) -> anyhow::Result<()> {
             break;
         }
         if count < 0 {
-            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+            let kind = std::io::Error::last_os_error().kind();
+            if matches!(
+                kind,
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+            ) {
                 continue;
             }
             return Err(std::io::Error::last_os_error().into());
         }
+        let mut scan_from = pending.len();
         pending.extend_from_slice(&chunk[..count as usize]);
-        while let Some(end) = pending.iter().position(|byte| *byte == b'\n') {
+        while let Some(rel) = pending[scan_from..].iter().position(|byte| *byte == b'\n') {
+            let end = scan_from + rel;
             if stopping.load(Ordering::Acquire) {
                 break;
             }
@@ -709,6 +722,7 @@ pub fn serve(options: McpServeCommand) -> anyhow::Result<()> {
                 return Ok(());
             }
             let line: Vec<_> = pending.drain(..=end).collect();
+            scan_from = 0;
             let reply = match serde_json::from_slice(&line) {
                 Ok(value) => server.request(value),
                 Err(_) => Some(rpc_error(Value::Null, -32700, "Invalid JSON")),
@@ -748,6 +762,8 @@ fn job_application_registered(namespace: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::args::App;
+    use clap::Parser;
     fn server() -> Server {
         Server::new(
             McpServeCommand {
@@ -955,5 +971,21 @@ mod tests {
             .unwrap();
         assert!(args.iter().any(|a| a == "--offline"));
         assert!(args.iter().any(|a| a == "--skip-ipv6"));
+    }
+
+    #[test]
+    fn non_object_tool_arguments_return_json_rpc_invalid_params() {
+        let mut server = server();
+        let init = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}});
+        assert!(server.request(init).unwrap().get("result").is_some());
+        assert!(
+            server
+                .request(json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
+                .is_none()
+        );
+        let bad = server
+            .request(json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"status","arguments":"not-an-object"}}))
+            .unwrap();
+        assert_eq!(bad["error"]["code"], -32602);
     }
 }

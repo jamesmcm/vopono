@@ -100,6 +100,8 @@ pub struct OpenConnect {
     pub(crate) pid: u32,
     #[serde(default)]
     runtime_dir: Option<PathBuf>,
+    #[serde(default)]
+    ns_name: Option<String>,
     #[serde(skip)]
     cleanup_enabled: bool,
 }
@@ -126,11 +128,13 @@ impl OpenConnect {
         let contents = read_config_as_owner(&config_file)?;
         if crate::util::is_daemon_mode() {
             validate_unprivileged_config_str(&contents)?;
+            anyhow::bail!(
+                "Interactive OpenConnect password prompts are not supported in daemon mode"
+            );
         }
 
-        let pass = request_creds(uiclient);
-
-        let password = pass.expect("Provide password via Stdin!");
+        let password =
+            request_creds(uiclient).context("Failed to read OpenConnect password from stdin")?;
 
         let runtime_dir = super::etc_overlay::trusted_runtime_dir("openconnect-")?;
         let frozen_config = runtime_dir.path().join("config");
@@ -215,6 +219,7 @@ impl OpenConnect {
         Ok(Self {
             pid: id,
             runtime_dir: Some(runtime_dir.keep()),
+            ns_name: Some(netns.name.clone()),
             cleanup_enabled: true,
         })
     }
@@ -267,9 +272,19 @@ impl Drop for OpenConnect {
             return;
         }
         let pid = nix::unistd::Pid::from_raw(self.pid as i32);
-        match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
-            Ok(_) => debug!("Killed OpenConnect (pid: {})", self.pid),
-            Err(e) => error!("Failed to kill OpenConnect (pid: {}): {:?}", self.pid, e),
+        let pid_matches = self.ns_name.as_deref().is_none_or(|ns| {
+            crate::util::process_is_in_network_namespace(self.pid, ns).unwrap_or(false)
+        });
+        if pid_matches {
+            match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
+                Ok(_) => debug!("Killed OpenConnect (pid: {})", self.pid),
+                Err(e) => error!("Failed to kill OpenConnect (pid: {}): {:?}", self.pid, e),
+            }
+        } else {
+            debug!(
+                "Skipping OpenConnect kill for pid {}: no longer in target namespace",
+                self.pid
+            );
         }
         while matches!(
             nix::sys::wait::waitpid(pid, None),

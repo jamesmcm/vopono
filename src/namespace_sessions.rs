@@ -58,6 +58,25 @@ pub fn try_lock_namespace(name: &str) -> Option<Transition> {
         .then(|| Transition(name.to_owned()))
 }
 
+/// Wait briefly during daemon shutdown for in-flight setup/teardown transitions to finish.
+pub fn wait_for_idle_transitions(timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut busy = TRANSITIONS.0.lock().unwrap_or_else(|p| p.into_inner());
+    while !busy.is_empty() {
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            break;
+        };
+        let (guard, result) = TRANSITIONS
+            .1
+            .wait_timeout(busy, remaining)
+            .unwrap_or_else(|p| p.into_inner());
+        busy = guard;
+        if result.timed_out() {
+            break;
+        }
+    }
+}
+
 pub struct SetupGuard;
 impl Drop for SetupGuard {
     fn drop(&mut self) {
@@ -150,6 +169,8 @@ struct Entry {
     applications: usize,
     valid: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
+    stop_forwarder_for_teardown: Arc<AtomicBool>,
+    forwarder_released: Arc<AtomicBool>,
     monitor: Option<crate::health::Monitor>,
     forwarder_stop: Option<std::sync::mpsc::Sender<bool>>,
     proxies: HashMap<u16, crate::tcp_proxy::TcpProxy>,
@@ -197,12 +218,19 @@ pub fn stop_monitor(name: &str) -> anyhow::Result<()> {
         // is not invoked for a second wait.
         handle.stop_and_wait()?;
     }
-    let (monitor, forwarder_stop) = {
+    let (monitor, forwarder_stop, forwarder_released) = {
         let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(entry) = sessions.get_mut(name) {
-            (entry.monitor.take(), entry.forwarder_stop.take())
+            entry
+                .stop_forwarder_for_teardown
+                .store(true, Ordering::Release);
+            (
+                entry.monitor.take(),
+                entry.forwarder_stop.take(),
+                Some(Arc::clone(&entry.forwarder_released)),
+            )
         } else {
-            (None, None)
+            (None, None, None)
         }
     };
     if monitor.is_some()
@@ -217,7 +245,36 @@ pub fn stop_monitor(name: &str) -> anyhow::Result<()> {
     if let Some(stop) = forwarder_stop {
         let _ = stop.send(true);
     }
+    let _ = forwarder_released;
     Ok(())
+}
+
+/// Signal the controller to drop its port forwarder (joining renewal threads
+/// and allowing remote DELETE calls like AzireVPN while the netns still exists)
+/// and wait for completion without holding the namespace transition lock.
+pub fn request_forwarder_release(name: &str) -> Option<Arc<AtomicBool>> {
+    let (stop, released) = {
+        let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
+        let entry = sessions.get_mut(name)?;
+        entry
+            .stop_forwarder_for_teardown
+            .store(true, Ordering::Release);
+        (
+            entry.forwarder_stop.take(),
+            Arc::clone(&entry.forwarder_released),
+        )
+    };
+    if let Some(stop) = stop {
+        let _ = stop.send(true);
+    }
+    Some(released)
+}
+
+pub fn wait_forwarder_released(released: &AtomicBool, timeout: Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while !released.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Caller holds the namespace's transition permit so relays cannot disappear during an attach.
@@ -230,12 +287,12 @@ pub fn contains(name: &str) -> bool {
 
 /// Existing relays belong to the namespace and can be reused by later launches.
 pub fn relay_ports(name: &str) -> Vec<u16> {
-    SESSIONS
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .get(name)
-        .map(|entry| entry.proxies.keys().copied().collect())
-        .unwrap_or_default()
+    let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(entry) = sessions.get_mut(name) else {
+        return Vec::new();
+    };
+    entry.proxies.retain(|_, proxy| proxy.is_alive());
+    entry.proxies.keys().copied().collect()
 }
 
 pub fn desired_relay_ports(name: &str) -> Vec<u16> {
@@ -269,6 +326,8 @@ pub struct Session {
     controller: bool,
     registered: bool,
     valid: Arc<AtomicBool>,
+    stop_forwarder_for_teardown: Arc<AtomicBool>,
+    forwarder_released: Arc<AtomicBool>,
     forwarder: Option<Box<dyn Forwarder>>,
     pending_forwarder: Option<vopono_core::network::port_forwarding::ForwarderSnapshot>,
 }
@@ -283,10 +342,13 @@ impl Session {
     ) -> Self {
         let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
         let controller = !sessions.contains_key(&ns.name);
+        let has_forwarder = forwarder.is_some();
         let entry = sessions.entry(ns.name.clone()).or_insert_with(|| Entry {
             applications: 0,
             valid: Arc::new(AtomicBool::new(true)),
             released: Arc::new(AtomicBool::new(false)),
+            stop_forwarder_for_teardown: Arc::new(AtomicBool::new(false)),
+            forwarder_released: Arc::new(AtomicBool::new(!has_forwarder)),
             monitor: None,
             forwarder_stop: None,
             proxies: HashMap::new(),
@@ -297,6 +359,8 @@ impl Session {
             entry.forwarder_stop = Some(stop);
         }
         let valid = entry.valid.clone();
+        let stop_forwarder_for_teardown = entry.stop_forwarder_for_teardown.clone();
+        let forwarder_released = entry.forwarder_released.clone();
         if !controller {
             ns.detach();
         }
@@ -314,6 +378,8 @@ impl Session {
             controller,
             registered: true,
             valid,
+            stop_forwarder_for_teardown,
+            forwarder_released,
             forwarder,
             pending_forwarder: None,
         }
@@ -446,11 +512,23 @@ impl Session {
         let mut cleanup_retry_at = std::time::Instant::now();
         let mut primary_removed = false;
         loop {
-            let transition = lock_namespace(&self.ns.name);
+            let mut transition = lock_namespace(&self.ns.name);
             if !self.valid.load(Ordering::Acquire) {
                 self.disarm();
+                self.forwarder_released.store(true, Ordering::Release);
                 remove_session(&self.ns.name, &self.valid);
                 break;
+            }
+            // Explicit teardown requests forwarder shutdown BEFORE deleting the
+            // netns so renewal threads join cleanly and AzireVPN DELETE runs.
+            if self.stop_forwarder_for_teardown.load(Ordering::Acquire) {
+                self.pending_forwarder = None;
+                let forwarder = self.forwarder.take();
+                drop(transition);
+                drop(forwarder);
+                self.forwarder_released.store(true, Ordering::Release);
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
             }
             // An explicit stop may already have removed the namespace. Disarm
             // our copy so a subsequent namespace with the same name stays safe.
@@ -459,6 +537,7 @@ impl Session {
                 .exists()
             {
                 self.disarm();
+                self.forwarder_released.store(true, Ordering::Release);
                 remove_session(&self.ns.name, &self.valid);
                 break;
             }
@@ -466,10 +545,26 @@ impl Session {
                 self.restore_missing_relays();
                 relay_retry_at = std::time::Instant::now() + Duration::from_secs(5);
             }
-            if let Some(snapshot) = self.pending_forwarder.as_ref()
+            if let Some(snapshot) = self.pending_forwarder.clone()
                 && std::time::Instant::now() >= lease_retry_at
             {
-                match snapshot.restore(&self.ns) {
+                // Release the transition lock while performing network I/O and
+                // user callback execution so stop/launch requests cannot deadlock.
+                drop(transition);
+                let restored = snapshot.restore(&self.ns);
+                transition = lock_namespace(&self.ns.name);
+                if !self.valid.load(Ordering::Acquire)
+                    || self.stop_forwarder_for_teardown.load(Ordering::Acquire)
+                    || !std::path::Path::new("/run/netns")
+                        .join(&self.ns.name)
+                        .exists()
+                {
+                    if let Ok(mut forwarder) = restored {
+                        forwarder.disarm();
+                    }
+                    continue;
+                }
+                match restored {
                     Ok(forwarder) => {
                         let port = forwarder.forwarded_port();
                         if let Some(stop) = forwarder.stop_handle()
@@ -480,6 +575,7 @@ impl Session {
                         {
                             entry.forwarder_stop = Some(stop);
                         }
+                        self.forwarder_released.store(false, Ordering::Release);
                         if let Err(error) =
                             vopono_core::util::open_ports(&self.ns, &[port], self.ns.firewall)
                         {

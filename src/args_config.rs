@@ -65,7 +65,7 @@ macro_rules! command_else_config_option_variant {
 
 fn config_variant<T>(config: &Config, name: &str) -> Option<T>
 where
-    T: strum::IntoEnumIterator + Clone + std::fmt::Display,
+    T: strum::IntoEnumIterator + Clone + std::fmt::Display + Send + Sync + 'static,
 {
     config
         .get_string(name)
@@ -141,7 +141,9 @@ impl ConnectionSettings {
         let cli_provider = command.provider.as_ref().map(|p| p.to_variant());
         // Only inherit `custom` from config when CLI did not explicitly choose a
         // non-Custom provider (e.g., `--provider mullvad` or `--existing-netns`).
-        let custom: Option<PathBuf> = if command.custom.is_some() {
+        let custom: Option<PathBuf> = if command.existing_netns.is_some() {
+            None
+        } else if command.custom.is_some() {
             command.custom.clone()
         } else if cli_provider
             .as_ref()

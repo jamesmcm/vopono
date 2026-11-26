@@ -166,7 +166,19 @@ pub trait ThreadLoopForwarder: Forwarder {
                                         None,
                                         p,
                                     ) {
-                                        Ok(()) => opened_port = Some(p),
+                                        Ok(()) => {
+                                            if let Some(previous) = opened_port
+                                                && previous != p
+                                            {
+                                                crate::util::open_ports::close_port_in_namespace(
+                                                    &params.get_netns_name(),
+                                                    firewall,
+                                                    ipv6_enabled,
+                                                    previous,
+                                                );
+                                            }
+                                            opened_port = Some(p);
+                                        }
                                         Err(e) => {
                                             log::warn!(
                                                 "Failed to open renewed port {p} in firewall: {e:#}"
@@ -195,22 +207,62 @@ pub trait ThreadLoopForwarder: Forwarder {
 
     fn callback_command(params: &Self::ThreadParams, port: u16) -> Option<anyhow::Result<String>> {
         params.get_callback().map(|callback| {
+            use std::io::Read;
+            use std::os::unix::process::CommandExt;
+            use std::time::{Duration, Instant};
+
             // The callback is attacker-controllable input relative to this
             // process: de-elevate it to the session user via build_exec_command so
-            // both `--` separation and PR_SET_NO_NEW_PRIVS are enforced.
-            let refresh_response = callback
-                .build_command(&params.get_netns_name(), port)
-                .spawn()?
-                .wait_with_output()?;
-            if !refresh_response.status.success() {
+            // both `--` separation and PR_SET_NO_NEW_PRIVS are enforced, and bound
+            // its runtime so a hanging script cannot stall teardown or recovery.
+            let mut cmd = callback.build_command(&params.get_netns_name(), port);
+            cmd.process_group(0);
+            let mut child = cmd.spawn()?;
+            let stdout_pipe = child.stdout.take();
+            let stderr_pipe = child.stderr.take();
+            let stdout_reader = std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(pipe) = stdout_pipe {
+                    let _ = pipe.take(64 * 1024).read_to_end(&mut buf);
+                }
+                buf
+            });
+            let stderr_reader = std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(pipe) = stderr_pipe {
+                    let _ = pipe.take(64 * 1024).read_to_end(&mut buf);
+                }
+                buf
+            });
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let status = loop {
+                match child.try_wait()? {
+                    Some(status) => break status,
+                    None if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                    None => {
+                        let pgid = nix::unistd::Pid::from_raw(-(child.id() as i32));
+                        let _ = nix::sys::signal::kill(pgid, nix::sys::signal::Signal::SIGKILL);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        let _ = stdout_reader.join();
+                        let _ = stderr_reader.join();
+                        anyhow::bail!("Port forwarding callback script timed out after 15s");
+                    }
+                }
+            };
+            let stdout = stdout_reader.join().unwrap_or_default();
+            let stderr = stderr_reader.join().unwrap_or_default();
+            if !status.success() {
                 log::error!(
                     "Port forwarding callback script was unsuccessful!: stdout: {:?}, stderr: {:?}, exit code: {}",
-                    String::from_utf8(refresh_response.stdout),
-                    String::from_utf8(refresh_response.stderr),
-                    refresh_response.status
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr),
+                    status
                 );
                 Err(anyhow::anyhow!("Port forwarding callback script failed"))
-            } else if let Ok(out) = String::from_utf8(refresh_response.stdout) {
+            } else if let Ok(out) = String::from_utf8(stdout) {
                 println!("{out}");
                 Ok(out)
             } else {

@@ -26,7 +26,7 @@ pub(crate) fn connect(policy: Compatibility) -> anyhow::Result<LocalSocketStream
         "Daemon socket peer is not root"
     );
     match policy {
-        Compatibility::Warn => daemon::exchange_versions_with_daemon(&mut conn),
+        Compatibility::Warn => daemon::exchange_versions_with_daemon(&mut conn)?,
         Compatibility::Exact => {
             daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_HANDSHAKE_TIMEOUT_SECONDS)?;
             let version = daemon::client_handshake(&mut conn)?;

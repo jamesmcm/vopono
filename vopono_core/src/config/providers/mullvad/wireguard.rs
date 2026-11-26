@@ -84,7 +84,9 @@ impl Mullvad {
         })?;
 
         if use_automatic {
-            let client = Client::new();
+            let client = Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()?;
             let username = self.request_mullvad_username(uiclient)?;
 
             let mut map = HashMap::new();
@@ -94,12 +96,14 @@ impl Mullvad {
                 .post("https://api.mullvad.net/auth/v1/token".to_owned())
                 .json(&map)
                 .send()?
+                .error_for_status()?
                 .json()?;
 
             let user_info: UserInfo = client
                 .get("https://api.mullvad.net/accounts/v1/accounts/me")
                 .header(AUTHORIZATION, format!("Bearer {}", auth.access_token))
                 .send()?
+                .error_for_status()?
                 .json()?;
 
             // Warn if account expired
@@ -119,70 +123,91 @@ impl Mullvad {
                 .get("https://api.mullvad.net/accounts/v1/devices")
                 .header(AUTHORIZATION, format!("Bearer {}", auth.access_token))
                 .send()?
+                .error_for_status()?
                 .json()?;
 
             if !existing_devices.is_empty() {
-        let existing = Devices { devices: existing_devices.clone()};
+                let existing = Devices {
+                    devices: existing_devices.clone(),
+                };
 
-        let selection = uiclient.get_configuration_choice(&existing)?;
+                let selection = uiclient.get_configuration_choice(&existing)?;
 
-        if selection >= existing_devices.len() {
-            if existing_devices.len() >= user_info.max_devices as usize
-                || !user_info.can_add_devices
-            {
-                return Err(anyhow!("Cannot add more Wireguard keypairs to this account. Try to delete existing keypairs."));
-            }
-            let keypair = generate_keypair()?;
-            let dev = Mullvad::upload_wg_key(&client, &auth.access_token, &keypair)?;
+                if selection >= existing_devices.len() {
+                    if existing_devices.len() >= user_info.max_devices as usize
+                        || !user_info.can_add_devices
+                    {
+                        return Err(anyhow!(
+                            "Cannot add more Wireguard keypairs to this account. Try to delete existing keypairs."
+                        ));
+                    }
+                    let keypair = generate_keypair()?;
+                    let dev = Mullvad::upload_wg_key(&client, &auth.access_token, &keypair)?;
 
-            // Save keypair
-            save_wireguard_device_json(
-                &self.wireguard_dir()?,
-                &PrivateDevice::from_device(&dev, &keypair.private),
-            )?;
+                    // Save keypair
+                    save_wireguard_device_json(
+                        &self.wireguard_dir()?,
+                        &PrivateDevice::from_device(&dev, &keypair.private),
+                    )?;
 
-            Ok((keypair, IpNet::from_str(&dev.ipv4_address).expect("Invalid IPv4 address"), IpNet::from_str(&dev.ipv6_address).expect("Invalid IPv6 address")))
-        } else {
-            let dev = existing_devices[selection].clone();
+                    Ok((
+                        keypair,
+                        IpNet::from_str(&dev.ipv4_address)
+                            .context("Mullvad returned an invalid IPv4 address")?,
+                        IpNet::from_str(&dev.ipv6_address)
+                            .context("Mullvad returned an invalid IPv6 address")?,
+                    ))
+                } else {
+                    let dev = existing_devices[selection].clone();
 
-            let private_key = prompt_for_private_key(
-                uiclient,
-                &dev.pubkey,
-                format!("Private key for {}", existing.devices[selection].pubkey),
-            )?;
+                    let private_key = prompt_for_private_key(
+                        uiclient,
+                        &dev.pubkey,
+                        format!("Private key for {}", existing.devices[selection].pubkey),
+                    )?;
 
-            // Save keypair
-            save_wireguard_device_json(
-                &self.wireguard_dir()?,
-                &PrivateDevice::from_device(&dev, &private_key),
-            )?;
+                    // Save keypair
+                    save_wireguard_device_json(
+                        &self.wireguard_dir()?,
+                        &PrivateDevice::from_device(&dev, &private_key),
+                    )?;
 
- Ok((WgKey {
-                public: dev.pubkey.clone(),
-                private: private_key,
-            },
-        IpNet::from_str(&dev.ipv4_address).expect("Invalid IPv4 address"), IpNet::from_str(&dev.ipv6_address).expect("Invalid IPv6 address"))
-        )
-        }
-    } else if uiclient.get_bool_choice(BoolChoice{
-            prompt:
-                "No Wireguard keys currently exist on your Mullvad account, would you like to generate a new keypair?".to_string(),
-            default: true,
-    })?
-             {
+                    Ok((
+                        WgKey {
+                            public: dev.pubkey.clone(),
+                            private: private_key,
+                        },
+                        IpNet::from_str(&dev.ipv4_address)
+                            .context("Mullvad returned an invalid IPv4 address")?,
+                        IpNet::from_str(&dev.ipv6_address)
+                            .context("Mullvad returned an invalid IPv6 address")?,
+                    ))
+                }
+            } else if uiclient.get_bool_choice(BoolChoice {
+                prompt: "No Wireguard keys currently exist on your Mullvad account, would you like to generate a new keypair?".to_string(),
+                default: true,
+            })? {
                 let keypair = generate_keypair()?;
                 let dev = Mullvad::upload_wg_key(&client, &auth.access_token, &keypair)?;
 
-           // Save keypair
-            save_wireguard_device_json(
-                &self.wireguard_dir()?,
-                &PrivateDevice::from_device(&dev, &keypair.private),
-            )?;
+                // Save keypair
+                save_wireguard_device_json(
+                    &self.wireguard_dir()?,
+                    &PrivateDevice::from_device(&dev, &keypair.private),
+                )?;
 
-                Ok((keypair, IpNet::from_str(&dev.ipv4_address).expect("Invalid IPv4 address"), IpNet::from_str(&dev.ipv6_address).expect("Invalid IPv6 address")))
-        } else {
-            Err(anyhow!("Wireguard requires a keypair, either upload one to Mullvad or let vopono generate one"))
-    }
+                Ok((
+                    keypair,
+                    IpNet::from_str(&dev.ipv4_address)
+                        .context("Mullvad returned an invalid IPv4 address")?,
+                    IpNet::from_str(&dev.ipv6_address)
+                        .context("Mullvad returned an invalid IPv6 address")?,
+                ))
+            } else {
+                Err(anyhow!(
+                    "Wireguard requires a keypair, either upload one to Mullvad or let vopono generate one"
+                ))
+            }
         } else {
             let manual_dev = get_manually_entered_keypair(uiclient)?;
             // Save keypair
@@ -206,10 +231,13 @@ impl WireguardProvider for Mullvad {
         create_dir_all(&wireguard_dir)?;
         delete_all_files_in_dir(&wireguard_dir)?;
 
-        let client = Client::new();
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?;
         let relays: Vec<WireguardRelay> = client
             .get("https://api.mullvad.net/www/relays/wireguard/")
             .send()?
+            .error_for_status()?
             .json().with_context(|| "Failed to parse Mullvad relays response - try again after a few minutes or report an issue if it is persistent")?;
 
         let (keypair, ipv4_net, ipv6_net) = self.prompt_for_wg_key(uiclient)?;
@@ -245,23 +273,8 @@ impl WireguardProvider for Mullvad {
                 peer: wireguard_peer,
             };
 
-            let host = if relay.hostname.chars().filter(|c| *c == '-').count() > 1 {
-                // New naming convention -  at-vie-wg-001
-                let substrings: Vec<&str> = relay.hostname.split('-').collect();
-
-                substrings[0].to_owned() + substrings[1] + substrings[3]
-            } else {
-                // Old naming convention - au10-wireguard
-                relay
-                    .hostname
-                    .split('-')
-                    .next()
-                    .unwrap_or_else(|| panic!("Failed to split hostname: {}", relay.hostname))
-                    .to_owned()
-            };
-
-            let country = relay.country_name.to_lowercase().replace(' ', "_");
-            let path = wireguard_dir.join(format!("{country}-{host}.conf"));
+            let filename = mullvad_config_filename(&relay.country_name, &relay.hostname)?;
+            let path = wireguard_dir.join(filename);
 
             // Create file, write WireGuard config
             {
@@ -277,6 +290,28 @@ impl WireguardProvider for Mullvad {
 
         Ok(())
     }
+}
+
+fn mullvad_config_filename(country_name: &str, hostname: &str) -> anyhow::Result<String> {
+    let substrings: Vec<&str> = hostname.split('-').collect();
+    let host = match substrings.as_slice() {
+        [a, b, _, d, ..] => format!("{a}{b}{d}"),
+        [first, ..] if !first.is_empty() => (*first).to_owned(),
+        _ => anyhow::bail!("Mullvad returned an invalid relay hostname"),
+    };
+    let country = country_name.to_lowercase().replace(' ', "_");
+    let filename = format!("{country}-{host}.conf");
+    anyhow::ensure!(
+        !country.is_empty()
+            && !host.is_empty()
+            && !filename.starts_with('.')
+            && !filename.contains('/')
+            && !filename.contains('\\')
+            && !filename.contains("..")
+            && !filename.contains('\0'),
+        "Mullvad returned an unsafe relay filename"
+    );
+    Ok(filename)
 }
 
 #[allow(dead_code)]
@@ -387,4 +422,37 @@ pub(crate) fn diagnostic_catalogue(
             public_key: Some(r.pubkey),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mullvad_config_filename;
+
+    #[test]
+    fn mullvad_config_filename_handles_varied_hostnames_and_rejects_traversal() {
+        assert_eq!(
+            mullvad_config_filename("Austria", "at-vie-wg-001").unwrap(),
+            "austria-atvie001.conf"
+        );
+        // 2-hyphen hostnames must not panic on out-of-bounds indexing.
+        assert_eq!(
+            mullvad_config_filename("Sweden", "se-got-001").unwrap(),
+            "sweden-se.conf"
+        );
+        assert_eq!(
+            mullvad_config_filename("Australia", "au10-wireguard").unwrap(),
+            "australia-au10.conf"
+        );
+        for (country, host) in [
+            ("../etc", "se-got-wg-001"),
+            ("Sweden", "../../evil"),
+            ("Sweden", "a/b"),
+            (".hidden", "se-got-wg-001"),
+        ] {
+            assert!(
+                mullvad_config_filename(country, host).is_err(),
+                "expected rejection for ({country:?}, {host:?})"
+            );
+        }
+    }
 }

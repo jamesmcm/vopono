@@ -199,17 +199,14 @@ pub struct VethPairIPs {
 pub fn validate_netns_name(name: &str) -> anyhow::Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 64
-        && name
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         && !name.ends_with('.');
     anyhow::ensure!(
         valid,
-        "Invalid network namespace name '{name}': must be 1-64 ASCII alphanumeric characters, dots, underscores or hyphens, starting alphanumerically"
+        "Invalid network namespace name '{name}': must be 1-64 ASCII alphanumeric characters, dots, underscores or hyphens, starting with an ASCII letter"
     );
     Ok(())
 }
@@ -278,13 +275,30 @@ pub fn build_hook_command(
         };
         let groups = crate::util::owner_write::supplementary_groups(&target_user.name, target_gid)?;
         let uid = target_user.uid;
+        let home_cstr = {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::CString::new(target_user.dir.as_os_str().as_bytes()).ok()
+        };
         let mut cmd = Command::new(program);
         cmd.args(args);
+        if crate::util::is_daemon_mode() {
+            cmd.env_clear();
+            cmd.env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            );
+            cmd.env("HOME", &target_user.dir);
+            cmd.env("USER", &target_user.name);
+            cmd.env("LOGNAME", &target_user.name);
+        }
         unsafe {
             cmd.pre_exec(move || {
                 unistd::setgroups(&groups)?;
                 unistd::setgid(target_gid)?;
                 unistd::setuid(uid)?;
+                if let Some(dir) = &home_cstr {
+                    let _ = libc::chdir(dir.as_ptr());
+                }
                 nix::sys::prctl::set_no_new_privs()?;
                 Ok(())
             });
@@ -876,6 +890,15 @@ impl ManagedNamespaceGuard {
 
             Self::exec(
                 &self.name,
+                &[
+                    "sysctl",
+                    "-w",
+                    &format!("net.ipv6.conf.{veth_source}.disable_ipv6=0"),
+                ],
+            )?;
+
+            Self::exec(
+                &self.name,
                 &["ip", "addr", "add", &ipv6_ns_ip_cidr, "dev", veth_source],
             )
             .with_context(|| format!("Failed to assign IPv6 to veth source: {veth_source}"))?;
@@ -1339,7 +1362,8 @@ impl ManagedNamespaceGuard {
             application_pid: Option<u32>,
             application_started_at: Option<u64>,
         }
-        let meta: LockfileMeta = ron::de::from_reader(File::open(&lockfile_path)?)?;
+        let raw_lock = crate::util::owner_write::read_file_as_config_owner(&lockfile_path)?;
+        let meta: LockfileMeta = ron::de::from_bytes(&raw_lock)?;
         let view = LockfileUpdateView {
             ns: self.snapshot_ref(),
             start: meta.start,
@@ -1492,9 +1516,10 @@ impl ManagedNamespaceGuard {
         }
         let mut lock_dir = config_dir()?;
         lock_dir.push(format!("vopono/locks/{}", self.name));
+        let own_lock_name = format!("{}", unistd::getpid());
         let mut lockfile_path = lock_dir.clone();
         // Each instance responsible for deleting their own lockfile
-        lockfile_path.push(format!("{}", unistd::getpid()));
+        lockfile_path.push(&own_lock_name);
         // A lock left by a previous session must not pin this namespace open.
         // Prune client locks whose PID has exited or no longer belongs to this
         // namespace before deciding whether another live session exists.
@@ -1504,12 +1529,9 @@ impl ManagedNamespaceGuard {
                 lock_dir.display()
             );
         }
-        if crate::util::is_daemon_mode() && crate::status::has_client_lockfiles(&lock_dir) {
-            debug!(
-                "Preserving daemon namespace lock while client locks remain: {}",
-                lockfile_path.display()
-            );
-        } else if lockfile_path.exists()
+        let daemon_mode = crate::util::is_daemon_mode();
+        if !daemon_mode
+            && lockfile_path.exists()
             && let Err(e) = crate::util::owner_write::remove_file_as_config_owner(&lockfile_path)
         {
             warn!(
@@ -1519,23 +1541,24 @@ impl ManagedNamespaceGuard {
             );
         }
 
-        let lockfile_path = lock_dir;
+        let lockfile_path_dir = lock_dir;
 
-        // Tear down only if the lock directory is gone or empty (no other
-        // vopono instance uses this namespace) AND no unaccounted processes
-        // remain inside it. The lockfiles only track vopono-spawned sessions;
-        // detached or externally-started processes would lose connectivity if
-        // we deleted the namespace while they were still running.
-        let lock_dir_is_empty = match crate::status::lock_dir_has_no_session_state(&lockfile_path) {
-            Ok(no_session_state) => no_session_state,
-            Err(e) => {
-                warn!(
-                    "Could not inspect locks directory {}: {e:?}; preserving namespace",
-                    lockfile_path.display()
-                );
-                false
-            }
-        };
+        // Tear down only if no other vopono instance uses this namespace AND no
+        // unaccounted processes remain inside it. In daemon mode, preserve the
+        // primary `<daemon_pid>` lockfile until teardown is confirmed so the
+        // namespace remains visible to `vopono status` if teardown is skipped.
+        let lock_dir_is_empty = if daemon_mode {
+            crate::status::lock_dir_has_no_other_session_state(&lockfile_path_dir, &own_lock_name)
+        } else {
+            crate::status::lock_dir_has_no_session_state(&lockfile_path_dir)
+        }
+        .unwrap_or_else(|e| {
+            warn!(
+                "Could not inspect locks directory {}: {e:?}; preserving namespace",
+                lockfile_path_dir.display()
+            );
+            false
+        });
         let has_unaccounted_processes = self.has_application_processes().unwrap_or_else(|error| {
             warn!("Could not inspect namespace processes: {error}; preserving namespace");
             true
@@ -1546,30 +1569,46 @@ impl ManagedNamespaceGuard {
             // is returned to explicit callers and must not trigger a second,
             // implicit teardown from Drop.
             self.disposition = GuardDisposition::TornDown;
-            // Only try to delete if exists
-            if lockfile_path.exists() {
-                // The sidecar is not session state; drop it so the now-empty
-                // lock directory can be removed.
-                crate::status::remove_forwarded_port_sidecar(&lockfile_path);
-                let removed =
-                    crate::util::owner_write::remove_dir_as_config_owner_if_needed(&lockfile_path)
-                        .with_context(|| {
-                            format!(
-                                "Could not remove locks directory {}",
-                                lockfile_path.display()
-                            )
-                        })?;
-                if !removed {
-                    std::fs::remove_dir(&lockfile_path).with_context(|| {
-                        format!(
-                            "Could not remove locks directory {}",
-                            lockfile_path.display()
-                        )
-                    })?;
+            if daemon_mode
+                && lockfile_path.exists()
+                && let Err(e) =
+                    crate::util::owner_write::remove_file_as_config_owner(&lockfile_path)
+            {
+                warn!(
+                    "Failed to remove daemon lockfile: {}, {:?}",
+                    lockfile_path.display(),
+                    e
+                );
+            }
+            // Only try to delete if exists; never abort `ip netns delete` if
+            // removing the user-owned lock directory fails.
+            if lockfile_path_dir.exists() {
+                crate::status::remove_forwarded_port_sidecar(&lockfile_path_dir);
+                match crate::util::owner_write::remove_dir_as_config_owner_if_needed(
+                    &lockfile_path_dir,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if let Err(error) = std::fs::remove_dir(&lockfile_path_dir)
+                            && error.kind() != std::io::ErrorKind::NotFound
+                        {
+                            warn!(
+                                "Could not remove locks directory {}: {error}",
+                                lockfile_path_dir.display()
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            "Could not remove locks directory {}: {error:#}",
+                            lockfile_path_dir.display()
+                        );
+                    }
                 }
             }
             info!("Shutting down vopono namespace - as there are no processes left running inside");
-            // Run PreDown script (if any)
+            // Run PreDown script (if any) and wait with a bounded timeout so it
+            // completes before the namespace is destroyed and never leaks a zombie.
             if let Some(pdcmd) = self.predown.as_ref() {
                 // Extra check so we don't panic on bad predown command
                 match parse_command_str(pdcmd) {
@@ -1584,7 +1623,25 @@ impl ManagedNamespaceGuard {
                         );
                         if let Ok(mut cmd) = cmd {
                             self.add_env_vars_to_cmd(&mut cmd);
-                            cmd.spawn().ok();
+                            if let Ok(mut child) = cmd.spawn() {
+                                let deadline =
+                                    std::time::Instant::now() + std::time::Duration::from_secs(5);
+                                loop {
+                                    match child.try_wait() {
+                                        Ok(Some(_)) => break,
+                                        Ok(None) if std::time::Instant::now() < deadline => {
+                                            std::thread::sleep(std::time::Duration::from_millis(
+                                                25,
+                                            ));
+                                        }
+                                        _ => {
+                                            let _ = child.kill();
+                                            let _ = child.wait();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         } else if let Err(e) = cmd {
                             log::error!(
                                 "Failed to prepare predown command '{}' in shutdown state: {e:#}",

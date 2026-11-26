@@ -4,35 +4,41 @@ on:
   pull_request:
     branches: [ master ]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
-jobs: 
+jobs:
   quickcheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.rustversion.outputs.rustversion }}
     steps:
     - uses: actions/checkout@v4
-    - run: cargo check
+    - run: cargo check --locked
     - run: cargo pkgid
     - run: 'echo "$(cargo pkgid | cut -d# -f2)"'
     - id: rustversion
       run: 'echo "rustversion=$(cargo pkgid | cut -d# -f2)" >> "$GITHUB_OUTPUT"'
   clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
     - uses: actions/checkout@v4
     - name: Install Clippy
       run: rustup component add clippy rustfmt
     - name: Clippy
-      run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+      run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
     - name: Rustfmt
       run: cargo fmt --all -- --check
     - name: Test
-      run: cargo test --workspace
+      run: cargo test --workspace --locked
   gui:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
     - uses: actions/checkout@v4
     - name: Install GUI dependencies

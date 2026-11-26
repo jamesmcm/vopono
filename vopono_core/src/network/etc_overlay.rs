@@ -67,17 +67,21 @@ impl EtcOverlay {
         let work = directory.path().join("work");
         std::fs::create_dir(&upper)?;
         std::fs::create_dir(&work)?;
-
+        // Overlayfs inherits the upperdir mode onto the mounted /etc root;
+        // enforce 0755 so a restrictive daemon UMask never blocks unprivileged apps.
+        std::fs::set_permissions(&upper, std::fs::Permissions::from_mode(0o755))?;
         let namespace_etc = PathBuf::from("/etc/netns").join(namespace);
         for name in ["resolv.conf", "hosts", "nsswitch.conf"] {
             let source = namespace_etc.join(name);
             if source.is_file() {
-                std::fs::copy(&source, upper.join(name)).with_context(|| {
+                let target = upper.join(name);
+                std::fs::copy(&source, &target).with_context(|| {
                     format!(
                         "Failed to stage {} for namespace {namespace}",
                         source.display()
                     )
                 })?;
+                let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644));
             }
         }
 

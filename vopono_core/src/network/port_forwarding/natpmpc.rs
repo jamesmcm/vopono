@@ -78,6 +78,16 @@ impl Natpmpc {
         }
 
         log::debug!("Opening firewall for NAT-PMP gateway: {gateway_str}");
+        let tunnel_iface = ns
+            .wireguard
+            .as_ref()
+            .map(|wg| wg.if_name.clone())
+            .or_else(|| {
+                crate::network::firewall::wait_for_tunnel_interface(&ns.name, &["tun"], 1)
+                    .ok()
+                    .flatten()
+            })
+            .context("Could not determine tunnel interface for NAT-PMP gateway rule")?;
         match ns.firewall {
             crate::network::firewall::Firewall::IpTables => {
                 NetworkNamespace::exec(
@@ -87,6 +97,8 @@ impl Natpmpc {
                         "-I",
                         "OUTPUT",
                         "1",
+                        "-o",
+                        &tunnel_iface,
                         "-p",
                         "udp",
                         "-d",
@@ -99,6 +111,7 @@ impl Natpmpc {
                 )?;
             }
             crate::network::firewall::Firewall::NfTables => {
+                let quoted_iface = format!("\"{tunnel_iface}\"");
                 NetworkNamespace::exec(
                     &ns.name,
                     &[
@@ -108,6 +121,8 @@ impl Natpmpc {
                         "inet",
                         &ns.name,
                         "output",
+                        "oifname",
+                        &quoted_iface,
                         "ip",
                         "daddr",
                         &gateway_str,
@@ -198,6 +213,11 @@ impl ThreadLoopForwarder for Natpmpc {
             &params.netns_name,
             &["natpmpc", "-a", "1", "0", "udp", "60", "-g", &gateway_str],
         )?;
+        anyhow::ensure!(
+            udp_output.status.success(),
+            "natpmpc UDP port renewal failed ({})",
+            udp_output.status
+        );
         let udp_port: u16 = re
             .captures(String::from_utf8_lossy(&udp_output.stdout).as_ref())
             .context("Failed to read port from natpmpc output - no captures")?
@@ -210,6 +230,11 @@ impl ThreadLoopForwarder for Natpmpc {
             &params.netns_name,
             &["natpmpc", "-a", "1", "0", "tcp", "60", "-g", &gateway_str],
         )?;
+        anyhow::ensure!(
+            tcp_output.status.success(),
+            "natpmpc TCP port renewal failed ({})",
+            tcp_output.status
+        );
         let tcp_port: u16 = re
             .captures(String::from_utf8_lossy(&tcp_output.stdout).as_ref())
             .context("Failed to read port from natpmpc output - no captures")?

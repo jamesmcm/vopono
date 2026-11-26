@@ -45,7 +45,7 @@ pub fn launch_custom_config(
             .arg(working_directory.as_os_str());
     }
 
-    command.arg(application_command(app));
+    command.arg("--").arg(application_command(app));
     let command_line = display_command(&command);
     prepare_background_command(&mut command, true);
     let child = command
@@ -90,7 +90,7 @@ pub fn launch_provider_config(
             .arg(working_directory.as_os_str());
     }
 
-    command.arg(application_command(app));
+    command.arg("--").arg(application_command(app));
     let command_line = display_command(&command);
     prepare_background_command(&mut command, true);
     let child = command
@@ -120,15 +120,8 @@ fn add_launch_args(command: &mut Command, launch: &LaunchConfig) -> anyhow::Resu
             .arg("--port-forwarding-callback")
             .arg(ensure_port_forwarding_callback()?);
     }
-    if !launch.open_ports.is_empty() {
-        command.arg("--open-ports").arg(
-            launch
-                .open_ports
-                .iter()
-                .map(u16::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
-        );
+    for port in &launch.open_ports {
+        command.arg("--open-ports").arg(port.to_string());
     }
     Ok(())
 }
@@ -141,9 +134,13 @@ pub fn sync_provider(provider: VpnProvider, protocol: Option<Protocol>) -> anyho
         command.arg("--protocol").arg(protocol.to_string());
     }
     prepare_background_command(&mut command, false);
-    command
+    let mut child = command
         .spawn()
         .with_context(|| format!("Failed to start sync for {provider}"))?;
+    // Reap the background sync process so it never lingers as a zombie.
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
 
     Ok(format!(
         "Started sync for {provider} through {}",
@@ -188,16 +185,16 @@ fn application_command(app: &ApplicationProfile) -> String {
         .cloned()
         .chain(app.args.iter().cloned())
         .collect::<Vec<_>>();
-    let env_vars = effective_env_vars(app, &app_words);
-    let mut words = Vec::with_capacity(2 + env_vars.len() + command_words.len() + app.args.len());
+    let env_vars: Vec<String> = effective_env_vars(app, &app_words)
+        .into_iter()
+        .filter(|env_var| !env_var.key.trim().is_empty())
+        .map(|env_var| format!("{}={}", env_var.key.trim(), env_var.value))
+        .collect();
+    let mut words = Vec::with_capacity(3 + env_vars.len() + command_words.len() + app.args.len());
     if !env_vars.is_empty() {
         words.push("env".to_string());
-        words.extend(
-            env_vars
-                .iter()
-                .filter(|env_var| !env_var.key.trim().is_empty())
-                .map(|env_var| format!("{}={}", env_var.key.trim(), env_var.value)),
-        );
+        words.extend(env_vars);
+        words.push("--".to_string());
     }
     words.extend(command_words);
     words.extend(app.args.iter().cloned());
@@ -304,6 +301,7 @@ mod tests {
                 "SUDO_GID=",
                 "SUDO_HOME=",
                 "SUDO_TTY=",
+                "--",
                 "flatpak",
                 "run",
                 "org.example.App"
@@ -333,6 +331,7 @@ mod tests {
                 "SUDO_GID=",
                 "SUDO_HOME=",
                 "SUDO_TTY=",
+                "--",
                 "flatpak",
                 "run",
                 "org.example.App"

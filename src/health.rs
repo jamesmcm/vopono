@@ -88,8 +88,18 @@ impl Monitor {
                 return;
             };
             let path = base.join("vopono/locks").join(&name).join(HEALTH_FILE);
-            let skip_ipv4 = recovery_state.as_ref().is_some_and(runtime::skip_ipv4);
-            let skip_ipv6 = recovery_state.as_ref().is_none_or(runtime::skip_ipv6);
+            let mut skip_ipv4 = recovery_state.as_ref().is_some_and(runtime::skip_ipv4);
+            let mut skip_ipv6 = recovery_state.as_ref().is_none_or(runtime::skip_ipv6);
+            // Never skip both IPv4 and IPv6 simultaneously (e.g. an OpenVPN
+            // namespace adopted while temporarily disconnected with no global tun IP):
+            // skipping both would omit all TCP probes and falsely report Connected.
+            let mut refresh_openvpn_families =
+                recovery_state.as_ref().is_some_and(|s| s.openvpn.is_some())
+                    && skip_ipv4
+                    && skip_ipv6;
+            if skip_ipv4 && skip_ipv6 {
+                skip_ipv4 = false;
+            }
             let mut health = Health {
                 state: State::Degraded,
                 checked_at: 0,
@@ -116,6 +126,15 @@ impl Monitor {
                 if receiver.try_recv().is_ok() || !Path::new("/run/netns").join(&name).exists() {
                     break;
                 }
+                if refresh_openvpn_families && let Some(state) = recovery_state.as_ref() {
+                    let next_v4 = runtime::skip_ipv4(state);
+                    let next_v6 = runtime::skip_ipv6(state);
+                    if !next_v4 || !next_v6 {
+                        skip_ipv4 = next_v4;
+                        skip_ipv6 = next_v6;
+                        refresh_openvpn_families = false;
+                    }
+                }
                 let recover = worker_recover.load(Ordering::Acquire);
                 if recover {
                     if !recovery_was_enabled {
@@ -125,7 +144,16 @@ impl Monitor {
                         .as_ref()
                         .and_then(vopono_core::network::recovery::signature);
                     if next.is_some() && next != route_signature {
-                        failures = 0;
+                        // Only reset backoff once past the grace period (or if the
+                        // route table itself changed rather than pure GeoDNS IP rotation)
+                        // so rotating round-robin DNS records cannot starve recovery at 0/1.
+                        let route_changed = match (&route_signature, &next) {
+                            (Some((_, old_route)), Some((_, new_route))) => old_route != new_route,
+                            _ => true,
+                        };
+                        if route_changed || failures > 32 {
+                            failures = failures.min(1);
+                        }
                         route_signature = next;
                     }
                 }

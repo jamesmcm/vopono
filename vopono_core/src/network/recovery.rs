@@ -88,12 +88,10 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
     let host_interface =
         NetworkInterface::new(interface(super::route::lookup(address)?.interface_index)?)?;
     let veth = state.veth_pair.as_ref().context("Missing namespace veth")?;
-    let changed_underlay = if let Some(masquerade) = &mut state.host_masquerade {
-        masquerade.recover_interface(host_interface.clone())?
-    } else {
-        false
-    };
-    if changed_underlay && let Some(exception) = &mut state.firewall_exception {
+    if let Some(masquerade) = &mut state.host_masquerade {
+        masquerade.recover_interface(host_interface.clone())?;
+    }
+    if let Some(exception) = &mut state.firewall_exception {
         exception.recover_interface(host_interface, &veth.dest)?;
     }
     if let Some(wg) = &mut state.wireguard {
@@ -287,12 +285,31 @@ fn iptables_endpoint_rules(
     }
     // Add the new exception before removing the old one so a failure cannot
     // leave the tunnel with no endpoint permission. Insert ahead of the final
-    // kill-switch REJECT rule.
+    // kill-switch REJECT/DROP rules.
     if !(disable_ipv6 && new.is_ipv6()) {
         let (command, args) = iptables_endpoint_rule_args(new, port, true);
         let mut argv = vec![command.as_str()];
         argv.extend(args.iter().map(String::as_str));
         checked(name, &argv)?;
+        checked(
+            name,
+            &[
+                command.as_str(),
+                "-I",
+                "INPUT",
+                "1",
+                "-p",
+                "udp",
+                "-m",
+                "udp",
+                "-s",
+                &new.to_string(),
+                "--sport",
+                &port.to_string(),
+                "-j",
+                "ACCEPT",
+            ],
+        )?;
     }
     if !(disable_ipv6 && old.is_ipv6()) {
         let (command, args) = iptables_endpoint_rule_args(old, port, false);
@@ -300,6 +317,24 @@ fn iptables_endpoint_rules(
         argv.extend(args.iter().map(String::as_str));
         // The old rule may already be absent after a concurrent repair.
         let _ = NetworkNamespace::exec_with_output(name, &argv);
+        let _ = NetworkNamespace::exec_with_output(
+            name,
+            &[
+                command.as_str(),
+                "-D",
+                "INPUT",
+                "-p",
+                "udp",
+                "-m",
+                "udp",
+                "-s",
+                &old.to_string(),
+                "--sport",
+                &port.to_string(),
+                "-j",
+                "ACCEPT",
+            ],
+        );
     }
     Ok(())
 }

@@ -183,6 +183,8 @@ impl HostMasquerade {
                 .context("Failed to create nft postrouting chain in vopono_nat")?;
                 let comment =
                     Self::nft_comment(ipv4_mask.as_deref(), ipv6_mask.as_deref(), &interface.name);
+                let quoted_if = format!("\"{}\"", interface.name);
+                let _nft_guard = host_nft_lock();
 
                 if let Some(ref mask) = ipv4_mask {
                     sudo_command(&[
@@ -193,7 +195,7 @@ impl HostMasquerade {
                         "vopono_nat",
                         "postrouting",
                         "oifname",
-                        &interface.name,
+                        &quoted_if,
                         "ip",
                         "saddr",
                         mask,
@@ -218,7 +220,7 @@ impl HostMasquerade {
                         "vopono_nat",
                         "postrouting",
                         "oifname",
-                        &interface.name,
+                        &quoted_if,
                         "ip6",
                         "saddr",
                         mask,
@@ -251,13 +253,11 @@ impl Drop for HostMasquerade {
         if !self.cleanup_enabled {
             return;
         }
-        let namespaces = crate::util::get_lock_namespaces();
-        debug!("Remaining namespaces: {namespaces:?}");
-        let last_namespace = namespaces.is_ok_and(|namespaces| namespaces.is_empty());
+        let _nft_guard = host_nft_lock();
         self.remove_rules();
-        if last_namespace && self.firewall == Firewall::NfTables {
-            // Removing this generation's rules above is safe alongside other
-            // namespaces; the shared table itself is removed only when empty.
+        if self.firewall == Firewall::NfTables && nft_table_has_no_rules("vopono_nat") {
+            // Delete the shared table only when zero rules remain across all
+            // namespaces and users, never based on a single user's lock dir.
             sudo_command(&["nft", "delete", "table", "inet", "vopono_nat"])
                 .unwrap_or_else(|e| log::warn!("Failed to delete nftables table vopono_nat: {e}"));
         }
@@ -293,7 +293,15 @@ impl FirewallException {
         &mut self,
         interface: NetworkInterface,
         veth: &str,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<bool> {
+        let current_host = if self.ns_interface.name == veth {
+            &self.host_interface
+        } else {
+            &self.ns_interface
+        };
+        if current_host.name == interface.name {
+            return Ok(false);
+        }
         let (first, second) = if self.ns_interface.name == veth {
             (self.ns_interface.clone(), interface)
         } else {
@@ -305,7 +313,7 @@ impl FirewallException {
         self.remove_rules();
         self.set_cleanup_enabled(false);
         *self = replacement;
-        Ok(())
+        Ok(true)
     }
 
     fn nft_comment(host_interface: &str, ns_interface: &str) -> String {
@@ -516,6 +524,9 @@ impl FirewallException {
                 .context("Failed to create nft forward chain in vopono_bridge")?;
 
                 let comment = Self::nft_comment(&host_interface.name, &ns_interface.name);
+                let quoted_host = format!("\"{}\"", host_interface.name);
+                let quoted_ns = format!("\"{}\"", ns_interface.name);
+                let _nft_guard = host_nft_lock();
                 sudo_command(&[
                     "nft",
                     "add",
@@ -524,9 +535,9 @@ impl FirewallException {
                     "vopono_bridge",
                     "forward",
                     "iifname",
-                    &host_interface.name,
+                    &quoted_host,
                     "oifname",
-                    &ns_interface.name,
+                    &quoted_ns,
                     "counter",
                     "accept",
                     "comment",
@@ -547,9 +558,9 @@ impl FirewallException {
                     "vopono_bridge",
                     "forward",
                     "oifname",
-                    &host_interface.name,
+                    &quoted_host,
                     "iifname",
-                    &ns_interface.name,
+                    &quoted_ns,
                     "counter",
                     "accept",
                     "comment",
@@ -606,19 +617,43 @@ impl Drop for FirewallException {
         if !self.cleanup_enabled {
             return;
         }
-        let namespaces = crate::util::get_lock_namespaces();
-        debug!("Remaining namespaces: {namespaces:?}");
-        let last_namespace = namespaces.is_ok_and(|namespaces| namespaces.is_empty());
+        let _nft_guard = host_nft_lock();
         self.remove_rules();
-        if last_namespace && self.firewall == Firewall::NfTables {
-            // Interface-specific rules were removed above; drop the now-unused
-            // shared table only when no other namespace can still own rules.
+        if self.firewall == Firewall::NfTables && nft_table_has_no_rules("vopono_bridge") {
+            // Delete the shared table only when zero rules remain across all
+            // namespaces and users, never based on a single user's lock dir.
             delete_firewall_rule(
                 &["nft", "delete", "table", "inet", "vopono_bridge"],
                 "nftables namespace bridge table",
             );
         }
     }
+}
+
+fn host_nft_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn nft_table_has_no_rules(table: &str) -> bool {
+    let Ok(listing) = Command::new("nft")
+        .args(["-j", "list", "table", "inet", table])
+        .output()
+    else {
+        return false;
+    };
+    if !listing.status.success() {
+        return false;
+    }
+    let Ok(ruleset) = serde_json::from_slice::<serde_json::Value>(&listing.stdout) else {
+        return false;
+    };
+    let Some(items) = ruleset["nftables"].as_array() else {
+        return false;
+    };
+    !items.iter().any(|item| item.get("rule").is_some())
 }
 
 impl FirewallException {

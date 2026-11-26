@@ -201,21 +201,15 @@ fn warn_on_client_version_mismatch(client_version: &str) {
 
 /// Client side: announce our version and warn when the daemon's differs.
 ///
-/// Best-effort and time-bounded: a wedged daemon must not hang the client,
-/// and a daemon too old to understand `ClientVersion` simply drops the
-/// connection so the caller falls back to sudo; the local warning below
-/// still fires whenever the daemon's reported version can be read.
-pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) {
+/// Propagates handshake transport/timeout errors so callers never reuse a
+/// dropped or protocol-desynchronized socket.
+pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) -> anyhow::Result<()> {
     let own = env!("CARGO_PKG_VERSION");
-    if set_socket_timeouts_for(conn, DAEMON_HANDSHAKE_TIMEOUT_SECONDS).is_err() {
-        return;
-    }
-    let daemon_version = client_handshake(conn).ok();
+    set_socket_timeouts_for(conn, DAEMON_HANDSHAKE_TIMEOUT_SECONDS)?;
+    let daemon_version = client_handshake(conn);
     // Restore blocking mode for the long-lived session that follows.
     let _ = clear_socket_timeouts(conn);
-    let Some(daemon_version) = daemon_version else {
-        return;
-    };
+    let daemon_version = daemon_version?;
     match classify_version_skew(&daemon_version, own) {
         VersionSkew::Match => {}
         VersionSkew::MinorMismatch => log::warn!(
@@ -225,6 +219,7 @@ pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) {
             "Daemon vopono version {daemon_version} is incompatible with client version {own}; update vopono and restart the daemon."
         ),
     }
+    Ok(())
 }
 
 /// Version handshake on an already authenticated connection.
@@ -502,17 +497,19 @@ pub fn start() -> anyhow::Result<()> {
     // Clean up any stale socket file from a previous unclean shutdown.
     let _ = std::fs::remove_file(SOCKET_PATH);
 
-    // Set up a signal handler to clean up the socket file on exit.
+    // Set up a signal handler to quiesce in-flight transitions, clean up the socket, and exit.
     let mut signals = Signals::new([SIGTERM, SIGINT, SIGQUIT])?;
     let socket_path = SOCKET_PATH.to_string();
     std::thread::spawn(move || {
-        // Block until the first signal is received, then exit.
+        // Block until the first signal is received, wait briefly for active
+        // namespace setup/teardown transitions to finish, then clean up and exit.
         if let Some(signal) = signals.forever().next() {
             info!(
-                "Received signal {}, cleaning up socket and exiting.",
+                "Received signal {}, waiting for active transitions before exiting.",
                 signal
             );
             let _ = std::fs::remove_file(&socket_path);
+            crate::namespace_sessions::wait_for_idle_transitions(std::time::Duration::from_secs(3));
             std::process::exit(0);
         }
     });
@@ -742,17 +739,40 @@ fn wait_for_application(
     pty_master: Option<OwnedFd>,
     client_fds: Option<&(OwnedFd, OwnedFd, OwnedFd)>,
     launch_notice: Option<String>,
+    pty_bridges_stdout: bool,
 ) -> anyhow::Result<std::process::ExitStatus> {
     let Some(master_fd) = pty_master else {
-        return Ok(child.wait()?);
+        // Non-TTY executions still receive client signals (Ctrl-C / SIGTERM)
+        // over the control socket; forward them to the child's process group.
+        let ctrl_conn = conn.try_clone()?;
+        let child_pgid = nix::unistd::Pid::from_raw(-(child.id() as i32));
+        let child_done = Arc::new(AtomicBool::new(false));
+        let child_done_for_ctrl = Arc::clone(&child_done);
+        let ctrl_thread = thread::spawn(move || {
+            forward_non_tty_signals(ctrl_conn, child_pgid, child_done_for_ctrl);
+        });
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(e) => {
+                    log::debug!("try_wait error: {e}");
+                    break None;
+                }
+            }
+        };
+        child_done.store(true, Ordering::Release);
+        let _ = ctrl_thread.join();
+        return match status {
+            Some(status) => Ok(status),
+            None => Ok(child.wait()?),
+        };
     };
     let mut exit_status = None;
     // Duplicate client FDs so we don't close the originals when Files drop
     let (client_stdin_fd, client_stdout_fd, _) = client_fds.expect("PTY client fds retained");
     let client_stdin_dup: OwnedFd = nix::unistd::dup(client_stdin_fd.as_fd())?;
-    let client_stdout_dup: OwnedFd = nix::unistd::dup(client_stdout_fd.as_fd())?;
     let client_stdin = File::from(client_stdin_dup);
-    let client_stdout = File::from(client_stdout_dup);
     let pty_master_file_r = File::from(master_fd);
     // The master belongs to the daemon, so its clones can share nonblocking mode.
     let flags = OFlag::from_bits_truncate(fcntl(&pty_master_file_r, FcntlArg::F_GETFL)?);
@@ -810,17 +830,39 @@ fn wait_for_application(
         }
     });
 
-    // output copier: pty master -> client stdout (stderr merges on TTY)
+    // output copier: pty master -> client stdout only when stdout is on the PTY;
+    // when stdout was redirected by the caller, drain PTY master to avoid blocking
+    // writes to /dev/tty without corrupting the redirected stdout stream.
     let child_done_for_output = Arc::clone(&child_done);
-    let output_copier = thread::spawn(move || match PtyOutput::new(client_stdout) {
-        Ok(output) => copy_pty_output(
-            pty_master_file_r,
-            output,
-            launch_notice.as_deref().unwrap_or_default().as_bytes(),
-            &child_done_for_output,
-        ),
-        Err(error) => log::debug!("Could not open client PTY output: {error}"),
-    });
+    let output_copier = if pty_bridges_stdout {
+        let client_stdout_dup: OwnedFd = nix::unistd::dup(client_stdout_fd.as_fd())?;
+        let client_stdout = File::from(client_stdout_dup);
+        thread::spawn(move || match PtyOutput::new(client_stdout) {
+            Ok(output) => copy_pty_output(
+                pty_master_file_r,
+                output,
+                launch_notice.as_deref().unwrap_or_default().as_bytes(),
+                &child_done_for_output,
+            ),
+            Err(error) => log::debug!("Could not open client PTY output: {error}"),
+        })
+    } else {
+        thread::spawn(move || {
+            let mut pty_r = pty_master_file_r;
+            let mut buf = [0u8; 4096];
+            while !child_done_for_output.load(Ordering::Acquire) {
+                if !fd_readable(pty_r.as_raw_fd(), 50) {
+                    continue;
+                }
+                match pty_r.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => break,
+                }
+            }
+        })
+    };
 
     // Wait for child to exit.
     loop {
@@ -848,6 +890,63 @@ fn wait_for_application(
     match exit_status {
         Some(status) => Ok(status),
         None => Ok(child.wait()?),
+    }
+}
+
+/// Forward allowlisted signals from a non-TTY client to the child's process group.
+fn forward_non_tty_signals(
+    conn: LocalSocketStream,
+    group: nix::unistd::Pid,
+    done: Arc<AtomicBool>,
+) {
+    let LocalSocketStream::UdSocket(ref sock) = conn;
+    let raw_fd = sock.as_fd().as_raw_fd();
+    let mut pending = Vec::new();
+    let mut chunk = [0u8; 256];
+    while !done.load(Ordering::Acquire) {
+        if !fd_readable(raw_fd, 50) {
+            continue;
+        }
+        match nix::sys::socket::recv(raw_fd, &mut chunk, MsgFlags::MSG_DONTWAIT) {
+            Ok(0) => break,
+            Ok(n) => pending.extend_from_slice(&chunk[..n]),
+            Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => continue,
+            Err(_) => break,
+        }
+        while pending.len() >= 4 {
+            let len = u32::from_be_bytes([pending[0], pending[1], pending[2], pending[3]]) as usize;
+            if len > MAX_CONTROL_FRAME_LEN {
+                return;
+            }
+            if pending.len() < 4 + len {
+                break;
+            }
+            let bytes: Vec<u8> = pending.drain(..4 + len).skip(4).collect();
+            if done.load(Ordering::Acquire) {
+                return;
+            }
+            let Ok(DaemonRequest::Control(DaemonControl::Signal(signal))) =
+                wincode::deserialize::<DaemonRequest>(&bytes)
+            else {
+                continue;
+            };
+            let Ok(signal) = nix::sys::signal::Signal::try_from(signal) else {
+                continue;
+            };
+            if matches!(
+                signal,
+                nix::sys::signal::Signal::SIGINT
+                    | nix::sys::signal::Signal::SIGQUIT
+                    | nix::sys::signal::Signal::SIGTSTP
+                    | nix::sys::signal::Signal::SIGTERM
+                    | nix::sys::signal::Signal::SIGHUP
+                    | nix::sys::signal::Signal::SIGCONT
+                    | nix::sys::signal::Signal::SIGUSR1
+                    | nix::sys::signal::Signal::SIGUSR2
+            ) {
+                let _ = nix::sys::signal::kill(group, signal);
+            }
+        }
     }
 }
 
@@ -1049,22 +1148,38 @@ fn handle_client(
                     // this branch, so take ownership and close all three locally.
                     let (_client_stdin, client_stdout, _client_stderr) =
                         client_fds.take().expect("client fds present");
-                    write_client_notice(
-                        client_stdout,
-                        format!("Created namespace {}\n", session.ns.name).as_bytes(),
-                    );
+                    if json {
+                        let report = crate::exec::launch_report_for_daemon(
+                            &session.ns,
+                            0,
+                            session.forwarded_port(),
+                        );
+                        write_client_notice(client_stdout, format!("{report}\n").as_bytes());
+                    } else if !silent {
+                        write_client_notice(
+                            client_stdout,
+                            format!("Created namespace {}\n", session.ns.name).as_bytes(),
+                        );
+                    }
                     write_response(&mut conn, &DaemonResponse::Exit(0))?;
                     return Ok(());
                 }
 
                 // The caller retains namespace resources after this handler
                 // closes its client descriptors and execution admission slot.
-                // If the client stdin is a TTY, run the child on a dedicated PTY and bridge I/O.
-                // This preserves job control and avoids stealing the user's controlling TTY.
-                let client_has_tty =
-                    nix_isatty(client_fds.as_ref().expect("client fds present").0.as_fd())
-                        .unwrap_or(false);
-                let client_report_out = if !client_has_tty && (!silent || json) {
+                // Check stdin/stdout/stderr individually so redirected stdout or
+                // stderr streams are never routed through the PTY or merged.
+                let (stdin_is_tty, stdout_is_tty, stderr_is_tty) = {
+                    let fds = client_fds.as_ref().expect("client fds present");
+                    (
+                        nix_isatty(fds.0.as_fd()).unwrap_or(false),
+                        nix_isatty(fds.1.as_fd()).unwrap_or(false),
+                        nix_isatty(fds.2.as_fd()).unwrap_or(false),
+                    )
+                };
+                let client_has_tty = stdin_is_tty;
+                let pty_bridges_stdout = client_has_tty && stdout_is_tty;
+                let client_report_out = if !pty_bridges_stdout && (!silent || json) {
                     Some(nix::unistd::dup(
                         client_fds.as_ref().expect("client fds present").1.as_fd(),
                     )?)
@@ -1079,13 +1194,29 @@ fn handle_client(
                 let mut pty_master: Option<OwnedFd> = None;
                 if client_has_tty {
                     let p = openpty(None, None).map_err(|e| anyhow!("openpty failed: {e}"))?;
-                    let slave_out = nix::unistd::dup(p.slave.as_fd())?;
-                    let slave_err = nix::unistd::dup(p.slave.as_fd())?;
-                    // Spawn child with PTY slave as stdio, and let it take controlling TTY in pre_exec
+                    // Assign PTY slave ownership to the connecting user so apps
+                    // opening /dev/tty (ssh, gpg, less, getpass) succeed.
+                    let _ = nix::unistd::fchown(p.slave.as_fd(), Some(uid), Some(gid));
+                    let _ = nix::sys::stat::fchmod(
+                        p.slave.as_fd(),
+                        nix::sys::stat::Mode::from_bits_truncate(0o600),
+                    );
+                    let fds = client_fds.as_ref().expect("client fds present");
+                    let child_out = if stdout_is_tty {
+                        nix::unistd::dup(p.slave.as_fd())?
+                    } else {
+                        nix::unistd::dup(fds.1.as_fd())?
+                    };
+                    let child_err = if stderr_is_tty {
+                        nix::unistd::dup(p.slave.as_fd())?
+                    } else {
+                        nix::unistd::dup(fds.2.as_fd())?
+                    };
+                    // Spawn child with PTY slave as stdin (and TTY outputs), letting it take controlling TTY in pre_exec
                     (application, ns, host_proxies) = execute_as_daemon_with_stdio(
                         exec_command,
                         false,
-                        Some((p.slave, slave_out, slave_err)),
+                        Some((p.slave, child_out, child_err)),
                         true,
                         Some(forwarded_env.clone()),
                     )?;
@@ -1127,10 +1258,20 @@ fn handle_client(
                         "Keep-alive flag active - marking network namespace {} persistent",
                         session.ns.name
                     );
-                    crate::namespace_ownership::mark_persistent(&session.ns.name, uid)?;
+                    if let Err(error) =
+                        crate::namespace_ownership::mark_persistent(&session.ns.name, uid)
+                    {
+                        let _ = application.handle.kill();
+                        let _ = application.handle.wait();
+                        return Err(error);
+                    }
                 }
                 session.retain_proxies(host_proxies);
-                session.persist_options()?;
+                if let Err(error) = session.persist_options() {
+                    let _ = application.handle.kill();
+                    let _ = application.handle.wait();
+                    return Err(error);
+                }
                 let forwarded_port = session.forwarded_port();
                 let mut launch_notice = if json {
                     let report = crate::exec::launch_report_for_daemon(
@@ -1160,6 +1301,7 @@ fn handle_client(
                     pty_master,
                     client_fds.as_ref(),
                     launch_notice,
+                    pty_bridges_stdout,
                 )?;
 
                 // Remove this application's status before the namespace controller
@@ -1198,23 +1340,45 @@ fn handle_client(
                     crate::control::stop_application(&id, Some(uid))
                 }
                 DaemonStopTarget::Namespace(id) => {
-                    let _transition = crate::namespace_sessions::lock_namespace(&id);
-                    let result = (|| {
-                        crate::namespace_ownership::authorize(&id, uid)?;
-                        crate::namespace_sessions::stop_monitor(&id)?;
-                        crate::control::stop_namespace(&id, Some(uid))
-                    })();
-                    let released = result
-                        .as_ref()
-                        .ok()
-                        .and_then(|_| crate::namespace_sessions::invalidate(&id));
-                    drop(_transition);
-                    result.and_then(|result| {
-                        if let Some(released) = released {
-                            crate::namespace_sessions::wait_released(&released)?;
+                    // Authorize and stop monitor + forwarder first. Release the
+                    // transition permit briefly so the controller thread can drop
+                    // its forwarder (joining renewal subprocesses and executing
+                    // AzireVPN remote DELETE) while the netns still exists.
+                    let forwarder_wait: anyhow::Result<_> = {
+                        let _transition = crate::namespace_sessions::lock_namespace(&id);
+                        (|| {
+                            crate::namespace_ownership::authorize(&id, uid)?;
+                            crate::namespace_sessions::stop_monitor(&id)?;
+                            Ok(crate::namespace_sessions::request_forwarder_release(&id))
+                        })()
+                    };
+                    match forwarder_wait {
+                        Err(error) => Err(error),
+                        Ok(wait) => {
+                            if let Some(released) = wait {
+                                crate::namespace_sessions::wait_forwarder_released(
+                                    &released,
+                                    std::time::Duration::from_secs(5),
+                                );
+                            }
+                            let _transition = crate::namespace_sessions::lock_namespace(&id);
+                            let result = (|| {
+                                crate::namespace_ownership::authorize(&id, uid)?;
+                                crate::control::stop_namespace(&id, Some(uid))
+                            })();
+                            let released = result
+                                .as_ref()
+                                .ok()
+                                .and_then(|_| crate::namespace_sessions::invalidate(&id));
+                            drop(_transition);
+                            result.and_then(|result| {
+                                if let Some(released) = released {
+                                    crate::namespace_sessions::wait_released(&released)?;
+                                }
+                                Ok(result)
+                            })
                         }
-                        Ok(result)
-                    })
+                    }
                 }
             };
             let payload = match outcome {
@@ -1242,7 +1406,10 @@ fn handle_client(
                 .flatten()
             {
                 anyhow::ensure!(
-                    !host.is_empty() && host.len() <= 253 && !host.starts_with('-'),
+                    !host.is_empty()
+                        && host.len() <= 253
+                        && !host.starts_with('-')
+                        && !host.chars().any(|c| c.is_control() || c.is_whitespace()),
                     "Invalid probe host"
                 );
             }
@@ -1747,6 +1914,7 @@ mod tests {
                 Some(pty.master),
                 Some(&client_fds),
                 Some("launch notice\n".into()),
+                true,
             );
             let _ = finished.send(result);
         });

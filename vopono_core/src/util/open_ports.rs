@@ -114,7 +114,11 @@ pub fn open_port_in_namespace(
                 NetworkNamespace::exec(netns_name, &input)?;
 
                 if let (Some(veth_source), Some(ips)) = (veth_source, veth_ips) {
-                    for (family, ips) in [("ip", ips.ipv4.as_ref()), ("ip6", ips.ipv6.as_ref())] {
+                    let families = [
+                        ("ip", ips.ipv4.as_ref()),
+                        ("ip6", ipv6_enabled.then_some(ips.ipv6.as_ref()).flatten()),
+                    ];
+                    for (family, ips) in families {
                         if let Some(ips) = ips {
                             NetworkNamespace::exec(
                                 netns_name,
@@ -150,4 +154,98 @@ pub fn open_port_in_namespace(
         }
     }
     Ok(())
+}
+
+/// Remove port-opening rules for an expired provider-assigned forwarded port.
+pub fn close_port_in_namespace(
+    netns_name: &str,
+    firewall: Firewall,
+    ipv6_enabled: bool,
+    port: u16,
+) {
+    let port_str = port.to_string();
+    match firewall {
+        Firewall::IpTables => {
+            let iptables_cmds: &[&str] = if ipv6_enabled {
+                &["iptables", "ip6tables"]
+            } else {
+                &["iptables"]
+            };
+            for iptables_cmd in iptables_cmds {
+                for protocol in ["tcp", "udp"] {
+                    let _ = NetworkNamespace::exec(
+                        netns_name,
+                        &[
+                            iptables_cmd,
+                            "-D",
+                            "INPUT",
+                            "-p",
+                            protocol,
+                            "--dport",
+                            &port_str,
+                            "-j",
+                            "ACCEPT",
+                        ],
+                    );
+                }
+            }
+        }
+        Firewall::NfTables => {
+            let Ok(output) = NetworkNamespace::exec_with_output(
+                netns_name,
+                &["nft", "-j", "list", "chain", "inet", netns_name, "input"],
+            ) else {
+                return;
+            };
+            if !output.status.success() {
+                return;
+            }
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+                return;
+            };
+            let Some(items) = value["nftables"].as_array() else {
+                return;
+            };
+            for item in items {
+                let Some(rule) = item.get("rule") else {
+                    continue;
+                };
+                let Some(handle) = rule["handle"].as_u64() else {
+                    continue;
+                };
+                let Some(exprs) = rule["expr"].as_array() else {
+                    continue;
+                };
+                let matches_port = exprs.iter().any(|expr| {
+                    expr.get("match")
+                        .map(|m| {
+                            let is_dport =
+                                m.pointer("/left/payload/field").and_then(|f| f.as_str())
+                                    == Some("dport");
+                            let is_port =
+                                m.get("right").and_then(|r| r.as_u64()) == Some(u64::from(port));
+                            is_dport && is_port
+                        })
+                        .unwrap_or(false)
+                });
+                let is_accept = exprs.iter().any(|expr| expr.get("accept").is_some());
+                if matches_port && is_accept {
+                    let handle_str = handle.to_string();
+                    let _ = NetworkNamespace::exec(
+                        netns_name,
+                        &[
+                            "nft",
+                            "delete",
+                            "rule",
+                            "inet",
+                            netns_name,
+                            "input",
+                            "handle",
+                            &handle_str,
+                        ],
+                    );
+                }
+            }
+        }
+    }
 }

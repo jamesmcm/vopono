@@ -99,6 +99,38 @@ pub fn tunnel_only_killswitch_rules(
                         "ACCEPT".into(),
                     ]);
                 }
+                if is_v6 {
+                    // Allow IPv6 Neighbor Discovery so outer IPv6 VPN endpoints
+                    // remain reachable after NDP neighbor entries expire.
+                    for icmpv6_type in ["135", "136"] {
+                        rules.push(vec![
+                            ipcmd.into(),
+                            "-A".into(),
+                            "INPUT".into(),
+                            "-p".into(),
+                            "icmpv6".into(),
+                            "-m".into(),
+                            "icmp6".into(),
+                            "--icmpv6-type".into(),
+                            icmpv6_type.into(),
+                            "-j".into(),
+                            "ACCEPT".into(),
+                        ]);
+                        rules.push(vec![
+                            ipcmd.into(),
+                            "-A".into(),
+                            "OUTPUT".into(),
+                            "-p".into(),
+                            "icmpv6".into(),
+                            "-m".into(),
+                            "icmp6".into(),
+                            "--icmpv6-type".into(),
+                            icmpv6_type.into(),
+                            "-j".into(),
+                            "ACCEPT".into(),
+                        ]);
+                    }
+                }
                 if let Some(iface) = tunnel_iface {
                     rules.push(vec![
                         ipcmd.into(),
@@ -174,6 +206,34 @@ pub fn tunnel_only_killswitch_rules(
                     "counter".into(),
                     "accept".into(),
                 ]);
+            }
+            if !disable_ipv6 {
+                for icmpv6_type in ["nd-neighbor-solicit", "nd-neighbor-advert"] {
+                    rules.push(vec![
+                        "nft".into(),
+                        "add".into(),
+                        "rule".into(),
+                        "inet".into(),
+                        ns_name.into(),
+                        "input".into(),
+                        "icmpv6".into(),
+                        "type".into(),
+                        icmpv6_type.into(),
+                        "accept".into(),
+                    ]);
+                    rules.push(vec![
+                        "nft".into(),
+                        "add".into(),
+                        "rule".into(),
+                        "inet".into(),
+                        ns_name.into(),
+                        "output".into(),
+                        "icmpv6".into(),
+                        "type".into(),
+                        icmpv6_type.into(),
+                        "accept".into(),
+                    ]);
+                }
             }
             rules.push(vec![
                 "nft".into(),
@@ -259,10 +319,13 @@ pub fn apply_tunnel_only_killswitch_for_server(
     let Some(host) = host_from_server_arg(server) else {
         bail!("Could not derive a VPN server host from '{server}' for the killswitch");
     };
-    let endpoints = crate::util::hostname_to_ip(&host)
-        .map_err(|e| anyhow!("Cannot resolve VPN server {host} for killswitch: {e}"))?;
+    let endpoints: Vec<IpAddr> = crate::util::hostname_to_ip(&host)
+        .map_err(|e| anyhow!("Cannot resolve VPN server {host} for killswitch: {e}"))?
+        .into_iter()
+        .filter(|ip| !disable_ipv6 || ip.is_ipv4())
+        .collect();
     if endpoints.is_empty() {
-        bail!("VPN server {host} resolved to no addresses for killswitch");
+        bail!("VPN server {host} resolved to no usable addresses for killswitch");
     }
     let tunnel_iface = wait_for_tunnel_interface(&netns.name, tunnel_interface_prefixes, 20)?;
     apply_tunnel_only_killswitch(
@@ -391,6 +454,13 @@ fn parse_tunnel_interface_from_json(
 }
 
 pub fn disable_ipv6(netns: &NetworkNamespace, firewall: Firewall) -> anyhow::Result<()> {
+    let kernel_ipv6_disabled = std::fs::read_to_string("/sys/module/ipv6/parameters/disable")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false);
+    if kernel_ipv6_disabled {
+        debug!("Kernel IPv6 is disabled; skipping IPv6 firewall drop rules");
+        return Ok(());
+    }
     match firewall {
         Firewall::IpTables => {
             NetworkNamespace::exec(&netns.name, &["ip6tables", "-P", "INPUT", "DROP"])?;

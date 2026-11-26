@@ -115,32 +115,46 @@ pub fn perform_owner_write(request: &OwnerWriteRequest) -> anyhow::Result<()> {
             contents,
             mode,
         } => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).with_context(|| {
-                    format!("Failed to create parent directories for {}", path.display())
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create parent directories for {}", path.display())
+            })?;
+            // Atomic exclusive replace so readers never observe a partial file,
+            // symlinks at temporary names cannot be followed, and errors clean up.
+            let prefix = match path.file_name().and_then(|name| name.to_str()) {
+                Some(crate::network::health::HEALTH_FILE) => {
+                    crate::network::health::HEALTH_TEMP_PREFIX
+                }
+                Some(crate::status::FORWARDED_PORT_SIDECAR) => {
+                    crate::status::FORWARDED_PORT_TEMP_PREFIX
+                }
+                _ => ".vopono-tmp-",
+            };
+            let mut temporary = tempfile::Builder::new()
+                .prefix(prefix)
+                .tempfile_in(parent)
+                .with_context(|| {
+                    format!(
+                        "Failed to create temporary file in {} for {}",
+                        parent.display(),
+                        path.display()
+                    )
                 })?;
+            if let Some(mode) = mode {
+                temporary
+                    .as_file()
+                    .set_permissions(PermissionsExt::from_mode(*mode))?;
             }
-            // Atomic replace so readers never observe a partial lockfile.
-            let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-            {
-                let mut options = std::fs::OpenOptions::new();
-                options.write(true).create(true).truncate(true);
-                if let Some(mode) = mode {
-                    options.mode(*mode);
-                }
-                let mut file = options
-                    .open(&temporary)
-                    .with_context(|| format!("Failed to create {}", temporary.display()))?;
-                if let Some(mode) = mode {
-                    file.set_permissions(PermissionsExt::from_mode(*mode))?;
-                }
-                file.write_all(contents.as_bytes())?;
-            }
-            std::fs::rename(&temporary, path).with_context(|| {
-                format!(
-                    "Failed to move {} into place at {}",
-                    temporary.display(),
-                    path.display()
+            temporary.write_all(contents.as_bytes())?;
+            temporary.persist(path).map_err(|error| {
+                anyhow!(
+                    "Failed to move {} into place at {}: {}",
+                    error.file.path().display(),
+                    path.display(),
+                    error.error
                 )
             })?;
         }
@@ -439,17 +453,13 @@ pub fn validated_user_owned_dir(path: &Path, uid: Uid) -> anyhow::Result<PathBuf
 /// Read a regular configuration file with the authenticated user's permissions.
 /// Runs a separate executable so daemon threads never change process credentials.
 pub fn read_file_as_config_owner(path: &Path) -> anyhow::Result<Vec<u8>> {
-    if !super::is_daemon_mode() {
+    let Some((uid, gid)) = super::config_write_owner()? else {
         return read_regular_file(path)
             .with_context(|| format!("Could not read {}", path.display()));
-    }
-    let (uid, gid) =
-        super::config_owner_override().context("Missing authenticated config owner")?;
-    if uid.is_root() {
-        return read_regular_file(path)
-            .with_context(|| format!("Could not read {}", path.display()));
-    }
-    let exe = helper_exe_override().context("Missing config reader executable")?;
+    };
+    let exe = helper_exe_override()
+        .or_else(|| std::env::current_exe().ok())
+        .context("Missing config reader executable")?;
     let user = User::from_uid(uid)?.context("Unknown config owner")?;
     let groups = supplementary_groups(&user.name, gid)?;
     let output = unsafe {

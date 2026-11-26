@@ -266,17 +266,21 @@ impl AzireVPN {
 
     pub fn read_access_token(&self) -> anyhow::Result<String> {
         let token_file_path = self.token_file_path();
-        if token_file_path.exists() {
-            let token = std::fs::read_to_string(&token_file_path)?;
-            log::debug!(
-                "AzireVPN Auth Token read from {}",
-                self.token_file_path().display()
-            );
-            return Ok(token);
+        match crate::util::owner_write::read_file_as_config_owner(&token_file_path) {
+            Ok(bytes) => {
+                let token =
+                    String::from_utf8(bytes).context("AzireVPN Auth Token is not valid UTF-8")?;
+                log::debug!(
+                    "AzireVPN Auth Token read from {}",
+                    self.token_file_path().display()
+                );
+                Ok(token)
+            }
+            Err(_) if !token_file_path.exists() => Err(anyhow::anyhow!(
+                "AzireVPN Auth Token not found at {}",
+                token_file_path.display()
+            )),
+            Err(error) => Err(error),
         }
-        Err(anyhow::anyhow!(
-            "AzireVPN Auth Token not found at {}",
-            token_file_path.display()
-        ))
     }
 }

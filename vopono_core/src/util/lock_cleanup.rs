@@ -1,10 +1,10 @@
 use crate::network::health::is_health_sidecar;
-use crate::status::{self, FORWARDED_PORT_SIDECAR, LockfileKind};
+use crate::status::{self, LockfileKind, is_forwarded_port_sidecar};
 use anyhow::Context;
 use nix::dir::{Dir, Entry, Type};
 use nix::errno::Errno;
-use nix::fcntl::OFlag;
-use nix::sys::stat::Mode;
+use nix::fcntl::{AtFlags, OFlag};
+use nix::sys::stat::{Mode, fstatat};
 use nix::unistd::{UnlinkatFlags, unlinkat};
 use std::ffi::CStr;
 use std::path::Path;
@@ -59,7 +59,7 @@ pub(super) fn clean_dead_locks(config_base: &Path) -> anyhow::Result<()> {
         let namespace_missing = std::fs::metadata(Path::new("/var/run/netns").join(namespace))
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
         for file in entries(&mut dir)? {
-            if file.file_type() != Some(Type::File) {
+            if !entry_is_regular_file(&dir, &file) {
                 continue;
             }
             let Ok(filename) = file.file_name().to_str() else {
@@ -67,9 +67,10 @@ pub(super) fn clean_dead_locks(config_base: &Path) -> anyhow::Result<()> {
             };
             let path = Path::new(filename);
             let stale = match LockfileKind::from_path(path) {
-                Some(LockfileKind::Primary) => filename
-                    .parse::<u32>()
-                    .is_ok_and(|pid| namespace_missing || !running_processes.contains(&pid)),
+                Some(LockfileKind::Primary) => filename.parse::<u32>().is_ok_and(|pid| {
+                    namespace_missing
+                        || (!running_processes.contains(&pid) && !super::check_process_running(pid))
+                }),
                 Some(LockfileKind::Client) => {
                     namespace_missing || status::client_lockfile_is_stale(path, namespace)
                 }
@@ -86,8 +87,8 @@ pub(super) fn clean_dead_locks(config_base: &Path) -> anyhow::Result<()> {
             let Ok(name) = file.file_name().to_str() else {
                 return false;
             };
-            (name == FORWARDED_PORT_SIDECAR || is_health_sidecar(name))
-                && file.file_type() == Some(Type::File)
+            (is_forwarded_port_sidecar(name) || is_health_sidecar(name))
+                && entry_is_regular_file(&dir, file)
         }) {
             for file in remaining {
                 remove_file(&dir, file.file_name())?;
@@ -100,6 +101,15 @@ pub(super) fn clean_dead_locks(config_base: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn entry_is_regular_file(dir: &Dir, entry: &Entry) -> bool {
+    match entry.file_type() {
+        Some(Type::File) => true,
+        Some(_) => false,
+        None => fstatat(dir, entry.file_name(), AtFlags::AT_SYMLINK_NOFOLLOW)
+            .is_ok_and(|stat| (stat.st_mode & libc::S_IFMT) == libc::S_IFREG),
+    }
 }
 
 fn optional_directory(result: nix::Result<Dir>) -> anyhow::Result<Option<Dir>> {
@@ -131,6 +141,7 @@ fn remove_file(dir: &Dir, filename: &CStr) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status::FORWARDED_PORT_SIDECAR;
     use std::fs;
     use std::os::unix::fs::symlink;
 

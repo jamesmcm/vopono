@@ -127,7 +127,7 @@ pub fn execute_as_daemon_with_stdio(
     if !existing_session {
         ns = ns.write_lockfile(&parsed_command.application)?;
     }
-    let application = match ApplicationWrapper::new(
+    let mut application = match ApplicationWrapper::new(
         &ns,
         &parsed_command.application,
         parsed_command.user.clone(),
@@ -150,7 +150,11 @@ pub fn execute_as_daemon_with_stdio(
     };
     if !existing_session {
         let pid = application.handle.id();
-        ns.update_lockfile_application_pid(pid)?;
+        if let Err(error) = ns.update_lockfile_application_pid(pid) {
+            let _ = application.handle.kill();
+            let _ = application.handle.wait();
+            return Err(error);
+        }
     }
     Ok((application, ns, host_proxies))
 }
@@ -414,6 +418,9 @@ fn setup_namespace_inner(
     };
 
     if let Some(uid) = daemon_uid {
+        if explicit_existing {
+            crate::namespace_ownership::authorize(&ns_name, uid)?;
+        }
         crate::namespace_sessions::reserve(&ns_name, uid, monitor_requested)?;
     }
 
@@ -454,6 +461,12 @@ fn setup_namespace_inner(
             );
         }
     } else {
+        if explicit_existing {
+            return Err(anyhow!("Network namespace '{ns_name}' no longer exists"));
+        }
+        if daemon_uid.is_some() {
+            parsed_command.interface.verify_exists_on_host()?;
+        }
         ns = NetworkNamespace::new(
             ns_name.clone(),
             parsed_command.provider.clone(),
@@ -598,7 +611,10 @@ fn setup_namespace_inner(
                     parsed_command.group.as_deref(),
                 )?;
                 set_env_vars(&ns, forwarder.as_deref(), &mut cmd, &host_env_vars);
-                cmd.spawn()?;
+                let mut child = cmd.spawn()?;
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
             }
         }
     }
@@ -1174,17 +1190,10 @@ fn provider_port_forwarding(
                     parsed_command.port_forwarding_callback.as_ref(),
                 )?))
             }
-            Some(VpnProvider::ProtonVPN) => {
-                vopono_core::util::open_hosts(
-                    &ns.name,
-                    &[vopono_core::config::providers::protonvpn::PROTONVPN_GATEWAY],
-                    parsed_command.firewall,
-                )?;
-                Some(Box::new(Natpmpc::new(
-                    ns,
-                    parsed_command.port_forwarding_callback.as_ref(),
-                )?))
-            }
+            Some(VpnProvider::ProtonVPN) => Some(Box::new(Natpmpc::new(
+                ns,
+                parsed_command.port_forwarding_callback.as_ref(),
+            )?)),
             Some(VpnProvider::AzireVPN) => {
                 let azirevpn = vopono_core::config::providers::azirevpn::AzireVPN {};
                 let access_token = azirevpn.read_access_token()?;

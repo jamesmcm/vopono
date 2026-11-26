@@ -351,6 +351,10 @@ fn handle_check(command: args::CheckCommand, askpass: bool) -> anyhow::Result<()
         }
     };
 
+    let ok = status.connected
+        && status.dns.as_ref().is_none_or(|dns| {
+            dns.code != Some(vopono_core::diagnostics::DiagnosticCode::ProbeUnavailable)
+        });
     if command.json {
         api::print_json(&check::ConnectivityDocument {
             version: api::SCHEMA_VERSION,
@@ -358,6 +362,9 @@ fn handle_check(command: args::CheckCommand, askpass: bool) -> anyhow::Result<()
         })?;
     } else {
         println!("{}", status.human_line());
+    }
+    if !ok {
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -381,9 +388,8 @@ fn forward_check_to_daemon(
 ) -> Result<check::ConnectivityStatus, CheckForwardError> {
     let mut conn = daemon_client::connect(policy).map_err(CheckForwardError::Retry)?;
     // Scale socket timeout to cover sequential IPv4 + IPv6 + DNS probes plus margin,
-    // capped to avoid EINVAL from oversized setsockopt timeouts.
-    let timeout_secs = ((command.timeout_ms.saturating_mul(3) / 1000) + 10)
-        .clamp(daemon::DAEMON_STOP_TIMEOUT_SECONDS as u64, 120) as i64;
+    // without imposing a 30s floor that would freeze single-threaded MCP callers.
+    let timeout_secs = ((command.timeout_ms.saturating_mul(3) / 1000) + 10).clamp(5, 120) as i64;
     daemon::set_socket_timeouts_for(&conn, timeout_secs).map_err(CheckForwardError::Retry)?;
 
     let request = daemon::DaemonRequest::CheckNamespace(daemon::CheckNamespaceRequest {

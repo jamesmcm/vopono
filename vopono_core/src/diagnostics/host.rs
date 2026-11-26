@@ -248,37 +248,68 @@ fn nft_diagnostics(text: &str, skip_ipv6: bool) -> Option<Vec<Diagnostic>> {
             }
         }
         if let Some(rule) = entry.get("rule") {
-            let family = rule.get("family")?.as_str()?;
+            let Some(family) = rule.get("family").and_then(|v| v.as_str()) else {
+                continue;
+            };
             if skip_ipv6 && family == "ip6" {
                 continue;
             }
-            let table = rule.get("table")?.as_str()?;
-            let id = format!("{family}/{table}/{}", rule.get("chain")?.as_str()?);
-            for expr in rule.get("expr")?.as_array()? {
-                for verdict in ["drop", "reject"] {
-                    if expr.get(verdict).is_some() {
-                        edges
-                            .entry(id.clone())
-                            .or_default()
-                            .insert(verdict.to_uppercase());
-                    }
-                }
-                for jump in ["jump", "goto"] {
-                    if let Some(target) = expr
-                        .get(jump)
-                        .and_then(|s| s.get("target"))
-                        .and_then(|s| s.as_str())
-                    {
-                        edges
-                            .entry(id.clone())
-                            .or_default()
-                            .insert(format!("{family}/{table}/{target}"));
-                    }
-                }
+            let Some(table) = rule.get("table").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(chain_name) = rule.get("chain").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let id = format!("{family}/{table}/{chain_name}");
+            let Some(exprs) = rule.get("expr").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            for expr in exprs {
+                collect_nft_expr_edges(expr, family, table, &id, &mut edges);
             }
         }
     }
     Some(rule_evidence("nftables", policies, &edges, &roots))
+}
+
+fn collect_nft_expr_edges(
+    value: &serde_json::Value,
+    family: &str,
+    table: &str,
+    id: &str,
+    edges: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    if let Some(obj) = value.as_object() {
+        for verdict in ["drop", "reject"] {
+            if obj.contains_key(verdict) {
+                edges
+                    .entry(id.to_owned())
+                    .or_default()
+                    .insert(verdict.to_uppercase());
+            }
+        }
+        for jump in ["jump", "goto"] {
+            if let Some(target) = obj
+                .get(jump)
+                .and_then(|s| s.get("target"))
+                .and_then(|s| s.as_str())
+            {
+                edges
+                    .entry(id.to_owned())
+                    .or_default()
+                    .insert(format!("{family}/{table}/{target}"));
+            }
+        }
+        for nested in ["vmap", "map", "data", "set"] {
+            if let Some(child) = obj.get(nested) {
+                collect_nft_expr_edges(child, family, table, id, edges);
+            }
+        }
+    } else if let Some(items) = value.as_array() {
+        for item in items {
+            collect_nft_expr_edges(item, family, table, id, edges);
+        }
+    }
 }
 
 pub fn apparmor_diagnostics() -> Vec<Diagnostic> {
@@ -664,5 +695,25 @@ mod tests {
         assert!(read_command("sleep", &["5"], started + Duration::from_millis(25)).is_none());
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(read_command("yes", &[], Instant::now() + Duration::from_secs(1)).is_none());
+    }
+
+    #[test]
+    fn nft_diagnostics_inspects_vmap_and_tolerates_rules_without_expr() {
+        let ruleset = serde_json::json!({
+            "nftables": [
+                {"chain": {"family": "inet", "table": "filter", "name": "forward", "hook": "forward", "policy": "accept"}},
+                {"rule": {"family": "inet", "table": "filter", "chain": "forward"}},
+                {"rule": {"family": "inet", "table": "filter", "chain": "forward", "expr": [
+                    {"vmap": {"key": {"meta": {"key": "iifname"}}, "data": {"set": [["eth0", {"drop": null}]]}}}
+                ]}}
+            ]
+        });
+        let diags = nft_diagnostics(&ruleset.to_string(), false)
+            .expect("missing expr must not abort nftables inspection");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.state == State::Skipped && d.message.contains("DROP/REJECT"))
+        );
     }
 }

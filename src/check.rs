@@ -230,8 +230,9 @@ fn probe_family(host: &str, port: u16, timeout_ms: u64, v6: bool) -> ChildFamily
                 .checked_duration_since(Instant::now())
                 .filter(|d| !d.is_zero())
                 .ok_or_else(|| anyhow!("Probe timeout exhausted before TCP connect"))?;
-            TcpStream::connect_timeout(&SocketAddr::new(ip, port), remaining)
-                .with_context(|| format!("TCP connect to {ip}:{port} failed"))
+            let target = SocketAddr::new(ip, port);
+            TcpStream::connect_timeout(&target, remaining)
+                .with_context(|| format!("TCP connect to {target} failed"))
         });
     match attempt {
         Ok(_) => ChildFamily {
@@ -354,7 +355,12 @@ pub fn probe_namespace(
         (skip_ipv6, v6_host),
         (skip_dns, dns_host),
     ] {
-        if !skipped && (host.is_empty() || host.len() > 253 || host.starts_with('-')) {
+        if !skipped
+            && (host.is_empty()
+                || host.len() > 253
+                || host.starts_with('-')
+                || host.chars().any(|c| c.is_control() || c.is_whitespace()))
+        {
             return probe_unavailable_status(
                 id,
                 v4_host,
@@ -464,52 +470,145 @@ fn probe_namespace_inner(
         } else {
             cmd.arg("--skip-dns");
         }
+        use std::io::Read;
+        use std::os::fd::AsFd;
+        use std::os::unix::process::CommandExt;
+
         cmd.env("RUST_LOG", "off")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            .process_group(0);
         let mut child = cmd
             .spawn()
             .with_context(|| format!("Failed to launch probe inside namespace '{id}'"))?;
-        // Drain stdout and stderr concurrently with a bounded limit so verbose child
-        // output can never fill the OS pipe buffer and deadlock before `try_wait`.
-        const MAX_PROBE_PIPE_BYTES: u64 = 256 * 1024;
-        fn read_bounded<R: std::io::Read + Send + 'static>(
-            pipe: Option<R>,
-        ) -> std::thread::JoinHandle<Vec<u8>> {
-            std::thread::spawn(move || {
-                use std::io::Read;
-                let mut buf = Vec::new();
-                if let Some(pipe) = pipe {
-                    let _ = pipe.take(MAX_PROBE_PIPE_BYTES).read_to_end(&mut buf);
-                }
-                buf
-            })
+        let pgid = nix::unistd::Pid::from_raw(-(child.id() as i32));
+        let kill_and_reap = |child: &mut std::process::Child| {
+            let _ = nix::sys::signal::kill(pgid, nix::sys::signal::Signal::SIGKILL);
+            let _ = child.kill();
+            let _ = child.wait();
+        };
+
+        // Drain stdout and stderr non-blockingly on this thread with a bounded
+        // cap so lingering descendants cannot block join() or leak probe permits.
+        const MAX_PROBE_PIPE_BYTES: usize = 256 * 1024;
+        let set_nonblocking = |fd: std::os::fd::BorrowedFd<'_>| -> anyhow::Result<()> {
+            let flags = nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_GETFL)?;
+            nix::fcntl::fcntl(
+                fd,
+                nix::fcntl::FcntlArg::F_SETFL(
+                    nix::fcntl::OFlag::from_bits_truncate(flags) | nix::fcntl::OFlag::O_NONBLOCK,
+                ),
+            )?;
+            Ok(())
+        };
+        let mut stdout_pipe = child.stdout.take();
+        let mut stderr_pipe = child.stderr.take();
+        if let Some(ref pipe) = stdout_pipe
+            && let Err(error) = set_nonblocking(pipe.as_fd())
+        {
+            kill_and_reap(&mut child);
+            return Err(error);
         }
-        let stdout_thread = read_bounded(child.stdout.take());
-        let stderr_thread = read_bounded(child.stderr.take());
+        if let Some(ref pipe) = stderr_pipe
+            && let Err(error) = set_nonblocking(pipe.as_fd())
+        {
+            kill_and_reap(&mut child);
+            return Err(error);
+        }
+        let drain_pipe = |pipe: &mut Option<std::process::ChildStdout>, buf: &mut Vec<u8>| {
+            let Some(reader) = pipe.as_mut() else {
+                return;
+            };
+            let mut chunk = [0u8; 4096];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => {
+                        *pipe = None;
+                        break;
+                    }
+                    Ok(n) => {
+                        let space = MAX_PROBE_PIPE_BYTES.saturating_sub(buf.len());
+                        if space > 0 {
+                            buf.extend_from_slice(&chunk[..n.min(space)]);
+                        }
+                    }
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(_) => {
+                        *pipe = None;
+                        break;
+                    }
+                }
+            }
+        };
+        let drain_err = |pipe: &mut Option<std::process::ChildStderr>, buf: &mut Vec<u8>| {
+            let Some(reader) = pipe.as_mut() else {
+                return;
+            };
+            let mut chunk = [0u8; 4096];
+            loop {
+                match reader.read(&mut chunk) {
+                    Ok(0) => {
+                        *pipe = None;
+                        break;
+                    }
+                    Ok(n) => {
+                        let space = MAX_PROBE_PIPE_BYTES.saturating_sub(buf.len());
+                        if space > 0 {
+                            buf.extend_from_slice(&chunk[..n.min(space)]);
+                        }
+                    }
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(_) => {
+                        *pipe = None;
+                        break;
+                    }
+                }
+            }
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
         let deadline = Instant::now()
             + Duration::from_millis(timeout_ms.saturating_mul(3).saturating_add(5000));
         loop {
-            match child.try_wait()? {
-                Some(status) => {
-                    let stdout = stdout_thread.join().unwrap_or_default();
-                    let stderr = stderr_thread.join().unwrap_or_default();
+            drain_pipe(&mut stdout_pipe, &mut stdout);
+            drain_err(&mut stderr_pipe, &mut stderr);
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    drain_pipe(&mut stdout_pipe, &mut stdout);
+                    drain_err(&mut stderr_pipe, &mut stderr);
+                    // Terminate any stray descendants left in the probe process group.
+                    let _ = nix::sys::signal::kill(pgid, nix::sys::signal::Signal::SIGKILL);
                     return Ok(std::process::Output {
                         status,
                         stdout,
                         stderr,
                     });
                 }
-                None if Instant::now() < deadline => {
+                Ok(None) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(15));
                 }
-                None => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    let _ = stdout_thread.join();
-                    let _ = stderr_thread.join();
+                Ok(None) => {
+                    kill_and_reap(&mut child);
                     anyhow::bail!("Connectivity probe child timed out inside namespace '{id}'");
+                }
+                Err(error) => {
+                    kill_and_reap(&mut child);
+                    return Err(error.into());
                 }
             }
         }

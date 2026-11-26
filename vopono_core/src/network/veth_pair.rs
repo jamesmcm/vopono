@@ -56,6 +56,7 @@ impl VethPair {
         }
 
         let nm_unmanaged = if nm_path.exists() && nm_running {
+            let _nm_guard = nm_config_lock();
             debug!(
                 "NetworkManager detected, adding {} to unmanaged devices",
                 dest
@@ -66,10 +67,13 @@ impl VethPair {
             nm_config_path.push("unmanaged.conf");
 
             let backup_file = if nm_config_path.exists() {
-                // Backup existing unmanaged.conf
+                // Backup existing unmanaged.conf only if a backup does not already
+                // exist so concurrent launches do not overwrite the original.
                 let mut backup_path = nm_path;
                 backup_path.push("conf.d/unmanaged.conf.vopono.bak");
-                std::fs::copy(&nm_config_path, &backup_path)?;
+                if !backup_path.exists() {
+                    std::fs::copy(&nm_config_path, &backup_path)?;
+                }
                 Some(backup_path)
             } else {
                 None
@@ -235,52 +239,83 @@ impl Drop for NetworkManagerUnmanaged {
         if !self.cleanup_enabled {
             return;
         }
-        // Only restore settings if there are no other active namespaces
-        if let Ok(namespaces) = crate::util::get_lock_namespaces() {
-            if !namespaces.is_empty() {
-                return;
-            }
+        let _nm_guard = nm_config_lock();
+        // Only restore settings if there are no other active vopono namespaces
+        // globally (across all users, not just the current user's lock dir).
+        let other_active = has_other_active_vopono_namespaces();
+        if other_active {
+            return;
+        }
+        if let Ok(namespaces) = crate::util::get_lock_namespaces()
+            && !namespaces.is_empty()
+        {
+            return;
+        }
 
-            let nm_path = PathBuf::from_str("/etc/NetworkManager/conf.d/unmanaged.conf")
-                .expect("Failed to build path");
-            if let Some(backup_file) = self.backup_file.as_ref() {
-                // Concurrent teardowns (e.g. `vopono stop` racing the owning
-                // session) may already have restored and removed the backup;
-                // cleanup must never panic inside Drop.
-                match std::fs::copy(backup_file, &nm_path) {
-                    Ok(_) => {
-                        if let Err(error) = std::fs::remove_file(backup_file)
-                            && error.kind() != std::io::ErrorKind::NotFound
-                        {
-                            log::warn!(
-                                "Failed to delete NetworkManager unmanaged.conf backup {}: {error}",
-                                backup_file.display()
-                            );
-                        }
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                        debug!(
-                            "NetworkManager unmanaged.conf backup {} already consumed by another teardown",
-                            backup_file.display()
-                        );
-                    }
-                    Err(error) => {
+        let nm_path = PathBuf::from("/etc/NetworkManager/conf.d/unmanaged.conf");
+        if let Some(backup_file) = self.backup_file.as_ref() {
+            // Concurrent teardowns (e.g. `vopono stop` racing the owning
+            // session) may already have restored and removed the backup;
+            // cleanup must never panic inside Drop.
+            match std::fs::copy(backup_file, &nm_path) {
+                Ok(_) => {
+                    if let Err(error) = std::fs::remove_file(backup_file)
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
                         log::warn!(
-                            "Failed to restore NetworkManager unmanaged.conf from {}: {error}",
+                            "Failed to delete NetworkManager unmanaged.conf backup {}: {error}",
                             backup_file.display()
                         );
                     }
                 }
-            } else if let Err(error) = std::fs::remove_file(&nm_path)
-                && error.kind() != std::io::ErrorKind::NotFound
-            {
-                log::warn!("Failed to delete NetworkManager unmanaged.conf: {error}");
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    debug!(
+                        "NetworkManager unmanaged.conf backup {} already consumed by another teardown",
+                        backup_file.display()
+                    );
+                }
+                Err(error) => {
+                    log::warn!(
+                        "Failed to restore NetworkManager unmanaged.conf from {}: {error}",
+                        backup_file.display()
+                    );
+                }
             }
-            if let Err(error) = sudo_command(&["nmcli", "connection", "reload"]) {
-                log::warn!("Failed to reload NetworkManager configuration: {error}");
-            }
+        } else if let Err(error) = std::fs::remove_file(&nm_path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            log::warn!("Failed to delete NetworkManager unmanaged.conf: {error}");
+        }
+        if let Err(error) = sudo_command(&["nmcli", "connection", "reload"]) {
+            log::warn!("Failed to reload NetworkManager configuration: {error}");
         }
     }
+}
+
+fn nm_config_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn has_other_active_vopono_namespaces() -> bool {
+    let owners_dir = std::path::Path::new("/run/vopono/namespace-owners");
+    if let Ok(entries) = std::fs::read_dir(owners_dir) {
+        let count = entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| !name.starts_with('.'))
+            })
+            .count();
+        if count > 1 {
+            return true;
+        }
+    }
+    false
 }
 
 impl VethPair {

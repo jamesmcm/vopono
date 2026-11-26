@@ -238,13 +238,20 @@ impl FromStr for WireguardEndpoint {
     type Err = anyhow::Error;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
         if let Ok(addr) = s.parse::<SocketAddr>() {
+            anyhow::ensure!(addr.port() != 0, "Wireguard endpoint port cannot be 0");
             Ok(WireguardEndpoint::IpWithPort(addr))
         } else if let Some((host, port)) = s.rsplit_once(':') {
             // Use rsplit_once for IPv6 addresses
             let port = port.parse::<u16>().map_err(|_| anyhow!("Invalid port"))?;
-            let host = host.trim_matches(|c| c == '[' || c == ']').to_string(); // Handle [ipv6:add:ress]
-            Ok(WireguardEndpoint::HostnameWithPort(host.to_string(), port))
+            anyhow::ensure!(port != 0, "Wireguard endpoint port cannot be 0");
+            let host = host
+                .trim_matches(|c| c == '[' || c == ']')
+                .trim()
+                .to_string(); // Handle [ipv6:add:ress]
+            anyhow::ensure!(!host.is_empty(), "Wireguard endpoint host cannot be empty");
+            Ok(WireguardEndpoint::HostnameWithPort(host, port))
         } else {
             Err(anyhow!("Invalid Wireguard endpoint format"))
         }
@@ -319,6 +326,11 @@ impl FromStr for WireguardConfig {
         for (section_name, kvs) in parsed_sections {
             match section_name {
                 "Interface" => {
+                    if interface.is_some() {
+                        return Err(anyhow!(
+                            "Multiple [Interface] sections are not allowed in Wireguard configuration"
+                        ));
+                    }
                     let mut private_key = None;
                     let mut addresses = Vec::new();
                     let mut dns_servers = Vec::new();
@@ -470,7 +482,11 @@ where
 {
     let raw = String::deserialize(deserializer)?;
     match raw.trim().to_socket_addrs() {
-        Ok(mut x) => Ok(x.next().unwrap()),
+        Ok(mut x) => x.next().ok_or_else(|| {
+            serde::de::Error::custom(anyhow!(
+                "Wireguard endpoint resolved to no socket addresses"
+            ))
+        }),
         Err(x) => Err(serde::de::Error::custom(anyhow!(
             "Wireguard IpAddr deserialisation error: {:?}",
             x
@@ -714,5 +730,27 @@ Endpoint = 192.0.2.2:51820
 "#;
 
         assert!(WireguardConfig::from_str(config).is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_interface_and_invalid_endpoints() {
+        let dup_iface = r#"
+[Interface]
+PrivateKey = private1
+Address = 10.0.0.2/32
+
+[Interface]
+PrivateKey = private2
+Address = 10.0.0.3/32
+
+[Peer]
+PublicKey = pub
+AllowedIPs = 0.0.0.0/0
+Endpoint = 192.0.2.1:51820
+"#;
+        assert!(WireguardConfig::from_str(dup_iface).is_err());
+        assert!(":51820".parse::<WireguardEndpoint>().is_err());
+        assert!("192.0.2.1:0".parse::<WireguardEndpoint>().is_err());
+        assert!("vpn.example.com:0".parse::<WireguardEndpoint>().is_err());
     }
 }

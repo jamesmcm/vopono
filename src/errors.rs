@@ -151,20 +151,27 @@ impl ErrorCode {
         // e.g. util::get_config_file: "Could not find config ..."
         } else if message.contains("could not find config") {
             Self::ServerNotFound
-        // e.g. dependency checks: "... is not installed"
-        } else if message.contains("is not installed") {
+        // e.g. dependency checks: "... is not installed" / "is wireguard-tools installed?"
+        } else if message.contains("is not installed")
+            || (message.contains("installed?") && message.contains("failed to run"))
+        {
             Self::DependencyMissing
         // e.g. sudo/config permission failures: "Permission denied"
         } else if message.contains("permission denied") {
             Self::PermissionDenied
         } else if message.contains("failed to launch") {
             Self::ApplicationLaunchFailed
-        // VPN protocol failures only when tied to connection wording; avoids
-        // matching any message that merely mentions "vpn".
+        // VPN protocol failures tied to connection/tunnel/endpoint setup wording.
         } else if (message.contains("openvpn")
             || message.contains("wireguard")
+            || message.contains("openfortivpn")
+            || message.contains("openconnect")
             || message.contains("vpn"))
-            && (message.contains("connection") || message.contains("connect"))
+            && (message.contains("connection")
+                || message.contains("connect")
+                || message.contains("tunnel")
+                || message.contains("endpoint")
+                || message.contains("options error"))
         {
             Self::VpnConnectionFailed
         } else {
@@ -208,6 +215,12 @@ pub fn error_json_value(error: &Error) -> serde_json::Value {
     }
     if let Some(report) = report {
         value["error"]["diagnostics"] = serde_json::json!(report.diagnostics);
+        if report.original.is_none()
+            && let Some(primary) = report.diagnostics.first()
+        {
+            value["error"]["message"] = serde_json::json!(primary.to_string());
+            value["error"]["context"] = serde_json::json!([]);
+        }
     }
     value
 }

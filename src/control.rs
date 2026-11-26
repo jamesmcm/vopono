@@ -53,6 +53,14 @@ pub fn stop_application(
 
     vopono_core::network::netns::validate_netns_name(&namespace_id)?;
 
+    if let Some(uid) = requester_uid {
+        crate::namespace_ownership::authorize(&namespace_id, uid)?;
+    }
+
+    // Open a pidfd before verifying identity so both SIGTERM and SIGKILL target
+    // this exact process instance and cannot hit an unrelated recycled PID.
+    let pidfd = open_pidfd(pid);
+
     // Lockfiles live in a user-writable directory and PIDs can be recycled:
     // in daemon mode the request may come from any local user, so only
     // signal processes owned by the authenticated requester.
@@ -87,8 +95,8 @@ pub fn stop_application(
         }
     }
 
-    send_signal(pid, Signal::SIGTERM)?;
-    wait_for_process(pid)?;
+    send_signal_verified(pid, pidfd.as_ref(), Signal::SIGTERM)?;
+    wait_for_process_verified(pid, pidfd.as_ref())?;
     // Do not stall 10 seconds waiting for teardown if the namespace is explicitly
     // persistent or still hosts other live applications.
     let kept_alive = requester_uid.is_some_and(|uid| {
@@ -258,13 +266,83 @@ fn process_real_uid(pid: u32) -> Option<u32> {
         .and_then(|real_uid| real_uid.parse::<u32>().ok())
 }
 
-fn wait_for_process(pid: u32) -> Result<(), CliError> {
-    if wait_until(|| !check_process_running(pid)) {
+fn open_pidfd(pid: u32) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    let fd =
+        unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid as nix::libc::pid_t, 0u32) };
+    if fd >= 0 {
+        Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as nix::libc::c_int) })
+    } else {
+        None
+    }
+}
+
+fn send_signal_verified(
+    pid: u32,
+    pidfd: Option<&std::os::fd::OwnedFd>,
+    signal: Signal,
+) -> Result<(), CliError> {
+    use std::os::fd::AsRawFd;
+    if let Some(fd) = pidfd {
+        let rc = unsafe {
+            nix::libc::syscall(
+                nix::libc::SYS_pidfd_send_signal,
+                fd.as_raw_fd(),
+                signal as nix::libc::c_int,
+                std::ptr::null::<nix::libc::siginfo_t>(),
+                0u32,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(nix::libc::ESRCH) {
+            return Ok(());
+        }
+        return Err(CliError::ProcessSignal {
+            pid,
+            source: err.into(),
+        });
+    }
+    send_signal(pid, signal)
+}
+
+fn process_is_zombie(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    stat.rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().next())
+        .is_some_and(|state| state == "Z")
+}
+
+fn process_is_live(pid: u32, pidfd: Option<&std::os::fd::OwnedFd>) -> bool {
+    use std::os::fd::AsRawFd;
+    if let Some(fd) = pidfd {
+        let mut pfd = nix::libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: nix::libc::POLLIN,
+            revents: 0,
+        };
+        let rc = unsafe { nix::libc::poll(&mut pfd, 1, 0) };
+        if rc > 0 && (pfd.revents & nix::libc::POLLIN) != 0 {
+            return false;
+        }
+    }
+    check_process_running(pid) && !process_is_zombie(pid)
+}
+
+fn wait_for_process_verified(
+    pid: u32,
+    pidfd: Option<&std::os::fd::OwnedFd>,
+) -> Result<(), CliError> {
+    if wait_until(|| !process_is_live(pid, pidfd)) {
         return Ok(());
     }
-    if check_process_running(pid) {
-        send_signal(pid, Signal::SIGKILL)?;
-        if wait_until(|| !check_process_running(pid)) {
+    if process_is_live(pid, pidfd) {
+        send_signal_verified(pid, pidfd, Signal::SIGKILL)?;
+        if wait_until(|| !process_is_live(pid, pidfd)) {
             return Ok(());
         }
         return Err(CliError::ProcessStillRunning { pid });

@@ -22,17 +22,41 @@ pub(crate) fn prepare(argv: &[&str], runtime: &Path) -> anyhow::Result<Vec<Strin
         .find(|args| args[0] == "--config")
         .context("Missing frozen OpenVPN configuration")?[1];
     let mut device = "tun0".to_owned();
-    for line in fs::read_to_string(config)?.lines() {
-        if let Ok(fields) = shell_words::split(line)
+    let mut inline_block: Option<String> = None;
+    for raw_line in fs::read_to_string(config)?.lines() {
+        let trimmed = raw_line.trim();
+        if let Some(tag) = &inline_block {
+            if trimmed == format!("</{tag}>") {
+                inline_block = None;
+            }
+            continue;
+        }
+        if let Some(tag) = trimmed
+            .strip_prefix('<')
+            .and_then(|rest| rest.strip_suffix('>'))
+            && !tag.is_empty()
+            && !tag.starts_with('/')
+            && tag
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            inline_block = Some(tag.to_owned());
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        if let Ok(fields) = shell_words::split(trimmed)
             && fields
                 .first()
                 .is_some_and(|field| field.strip_prefix("--").unwrap_or(field) == "dev")
             && let Some(value) = fields.get(1)
         {
-            if value != "tun" {
-                device = value.clone();
-            }
-            break;
+            device = if value == "tun" {
+                "tun0".to_owned()
+            } else {
+                value.clone()
+            };
         }
     }
     ensure!(
@@ -161,6 +185,16 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
     ])?;
     let mut child = Some(spawn(&plan, &runtime)?);
     loop {
+        // Reap any already-exited child BEFORE draining signals so a SIGUSR1
+        // restart request immediately spawns a fresh OpenVPN child instead of
+        // signaling a zombie and dropping the recovery request.
+        if let Some(running) = &mut child
+            && let Some(status) = running.try_wait()?
+        {
+            child = None;
+            let _ = fs::remove_file(runtime.join("child.pid"));
+            fs::write(runtime.join("child-exited"), status.to_string())?;
+        }
         for signal in signals.pending() {
             if signal == signal_hook::consts::SIGUSR1 {
                 if let Some(child) = &mut child {
@@ -184,26 +218,28 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
                 return Ok(());
             }
         }
-        if let Some(running) = &mut child
-            && let Some(status) = running.try_wait()?
-        {
-            child = None;
-            let _ = fs::remove_file(runtime.join("child.pid"));
-            fs::write(runtime.join("child-exited"), status.to_string())?;
-        }
         std::thread::sleep(Duration::from_millis(50));
     }
 }
 
 pub(crate) fn matches(pid: u32, runtime: &Path) -> bool {
+    let Ok(meta) = fs::metadata(format!("/proc/{pid}")) else {
+        return false;
+    };
+    if meta.uid() != 0 {
+        return false;
+    }
     fs::read(format!("/proc/{pid}/cmdline"))
         .ok()
         .is_some_and(|bytes| {
-            bytes.split(|byte| *byte == 0).any(|arg| {
-                arg == runtime
-                    .join("supervisor.json")
-                    .as_os_str()
-                    .as_encoded_bytes()
-            })
+            let args: Vec<&[u8]> = bytes
+                .split(|byte| *byte == 0)
+                .filter(|arg| !arg.is_empty())
+                .collect();
+            let expected_plan = runtime.join("supervisor.json");
+            args.get(1) == Some(&b"__openvpn-supervisor".as_slice())
+                && args
+                    .iter()
+                    .any(|arg| *arg == expected_plan.as_os_str().as_encoded_bytes())
         })
 }

@@ -332,26 +332,27 @@ fn route_evidence(route: &RouteInfo, context: &str) -> Diagnostic {
 pub fn namespace_resolver(name: &str) -> anyhow::Result<NamespaceNetwork> {
     crate::network::netns::validate_netns_name(name)?;
     let path = format!("/etc/netns/{name}/resolv.conf");
-    let exists = Path::new(&path).try_exists()?;
-    let source = if exists {
-        path.as_str()
-    } else {
-        "/etc/resolv.conf"
+    let (source, inherited, unreadable) = match Path::new(&path).try_exists() {
+        Ok(true) => (path.as_str(), false, false),
+        Ok(false) => ("/etc/resolv.conf", true, false),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            (path.as_str(), false, true)
+        }
+        Err(error) => return Err(error.into()),
     };
-    let mut dns = resolver(
-        source,
-        std::fs::read_to_string(source).ok().as_deref(),
-        !exists,
-    );
+    let content = if unreadable {
+        None
+    } else {
+        std::fs::read_to_string(source).ok()
+    };
+    let mut dns = resolver(source, content.as_deref(), inherited);
     let ns_nss = format!("/etc/netns/{name}/nsswitch.conf");
-    nsswitch(
-        &mut dns,
-        if Path::new(&ns_nss).exists() {
-            &ns_nss
-        } else {
-            "/etc/nsswitch.conf"
-        },
-    );
+    match Path::new(&ns_nss).try_exists() {
+        Ok(true) => nsswitch(&mut dns, &ns_nss),
+        Ok(false) => nsswitch(&mut dns, "/etc/nsswitch.conf"),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {}
+        Err(error) => return Err(error.into()),
+    }
     let diagnostics = resolver_evidence(&dns, true);
     Ok(NamespaceNetwork {
         dns,

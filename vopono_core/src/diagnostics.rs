@@ -124,7 +124,7 @@ impl std::error::Error for Diagnostic {}
 
 pub fn config_fingerprint(path: &Path) -> anyhow::Result<String> {
     use sha2::{Digest, Sha256};
-    let bytes = std::fs::read(path)?;
+    let bytes = crate::util::owner_write::read_regular_file(path)?;
     use base64::Engine;
     Ok(base64::engine::general_purpose::STANDARD.encode(Sha256::digest(&bytes)))
 }

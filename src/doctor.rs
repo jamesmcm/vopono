@@ -169,7 +169,7 @@ pub fn run(command: DoctorCommand) -> anyhow::Result<i32> {
     let daemon = report
         .daemon
         .get_or_insert_with(|| DaemonInfo::new(crate::daemon::status()));
-    let daemon_available = daemon.status.available;
+    let daemon_usable = daemon.status.available && daemon.status.compatible;
     report.diagnostics.splice(0..0, daemon.diagnostics());
     if !offline {
         report
@@ -181,7 +181,7 @@ pub fn run(command: DoctorCommand) -> anyhow::Result<i32> {
     }
     report
         .diagnostics
-        .extend(host_environment(skip_ipv6, daemon_available));
+        .extend(host_environment(skip_ipv6, daemon_usable));
     report.host_network = Some(vopono_core::diagnostics::topology::host_network(skip_ipv6));
     let failed = report.failed();
     if json {
@@ -291,18 +291,34 @@ fn configuration_report(command: DoctorCommand) -> Report {
         host_network: None,
         daemon: None,
     };
+    let mut unsupported_protocol: Option<(State, String, Option<&str>)> = None;
     let path = if let Some(path) = command.custom {
         Some(path)
     } else if let Some(p) = &provider {
-        let directory = match protocol {
-            Protocol::Wireguard => p
-                .get_dyn_wireguard_provider()
-                .and_then(|p| p.wireguard_dir()),
-            Protocol::OpenVpn => p.get_dyn_openvpn_provider().and_then(|p| p.openvpn_dir()),
-            _ => Err(anyhow::anyhow!("Unsupported local diagnostic protocol")),
+        enum Lookup {
+            Dir(std::path::PathBuf),
+            UnsupportedProviderProtocol(String),
+            UnsupportedDiagnosticProtocol,
+        }
+        let lookup = match protocol {
+            Protocol::Wireguard => match p.get_dyn_wireguard_provider() {
+                Ok(wg) => wg
+                    .wireguard_dir()
+                    .map(Lookup::Dir)
+                    .unwrap_or_else(|e| Lookup::UnsupportedProviderProtocol(e.to_string())),
+                Err(e) => Lookup::UnsupportedProviderProtocol(e.to_string()),
+            },
+            Protocol::OpenVpn => match p.get_dyn_openvpn_provider() {
+                Ok(ovpn) => ovpn
+                    .openvpn_dir()
+                    .map(Lookup::Dir)
+                    .unwrap_or_else(|e| Lookup::UnsupportedProviderProtocol(e.to_string())),
+                Err(e) => Lookup::UnsupportedProviderProtocol(e.to_string()),
+            },
+            _ => Lookup::UnsupportedDiagnosticProtocol,
         };
-        match directory {
-            Ok(dir) => {
+        match lookup {
+            Lookup::Dir(dir) => {
                 let mut files = vopono_core::util::get_configs_from_alias(
                     &dir,
                     command.server.as_deref().unwrap_or(""),
@@ -314,7 +330,31 @@ fn configuration_report(command: DoctorCommand) -> Report {
                 }
                 files.into_iter().next()
             }
-            Err(_) => None,
+            Lookup::UnsupportedProviderProtocol(message) => {
+                unsupported_protocol = Some((
+                    State::Fail,
+                    format!(
+                        "Provider {} does not support protocol {}: {message}",
+                        p.id(),
+                        protocol.id()
+                    ),
+                    Some(
+                        "Select a protocol supported by this provider or pass --custom /path/to/config",
+                    ),
+                ));
+                None
+            }
+            Lookup::UnsupportedDiagnosticProtocol => {
+                unsupported_protocol = Some((
+                    State::Skipped,
+                    format!(
+                        "Local configuration preflight does not support protocol {}",
+                        protocol.id()
+                    ),
+                    Some("Run vopono doctor without --provider to inspect running namespaces"),
+                ));
+                None
+            }
         }
     } else {
         None
@@ -383,6 +423,13 @@ fn configuration_report(command: DoctorCommand) -> Report {
                 ),
             ));
         }
+    } else if let Some((state, message, action)) = unsupported_protocol {
+        report.diagnostics.push(Diagnostic::new(
+            Code::ProviderConfig,
+            state,
+            &message,
+            action,
+        ));
     } else if let Some(provider) = &provider {
         if !provider.supports_sync() {
             report.diagnostics.push(Diagnostic::new(
@@ -498,9 +545,12 @@ fn namespace_report(command: &DoctorCommand) -> Report {
             )
         }
     });
-    let daemon_available = report.daemon.as_ref().is_some_and(|d| d.status.available);
+    let daemon_usable = report
+        .daemon
+        .as_ref()
+        .is_some_and(|d| d.status.available && d.status.compatible);
     for ns in &mut report.namespaces {
-        ns.network = namespace_environment(&ns.id, command, daemon_available);
+        ns.network = namespace_environment(&ns.id, command, daemon_usable);
     }
     if !command.offline {
         report.diagnostics.insert(

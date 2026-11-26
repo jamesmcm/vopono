@@ -102,12 +102,18 @@ pub struct Config {
 impl PrivateInternetAccess {
     const PORT: u16 = 1337;
     const CERT: &'static [u8] = include_bytes!("ca.rsa.4096.crt");
+    const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    fn http_client() -> anyhow::Result<Client> {
+        Ok(Client::builder().timeout(Self::HTTP_TIMEOUT).build()?)
+    }
 
     pub fn get_pia_token(user: &str, pass: &str) -> anyhow::Result<String> {
-        let token: PiaToken = Client::new()
+        let token: PiaToken = Self::http_client()?
             .get("https://www.privateinternetaccess.com/gtoken/generateToken")
             .basic_auth(user, Some(pass))
             .send()?
+            .error_for_status()?
             .json()
             .map_err(|_| anyhow!("Could not decode PIA authentication response"))?;
 
@@ -139,6 +145,7 @@ impl PrivateInternetAccess {
         // so you need to manually set the certificate as well as telling the client
         // what IP the domain should resolve to if you want it to validate properly
         let key_client = ClientBuilder::new()
+            .timeout(Self::HTTP_TIMEOUT)
             .tls_certs_only([cert])
             .resolve(cn, (*ip, PrivateInternetAccess::PORT).into())
             .build()?;
@@ -151,6 +158,8 @@ impl PrivateInternetAccess {
         let server_info: WireguardServerInfoRequest = key_client
             .get(url)
             .send()
+            .map_err(reqwest::Error::without_url)?
+            .error_for_status()
             .map_err(reqwest::Error::without_url)?
             .json()
             .map_err(|_| anyhow!("Could not decode PIA Wireguard key registration response"))?;
@@ -166,16 +175,21 @@ impl PrivateInternetAccess {
         Ok(self.wireguard_dir()?.join("config.txt"))
     }
 
+    fn read_wireguard_config(&self) -> anyhow::Result<Config> {
+        let path = self.wireguard_config_file_path()?;
+        let bytes = crate::util::owner_write::read_file_as_config_owner(&path)?;
+        serde_json::from_slice(&bytes)
+            .with_context(|| format!("Failed to parse PIA Wireguard config {}", path.display()))
+    }
+
     pub fn load_wireguard_auth(&self) -> anyhow::Result<(String, String)> {
-        let config_file = File::open(self.wireguard_config_file_path()?)?;
-        let config: Config = serde_json::from_reader(config_file)?;
+        let config = self.read_wireguard_config()?;
         Ok((config.user, config.pass))
     }
 
     //This only works if wireguard was sync'd
     pub fn hostname_for_wireguard_conf(&self, config_file: &String) -> anyhow::Result<String> {
-        let pia_config_file = File::open(self.wireguard_config_file_path()?)?;
-        let pia_config: Config = serde_json::from_reader(pia_config_file)?;
+        let pia_config = self.read_wireguard_config()?;
 
         let hostname = pia_config
             .hostname_lookup
@@ -188,6 +202,19 @@ impl PrivateInternetAccess {
     }
 }
 
+fn validate_safe_region_id(id: &str) -> anyhow::Result<()> {
+    if id.is_empty()
+        || id.starts_with('.')
+        || id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || id.contains('\0')
+    {
+        bail!("PIA returned an unsafe region identifier");
+    }
+    Ok(())
+}
+
 impl WireguardProvider for PrivateInternetAccess {
     fn create_wireguard_config(&self, uiclient: &dyn UiClient) -> anyhow::Result<()> {
         let wireguard_dir = self.wireguard_dir()?;
@@ -196,10 +223,11 @@ impl WireguardProvider for PrivateInternetAccess {
 
         let (user, pass) = self.prompt_for_auth(uiclient)?;
 
-        let client = Client::new();
+        let client = Self::http_client()?;
         let vpn_info: String = client
             .get("https://serverlist.piaservers.net/vpninfo/servers/v6")
             .send()?
+            .error_for_status()?
             .text()?;
 
         // JSON response on first line
@@ -239,6 +267,7 @@ impl WireguardProvider for PrivateInternetAccess {
             if only_port_forwarding && !region.port_forward {
                 continue;
             }
+            validate_safe_region_id(&id)?;
 
             info!("Associating {id} with hostname {}", region.dns);
             config
@@ -289,16 +318,22 @@ impl WireguardProvider for PrivateInternetAccess {
     }
 
     fn wireguard_preup(&self, wg_config_file: &Path) -> anyhow::Result<()> {
-        let pia_config_file = File::open(self.wireguard_config_file_path()?)?;
-        let pia_config: Config = serde_json::from_reader(pia_config_file)?;
+        let pia_config = self.read_wireguard_config()?;
 
         let token = PrivateInternetAccess::get_pia_token(&pia_config.user, &pia_config.pass)
             .context("Failed to authenticate with PIA while preparing Wireguard config")?;
 
-        let mut wg_config: WireguardConfig = std::fs::read_to_string(wg_config_file)
+        let raw_wg_config = crate::util::owner_write::read_file_as_config_owner(wg_config_file)
             .with_context(|| {
                 format!(
                     "Failed to read PIA Wireguard config {}",
+                    wg_config_file.display()
+                )
+            })?;
+        let mut wg_config: WireguardConfig = String::from_utf8(raw_wg_config)
+            .with_context(|| {
+                format!(
+                    "PIA Wireguard config {} is not valid UTF-8",
                     wg_config_file.display()
                 )
             })?
@@ -321,7 +356,12 @@ impl WireguardProvider for PrivateInternetAccess {
             })?;
         validate_pia_wireguard_server_info(&server_info)?;
 
-        wg_config.interface.address = vec![IpNet::new(server_info.peer_ip, 32)?];
+        let peer_prefix = if server_info.peer_ip.is_ipv4() {
+            32
+        } else {
+            128
+        };
+        wg_config.interface.address = vec![IpNet::new(server_info.peer_ip, peer_prefix)?];
         let dns_servers = server_info
             .dns_servers
             .iter()
@@ -335,13 +375,27 @@ impl WireguardProvider for PrivateInternetAccess {
             wg_config.peer.allowed_ips = vec![IpNet::from_str("0.0.0.0/0")?];
         }
         wg_config.peer.public_key = server_info.server_key.clone();
-        wg_config.peer.endpoint =
-            format!("{}:{}", server_info.server_ip, server_info.server_port).parse()?;
+        wg_config.peer.endpoint = WireguardEndpoint::IpWithPort(SocketAddr::new(
+            server_info.server_ip,
+            server_info.server_port,
+        ));
 
-        // Overwrite the existing invalid wg config with a new one that is now valid
+        // Atomically replace the WireGuard config without following symlinks or
+        // leaving root-owned files inside the user's configuration tree.
         let new_wg_config: String = wg_config.to_string();
-        let mut f = crate::util::create_private_file(wg_config_file)?;
-        f.write_all(new_wg_config.as_bytes())?;
+        if !crate::util::write_file_as_config_owner(wg_config_file, &new_wg_config, Some(0o600))? {
+            use std::os::unix::fs::PermissionsExt;
+            let parent = wg_config_file
+                .parent()
+                .context("PIA Wireguard config path has no parent directory")?;
+            let mut tmp = tempfile::Builder::new()
+                .prefix(".pia-wg-")
+                .tempfile_in(parent)?;
+            tmp.as_file()
+                .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            tmp.write_all(new_wg_config.as_bytes())?;
+            tmp.persist(wg_config_file).map_err(|e| e.error)?;
+        }
 
         Ok(())
     }

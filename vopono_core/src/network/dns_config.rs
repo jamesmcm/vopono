@@ -7,7 +7,7 @@ use std::io::Write;
 use std::net::IpAddr;
 use std::os::unix::fs::PermissionsExt;
 
-use crate::util::{nft_interface_name, open_hosts_on_interface};
+use crate::util::nft_interface_name;
 
 use super::firewall::Firewall;
 use super::netns::{NetworkNamespace, VethPairIPs};
@@ -77,7 +77,18 @@ impl DnsConfig {
                 .join(", ")
         );
 
-        let suffix = suffixes.join(" ");
+        let safe_suffixes: Vec<&str> = suffixes
+            .iter()
+            .copied()
+            .filter(|suffix| {
+                !suffix.is_empty()
+                    && suffix.len() <= 253
+                    && suffix.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
+                    })
+            })
+            .collect();
+        let suffix = safe_suffixes.join(" ");
         if !suffix.is_empty() {
             writeln!(resolv, "search {suffix}")?;
         }
@@ -139,15 +150,9 @@ impl DnsConfig {
             }
         }
 
-        // When the tunnel is full-tunnel, scope these exceptions to the tunnel interface so
-        // DNS cannot become an accidental killswitch bypass over the veth.
-        open_hosts_on_interface(
-            &ns_name,
-            &effective_servers,
-            options.firewall,
-            options.egress_interface,
-        )?;
-
+        // Open only DNS ports (TCP/UDP 53) to the configured DNS servers,
+        // scoped to the tunnel interface when full-tunnel is active so DNS
+        // servers cannot become an arbitrary-port killswitch bypass.
         if !effective_servers.is_empty() {
             log::debug!("Opening firewall for DNS servers: {effective_servers:?}");
             open_dns_ports(
