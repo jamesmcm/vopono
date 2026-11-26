@@ -22,9 +22,10 @@ def connected():
 initial = wait_for(connected, seconds=40)
 assert initial['daemon_version'] and initial['daemon_pid']
 codes = {d['code'] for d in initial['diagnostics']}
-assert {'host_dns', 'endpoint_dns', 'dns_configuration', 'network_interface',
+assert {'host_dns', 'dns_configuration', 'network_interface',
         'host_link', 'host_forwarding', 'host_firewall', 'app_armor',
         'network_manager'} <= codes, codes
+assert 'endpoint_dns' not in codes, codes  # The WireGuard fixture uses a literal IP.
 report = json.loads(context.client('doctor', '--namespace', namespace,
                                   '--offline', '--json').stdout)
 veth = report['namespaces'][0]['network']['host_veth']
