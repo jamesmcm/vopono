@@ -233,11 +233,12 @@ impl ConnectionSettings {
             } else if protocol == Protocol::OpenConnect {
                 self.server.clone().unwrap_or_default()
             } else {
-                let path = path.to_str().ok_or(SetupError::Configuration(
-                    "Custom configuration path must be UTF-8",
-                ))?;
-                let encoded = bs58::encode(path).into_string();
-                encoded[..encoded.len().min(11)].to_owned()
+                path.file_stem()
+                    .and_then(|name| name.to_str())
+                    .ok_or(SetupError::Configuration(
+                        "Custom configuration must have a UTF-8 filename",
+                    ))?
+                    .to_owned()
             }
         } else {
             self.server.clone().or_else(|| provider.default_server()).ok_or(SetupError::Configuration(

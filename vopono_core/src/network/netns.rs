@@ -67,6 +67,7 @@ pub struct ManagedNamespaceGuard {
     pub trojan: Option<Trojan>,
     /// Runtime state shared with the status/lockfile projections.
     pub state: NamespaceState,
+    launch_fingerprint: Option<String>,
     disposition: GuardDisposition,
 }
 
@@ -111,6 +112,8 @@ pub struct NamespaceSnapshot {
     pub trojan: Option<Trojan>,
     #[serde(default)]
     pub state: NamespaceState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_fingerprint: Option<String>,
     // Read legacy snapshots without carrying their lifecycle decision into the
     // new guard. Ownership records are authoritative for persistence.
     #[serde(default, rename = "unmanaged", skip_serializing)]
@@ -141,6 +144,8 @@ struct NamespaceSnapshotRef<'a> {
     config_file: &'a Option<PathBuf>,
     trojan: &'a Option<Trojan>,
     state: &'a NamespaceState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch_fingerprint: Option<&'a str>,
 }
 
 /// Server/port metadata mirrored into the lockfiles so read-only commands can
@@ -402,6 +407,7 @@ impl NamespaceSnapshot {
             config_file: self.config_file,
             trojan: self.trojan,
             state: self.state,
+            launch_fingerprint: self.launch_fingerprint,
             disposition: GuardDisposition::Managed,
         };
         guard.set_resource_cleanup(true);
@@ -434,6 +440,7 @@ impl ManagedNamespaceGuard {
             config_file: &self.config_file,
             trojan: &self.trojan,
             state: &self.state,
+            launch_fingerprint: self.launch_fingerprint.as_deref(),
         }
     }
 
@@ -488,6 +495,27 @@ impl ManagedNamespaceGuard {
     pub fn detach(&mut self) {
         self.set_resource_cleanup(false);
         self.disposition = GuardDisposition::Detached;
+    }
+
+    /// Fingerprint of the connection and isolation settings used at launch.
+    pub fn launch_fingerprint(&self) -> Option<&str> {
+        self.launch_fingerprint.as_deref()
+    }
+
+    pub fn set_launch_fingerprint(&mut self, fingerprint: String) {
+        self.launch_fingerprint = Some(fingerprint);
+    }
+
+    /// The VPN transport address or configured hostname when the protocol records it.
+    pub fn vpn_endpoint(&self) -> Option<std::borrow::Cow<'_, str>> {
+        use std::borrow::Cow;
+        if let Some(peer) = self.wireguard.as_ref().and_then(|wg| wg.recovery.as_ref()) {
+            return Some(Cow::Borrowed(&peer.host));
+        }
+        let vpn = self.openvpn.as_ref()?;
+        vpn.recovery_address
+            .map(|ip| Cow::Owned(ip.to_string()))
+            .or_else(|| vpn.recovery_host.as_deref().map(Cow::Borrowed))
     }
 
     /// Replace the DNS resource without deleting its on-disk files between
@@ -594,6 +622,7 @@ impl ManagedNamespaceGuard {
             config_file: None,
             trojan: None,
             state: NamespaceState::default(),
+            launch_fingerprint: None,
             disposition: GuardDisposition::Detached,
         })
     }
@@ -635,6 +664,7 @@ impl ManagedNamespaceGuard {
             config_file: None,
             trojan: None,
             state: NamespaceState::default(),
+            launch_fingerprint: None,
             disposition: GuardDisposition::Managed,
         })
     }

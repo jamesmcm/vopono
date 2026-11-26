@@ -4984,6 +4984,7 @@ dependencies = [
  "pretty_env_logger",
  "ron",
  "serde",
+ "serde_json",
  "shell-words",
  "strum",
  "toml_edit 0.25.13+spec-1.1.0",

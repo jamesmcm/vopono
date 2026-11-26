@@ -123,6 +123,17 @@ pub fn stop_application(
     })
 }
 
+pub(crate) fn mark_namespace_stopping(namespace_id: &str, uid: nix::unistd::Uid) -> Result<()> {
+    crate::namespace_ownership::mark_stopping(namespace_id, uid)?;
+    let lock_dir = vopono_core::util::vopono_dir()?
+        .join("locks")
+        .join(namespace_id);
+    if let Err(error) = vopono_core::status::record_namespace_stopping(&lock_dir) {
+        log::debug!("Could not publish stopping status for {namespace_id}: {error:#}");
+    }
+    Ok(())
+}
+
 pub fn stop_namespace(
     namespace_id: &str,
     requester_uid: Option<nix::unistd::Uid>,
@@ -146,16 +157,14 @@ pub fn stop_namespace(
         // Make an explicit stop authoritative over a previous keep-alive or
         // create-only request. A live handler will observe this after its child
         // exits and perform normal teardown; an idle namespace is handled below.
-        allow_completed_teardown(
-            crate::namespace_ownership::mark_stopping(namespace_id, uid),
-            || namespace_exists(namespace_id),
-        )?;
+        allow_completed_teardown(mark_namespace_stopping(namespace_id, uid), || {
+            namespace_exists(namespace_id)
+        })?;
         allow_completed_teardown(
             terminate_namespace_user_processes(namespace_id, uid),
             || namespace_exists(namespace_id),
         )?;
-        let lock_dir = vopono_core::util::config_dir()?
-            .join("vopono")
+        let lock_dir = vopono_core::util::vopono_dir()?
             .join("locks")
             .join(namespace_id);
         // The applications terminated above leave client lockfiles whose PIDs

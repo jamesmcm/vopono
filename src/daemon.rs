@@ -25,7 +25,7 @@ use std::fs::{File, OpenOptions};
 use std::io::IoSliceMut;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
@@ -133,20 +133,26 @@ pub fn status() -> DaemonStatus {
     snapshot
 }
 
+fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version.split(['-', '+']).next()?;
+    let mut components = core.split('.');
+    let parsed = (
+        components.next()?.parse().ok()?,
+        components.next()?.parse().ok()?,
+        components.next()?.parse().ok()?,
+    );
+    components.next().is_none().then_some(parsed)
+}
+
+pub(crate) fn version_at_least(version: &str, minimum: (u64, u64, u64)) -> bool {
+    parse_version(version).is_some_and(|version| version.0 == minimum.0 && version >= minimum)
+}
+
 /// Compatible means an identical major version (breaking-change proxy).
 fn versions_compatible(daemon_version: &str, client_version: &str) -> bool {
-    fn major(version: &str) -> Option<u64> {
-        let core = version.split(['-', '+']).next()?;
-        let mut components = core.split('.');
-        let major = components.next()?.parse().ok()?;
-        components.next()?.parse::<u64>().ok()?;
-        components.next()?.parse::<u64>().ok()?;
-        components.next().is_none().then_some(major)
-    }
-
-    major(daemon_version)
-        .zip(major(client_version))
-        .is_some_and(|(daemon_major, client_major)| daemon_major == client_major)
+    parse_version(daemon_version)
+        .zip(parse_version(client_version))
+        .is_some_and(|(daemon, client)| daemon.0 == client.0)
 }
 
 /// Outcome of comparing a peer's version against ours.
@@ -739,7 +745,7 @@ fn wait_for_application(
     pty_master: Option<OwnedFd>,
     client_fds: Option<&(OwnedFd, OwnedFd, OwnedFd)>,
     launch_notice: Option<String>,
-    pty_bridges_stdout: bool,
+    pty_output_fd: Option<&OwnedFd>,
 ) -> anyhow::Result<std::process::ExitStatus> {
     let Some(master_fd) = pty_master else {
         // Non-TTY executions still receive client signals (Ctrl-C / SIGTERM)
@@ -770,7 +776,7 @@ fn wait_for_application(
     };
     let mut exit_status = None;
     // Duplicate client FDs so we don't close the originals when Files drop
-    let (client_stdin_fd, client_stdout_fd, _) = client_fds.expect("PTY client fds retained");
+    let (client_stdin_fd, _, _) = client_fds.expect("PTY client fds retained");
     let client_stdin_dup: OwnedFd = nix::unistd::dup(client_stdin_fd.as_fd())?;
     let client_stdin = File::from(client_stdin_dup);
     let pty_master_file_r = File::from(master_fd);
@@ -830,14 +836,17 @@ fn wait_for_application(
         }
     });
 
-    // output copier: pty master -> client stdout only when stdout is on the PTY;
-    // when stdout was redirected by the caller, drain PTY master to avoid blocking
-    // writes to /dev/tty without corrupting the redirected stdout stream.
+    // Send terminal output to the caller's terminal, preserving redirected streams.
     let child_done_for_output = Arc::clone(&child_done);
-    let output_copier = if pty_bridges_stdout {
-        let client_stdout_dup: OwnedFd = nix::unistd::dup(client_stdout_fd.as_fd())?;
-        let client_stdout = File::from(client_stdout_dup);
-        thread::spawn(move || match PtyOutput::new(client_stdout) {
+    let terminal_fd = pty_output_fd.or_else(|| {
+        // With both output streams redirected, /dev/tty still goes to the
+        // terminal when the caller supplied it as a read-write input FD.
+        let flags = OFlag::from_bits_truncate(fcntl(client_stdin_fd, FcntlArg::F_GETFL).ok()?);
+        (flags & OFlag::O_ACCMODE == OFlag::O_RDWR).then_some(client_stdin_fd)
+    });
+    let output_copier = if let Some(terminal) = terminal_fd {
+        let terminal = File::from(nix::unistd::dup(terminal.as_fd())?);
+        thread::spawn(move || match PtyOutput::new(terminal) {
             Ok(output) => copy_pty_output(
                 pty_master_file_r,
                 output,
@@ -1153,12 +1162,17 @@ fn handle_client(
                             &session.ns,
                             0,
                             session.forwarded_port(),
+                            setup.reused,
                         );
                         write_client_notice(client_stdout, format!("{report}\n").as_bytes());
                     } else if !silent {
                         write_client_notice(
                             client_stdout,
-                            format!("Created namespace {}\n", session.ns.name).as_bytes(),
+                            format!(
+                                "{}\n",
+                                crate::exec::human_launch_report(&session.ns, setup.reused)
+                            )
+                            .as_bytes(),
                         );
                     }
                     write_response(&mut conn, &DaemonResponse::Exit(0))?;
@@ -1186,10 +1200,18 @@ fn handle_client(
                 } else {
                     None
                 };
-                let (mut application, ns, host_proxies): (
+                let human_notice_fd = if !json && !silent {
+                    Some(nix::unistd::dup(
+                        client_fds.as_ref().expect("client fds present").2.as_fd(),
+                    )?)
+                } else {
+                    None
+                };
+                let (mut application, ns, host_proxies, reused): (
                     vopono_core::network::application_wrapper::ApplicationWrapper,
                     vopono_core::network::netns::NetworkNamespace,
                     crate::exec::HostProxies,
+                    bool,
                 );
                 let mut pty_master: Option<OwnedFd> = None;
                 if client_has_tty {
@@ -1213,7 +1235,7 @@ fn handle_client(
                         nix::unistd::dup(fds.2.as_fd())?
                     };
                     // Spawn child with PTY slave as stdin (and TTY outputs), letting it take controlling TTY in pre_exec
-                    (application, ns, host_proxies) = execute_as_daemon_with_stdio(
+                    (application, ns, host_proxies, reused) = execute_as_daemon_with_stdio(
                         exec_command,
                         false,
                         Some((p.slave, child_out, child_err)),
@@ -1222,7 +1244,7 @@ fn handle_client(
                     )?;
                     pty_master = Some(p.master);
                 } else {
-                    (application, ns, host_proxies) = execute_as_daemon_with_stdio(
+                    (application, ns, host_proxies, reused) = execute_as_daemon_with_stdio(
                         exec_command,
                         false,
                         client_fds.take(),
@@ -1278,6 +1300,7 @@ fn handle_client(
                         &session.ns,
                         application.handle.id(),
                         forwarded_port,
+                        reused,
                     );
                     Some(format!("{report}\n"))
                 } else if !silent {
@@ -1286,6 +1309,16 @@ fn handle_client(
                     None
                 };
                 drop(transition);
+                if let Some(fd) = human_notice_fd {
+                    write_client_notice(
+                        fd,
+                        format!(
+                            "{}\n",
+                            crate::exec::human_launch_report(&session.ns, reused)
+                        )
+                        .as_bytes(),
+                    );
+                }
                 // Write launch summary / forwarded port notice AFTER releasing the
                 // namespace transition lock so a stalled client pipe cannot deadlock
                 // operations on this namespace.
@@ -1301,7 +1334,13 @@ fn handle_client(
                     pty_master,
                     client_fds.as_ref(),
                     launch_notice,
-                    pty_bridges_stdout,
+                    client_fds.as_ref().and_then(|(_, stdout, stderr)| {
+                        if stdout_is_tty {
+                            Some(stdout)
+                        } else {
+                            stderr_is_tty.then_some(stderr)
+                        }
+                    }),
                 )?;
 
                 // Remove this application's status before the namespace controller
@@ -1339,47 +1378,7 @@ fn handle_client(
                 DaemonStopTarget::Application(id) => {
                     crate::control::stop_application(&id, Some(uid))
                 }
-                DaemonStopTarget::Namespace(id) => {
-                    // Authorize and stop monitor + forwarder first. Release the
-                    // transition permit briefly so the controller thread can drop
-                    // its forwarder (joining renewal subprocesses and executing
-                    // AzireVPN remote DELETE) while the netns still exists.
-                    let forwarder_wait: anyhow::Result<_> = {
-                        let _transition = crate::namespace_sessions::lock_namespace(&id);
-                        (|| {
-                            crate::namespace_ownership::authorize(&id, uid)?;
-                            crate::namespace_sessions::stop_monitor(&id)?;
-                            Ok(crate::namespace_sessions::request_forwarder_release(&id))
-                        })()
-                    };
-                    match forwarder_wait {
-                        Err(error) => Err(error),
-                        Ok(wait) => {
-                            if let Some(released) = wait {
-                                crate::namespace_sessions::wait_forwarder_released(
-                                    &released,
-                                    std::time::Duration::from_secs(5),
-                                );
-                            }
-                            let _transition = crate::namespace_sessions::lock_namespace(&id);
-                            let result = (|| {
-                                crate::namespace_ownership::authorize(&id, uid)?;
-                                crate::control::stop_namespace(&id, Some(uid))
-                            })();
-                            let released = result
-                                .as_ref()
-                                .ok()
-                                .and_then(|_| crate::namespace_sessions::invalidate(&id));
-                            drop(_transition);
-                            result.and_then(|result| {
-                                if let Some(released) = released {
-                                    crate::namespace_sessions::wait_released(&released)?;
-                                }
-                                Ok(result)
-                            })
-                        }
-                    }
-                }
+                DaemonStopTarget::Namespace(id) => stop_daemon_namespace(&id, uid),
             };
             let payload = match outcome {
                 Ok(result) => serde_json::to_vec(&result)?,
@@ -1483,6 +1482,46 @@ fn handle_client(
         }
     }
     Ok(())
+}
+
+fn stop_daemon_namespace(id: &str, uid: Uid) -> anyhow::Result<crate::control::StopResult> {
+    let transition = crate::namespace_sessions::lock_namespace(id);
+    crate::namespace_ownership::authorize(id, uid)?;
+    let path = Path::new("/run/netns").join(id);
+    // Hold the original generation open while the forwarder releases its lease.
+    let original = File::open(&path)?;
+    let identity = original.metadata()?;
+    crate::control::mark_namespace_stopping(id, uid)?;
+    crate::namespace_sessions::stop_monitor(id)?;
+    let forwarder = crate::namespace_sessions::request_forwarder_release(id);
+    drop(transition);
+    if let Some(released) = forwarder {
+        crate::namespace_sessions::wait_forwarder_released(&released, Duration::from_secs(5));
+    }
+
+    let transition = crate::namespace_sessions::lock_namespace(id);
+    let same_generation = match std::fs::metadata(&path) {
+        Ok(current) => current.dev() == identity.dev() && current.ino() == identity.ino(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if !same_generation {
+        return Ok(crate::control::StopResult {
+            version: crate::api::SCHEMA_VERSION,
+            target: crate::control::StopTargetKind::Namespace,
+            application_id: None,
+            namespace_id: id.to_owned(),
+            namespace_removed: true,
+        });
+    }
+
+    let result = crate::control::stop_namespace(id, Some(uid))?;
+    let released = crate::namespace_sessions::invalidate(id);
+    drop(transition);
+    if let Some(released) = released {
+        crate::namespace_sessions::wait_released(&released)?;
+    }
+    Ok(result)
 }
 
 /// Extract the client-supplied config-home candidate from the request.
@@ -1711,6 +1750,17 @@ mod tests {
     use super::{VersionSkew, classify_version_skew};
 
     #[test]
+    fn profile_and_monitor_launches_require_daemon_support() {
+        use super::version_at_least;
+        let minimum = (1, 1, 0);
+        assert!(!version_at_least("1.0.3", minimum));
+        assert!(!version_at_least("2.0.0", minimum));
+        assert!(!version_at_least("unknown", minimum));
+        assert!(version_at_least("1.1.0", minimum));
+        assert!(version_at_least("1.2.0+packaged", minimum));
+    }
+
+    #[test]
     fn version_skew_classification() {
         assert_eq!(
             classify_version_skew("0.10.22", "0.10.22"),
@@ -1914,7 +1964,7 @@ mod tests {
                 Some(pty.master),
                 Some(&client_fds),
                 Some("launch notice\n".into()),
-                true,
+                Some(&client_fds.1),
             );
             let _ = finished.send(result);
         });

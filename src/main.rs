@@ -351,10 +351,17 @@ fn handle_check(command: args::CheckCommand, askpass: bool) -> anyhow::Result<()
         }
     };
 
-    let ok = status.connected
-        && status.dns.as_ref().is_none_or(|dns| {
-            dns.code != Some(vopono_core::diagnostics::DiagnosticCode::ProbeUnavailable)
-        });
+    let ok = if command.skip_ipv4 && command.skip_ipv6 {
+        status
+            .dns
+            .as_ref()
+            .is_some_and(|dns| !dns.resolved_ips.is_empty())
+    } else {
+        status.connected
+            && status.dns.as_ref().is_none_or(|dns| {
+                dns.code != Some(vopono_core::diagnostics::DiagnosticCode::ProbeUnavailable)
+            })
+    };
     if command.json {
         api::print_json(&check::ConnectivityDocument {
             version: api::SCHEMA_VERSION,
@@ -539,7 +546,21 @@ enum DaemonForward {
 }
 
 fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonForward> {
-    let mut conn = daemon_client::connect(daemon_client::Compatibility::Warn)?;
+    let mut conn = if cmd.profile.is_some() || cmd.monitor {
+        match daemon_client::connect(daemon_client::Compatibility::ProfileOrMonitor) {
+            Ok(conn) => conn,
+            Err(error)
+                if error
+                    .downcast_ref::<daemon_client::UnsupportedLaunch>()
+                    .is_some() =>
+            {
+                return Ok(DaemonForward::ExecutionError(error.to_string()));
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        daemon_client::connect(daemon_client::Compatibility::Warn)?
+    };
 
     debug!("Connected to daemon, forwarding command.");
     if let Some(user) = &cmd.user {

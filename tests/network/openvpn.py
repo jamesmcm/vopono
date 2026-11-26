@@ -125,6 +125,40 @@ assert 'OpenVPN directive "plugin" on line' in json.loads(rejected.stdout)['erro
 assert 'SECRET_ARGUMENT' not in rejected.stdout + rejected.stderr
 print('PASS: OpenVPN uses private inputs with umask 022, honors auth overrides and reports rejected directives', flush=True)
 
+# After the VPN dies, namespace DNS is blocked by the kill switch even when
+# host DNS can still resolve the same transport endpoint.
+hostname = 'vpn-recovery.test'
+hostname_profile = ctx.user_file(
+    'hostname-client.ovpn', valid_profile.replace('proto udp', 'proto udp4')
+    .replace('remote 192.0.2.2', f'remote {hostname}'))
+hostname_name = ctx.namespace('hostname_recovery')
+resolv = Path('/etc/resolv.conf')
+resolv.write_text('nameserver 192.0.2.2\noptions timeout:1 attempts:1\n')
+hostname_app = ctx.spawn([
+    'exec', '--custom', str(hostname_profile), '--protocol', 'openvpn',
+    '--interface', 'uplink', '--firewall', 'nftables', '--dns', '192.0.2.2',
+    '--custom-netns-name', 'hostname_recovery', '--monitor', '--recover', 'sleep 150',
+], 'hostname-client.log')
+try:
+    assert command('getent', 'ahostsv4', hostname).stdout.startswith('192.0.2.2 ')
+    app_pid = wait_for(lambda: application_pid(ctx.status(hostname_name)), seconds=30)
+    record = json.loads((Path('/run/vopono/namespace-owners') / hostname_name).read_text())
+    runtime = Path(record['namespace']['openvpn']['runtime_dir'])
+    assert 'remote 192.0.2.2' in (runtime / 'recovery.ovpn').read_text()
+    old_child = int((runtime / 'child.pid').read_text())
+    os.kill(old_child, signal.SIGKILL)
+    wait_for(lambda: int((runtime / 'child.pid').read_text()) != old_child, seconds=75)
+    def hostname_tunnel_is_up():
+        return ctx.client('check', hostname_name, '--skip-ipv6', '--skip-dns',
+                          '--timeout-ms', '500', check=False).returncode == 0
+    wait_for(hostname_tunnel_is_up, seconds=20)
+    assert Path(f'/proc/{app_pid}').exists()
+finally:
+    ctx.client('stop', 'namespace', hostname_name, '--json', check=False)
+    hostname_app.wait(timeout=15)
+    resolv.write_bytes(host_dns)
+print('PASS: OpenVPN recovers a hostname endpoint with no namespace bootstrap DNS', flush=True)
+
 tcp_server = scratch / 'tcp-server.ovpn'
 tcp_server.write_text(server.read_text().replace('proto udp', 'proto tcp-server')
                       .replace('port 1194', 'port 1196').replace('dev tun', 'dev tun_tcp')

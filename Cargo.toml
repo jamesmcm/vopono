@@ -26,6 +26,7 @@ console = "0.16"
 signal-hook = "0.4"
 chrono = "0.4"
 bs58 = "0.5"
+sha2 = "0.11"
 nix = { version = "0.31", features = ["signal", "process", "socket", "net", "uio", "mount", "term"] }
 config = "0.15"
 serde = { version = "1", features = ["derive", "std"] }

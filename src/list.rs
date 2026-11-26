@@ -33,6 +33,7 @@ pub struct NamespaceEntry {
     pub open_ports: Vec<u16>,
     pub host_forwarded_ports: Vec<u16>,
     pub health: Option<crate::health::Health>,
+    pub stopping: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -186,6 +187,9 @@ fn namespace_entry(
 
     Ok(NamespaceEntry {
         health: crate::health::read_health(id),
+        stopping: vopono_core::util::vopono_dir().is_ok_and(|base| {
+            vopono_core::status::namespace_is_stopping(&base.join("locks").join(id))
+        }),
         id: id.to_string(),
         provider: namespace.provider.id().to_string(),
         protocol: namespace.protocol.id().to_string(),
@@ -304,15 +308,20 @@ fn print_namespaces(namespaces: &[NamespaceEntry]) {
     if namespaces.is_empty() {
         return;
     }
-    println!("namespace\tprovider\tprotocol\tapplications\tuptime");
+    println!("namespace\tprovider\tprotocol\tapplications\tuptime\tstate");
     for namespace in namespaces {
         println!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             namespace.id,
             namespace.provider,
             namespace.protocol,
             namespace.applications.len(),
             compound_duration::format_wdhms(namespace.uptime_seconds),
+            if namespace.stopping {
+                "stopping"
+            } else {
+                "active"
+            },
         );
         for application in &namespace.applications {
             println!(

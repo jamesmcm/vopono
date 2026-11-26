@@ -278,6 +278,95 @@ fn parse_lines(content: &str) -> anyhow::Result<Vec<ConfigLine<'_>>> {
     Ok(output)
 }
 
+/// Build a private restart profile from the already validated snapshot. Keep
+/// connection scopes and TLS options intact while removing the dependency on
+/// namespace DNS for VPN transports.
+pub(crate) fn freeze_recovery_remotes(
+    content: &str,
+    mut resolve: impl FnMut(&str) -> Vec<std::net::IpAddr>,
+    negotiated_peer: Option<std::net::IpAddr>,
+    disable_ipv6: bool,
+) -> anyhow::Result<String> {
+    endpoints(content)?;
+    let lines = parse_lines(content)?;
+    let mut protocols = vec![None];
+    let mut group = 0;
+    let mut remote_count = 0;
+    for line in &lines {
+        match line {
+            ConfigLine::ConnectionStart => {
+                group = protocols.len();
+                protocols.push(None);
+            }
+            ConfigLine::ConnectionEnd => group = 0,
+            ConfigLine::Directive { fields, .. } => match fields[0].trim_start_matches("--") {
+                "proto" => protocols[group] = fields.get(1).map(String::as_str),
+                "remote" => remote_count += 1,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+
+    let mut output = String::new();
+    let mut next_group = 0;
+    for line in &lines {
+        match line {
+            ConfigLine::ConnectionStart => {
+                next_group += 1;
+                group = next_group;
+                output.push_str("<connection>\n");
+            }
+            ConfigLine::ConnectionEnd => {
+                group = 0;
+                output.push_str("</connection>\n");
+            }
+            ConfigLine::Directive { raw, fields, .. } => {
+                let option = fields[0].trim_start_matches("--");
+                if option == "remote-random-hostname" {
+                    continue;
+                }
+                if option != "remote" || fields[1].parse::<std::net::IpAddr>().is_ok() {
+                    output.push_str(raw);
+                    output.push('\n');
+                    continue;
+                }
+                let protocol = fields
+                    .get(3)
+                    .map(String::as_str)
+                    .or(protocols[group])
+                    .or(protocols[0]);
+                let supports = |ip: &std::net::IpAddr| {
+                    if ip.is_ipv4() {
+                        !protocol.is_some_and(|proto| proto.contains('6'))
+                    } else {
+                        !disable_ipv6 && !protocol.is_some_and(|proto| proto.contains('4'))
+                    }
+                };
+                let addresses = resolve(&fields[1]);
+                let ip = negotiated_peer
+                    .filter(|ip| remote_count == 1 || addresses.contains(ip))
+                    .filter(supports)
+                    .or_else(|| addresses.into_iter().find(supports))
+                    .with_context(|| {
+                        format!("Could not pin OpenVPN recovery endpoint {}", fields[1])
+                    })?;
+                output.push_str(&format!("remote {ip}"));
+                for field in &fields[2..] {
+                    output.push(' ');
+                    output.push_str(field);
+                }
+                output.push('\n');
+            }
+            ConfigLine::Inline { raw, .. } => {
+                output.push_str(raw);
+                output.push('\n');
+            }
+        }
+    }
+    Ok(output)
+}
+
 pub(crate) fn endpoints(content: &str) -> anyhow::Result<Vec<crate::diagnostics::Endpoint>> {
     use crate::diagnostics::{Endpoint, valid_host};
     struct Group {
@@ -522,6 +611,33 @@ fn sanitize_with_auth(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_freezes_endpoints_without_changing_connection_or_tls_options() {
+        let configuration = "client\n<connection>\nproto tcp6-client\nremote first.test 443\n</connection>\n\
+                             remote second.test 1194 udp4\nverify-x509-name server name\n<ca>\ninline material\n</ca>\n";
+        let frozen = freeze_recovery_remotes(
+            configuration,
+            |_| vec!["192.0.2.4".parse().unwrap(), "2001:db8::4".parse().unwrap()],
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(
+            frozen
+                .contains("<connection>\nproto tcp6-client\nremote 2001:db8::4 443\n</connection>")
+        );
+        assert!(frozen.contains("remote 192.0.2.4 1194 udp4"));
+        assert!(frozen.contains("verify-x509-name server name\n<ca>\ninline material\n</ca>"));
+        let frozen = freeze_recovery_remotes(
+            "remote vpn.test 443\nremote-random-hostname\n",
+            |_| Vec::new(),
+            Some("192.0.2.8".parse().unwrap()),
+            false,
+        )
+        .unwrap();
+        assert_eq!(frozen, "remote 192.0.2.8 443\n");
+    }
 
     #[test]
     fn auth_override_keeps_safe_options_and_omits_superseded_credentials() {

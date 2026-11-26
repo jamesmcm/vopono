@@ -965,6 +965,7 @@ mod tests {
                     open_ports: Vec::new(),
                     host_forwarded_ports: Vec::new(),
                     health: None,
+                    stopping: false,
                 })
                 .collect(),
             errors: Vec::new(),

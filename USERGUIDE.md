@@ -205,8 +205,12 @@ anything inside the namespace themselves.
 application has started:
 
 ```json
-{"version":1,"event":"launched","namespace":"vo_ar_romania","pid":183041,"forwarded_port":null,"open_ports":[],"host_forwarded_ports":[]}
+{"version":1,"event":"launched","namespace":"vo_ar_romania","pid":183041,"provider":"airvpn","protocol":"wireguard","server":"ro-fixture","reused":false,"forwarded_port":null,"open_ports":[],"host_forwarded_ports":[]}
 ```
+
+The report shows the connection in use and whether the launch reused an existing
+namespace. `server` is the selected provider server ID or custom endpoint when
+available. The GUI shows these details on the Launch and Logs screens.
 
 Scan stdout for `"event":"launched"` rather than assuming it is the first
 line - host-side setup commands may print earlier lines.
@@ -1642,10 +1646,9 @@ false degradation. Split tunnels may also intentionally exclude these targets.
 the existing namespace's host route, interface rules and WireGuard endpoint,
 including gateway/source changes on the same interface, endpoint DNS changes,
 and the matching iptables/nftables kill-switch exception. A failed OpenVPN process
-is restarted from private frozen inputs; an OpenVPN endpoint that rotates to a
-new IP may still require an explicit
-reconnect. Attempts are exponentially spaced, with at most five
-per continuous outage; a changed host route or endpoint resets that budget.
+is restarted from private frozen inputs with resolved transport addresses.
+An OpenVPN endpoint that rotates to a new IP may still require an explicit
+reconnect. Attempts are exponentially spaced, with at most five per continuous outage; a changed host route or endpoint resets that budget.
 The existing application keeps running and the kill switch remains installed.
 Applications cannot gain privileges from setuid binaries or file capabilities
 (`no_new_privs`); helpers that require that elevation must be launched separately.
@@ -1681,8 +1684,8 @@ Creation, attachment and teardown are serialized per namespace. A slow handshake
 in one namespace does not block unrelated namespaces. Port renewal tasks retry
 transient provider failures with bounded backoff instead of permanently exiting.
 A daemon restart validates persisted root-owned namespace identities and restores
-monitors, host relays and provider lease workers. Interrupted stops finish during
-startup. The systemd unit uses `KillMode=process` to preserve applications and VPN
+monitors, host relays and provider lease workers. The daemon retries interrupted
+stops. Pending stops appear as `stopping` in `vopono status`. The systemd unit uses `KillMode=process` to preserve applications and VPN
 helpers when restarting the daemon. Noninteractive applications keep running;
 interactive PTY sessions cannot reconnect their terminal and may receive SIGHUP.
 
@@ -1696,7 +1699,12 @@ metadata. Failed generation or validation preserves the installed generation.
 
 ## Named launch profiles and desktop launchers
 
-Add profiles to `~/.config/vopono/config.toml`. Explicit command-line settings
+Add profiles to `~/.config/vopono/config.toml`. Restart the daemon after upgrading
+from a version older than 1.1.0 before launching profiles through it.
+Implicit namespace reuse checks the connection and isolation settings.
+To use a namespace created before those checks were recorded, explicitly attach
+with `--existing-netns` or stop and recreate it.
+Explicit command-line settings
 win over profile values, and profile values override global defaults. Boolean
 flags enable features; a true profile/default flag cannot be disabled by omitting
 it on the command line.

@@ -21,6 +21,27 @@ pub(crate) const FORWARDED_PORT_SIDECAR: &str = "port-forwarding.json";
 pub(crate) const FORWARDED_PORT_TEMP_PREFIX: &str = "port-forwarding.tmp-";
 const FORWARDED_PORT_LEGACY_TEMP_PREFIX: &str = ".port-forwarding-";
 const MAX_LOCK_WALK_ENTRIES: usize = 4096;
+pub(crate) const STOPPING_SIDECAR: &str = "stopping";
+
+pub fn record_namespace_stopping(lock_dir: &Path) -> anyhow::Result<()> {
+    if lock_dir.is_dir() {
+        anyhow::ensure!(
+            write_file_as_config_owner(
+                &lock_dir.join(STOPPING_SIDECAR),
+                "stopping\n",
+                Some(0o600)
+            )?,
+            "Config-owner writer unexpectedly unavailable"
+        );
+    }
+    Ok(())
+}
+
+pub fn namespace_is_stopping(lock_dir: &Path) -> bool {
+    std::fs::symlink_metadata(lock_dir).is_ok_and(|metadata| metadata.is_dir())
+        && owner_write::read_bounded_regular_file_nofollow(&lock_dir.join(STOPPING_SIDECAR), 32)
+            .is_ok_and(|value| value == b"stopping\n")
+}
 
 pub(crate) fn is_forwarded_port_sidecar(name: &str) -> bool {
     let valid_suffix = |suffix: &str| {
@@ -364,6 +385,7 @@ fn lock_dir_has_only_ignored(dir: &Path, own_lock_name: Option<&str>) -> anyhow:
         };
         if !is_forwarded_port_sidecar(&name)
             && !is_health_sidecar(&name)
+            && name != STOPPING_SIDECAR
             && own_lock_name != Some(name.as_str())
         {
             return Ok(false);
@@ -467,6 +489,7 @@ pub(crate) fn remove_forwarded_port_sidecar(dir: &Path) {
     };
     remove(&dir.join(FORWARDED_PORT_SIDECAR));
     remove(&dir.join(HEALTH_FILE));
+    remove(&dir.join(STOPPING_SIDECAR));
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             if entry

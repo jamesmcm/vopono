@@ -29,6 +29,8 @@ pub struct OpenVpn {
     #[serde(default)]
     pub(crate) recovery_host: Option<String>,
     #[serde(default)]
+    pub(crate) recovery_address: Option<IpAddr>,
+    #[serde(default)]
     ns_name: Option<String>,
     #[serde(skip)]
     cleanup_enabled: bool,
@@ -191,6 +193,7 @@ impl OpenVpn {
         .context("Failed to launch OpenVPN - is openvpn installed?")?;
         let id = handle.id();
         let effective_disable_ipv6 = disable_ipv6 || ipv6_disabled;
+        let mut recovery_address = None;
         let setup_result = (|| -> anyhow::Result<Vec<IpAddr>> {
             const MAX_STARTUP_LOG_BYTES: usize = 4 * 1024 * 1024;
             let mut line_buffer = String::with_capacity(4096);
@@ -345,9 +348,47 @@ impl OpenVpn {
                 None => unreachable!("startup loop only exits with a terminal state"),
             }
 
+            recovery_address = connected_peers.first().map(|(ip, _)| *ip);
+            let pinned_remotes = if supervised
+                && let Some((connected_ip, _)) = connected_peers.first()
+                && remotes
+                    .iter()
+                    .any(|remote| matches!(remote.host, Host::Hostname(_)))
+            {
+                let content = std::fs::read_to_string(&config_file_path)?;
+                let deadline = Instant::now() + std::time::Duration::from_secs(3);
+                match super::openvpn_config::freeze_recovery_remotes(
+                    &content,
+                    |host| {
+                        let timeout = deadline
+                            .saturating_duration_since(Instant::now())
+                            .min(std::time::Duration::from_secs(1));
+                        crate::diagnostics::resolve_bounded(host, timeout).unwrap_or_default()
+                    },
+                    Some(*connected_ip),
+                    effective_disable_ipv6,
+                ) {
+                    Ok(profile) => {
+                        let path = runtime_dir
+                            .path()
+                            .join(super::openvpn_supervisor::RECOVERY_PROFILE);
+                        use std::io::Write;
+                        crate::util::create_private_file(&path)?.write_all(profile.as_bytes())?;
+                        get_remotes_from_config(&path)?
+                    }
+                    Err(error) => {
+                        log::warn!("Could not prepare offline OpenVPN recovery: {error:#}");
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
             // Include the peer IP that OpenVPN actually connected to so round-robin
             // or GeoDNS hostnames cannot blackhole the active socket during killswitch setup.
             let mut effective_remotes = remotes;
+            effective_remotes.extend(pinned_remotes);
             let default_proto = effective_remotes
                 .first()
                 .map(|r| r.protocol.clone())
@@ -402,6 +443,7 @@ impl OpenVpn {
             runtime_dir: Some(runtime_dir.keep()),
             supervised,
             recovery_host,
+            recovery_address,
             ns_name: Some(netns.name.clone()),
             cleanup_enabled: true,
         })

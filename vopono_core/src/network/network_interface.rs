@@ -93,14 +93,17 @@ impl FromStr for NetworkInterface {
 }
 
 pub fn get_active_interfaces() -> anyhow::Result<Vec<String>> {
-    debug!("ip addr");
+    debug!("ip -j address");
     let output = Command::new("ip")
-        .arg("addr")
+        .args(["-j", "address"])
         .output()
-        .with_context(|| "Failed to run command: ip addr".to_string())?
-        .stdout;
-
-    let out = parse_active_interfaces(std::str::from_utf8(&output)?);
+        .context("Failed to run ip -j address")?;
+    ensure!(
+        output.status.success(),
+        "ip -j address failed: {}",
+        output.status
+    );
+    let out = parse_active_interfaces(&output.stdout)?;
 
     if !out.is_empty() {
         Ok(out)
@@ -131,13 +134,19 @@ pub fn interface_has_default_route(interface: &str) -> anyhow::Result<bool> {
     )
 }
 
-fn parse_active_interfaces(ip_addr_output: &str) -> Vec<String> {
-    ip_addr_output
-        .split('\n')
-        .filter(|line| line.contains("state UP"))
-        .filter_map(|line| line.split_whitespace().nth(1))
-        .map(|iface| String::from(&iface[..iface.len() - 1]))
-        .collect()
+fn parse_active_interfaces(output: &[u8]) -> anyhow::Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct Interface {
+        ifname: String,
+        operstate: Option<String>,
+    }
+    let interfaces: Vec<Interface> =
+        serde_json::from_slice(output).context("Invalid ip address output")?;
+    Ok(interfaces
+        .into_iter()
+        .filter(|interface| interface.operstate.as_deref() == Some("UP"))
+        .map(|interface| interface.ifname)
+        .collect())
 }
 
 fn route_output_has_default(route_output: &str) -> bool {
@@ -153,15 +162,16 @@ mod tests {
 
     #[test]
     fn parse_active_interfaces_extracts_up_links() {
-        let ip_addr_output = "\
-1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 state UNKNOWN
-2: wlp2s0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP
-3: eno1: <BROADCAST,MULTICAST> mtu 1500 state DOWN
-4: tailscale0: <POINTOPOINT,UP,LOWER_UP> mtu 1280 state UNKNOWN";
-
-        let active = parse_active_interfaces(ip_addr_output);
-
-        assert_eq!(active, vec!["wlp2s0"]);
+        let links = br#"[
+            {"ifname":"lo","operstate":"UNKNOWN"},
+            {"ifname":"wlp2s0","operstate":"UP"},
+            {"ifname":"eno1","operstate":"DOWN"},
+            {"ifname":"uplink","link_index":6,"operstate":"UP"}
+        ]"#;
+        assert_eq!(
+            parse_active_interfaces(links).unwrap(),
+            vec!["wlp2s0", "uplink"]
+        );
     }
 
     #[test]

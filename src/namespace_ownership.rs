@@ -138,21 +138,13 @@ pub fn tag(namespace_state: &NetworkNamespace, uid: Uid) -> anyhow::Result<()> {
     std::fs::create_dir_all(OWNER_DIR)?;
     std::fs::set_permissions(OWNER_DIR, std::fs::Permissions::from_mode(0o700))?;
 
-    // Re-tagging happens whenever an existing namespace is reused. Preserve a
-    // previous keep-alive/create-only decision rather than silently reverting
-    // it to ordinary last-client teardown semantics.
-    let existing = validated_record(name, uid).ok();
-    let lifecycle = existing
-        .as_ref()
-        .map(|record| record.lifecycle)
-        .unwrap_or_default();
     let record = OwnerRecord {
         uid: uid.as_raw(),
         device: namespace.dev(),
         inode: namespace.ino(),
         namespace: StoredNamespace::Snapshot(namespace_state.snapshot()?),
-        lifecycle,
-        runtime: existing.and_then(|record| record.runtime),
+        lifecycle: NamespaceLifecycle::Active,
+        runtime: None,
     };
     persist_record(name, &record)
 }

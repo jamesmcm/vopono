@@ -1,5 +1,5 @@
 use crate::network::health::is_health_sidecar;
-use crate::status::{self, LockfileKind, is_forwarded_port_sidecar};
+use crate::status::{self, LockfileKind, STOPPING_SIDECAR, is_forwarded_port_sidecar};
 use anyhow::Context;
 use nix::dir::{Dir, Entry, Type};
 use nix::errno::Errno;
@@ -87,7 +87,7 @@ pub(super) fn clean_dead_locks(config_base: &Path) -> anyhow::Result<()> {
             let Ok(name) = file.file_name().to_str() else {
                 return false;
             };
-            (is_forwarded_port_sidecar(name) || is_health_sidecar(name))
+            (is_forwarded_port_sidecar(name) || is_health_sidecar(name) || name == STOPPING_SIDECAR)
                 && entry_is_regular_file(&dir, file)
         }) {
             for file in remaining {

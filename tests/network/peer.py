@@ -30,7 +30,13 @@ def dns(family):
         offset += 1
         kind = struct.unpack("!H", query[offset:offset + 2])[0]
         end = offset + 4
-        address = ipaddress.ip_address("2606:4700:4700::1111" if kind == 28 else "1.1.1.1").packed
+        if query[12:end].startswith(b"\x0cvpn-recovery\x04test"):
+            if kind != 1:
+                listener.sendto(query[:2] + struct.pack("!HHHHH", 0x8180, 1, 0, 0, 0) + query[12:end], client)
+                continue
+            address = ipaddress.ip_address("192.0.2.2").packed
+        else:
+            address = ipaddress.ip_address("2606:4700:4700::1111" if kind == 28 else "1.1.1.1").packed
         answer = b"\xc0\x0c" + struct.pack("!HHIH", kind, 1, 30, len(address)) + address
         listener.sendto(query[:2] + struct.pack("!HHHHH", 0x8180, 1, 1, 0, 0) + query[12:end] + answer, client)
 

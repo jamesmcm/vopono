@@ -5,6 +5,9 @@ use eframe::egui;
 impl VoponoGuiApp {
     pub(super) fn launch_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Launch");
+        if let Some(details) = &self.last_launch_details {
+            ui.label(details);
+        }
         let vpn_choices = self.vpn_choices();
         let mut delete_custom = None;
         ui.columns(2, |columns| {

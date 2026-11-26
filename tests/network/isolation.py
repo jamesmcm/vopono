@@ -245,7 +245,7 @@ def check_command_failure(context):
     shim = tools / 'nft'
     shim.write_text(
         '#!/usr/bin/python3\nimport os,sys\n'
-        f'if {namespace!r} in sys.argv and "reject" in sys.argv and "!=" in sys.argv: raise SystemExit(42)\n'
+        f'if {namespace!r} in sys.argv and "reject" in sys.argv and "output" in sys.argv: raise SystemExit(42)\n'
         f'os.execv({actual!r}, [{actual!r}, *sys.argv[1:]])\n')
     shim.chmod(0o755)
     original = os.environ['PATH']

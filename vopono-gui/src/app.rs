@@ -10,7 +10,7 @@ use crate::gui_config::{
     VpnConfigUsage, gui_config_path, load_gui_config, load_vopono_config_text,
     read_provider_forwarded_port, save_gui_config, vopono_config_path,
 };
-use crate::launcher::pipe_child_output;
+use crate::launcher::{LaunchOutput, pipe_child_output};
 use crate::status::{StatusSnapshot, read_status};
 use crate::tray::{TrayCommand, TrayManager};
 use eframe::egui;
@@ -81,8 +81,9 @@ pub struct VoponoGuiApp {
     selected_vpn_key: Option<String>,
     selected_app_cmd: Option<String>,
     active_children: Vec<ActiveLaunch>,
-    log_sender: Sender<(u64, String)>,
-    log_receiver: Receiver<(u64, String)>,
+    log_sender: Sender<(u64, LaunchOutput)>,
+    log_receiver: Receiver<(u64, LaunchOutput)>,
+    last_launch_details: Option<String>,
     logs: Vec<LaunchLog>,
     next_log_id: u64,
     file_picker: FilePicker,
@@ -141,6 +142,7 @@ impl VoponoGuiApp {
             active_children: Vec::new(),
             log_sender,
             log_receiver,
+            last_launch_details: None,
             logs: Vec::new(),
             next_log_id: 1,
             file_picker: FilePicker::new(),
@@ -418,6 +420,7 @@ impl VoponoGuiApp {
             Ok(result) => {
                 let log_id = self.next_log_id;
                 self.next_log_id += 1;
+                self.last_launch_details = None;
                 let mut child = result.child;
                 pipe_child_output(log_id, &mut child, self.log_sender.clone());
                 self.logs.push(LaunchLog {
@@ -496,7 +499,17 @@ impl VoponoGuiApp {
     }
 
     fn drain_log_output(&mut self) {
-        while let Ok((log_id, line)) = self.log_receiver.try_recv() {
+        while let Ok((log_id, output)) = self.log_receiver.try_recv() {
+            let line = match output {
+                LaunchOutput::Line(line) => line,
+                LaunchOutput::Details(details) => {
+                    let summary = details.summary();
+                    if log_id + 1 == self.next_log_id {
+                        self.last_launch_details = Some(summary.clone());
+                    }
+                    summary
+                }
+            };
             if let Some(log) = self.logs.iter_mut().find(|log| log.id == log_id) {
                 log.lines.push(line);
             }

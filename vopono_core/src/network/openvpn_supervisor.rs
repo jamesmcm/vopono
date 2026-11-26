@@ -89,7 +89,9 @@ pub(crate) fn prepare(argv: &[&str], runtime: &Path) -> anyhow::Result<Vec<Strin
     ])
 }
 
-fn spawn(plan: &Plan, runtime: &Path) -> anyhow::Result<Child> {
+pub(super) const RECOVERY_PROFILE: &str = "recovery.ovpn";
+
+fn spawn(plan: &Plan, runtime: &Path, recovery: bool) -> anyhow::Result<Child> {
     let _ = fs::remove_file(runtime.join("child-exited"));
     // A killed DCO process can leave its kernel interface and routes behind.
     // Remove only this supervisor's fixed device, retaining the kill switch.
@@ -107,9 +109,21 @@ fn spawn(plan: &Plan, runtime: &Path) -> anyhow::Result<Child> {
             "Could not remove obsolete OpenVPN device"
         );
     }
+    let mut args = plan.argv[1..].to_vec();
+    if recovery {
+        let config = args
+            .iter()
+            .position(|arg| arg == "--config")
+            .context("Missing OpenVPN config argument")?;
+        let path = runtime.join(RECOVERY_PROFILE);
+        args[config + 1] = path
+            .to_str()
+            .context("Invalid OpenVPN recovery config path")?
+            .to_owned();
+    }
     let mut command = Command::new(&plan.argv[0]);
     command
-        .args(&plan.argv[1..])
+        .args(args)
         .current_dir(runtime)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -183,7 +197,7 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
         signal_hook::consts::SIGINT,
         signal_hook::consts::SIGUSR1,
     ])?;
-    let mut child = Some(spawn(&plan, &runtime)?);
+    let mut child = Some(spawn(&plan, &runtime, false)?);
     loop {
         // Reap any already-exited child BEFORE draining signals so a SIGUSR1
         // restart request immediately spawns a fresh OpenVPN child instead of
@@ -197,17 +211,21 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
         }
         for signal in signals.pending() {
             if signal == signal_hook::consts::SIGUSR1 {
-                if let Some(child) = &mut child {
+                let recovery = runtime.join(RECOVERY_PROFILE).is_file();
+                if !recovery && let Some(child) = &child {
                     let _ = nix::sys::signal::kill(
                         nix::unistd::Pid::from_raw(child.id() as i32),
                         nix::sys::signal::Signal::SIGUSR1,
                     );
-                } else {
-                    match spawn(&plan, &runtime) {
-                        Ok(spawned) => child = Some(spawned),
-                        Err(error) => {
-                            log::warn!("OpenVPN supervisor could not restart child: {error:#}");
-                        }
+                    continue;
+                }
+                if let Some(mut child) = child.take() {
+                    terminate(&mut child);
+                }
+                match spawn(&plan, &runtime, recovery) {
+                    Ok(spawned) => child = Some(spawned),
+                    Err(error) => {
+                        log::warn!("OpenVPN supervisor could not restart child: {error:#}");
                     }
                 }
             } else {

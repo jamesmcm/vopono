@@ -106,6 +106,7 @@ probe() { client check "$name" --json > "$scratch/check.json" 2>/dev/null && pyt
 # Both inner IP families and DNS must work; the host underlay is forbidden.
 dual_stack_ready() { probe && python3 -c 'import json,sys; r=json.load(open(sys.argv[1]))["result"]; assert "latency_ms" in r["ipv4"] and "latency_ms" in r["ipv6"]' "$scratch/check.json"; }
 wait_for dual_stack_ready
+client check "$name" --skip-ipv4 --skip-ipv6 --json | python3 -c 'import json,sys; result=json.load(sys.stdin)["result"]; assert result["dns"]["resolved_ips"] and not result["connected"]'
 python3 "$test_dir/doctor.py" "$binary" "$scratch" "$user"
 python3 "$test_dir/monitor.py" "$binary" "$scratch" "$user"
 if [[ ${3:-} == --monitor-only ]]; then

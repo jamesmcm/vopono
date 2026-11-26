@@ -111,6 +111,14 @@ pub fn reserve(name: &str, uid: Uid, monitor: bool) -> anyhow::Result<()> {
             .get(name)
             .is_some_and(|entry| !entry.valid.load(Ordering::Acquire));
         if !retiring {
+            anyhow::ensure!(
+                !SESSIONS
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get(name)
+                    .is_some_and(|entry| entry.stop_forwarder_for_teardown.load(Ordering::Acquire)),
+                "Namespace {name} is being stopped"
+            );
             reserve_resources(name, uid, monitor)?;
             SETUP_TRANSITION.with(|slot| *slot.borrow_mut() = Some(permit));
             return Ok(());
@@ -218,21 +226,12 @@ pub fn stop_monitor(name: &str) -> anyhow::Result<()> {
         // is not invoked for a second wait.
         handle.stop_and_wait()?;
     }
-    let (monitor, forwarder_stop, forwarder_released) = {
-        let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(entry) = sessions.get_mut(name) {
-            entry
-                .stop_forwarder_for_teardown
-                .store(true, Ordering::Release);
-            (
-                entry.monitor.take(),
-                entry.forwarder_stop.take(),
-                Some(Arc::clone(&entry.forwarder_released)),
-            )
-        } else {
-            (None, None, None)
-        }
-    };
+    let (monitor, forwarder_stop) = SESSIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get_mut(name)
+        .map(|entry| (entry.monitor.take(), entry.forwarder_stop.take()))
+        .unwrap_or_default();
     if monitor.is_some()
         && let Some((_, reserved_monitor)) = RESOURCES
             .lock()
@@ -245,7 +244,6 @@ pub fn stop_monitor(name: &str) -> anyhow::Result<()> {
     if let Some(stop) = forwarder_stop {
         let _ = stop.send(true);
     }
-    let _ = forwarder_released;
     Ok(())
 }
 
@@ -523,12 +521,13 @@ impl Session {
             // netns so renewal threads join cleanly and AzireVPN DELETE runs.
             if self.stop_forwarder_for_teardown.load(Ordering::Acquire) {
                 self.pending_forwarder = None;
-                let forwarder = self.forwarder.take();
-                drop(transition);
-                drop(forwarder);
-                self.forwarder_released.store(true, Ordering::Release);
-                std::thread::sleep(Duration::from_millis(50));
-                continue;
+                if !self.forwarder_released.load(Ordering::Acquire) {
+                    let forwarder = self.forwarder.take();
+                    drop(transition);
+                    drop(forwarder);
+                    self.forwarder_released.store(true, Ordering::Release);
+                    continue;
+                }
             }
             // An explicit stop may already have removed the namespace. Disarm
             // our copy so a subsequent namespace with the same name stays safe.
@@ -541,11 +540,17 @@ impl Session {
                 remove_session(&self.ns.name, &self.valid);
                 break;
             }
-            if std::time::Instant::now() >= relay_retry_at {
+            let stopping =
+                crate::namespace_ownership::is_stopping(&self.ns.name, self.uid).unwrap_or(false);
+            if !stopping
+                && !self.stop_forwarder_for_teardown.load(Ordering::Acquire)
+                && std::time::Instant::now() >= relay_retry_at
+            {
                 self.restore_missing_relays();
                 relay_retry_at = std::time::Instant::now() + Duration::from_secs(5);
             }
-            if let Some(snapshot) = self.pending_forwarder.clone()
+            if !stopping
+                && let Some(snapshot) = self.pending_forwarder.clone()
                 && std::time::Instant::now() >= lease_retry_at
             {
                 // Release the transition lock while performing network I/O and
@@ -555,6 +560,8 @@ impl Session {
                 transition = lock_namespace(&self.ns.name);
                 if !self.valid.load(Ordering::Acquire)
                     || self.stop_forwarder_for_teardown.load(Ordering::Acquire)
+                    || crate::namespace_ownership::is_stopping(&self.ns.name, self.uid)
+                        .unwrap_or(true)
                     || !std::path::Path::new("/run/netns")
                         .join(&self.ns.name)
                         .exists()
@@ -616,7 +623,7 @@ impl Session {
             let persistent =
                 crate::namespace_ownership::is_persistent(&self.ns.name, self.uid).unwrap_or(true);
             if primary_removed
-                && (active > 0 || persistent)
+                && (active > 0 || persistent || stopping)
                 && std::time::Instant::now() >= cleanup_retry_at
             {
                 // Re-publish status in the controller's configuration tree after reattachment.
@@ -648,7 +655,9 @@ impl Session {
                         // Release our application status while keeping the controller,
                         // ownership record and resources available for a later retry.
                         let primary = lock_dir.join(own_lock);
-                        if primary.exists() && !vopono_core::status::has_client_lockfiles(&lock_dir)
+                        if !stopping
+                            && primary.exists()
+                            && !vopono_core::status::has_client_lockfiles(&lock_dir)
                         {
                             match vopono_core::util::owner_write::remove_file_as_config_owner(
                                 &primary,
@@ -752,8 +761,12 @@ pub fn restore_all() -> anyhow::Result<()> {
                             &lock_dir.join(runtime.daemon_pid.to_string()),
                         );
                     }
-                    crate::control::stop_namespace(&name, Some(uid))?;
-                    return Ok(None);
+                    match crate::control::stop_namespace(&name, Some(uid)) {
+                        Ok(_) => return Ok(None),
+                        Err(error) => {
+                            log::warn!("Will retry interrupted stop for {name}: {error:#}")
+                        }
+                    }
                 }
                 let mut ns = crate::namespace_ownership::load(&name, uid)?;
                 // Write the new primary lockfile BEFORE removing the previous daemon PID's
@@ -768,10 +781,13 @@ pub fn restore_all() -> anyhow::Result<()> {
                         &lock_dir.join(runtime.daemon_pid.to_string()),
                     );
                 }
+                let stopping = crate::namespace_ownership::is_stopping(&name, uid)?;
                 let mut session =
-                    Session::register(ns, uid, None, runtime.monitor, runtime.recover);
-                session.retain_desired_host_ports(&runtime.host_ports);
-                session.pending_forwarder = runtime.forwarder;
+                    Session::register(ns, uid, None, runtime.monitor && !stopping, runtime.recover);
+                if !stopping {
+                    session.retain_desired_host_ports(&runtime.host_ports);
+                    session.pending_forwarder = runtime.forwarder;
+                }
                 // A failure to refresh restart bookkeeping must not drop a
                 // persistent controller while the startup transition is held.
                 if let Err(error) = session.persist_options() {

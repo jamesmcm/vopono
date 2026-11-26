@@ -18,6 +18,9 @@ pub struct Peer {
 }
 
 fn destination(state: &NamespaceSnapshot) -> anyhow::Result<IpAddr> {
+    if let Some(address) = state.openvpn.as_ref().and_then(|vpn| vpn.recovery_address) {
+        return Ok(address);
+    }
     let host = state
         .wireguard
         .as_ref()

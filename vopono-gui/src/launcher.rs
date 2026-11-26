@@ -54,7 +54,7 @@ pub fn launch_custom_config(
 
     Ok(LaunchResult {
         message: format!(
-            "Started {} through {} using {}",
+            "Starting {} through {} using {}",
             app.name,
             vopono.display(),
             config.path.display()
@@ -99,7 +99,7 @@ pub fn launch_provider_config(
 
     Ok(LaunchResult {
         message: format!(
-            "Started {} through {} {} {}",
+            "Starting {} through {} {} {}",
             app.name, provider, protocol, server
         ),
         command_line,
@@ -108,6 +108,7 @@ pub fn launch_provider_config(
 }
 
 fn add_launch_args(command: &mut Command, launch: &LaunchConfig) -> anyhow::Result<()> {
+    command.arg("--json");
     if launch.monitor {
         command.arg("--monitor");
     }
@@ -233,19 +234,66 @@ fn display_command(command: &Command) -> String {
     shell_words::join(words.iter().map(String::as_str))
 }
 
-pub fn pipe_child_output(log_id: u64, child: &mut Child, sender: Sender<(u64, String)>) {
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct LaunchDetails {
+    event: String,
+    version: u8,
+    namespace: String,
+    provider: String,
+    protocol: String,
+    server: Option<String>,
+    reused: bool,
+}
+
+impl LaunchDetails {
+    fn from_stdout(line: &str) -> Option<Self> {
+        let details: Self = serde_json::from_str(line).ok()?;
+        (details.event == "launched" && details.version == 1).then_some(details)
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let action = if self.reused { "Reused" } else { "Created" };
+        let provider = &self.provider;
+        let protocol = &self.protocol;
+        let namespace = &self.namespace;
+        match &self.server {
+            Some(server) => {
+                format!("{action} namespace {namespace} · {provider} / {protocol} / {server}")
+            }
+            None => format!("{action} namespace {namespace} · {provider} / {protocol}"),
+        }
+    }
+}
+
+pub(crate) enum LaunchOutput {
+    Line(String),
+    Details(LaunchDetails),
+}
+
+pub(crate) fn pipe_child_output(
+    log_id: u64,
+    child: &mut Child,
+    sender: Sender<(u64, LaunchOutput)>,
+) {
     if let Some(stdout) = child.stdout.take() {
         let sender = sender.clone();
         thread::spawn(move || {
+            let mut reported = false;
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = sender.send((log_id, line));
+                let output = if !reported && let Some(details) = LaunchDetails::from_stdout(&line) {
+                    reported = true;
+                    LaunchOutput::Details(details)
+                } else {
+                    LaunchOutput::Line(line)
+                };
+                let _ = sender.send((log_id, output));
             }
         });
     }
     if let Some(stderr) = child.stderr.take() {
         thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                let _ = sender.send((log_id, line));
+                let _ = sender.send((log_id, LaunchOutput::Line(line)));
             }
         });
     }
@@ -254,6 +302,17 @@ pub fn pipe_child_output(log_id: u64, child: &mut Child, sender: Sender<(u64, St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_details_display_the_reported_connection() {
+        let report = r#"{"version":1,"event":"launched","namespace":"test-vpn","provider":"custom","protocol":"wireguard","server":"vpn.example","reused":true}"#;
+        let details = LaunchDetails::from_stdout(report).unwrap();
+        assert_eq!(
+            details.summary(),
+            "Reused namespace test-vpn · custom / wireguard / vpn.example"
+        );
+        assert!(LaunchDetails::from_stdout(r#"{"event":"application output"}"#).is_none());
+    }
 
     #[test]
     fn application_command_serializes_args_as_one_positional_string() {

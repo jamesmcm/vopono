@@ -12,7 +12,19 @@ pub(crate) enum Compatibility {
     Warn,
     /// MCP must never launch through a mismatched daemon or fall back to sudo.
     Exact,
+    ProfileOrMonitor,
 }
+
+#[derive(Debug)]
+pub(crate) struct UnsupportedLaunch;
+
+impl std::fmt::Display for UnsupportedLaunch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Profiles and monitoring require a compatible vopono daemon (1.1.0 or later in the 1.x series). Restart or update the daemon.")
+    }
+}
+
+impl std::error::Error for UnsupportedLaunch {}
 
 pub(crate) fn connect(policy: Compatibility) -> anyhow::Result<LocalSocketStream> {
     let mut conn =
@@ -27,14 +39,21 @@ pub(crate) fn connect(policy: Compatibility) -> anyhow::Result<LocalSocketStream
     );
     match policy {
         Compatibility::Warn => daemon::exchange_versions_with_daemon(&mut conn)?,
-        Compatibility::Exact => {
+        Compatibility::Exact | Compatibility::ProfileOrMonitor => {
             daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_HANDSHAKE_TIMEOUT_SECONDS)?;
             let version = daemon::client_handshake(&mut conn)?;
             let _ = daemon::clear_socket_timeouts(&conn);
-            ensure!(
-                version == env!("CARGO_PKG_VERSION"),
-                "MCP requires a matching daemon version; restart or update the daemon"
-            );
+            match policy {
+                Compatibility::ProfileOrMonitor => {
+                    if !crate::daemon::version_at_least(&version, (1, 1, 0)) {
+                        return Err(UnsupportedLaunch.into());
+                    }
+                }
+                _ => ensure!(
+                    version == env!("CARGO_PKG_VERSION"),
+                    "MCP requires a matching daemon version; restart or update the daemon"
+                ),
+            }
         }
     }
     Ok(conn)

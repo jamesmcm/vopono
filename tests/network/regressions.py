@@ -213,6 +213,22 @@ assert not (Path("/run/netns") / name).exists()
 assert not owner.exists()
 print("PASS: skipped teardown preserves ownership and supports a later explicit stop", flush=True)
 
+# A failed explicit stop keeps its intent and retries after a transient obstacle.
+pending = f'reg_pending_stop-u{uid}'
+pending_path = Path('/run/netns', pending)
+client(*launch('reg_pending_stop', '', '--create-netns-only'))
+blocker = scratch / 'config/vopono/locks' / pending / 'unexpected'
+blocker.touch()
+result = client('stop', 'namespace', pending, '--json', check=False)
+assert result.returncode != 0 and pending_path.exists(), result.stdout
+entry = next(ns for ns in json.loads(client('status', '--json').stdout)['namespaces']
+             if ns['id'] == pending)
+assert entry['stopping'], entry
+assert client(*attach(pending, 'true'), check=False).returncode != 0
+blocker.unlink()
+wait_for(lambda: not pending_path.exists())
+print('PASS: explicit stop is visible, blocks new attachments and retries automatically', flush=True)
+
 # CLI profile directories must be resolved before forwarding supplies a default.
 work = scratch / 'profile-work'
 work.mkdir()
@@ -230,6 +246,48 @@ for key in ('working-directory', 'working_directory'):
     result = client(*args, '--working-directory', str(scratch))
     assert result.stdout.strip() == str(scratch), result.stdout
 print('PASS: CLI profiles honor both working-directory spellings and explicit CLI overrides', flush=True)
+
+# Distinct custom profiles get distinct namespaces even with a common path prefix.
+contents = (scratch / 'client.conf').read_text()
+custom_a = scratch / 'review-a.conf'
+custom_b = scratch / 'review-b.conf'
+profile_config = scratch / 'review-profiles.toml'
+profile_config.write_text(f"""[profiles.first]
+custom = "{custom_a}"
+create_netns_only = true
+[profiles.second]
+custom = "{custom_b}"
+create_netns_only = true
+""")
+custom_a.write_text(contents)
+custom_b.write_text(contents.replace('192.0.2.2:51820', '192.0.2.3:51820'))
+for path in (custom_a, custom_b, profile_config):
+    os.chown(path, uid, account.pw_gid)
+profile_args = ['exec', '--vopono-config', str(profile_config), '--firewall', 'nftables', '--json']
+first = json.loads(client(*profile_args, '--profile', 'first').stdout)
+second = json.loads(client(*profile_args, '--profile', 'second').stdout)
+try:
+    assert first['namespace'] != second['namespace'], (first, second)
+    assert first['provider'] == 'custom' and first['protocol'] == 'wireguard', first
+    assert first['server'] == '192.0.2.2' and not first['reused'], first
+    assert second['server'] == '192.0.2.3' and not second['reused'], second
+    repeated = json.loads(client(*profile_args, '--profile', 'first').stdout)
+    assert repeated['reused'] and repeated['namespace'] == first['namespace'], repeated
+    insecure = client(*profile_args, '--profile', 'first', '--no-killswitch', check=False)
+    assert insecure.returncode != 0 and 'different or unverified connection' in insecure.stdout
+    # Exercise interface autodetection and the explicit attachment report together.
+    reused = json.loads(client('exec', '--existing-netns', first['namespace'],
+                               '--json', 'true').stdout)
+    assert reused['reused'] and reused['server'] == first['server'], reused
+    collision = client('exec', '--custom', str(custom_b), '--interface', 'uplink',
+                       '--custom-netns-name', first['namespace'].removesuffix(f'-u{uid}'),
+                       '--firewall', 'nftables', '--json', 'true', check=False)
+    assert collision.returncode != 0, collision.stdout
+    assert 'different or unverified connection' in json.loads(collision.stdout)['error']['message']
+finally:
+    for report in (first, second):
+        client('stop', 'namespace', report['namespace'], '--json')
+print('PASS: profile identity, effective launch details, reuse checks and default veth selection', flush=True)
 
 # Interactive requests take the terminal bridge path through the daemon.
 master, slave = pty.openpty()
@@ -256,6 +314,32 @@ with os.fdopen(master, 'r+b', buffering=0) as terminal:
         read_until(b'answer-hello')
         assert child.wait(timeout=10) == 0
 print('PASS: daemon terminal bridge carries interactive input/output and exits cleanly', flush=True)
+
+for redirect_stderr in (False, True):
+    master, slave = pty.openpty()
+    terminal_app = """sh -c 'echo output; echo error >&2; echo prompt > /dev/tty'"""
+    child = subprocess.Popen(base + launch('reg_redirected', terminal_app, '--json'),
+                             stdin=slave, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE if redirect_stderr else slave)
+    try:
+        output, errors = child.communicate(timeout=10)
+        assert child.returncode == 0 and b'output' in output.splitlines(), output
+        with selectors.DefaultSelector() as selector:
+            selector.register(master, selectors.EVENT_READ)
+            terminal_output = bytearray()
+            deadline = time.monotonic() + 5
+            while b'prompt' not in terminal_output:
+                assert time.monotonic() < deadline, terminal_output
+                if selector.select(.1):
+                    terminal_output.extend(os.read(master, 4096))
+            if redirect_stderr:
+                assert errors == b'error\n' and b'error' not in terminal_output
+            else:
+                assert b'error' in terminal_output, terminal_output
+    finally:
+        os.close(slave)
+        os.close(master)
+print('PASS: output redirection keeps stderr separate and terminal prompts visible', flush=True)
 
 # Exercise the parser disagreement through the real daemon and OpenVPN path.
 # The hidden log option must never create a root-owned output file.
