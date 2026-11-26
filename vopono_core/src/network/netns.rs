@@ -287,6 +287,9 @@ pub fn build_hook_command(
         let mut cmd = Command::new(program);
         cmd.args(args);
         if crate::util::is_daemon_mode() {
+            cmd.stdin(Stdio::null());
+            cmd.stdout(Stdio::null());
+            cmd.stderr(Stdio::null());
             cmd.env_clear();
             cmd.env(
                 "PATH",
@@ -717,8 +720,31 @@ impl ManagedNamespaceGuard {
             sudo_args.push(group);
         }
 
+        let daemon_mode = crate::util::is_daemon_mode();
+        if daemon_mode && user.is_some() {
+            handle.env_clear();
+            handle.env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            );
+            if let Some(username) = user
+                && let Ok(Some(target_user)) = nix::unistd::User::from_name(username)
+            {
+                handle.env("HOME", &target_user.dir);
+                handle.env("USER", &target_user.name);
+                handle.env("LOGNAME", &target_user.name);
+            }
+            if !capture_input {
+                handle.stdin(Stdio::null());
+            }
+        }
+
         let sudo_string = if !sudo_args.is_empty() {
-            let mut args = vec!["sudo", "--preserve-env"];
+            let mut args = if daemon_mode {
+                vec!["sudo"]
+            } else {
+                vec!["sudo", "--preserve-env"]
+            };
             args.append(&mut sudo_args);
             args.push("--");
             handle.args(args.clone());
@@ -958,6 +984,39 @@ impl ManagedNamespaceGuard {
             });
         }
 
+        // Strict reverse-path filtering on the host would silently drop VPN
+        // return traffic entering via the veth, so relax it in the namespace.
+        SysCtl::relax_strict_rp_filter(&self.name)?;
+
+        // Store the IPs
+        self.veth_pair_ips = Some(veth_ips);
+        self.add_host_routes(hosts, allow_host_access, disable_ipv6)?;
+        Ok(())
+    }
+
+    pub fn add_veth_routing(
+        &mut self,
+        target_subnet: u8,
+        disable_ipv6: bool,
+    ) -> anyhow::Result<()> {
+        self.add_routing(target_subnet, None, false, disable_ipv6)
+    }
+
+    pub fn add_host_routes(
+        &self,
+        hosts: Option<&Vec<IpAddr>>,
+        allow_host_access: bool,
+        disable_ipv6: bool,
+    ) -> anyhow::Result<()> {
+        let veth_source = &self.veth_pair.as_ref().context("No veth pair")?.source;
+        let veth_ips = self.veth_pair_ips.as_ref().context("Veth IPs not set")?;
+        let ipv4_host_ip_str = veth_ips
+            .ipv4
+            .as_ref()
+            .context("IPv4 veth pair IP not set")?
+            .host_ip
+            .to_string();
+
         if let Some(my_hosts) = hosts {
             for host in my_hosts {
                 let via_ip = match host {
@@ -1028,12 +1087,6 @@ impl ManagedNamespaceGuard {
             }
         }
 
-        // Strict reverse-path filtering on the host would silently drop VPN
-        // return traffic entering via the veth, so relax it in the namespace.
-        SysCtl::relax_strict_rp_filter(&self.name)?;
-
-        // Store the IPs
-        self.veth_pair_ips = Some(veth_ips);
         Ok(())
     }
 

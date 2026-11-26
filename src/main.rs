@@ -103,8 +103,9 @@ fn main() -> anyhow::Result<()> {
             }
         },
         args::Command::Exec(mut cmd) => {
+            let initial_json = cmd.json;
+            handle_result(profiles::prepare(&mut cmd), initial_json)?;
             let json = cmd.json;
-            handle_result(profiles::prepare(&mut cmd), json)?;
             if !cmd.create_netns_only && cmd.application.is_empty() {
                 handle_result(
                     Err(vopono_core::diagnostics::SetupError::Configuration(
@@ -546,9 +547,9 @@ enum DaemonForward {
 }
 
 fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonForward> {
-    let mut conn = if cmd.profile.is_some() || cmd.monitor {
-        match daemon_client::connect(daemon_client::Compatibility::ProfileOrMonitor) {
-            Ok(conn) => conn,
+    let (mut conn, daemon_version) = if cmd.profile.is_some() || cmd.monitor {
+        match daemon_client::connect_with_version(daemon_client::Compatibility::ProfileOrMonitor) {
+            Ok(connected) => connected,
             Err(error)
                 if error
                     .downcast_ref::<daemon_client::UnsupportedLaunch>()
@@ -559,7 +560,7 @@ fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonFo
             Err(error) => return Err(error),
         }
     } else {
-        daemon_client::connect(daemon_client::Compatibility::Warn)?
+        daemon_client::connect_with_version(daemon_client::Compatibility::Warn)?
     };
 
     debug!("Connected to daemon, forwarding command.");
@@ -575,7 +576,8 @@ fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonFo
              the application will run as the connecting group"
         );
     }
-    match forward_connected_execute(&mut conn, cmd, silent) {
+    let daemon_supports_literal_app = daemon::version_at_least(&daemon_version, (1, 1, 0));
+    match forward_connected_execute(&mut conn, cmd, silent, daemon_supports_literal_app) {
         Ok(forward) => Ok(forward),
         Err(ExecForwardError::PreDispatch(error)) => Err(error),
         Err(ExecForwardError::PostDispatch(error)) => Ok(if cmd.json {
@@ -597,10 +599,12 @@ fn forward_connected_execute(
     conn: &mut interprocess::local_socket::Stream,
     cmd: &ExecCommand,
     silent: bool,
+    daemon_supports_literal_app: bool,
 ) -> Result<DaemonForward, ExecForwardError> {
     use anyhow::Context as _;
-    let request = daemon_client::prepare_execute(cmd.clone(), silent)
-        .map_err(ExecForwardError::PreDispatch)?;
+    let request =
+        daemon_client::prepare_execute_for_daemon(cmd.clone(), silent, daemon_supports_literal_app)
+            .map_err(ExecForwardError::PreDispatch)?;
     let bytes =
         wincode::serialize(&request).map_err(|e| ExecForwardError::PreDispatch(e.into()))?;
     let mut sigs = Signals::new([SIGINT, SIGQUIT, SIGTERM, SIGTSTP])
@@ -719,14 +723,27 @@ fn resolve_daemon_path_string(
         return;
     };
     let expanded = expand_with_env(raw, env);
-    let is_path_like = if commands_only {
-        (expanded.contains('/') || expanded.starts_with('.'))
-            && !expanded.chars().any(char::is_whitespace)
-    } else {
-        true
-    };
+    if commands_only {
+        let (first, rest) = match expanded.find(char::is_whitespace) {
+            Some(idx) => (&expanded[..idx], Some(&expanded[idx..])),
+            None => (expanded.as_str(), None),
+        };
+        if (first.contains('/') || first.starts_with('.')) && !first.starts_with(['\'', '"']) {
+            let path = std::path::Path::new(first);
+            if path.is_relative() {
+                let mut resolved = client_working_dir.join(path).to_string_lossy().into_owned();
+                if let Some(rest) = rest {
+                    resolved.push_str(rest);
+                }
+                *value = Some(resolved);
+                return;
+            }
+        }
+        *value = Some(expanded);
+        return;
+    }
     let path = std::path::Path::new(&expanded);
-    *value = Some(if is_path_like && path.is_relative() {
+    *value = Some(if path.is_relative() {
         client_working_dir.join(path).to_string_lossy().into_owned()
     } else {
         expanded

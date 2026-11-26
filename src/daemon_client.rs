@@ -27,6 +27,12 @@ impl std::fmt::Display for UnsupportedLaunch {
 impl std::error::Error for UnsupportedLaunch {}
 
 pub(crate) fn connect(policy: Compatibility) -> anyhow::Result<LocalSocketStream> {
+    connect_with_version(policy).map(|(conn, _)| conn)
+}
+
+pub(crate) fn connect_with_version(
+    policy: Compatibility,
+) -> anyhow::Result<(LocalSocketStream, String)> {
     let mut conn =
         LocalSocketStream::connect(crate::SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?)
             .context("Daemon not running; start it separately as an administrator")?;
@@ -37,7 +43,7 @@ pub(crate) fn connect(policy: Compatibility) -> anyhow::Result<LocalSocketStream
             == 0,
         "Daemon socket peer is not root"
     );
-    match policy {
+    let version = match policy {
         Compatibility::Warn => daemon::exchange_versions_with_daemon(&mut conn)?,
         Compatibility::Exact | Compatibility::ProfileOrMonitor => {
             daemon::set_socket_timeouts_for(&conn, daemon::DAEMON_HANDSHAKE_TIMEOUT_SECONDS)?;
@@ -54,20 +60,39 @@ pub(crate) fn connect(policy: Compatibility) -> anyhow::Result<LocalSocketStream
                     "MCP requires a matching daemon version; restart or update the daemon"
                 ),
             }
+            version
         }
-    }
-    Ok(conn)
+    };
+    Ok((conn, version))
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_execute(command: ExecCommand, silent: bool) -> anyhow::Result<DaemonRequest> {
+    prepare_execute_for_daemon(command, silent, true)
+}
+
+pub(crate) fn prepare_execute_for_daemon(
+    command: ExecCommand,
+    silent: bool,
+    daemon_supports_literal_app: bool,
+) -> anyhow::Result<DaemonRequest> {
     let env: std::collections::HashMap<String, String> = std::env::vars().collect();
-    prepare_execute_with_env(command, silent, env)
+    prepare_execute_with_env_options(command, silent, env, daemon_supports_literal_app)
 }
 
 pub(crate) fn prepare_execute_with_env(
+    command: ExecCommand,
+    silent: bool,
+    env: std::collections::HashMap<String, String>,
+) -> anyhow::Result<DaemonRequest> {
+    prepare_execute_with_env_options(command, silent, env, true)
+}
+
+fn prepare_execute_with_env_options(
     mut command: ExecCommand,
     silent: bool,
     mut env: std::collections::HashMap<String, String>,
+    daemon_supports_literal_app: bool,
 ) -> anyhow::Result<DaemonRequest> {
     let working_dir = std::env::current_dir()?;
     crate::resolve_custom_path_for_daemon(&mut command, &working_dir, &env);
@@ -76,7 +101,12 @@ pub(crate) fn prepare_execute_with_env(
     }
     command.silent = silent;
     // Expansion belongs to the invoking user's environment, never root's.
-    if !command.literal_application && !command.application.is_empty() {
+    // Skip pre-expansion when talking to a 1.0.x daemon that does not honor
+    // `literal_application`, avoiding double expansion in the daemon.
+    if daemon_supports_literal_app
+        && !command.literal_application
+        && !command.application.is_empty()
+    {
         let home = env.get("HOME").cloned();
         command.application = shellexpand::full_with_context(
             &command.application,

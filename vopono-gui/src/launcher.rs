@@ -268,6 +268,16 @@ impl LaunchDetails {
 pub(crate) enum LaunchOutput {
     Line(String),
     Details(LaunchDetails),
+    Error(String),
+}
+
+fn parse_json_error_message(raw: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("error")
+        .and_then(|err| err.get("message"))
+        .and_then(|msg| msg.as_str())
+        .map(str::to_owned)
 }
 
 pub(crate) fn pipe_child_output(
@@ -279,14 +289,26 @@ pub(crate) fn pipe_child_output(
         let sender = sender.clone();
         thread::spawn(move || {
             let mut reported = false;
+            let mut json_buf = String::new();
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let output = if !reported && let Some(details) = LaunchDetails::from_stdout(&line) {
-                    reported = true;
-                    LaunchOutput::Details(details)
-                } else {
-                    LaunchOutput::Line(line)
-                };
-                let _ = sender.send((log_id, output));
+                if !reported {
+                    if let Some(details) = LaunchDetails::from_stdout(&line) {
+                        reported = true;
+                        let _ = sender.send((log_id, LaunchOutput::Details(details)));
+                        continue;
+                    }
+                    if json_buf.len() < 32 * 1024 {
+                        if !json_buf.is_empty() {
+                            json_buf.push('\n');
+                        }
+                        json_buf.push_str(&line);
+                        if let Some(message) = parse_json_error_message(&json_buf) {
+                            reported = true;
+                            let _ = sender.send((log_id, LaunchOutput::Error(message)));
+                        }
+                    }
+                }
+                let _ = sender.send((log_id, LaunchOutput::Line(line)));
             }
         });
     }
@@ -395,6 +417,15 @@ mod tests {
                 "run",
                 "org.example.App"
             ]
+        );
+    }
+
+    #[test]
+    fn parses_multiline_json_launch_error_message() {
+        let payload = "{\n  \"version\": 1,\n  \"error\": {\n    \"code\": \"daemon_unavailable\",\n    \"message\": \"Connectivity monitoring requires execution through the running vopono daemon\"\n  }\n}";
+        assert_eq!(
+            parse_json_error_message(payload).as_deref(),
+            Some("Connectivity monitoring requires execution through the running vopono daemon")
         );
     }
 }

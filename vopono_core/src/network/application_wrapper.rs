@@ -1,7 +1,7 @@
 use std::{
     ffi::CString,
     io::Write,
-    os::fd::{AsFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, OwnedFd},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -526,14 +526,40 @@ fn report_warning(message: String, silent: bool, stderr_fd: Option<&OwnedFd>) {
         // --silent suppresses warnings as well as application output.
         return;
     }
-    if let Some(stderr_fd) = stderr_fd
-        && let Ok(dup_fd) = nix::unistd::dup(stderr_fd.as_fd())
-    {
-        // Daemon path: the application runs in the daemon, so route warnings
-        // back to the client's stderr instead of the daemon's journal.
-        let mut stderr = std::fs::File::from(dup_fd);
-        let _ = writeln!(stderr, "warning: {message}");
-        let _ = stderr.flush();
+    if let Some(stderr_fd) = stderr_fd {
+        // Daemon path: route warnings back to the client's stderr without ever
+        // blocking the daemon or holding namespace transition locks on a full
+        // client pipe/socket.
+        let text = format!("warning: {message}\n");
+        let bytes = text.as_bytes();
+        let Ok(dup_fd) = nix::unistd::dup(stderr_fd.as_fd()) else {
+            return;
+        };
+        let file = std::fs::File::from(dup_fd);
+        let Ok(meta) = file.metadata() else {
+            return;
+        };
+        let kind = meta.file_type();
+        use std::os::unix::fs::FileTypeExt;
+        if kind.is_socket() {
+            let _ = nix::sys::socket::send(
+                file.as_raw_fd(),
+                bytes,
+                nix::sys::socket::MsgFlags::MSG_DONTWAIT | nix::sys::socket::MsgFlags::MSG_NOSIGNAL,
+            );
+        } else if kind.is_fifo() || kind.is_char_device() {
+            use std::os::unix::fs::OpenOptionsExt;
+            if let Ok(mut nonblocking) = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+                .open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            {
+                let _ = nonblocking.write(bytes);
+            }
+        } else {
+            let mut file = file;
+            let _ = file.write_all(bytes);
+        }
     } else {
         log::warn!("{message}");
     }

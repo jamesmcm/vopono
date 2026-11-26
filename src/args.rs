@@ -379,8 +379,8 @@ pub struct ExecCommand {
     #[serde(default)]
     pub monitor: bool,
 
-    /// Refresh an existing WireGuard peer's keepalive after repeated failures.
-    #[clap(long, requires = "monitor")]
+    /// Repair host routes/firewall, refresh WireGuard endpoints, or restart OpenVPN after repeated failures.
+    #[clap(long)]
     #[serde(default)]
     pub recover: bool,
 
@@ -496,12 +496,12 @@ pub struct ExecCommand {
     #[clap(long = "port-forwarding")]
     pub port_forwarding: bool,
 
-    /// Port forwarding implementation to use for custom config file with --custom-config
+    /// Port forwarding implementation to use for custom config file with --custom
     #[clap(long = "custom-port-forwarding", ignore_case = true)]
     pub custom_port_forwarding: Option<WrappedArg<VpnProvider>>,
 
-    /// Path or alias to executable script or binary to be called with the port as an argumnet
-    /// when the port forwarding is refreshed (PIA only)
+    /// Path or alias to executable script or binary to be called with the port as an argument
+    /// when the port forwarding is refreshed
     #[clap(long = "port-forwarding-callback")]
     pub port_forwarding_callback: Option<String>,
 
@@ -515,7 +515,7 @@ pub struct ExecCommand {
     pub trojan_host: Option<TrojanHost>,
 
     /// Trojan server password
-    /// Set this in ~/.config/vopono/vopono.toml or use --trojan-config
+    /// Set this in ~/.config/vopono/config.toml or use --trojan-config
     /// to avoid setting this in the command line
     #[clap(long = "trojan-password")]
     pub trojan_password: Option<String>,

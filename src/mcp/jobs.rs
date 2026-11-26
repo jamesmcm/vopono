@@ -241,7 +241,6 @@ fn sanitize_daemon_json_error(raw: &Value) -> Value {
                 "Application failed to launch inside the namespace"
             }
             Some("vpn_connection_failed") => "VPN connection failed to establish",
-            Some("invalid_configuration") => "VPN or profile configuration is invalid",
             _ => "Daemon execution failed",
         }
     });
@@ -409,9 +408,22 @@ impl Jobs {
                 drop(conn);
                 let cleaned = if result.is_err() && worker_job.cancel.load(Ordering::Acquire) {
                     // Cancellation already timed out in `supervise` with an in-flight stop;
-                    // do a short final check rather than stacking another 30s blocking stop
-                    // past `Jobs::shutdown`'s deadline.
-                    cleanup_namespace_with_timeout(&worker_job.namespace, config_home, 4).is_ok()
+                    // respect `stop_in_flight` so we never stack concurrent Stop connections.
+                    if worker_job
+                        .stop_in_flight
+                        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                    {
+                        let ok =
+                            cleanup_namespace_with_timeout(&worker_job.namespace, config_home, 4)
+                                .is_ok();
+                        worker_job.stop_in_flight.store(false, Ordering::Release);
+                        ok
+                    } else {
+                        !std::path::Path::new("/run/netns")
+                            .join(&worker_job.namespace)
+                            .exists()
+                    }
                 } else {
                     cleanup_namespace(&worker_job.namespace, config_home).is_ok()
                 };

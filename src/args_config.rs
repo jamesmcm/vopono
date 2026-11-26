@@ -659,37 +659,51 @@ impl ArgsConfig {
             let path = config_path
                 .as_deref()
                 .unwrap_or_else(|| std::path::Path::new("config.toml"));
-            // Include only the first summary line (e.g., line/column location) without
-            // echoing raw file snippets that could contain secrets.
-            let summary = error
-                .to_string()
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .chars()
-                .take(160)
-                .collect::<String>();
-            let message = if summary.is_empty() {
-                format!(
-                    "Could not read or parse the vopono configuration file {}",
-                    path.display()
-                )
-            } else {
-                format!(
-                    "Could not read or parse the vopono configuration file {}: {summary}",
-                    path.display()
-                )
-            };
-            anyhow::Error::new(vopono_core::diagnostics::Diagnostic::new(
-                vopono_core::diagnostics::DiagnosticCode::ProviderConfig,
-                vopono_core::diagnostics::DiagnosticState::Fail,
-                &message,
-                Some("Check that the file is readable and its syntax matches the file extension"),
-            ))
+            redacted_config_parse_error(path, &error)
         })?;
         crate::profiles::select(settings, command.profile.as_deref())
     }
+}
+
+pub(crate) fn load_config_file_redacted(path: &std::path::Path) -> anyhow::Result<Config> {
+    Config::builder()
+        .add_source(config::File::from(path.to_path_buf()))
+        .build()
+        .map_err(|error| redacted_config_parse_error(path, &error))
+}
+
+fn redacted_config_parse_error(
+    path: &std::path::Path,
+    error: &config::ConfigError,
+) -> anyhow::Error {
+    // Include only the first summary line (e.g., line/column location) without
+    // echoing raw file snippets that could contain secrets.
+    let summary = error
+        .to_string()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(160)
+        .collect::<String>();
+    let message = if summary.is_empty() {
+        format!(
+            "Could not read or parse the vopono configuration file {}",
+            path.display()
+        )
+    } else {
+        format!(
+            "Could not read or parse the vopono configuration file {}: {summary}",
+            path.display()
+        )
+    };
+    anyhow::Error::new(vopono_core::diagnostics::Diagnostic::new(
+        vopono_core::diagnostics::DiagnosticCode::ProviderConfig,
+        vopono_core::diagnostics::DiagnosticState::Fail,
+        &message,
+        Some("Check that the file is readable and its syntax matches the file extension"),
+    ))
 }
 
 #[cfg(test)]

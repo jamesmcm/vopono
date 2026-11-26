@@ -25,13 +25,23 @@ impl StatusSnapshot {
             if self.namespaces.len() == 1 { "" } else { "s" }
         )];
         lines.extend(self.namespaces.iter().take(4).map(|ns| {
+            let health_suffix = ns
+                .health
+                .as_ref()
+                .and_then(|h| match h.state {
+                    vopono_core::network::health::State::Connected => None,
+                    vopono_core::network::health::State::Degraded => Some(" [degraded]"),
+                    vopono_core::network::health::State::Reconnecting => Some(" [reconnecting]"),
+                })
+                .unwrap_or("");
             format!(
-                "{}: {} {} / {} app{}",
+                "{}: {} {} / {} app{}{}",
                 ns.name,
                 ns.provider,
                 ns.protocol,
                 ns.applications.len(),
-                if ns.applications.len() == 1 { "" } else { "s" }
+                if ns.applications.len() == 1 { "" } else { "s" },
+                health_suffix
             )
         }));
         if !self.errors.is_empty() {

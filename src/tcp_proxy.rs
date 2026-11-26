@@ -8,8 +8,42 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 const MAX_PROXY_CONNECTIONS: usize = 64;
+const MAX_PER_UID_PROXY_CONNECTIONS: usize = 64;
 const MAX_GLOBAL_PROXY_CONNECTIONS: usize = 256;
 static GLOBAL_PROXY_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+static PER_UID_PROXY_CONNECTIONS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<u32, usize>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+fn try_acquire_uid_proxy_slot(owner_uid: Option<u32>) -> bool {
+    let Some(uid) = owner_uid else {
+        return true;
+    };
+    let mut map = PER_UID_PROXY_CONNECTIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let count = map.entry(uid).or_insert(0);
+    if *count >= MAX_PER_UID_PROXY_CONNECTIONS {
+        return false;
+    }
+    *count += 1;
+    true
+}
+
+fn release_uid_proxy_slot(owner_uid: Option<u32>) {
+    let Some(uid) = owner_uid else {
+        return;
+    };
+    let mut map = PER_UID_PROXY_CONNECTIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(count) = map.get_mut(&uid) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            map.remove(&uid);
+        }
+    }
+}
 
 /// Host-side TCP forwarder with bounded connection concurrency.
 ///
@@ -30,12 +64,14 @@ impl Drop for AliveGuard {
 
 struct ConnectionSlot {
     proxy: Arc<AtomicUsize>,
+    owner_uid: Option<u32>,
 }
 
 impl Drop for ConnectionSlot {
     fn drop(&mut self) {
         self.proxy.fetch_sub(1, Ordering::AcqRel);
         GLOBAL_PROXY_CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+        release_uid_proxy_slot(self.owner_uid);
     }
 }
 
@@ -105,6 +141,15 @@ fn relay_stream(
 
 impl TcpProxy {
     pub fn new(listen_port: u16, proxy_to: SocketAddr, local_only: bool) -> anyhow::Result<Self> {
+        Self::new_for_uid(listen_port, proxy_to, local_only, None)
+    }
+
+    pub fn new_for_uid(
+        listen_port: u16,
+        proxy_to: SocketAddr,
+        local_only: bool,
+        owner_uid: Option<u32>,
+    ) -> anyhow::Result<Self> {
         use nix::sys::socket::{
             AddressFamily, Backlog, SockFlag, SockType, SockaddrIn, SockaddrIn6, bind, listen,
             setsockopt, socket, sockopt,
@@ -182,16 +227,25 @@ impl TcpProxy {
                 Err(err) => return Err(err.into()),
             }
         };
-        Self::from_listener(listener, proxy_to)
+        Self::from_listener_with_uid(listener, proxy_to, owner_uid)
     }
 
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
     }
 
+    #[cfg(test)]
     fn from_listener(
         listener: std::net::TcpListener,
         proxy_to: SocketAddr,
+    ) -> anyhow::Result<Self> {
+        Self::from_listener_with_uid(listener, proxy_to, None)
+    }
+
+    fn from_listener_with_uid(
+        listener: std::net::TcpListener,
+        proxy_to: SocketAddr,
+        owner_uid: Option<u32>,
     ) -> anyhow::Result<Self> {
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -246,8 +300,16 @@ impl TcpProxy {
                     );
                     continue;
                 }
+                if !try_acquire_uid_proxy_slot(owner_uid) {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    log::warn!(
+                        "Rejecting forwarded connection: per-user limit of {MAX_PER_UID_PROXY_CONNECTIONS} reached"
+                    );
+                    continue;
+                }
                 if !try_increment_bounded(&GLOBAL_PROXY_CONNECTIONS, MAX_GLOBAL_PROXY_CONNECTIONS) {
                     active.fetch_sub(1, Ordering::AcqRel);
+                    release_uid_proxy_slot(owner_uid);
                     log::warn!(
                         "Rejecting forwarded connection: global limit of {MAX_GLOBAL_PROXY_CONNECTIONS} reached"
                     );
@@ -255,6 +317,7 @@ impl TcpProxy {
                 }
                 let slot = ConnectionSlot {
                     proxy: Arc::clone(&active),
+                    owner_uid,
                 };
                 let connection_stop = Arc::clone(&thread_stop);
                 // Perform connect_timeout inside the worker so a stalled upstream

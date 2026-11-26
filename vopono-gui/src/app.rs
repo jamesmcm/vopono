@@ -509,6 +509,13 @@ impl VoponoGuiApp {
                     }
                     summary
                 }
+                LaunchOutput::Error(message) => {
+                    if log_id + 1 == self.next_log_id {
+                        self.message = None;
+                        self.error = Some(message.clone());
+                    }
+                    format!("error: {message}")
+                }
             };
             if let Some(log) = self.logs.iter_mut().find(|log| log.id == log_id) {
                 log.lines.push(line);
@@ -537,15 +544,27 @@ impl eframe::App for VoponoGuiApp {
             .retain_mut(|launch| match launch.child.try_wait() {
                 Ok(None) => true,
                 Ok(Some(status)) => {
-                    finished.push((launch.log_id, format!("process exited with {status}")));
+                    finished.push((
+                        launch.log_id,
+                        !status.success(),
+                        format!("process exited with {status}"),
+                    ));
                     false
                 }
                 Err(error) => {
-                    finished.push((launch.log_id, format!("failed to poll process: {error}")));
+                    finished.push((
+                        launch.log_id,
+                        true,
+                        format!("failed to poll process: {error}"),
+                    ));
                     false
                 }
             });
-        for (log_id, line) in finished {
+        for (log_id, failed, line) in finished {
+            if failed && log_id + 1 == self.next_log_id && self.error.is_none() {
+                self.message = None;
+                self.error = Some(format!("Launch failed ({line}); see Logs for details"));
+            }
             if let Some(log) = self.logs.iter_mut().find(|log| log.id == log_id) {
                 log.running = false;
                 log.lines.push(line);

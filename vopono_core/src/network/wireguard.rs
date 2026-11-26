@@ -30,6 +30,10 @@ pub struct Wireguard {
     pub if_name: String,
     pub interface_addresses: Vec<IpAddr>,
     #[serde(default)]
+    pub(crate) routed_ipv4: Option<bool>,
+    #[serde(default)]
+    pub(crate) routed_ipv6: Option<bool>,
+    #[serde(default)]
     pub(crate) recovery: Option<super::recovery::Peer>,
 }
 
@@ -666,6 +670,11 @@ impl Wireguard {
                             "PREROUTING",
                             "-p",
                             "udp",
+                            "-m",
+                            "connmark",
+                            "!",
+                            "--mark",
+                            "0",
                             "-j",
                             "CONNMARK",
                             "--restore-mark",
@@ -699,6 +708,9 @@ impl Wireguard {
             );
         }
 
+        let routed_ipv4 = Some(has_ipv4_default);
+        let routed_ipv6 = Some(!effective_disable_ipv6 && has_ipv6_default);
+
         Ok(Self {
             executable_wg,
             cleanup_enabled: true,
@@ -708,6 +720,8 @@ impl Wireguard {
             firewall,
             if_name,
             interface_addresses,
+            routed_ipv4,
+            routed_ipv6,
             recovery: Some(recovery),
         })
     }
@@ -764,9 +778,10 @@ fn select_endpoint_ip(addresses: &[IpAddr], disable_ipv6: bool) -> anyhow::Resul
 /// drop it. A /32 (or /128) via the veth gateway keeps both directions on the
 /// veth regardless of rp_filter mode.
 fn endpoint_needs_bypass_route(endpoint: IpAddr, allowed_ips: &[IpNet]) -> bool {
-    allowed_ips
-        .iter()
-        .any(|network| network.contains(&endpoint))
+    !endpoint.is_loopback()
+        && allowed_ips
+            .iter()
+            .any(|network| network.contains(&endpoint))
 }
 
 fn add_endpoint_bypass_route(

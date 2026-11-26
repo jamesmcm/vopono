@@ -312,12 +312,50 @@ pub fn get_pids_in_namespace(ns_name: &str) -> anyhow::Result<Vec<i32>> {
     Ok(pids)
 }
 
+/// Resolve the path to the current vopono executable for internal helpers,
+/// surviving in-place binary upgrades where `/proc/self/exe` gains a
+/// ` (deleted)` suffix.
+pub fn current_vopono_exe() -> anyhow::Result<PathBuf> {
+    static STARTUP_EXE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let cached = STARTUP_EXE.get_or_init(|| {
+        std::env::current_exe()
+            .map(strip_deleted_exe_suffix)
+            .unwrap_or_else(|_| PathBuf::from("/proc/self/exe"))
+    });
+    if cached.exists() {
+        return Ok(cached.clone());
+    }
+    let current = std::env::current_exe()?;
+    let stripped = strip_deleted_exe_suffix(current);
+    if stripped.exists() {
+        return Ok(stripped);
+    }
+    Ok(PathBuf::from("/proc/self/exe"))
+}
+
+fn strip_deleted_exe_suffix(path: PathBuf) -> PathBuf {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let bytes = path.as_os_str().as_bytes();
+    const SUFFIX: &[u8] = b" (deleted)";
+    if let Some(trimmed) = bytes.strip_suffix(SUFFIX)
+        && !trimmed.is_empty()
+    {
+        return PathBuf::from(std::ffi::OsString::from_vec(trimmed.to_vec()));
+    }
+    path
+}
+
 pub fn check_process_running(pid: u32) -> bool {
-    let s = System::new_with_specifics(
-        RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
-    )
-    .expect("Failed to initialize process information");
-    s.process(sysinfo::Pid::from_u32(pid)).is_some()
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The process comm name in /proc/<pid>/stat is enclosed in parentheses and
+    // may contain spaces/parentheses, so parse starting after the last ')'.
+    let Some(rest) = stat.rsplit_once(')').map(|(_, rest)| rest.trim_start()) else {
+        return false;
+    };
+    let state = rest.as_bytes().first().copied();
+    !matches!(state, Some(b'Z' | b'X' | b'x'))
 }
 
 /// Return the PIDs of processes whose comm name matches `process_name`.

@@ -1,12 +1,11 @@
 [package]
 name = "vopono-gui"
 description = "Graphical frontend for vopono"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2024"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/jamesmcm/vopono"
-homepage = "https://github.com/jamesmcm/vopono"
 keywords = ["vopono", "vpn", "wireguard", "netns", "gui"]
 
 [workspace]

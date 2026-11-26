@@ -45,9 +45,23 @@ pub fn select(config: Config, name: Option<&str>) -> anyhow::Result<Config> {
         .get("provider")
         .and_then(|v| v.clone().into_string().ok())
         .is_some_and(|p| !p.eq_ignore_ascii_case("custom"));
-    if profile_sets_non_custom_provider && !profile.contains_key("custom") {
-        // Prevent a top-level `custom` default from overriding a profile's explicit `provider`.
+    let profile_sets_ssh_protocol = profile
+        .get("protocol")
+        .and_then(|v| v.clone().into_string().ok())
+        .is_some_and(|p| p.eq_ignore_ascii_case("ssh"));
+    if (profile_sets_non_custom_provider || profile_sets_ssh_protocol)
+        && !profile.contains_key("custom")
+    {
+        // Prevent a top-level `custom` default from overriding a profile's explicit
+        // non-custom `provider` or SSH `protocol`.
         builder = builder.set_override("custom", "")?;
+    }
+    let profile_selects_connection =
+        profile.contains_key("custom") || profile.contains_key("provider");
+    if profile_selects_connection && !profile.contains_key("protocol") {
+        // Prevent a top-level `protocol` default (e.g. `protocol = "Wireguard"`)
+        // from overriding auto-detection or provider defaults for this profile.
+        builder = builder.set_override("protocol", "")?;
     }
     Ok(builder.build()?)
 }
@@ -110,6 +124,7 @@ pub fn prepare(command: &mut ExecCommand) -> anyhow::Result<()> {
         (&mut command.recover, "recover"),
         (&mut command.keep_alive, "keep_alive"),
         (&mut command.create_netns_only, "create_netns_only"),
+        (&mut command.json, "json"),
     ] {
         *flag |= config
             .get_bool(name)
@@ -144,9 +159,7 @@ pub fn run(command: ProfilesCommand) -> anyhow::Result<()> {
                 let path = path.canonicalize().with_context(|| {
                     format!("Configuration file {} was not found", path.display())
                 })?;
-                let config = Config::builder()
-                    .add_source(config::File::from(path))
-                    .build()?;
+                let config = crate::args_config::load_config_file_redacted(&path)?;
                 let mut names: Vec<_> = config
                     .get_table("profiles")
                     .unwrap_or_default()
@@ -170,9 +183,7 @@ pub fn run(command: ProfilesCommand) -> anyhow::Result<()> {
             let path = path
                 .canonicalize()
                 .with_context(|| format!("Configuration file {} was not found", path.display()))?;
-            let config = Config::builder()
-                .add_source(config::File::from(path.clone()))
-                .build()?;
+            let config = crate::args_config::load_config_file_redacted(&path)?;
             let selected = select(config, Some(&name))?;
             ensure!(
                 !selected.get_string("application")?.is_empty(),
@@ -312,5 +323,56 @@ mod tests {
         assert!(entry.contains("\\\\$vopono%%"));
         assert!(entry.contains("--profile downloads"));
         assert!(desktop_entry("bad\nExec=evil", Path::new("x"), Path::new("x")).is_err());
+    }
+
+    #[test]
+    fn profiles_do_not_inherit_incompatible_top_level_protocol_or_custom() {
+        let config = Config::builder()
+            .add_source(config::File::from_str(
+                "provider = 'mullvad'\nprotocol = 'wireguard'\ncustom = '/tmp/default.ovpn'\n\
+                 [profiles.work]\ncustom = '/tmp/work.ovpn'\napplication = 'curl'\n\
+                 [profiles.ssh_box]\nprotocol = 'ssh'\nserver = 'work-proxy'\napplication = 'curl'\n\
+                 [profiles.json_mon]\nprovider = 'airvpn'\nserver = 'at'\nmonitor = true\njson = true\napplication = 'curl'\n",
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap();
+        let work = select(config.clone(), Some("work")).unwrap();
+        assert_eq!(work.get_string("protocol").unwrap(), "");
+        let ssh_box = select(config.clone(), Some("ssh_box")).unwrap();
+        assert_eq!(ssh_box.get_string("custom").unwrap(), "");
+        let json_mon = select(config, Some("json_mon")).unwrap();
+        assert_eq!(json_mon.get_string("protocol").unwrap(), "");
+        assert_eq!(json_mon.get_string("custom").unwrap(), "");
+    }
+
+    #[test]
+    fn prepare_propagates_json_and_allows_cli_recover_with_profile_monitor() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            "[profiles.mon]\nprovider = 'airvpn'\nserver = 'at'\nmonitor = true\njson = true\napplication = 'true'\n",
+        )
+        .unwrap();
+        let Some(crate::args::Command::Exec(mut command)) = crate::args::App::try_parse_from([
+            "vopono",
+            "exec",
+            "--vopono-config",
+            config.to_str().unwrap(),
+            "--profile",
+            "mon",
+            "--recover",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            unreachable!()
+        };
+        prepare(&mut command).unwrap();
+        assert!(command.monitor);
+        assert!(command.recover);
+        assert!(command.json);
     }
 }

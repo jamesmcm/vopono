@@ -296,6 +296,7 @@ fn mullvad_config_filename(country_name: &str, hostname: &str) -> anyhow::Result
     let substrings: Vec<&str> = hostname.split('-').collect();
     let host = match substrings.as_slice() {
         [a, b, _, d, ..] => format!("{a}{b}{d}"),
+        [a, b, c] if !a.is_empty() && !b.is_empty() && !c.is_empty() => format!("{a}{b}{c}"),
         [first, ..] if !first.is_empty() => (*first).to_owned(),
         _ => anyhow::bail!("Mullvad returned an invalid relay hostname"),
     };
@@ -434,10 +435,14 @@ mod tests {
             mullvad_config_filename("Austria", "at-vie-wg-001").unwrap(),
             "austria-atvie001.conf"
         );
-        // 2-hyphen hostnames must not panic on out-of-bounds indexing.
+        // 2-hyphen hostnames must not panic on out-of-bounds indexing and must stay distinct.
         assert_eq!(
             mullvad_config_filename("Sweden", "se-got-001").unwrap(),
-            "sweden-se.conf"
+            "sweden-segot001.conf"
+        );
+        assert_eq!(
+            mullvad_config_filename("Sweden", "se-sto-002").unwrap(),
+            "sweden-sesto002.conf"
         );
         assert_eq!(
             mullvad_config_filename("Australia", "au10-wireguard").unwrap(),

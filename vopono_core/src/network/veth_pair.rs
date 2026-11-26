@@ -13,6 +13,8 @@ pub struct VethPair {
     pub source: String,
     pub dest: String,
     pub nm_unmanaged: Option<NetworkManagerUnmanaged>,
+    #[serde(default)]
+    firewalld_added: bool,
     #[serde(skip)]
     cleanup_enabled: bool,
 }
@@ -66,16 +68,24 @@ impl VethPair {
             std::fs::create_dir_all(&nm_config_path)?;
             nm_config_path.push("unmanaged.conf");
 
+            let created_marker = nm_path.join("conf.d/unmanaged.conf.vopono.created");
             let backup_file = if nm_config_path.exists() {
-                // Backup existing unmanaged.conf only if a backup does not already
-                // exist so concurrent launches do not overwrite the original.
-                let mut backup_path = nm_path;
-                backup_path.push("conf.d/unmanaged.conf.vopono.bak");
-                if !backup_path.exists() {
-                    std::fs::copy(&nm_config_path, &backup_path)?;
+                if created_marker.exists() {
+                    // Earlier vopono namespace created unmanaged.conf from scratch;
+                    // do not snapshot vopono's own generated file as a user backup.
+                    None
+                } else {
+                    // Backup existing unmanaged.conf only if a backup does not already
+                    // exist so concurrent launches do not overwrite the original.
+                    let mut backup_path = nm_path;
+                    backup_path.push("conf.d/unmanaged.conf.vopono.bak");
+                    if !backup_path.exists() {
+                        std::fs::copy(&nm_config_path, &backup_path)?;
+                    }
+                    Some(backup_path)
                 }
-                Some(backup_path)
             } else {
+                let _ = std::fs::File::create(&created_marker);
                 None
             };
 
@@ -129,6 +139,7 @@ impl VethPair {
             debug!("firewalld not detected running");
         }
 
+        let mut firewalld_added = false;
         if firewalld_running {
             debug!("Detected firewalld running, adding {dest} veth device to trusted zone");
             // Permit new interface
@@ -144,7 +155,7 @@ impl VethPair {
                 Ok(false) => warn!(
                     "Possibly failed to add veth device {dest} to firewalld trusted zone (non-zero exit code)"
                 ),
-                _ => {}
+                Ok(true) => firewalld_added = true,
             }
         }
 
@@ -161,6 +172,14 @@ impl VethPair {
         ])
         .with_context(|| format!("Failed to create veth pair {}, {}", source, dest))?;
 
+        let pair = Self {
+            source: source.clone(),
+            dest: dest.clone(),
+            nm_unmanaged,
+            firewalld_added,
+            cleanup_enabled: true,
+        };
+
         sudo_command(&["ip", "link", "set", dest.as_str(), "up"])
             .with_context(|| format!("Failed to bring up destination veth: {}", dest))?;
 
@@ -175,12 +194,7 @@ impl VethPair {
         ])
         .with_context(|| format!("Failed to bring up source veth: {}", dest))?;
 
-        Ok(Self {
-            source,
-            dest,
-            nm_unmanaged,
-            cleanup_enabled: true,
-        })
+        Ok(pair)
     }
 }
 
@@ -230,6 +244,12 @@ impl Drop for VethPair {
                     );
                 }
             }
+        }
+        if self.firewalld_added {
+            let _ = std::process::Command::new("firewall-cmd")
+                .arg("--zone=trusted")
+                .arg(format!("--remove-interface={}", self.dest))
+                .status();
         }
     }
 }
@@ -281,10 +301,14 @@ impl Drop for NetworkManagerUnmanaged {
                     );
                 }
             }
-        } else if let Err(error) = std::fs::remove_file(&nm_path)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            log::warn!("Failed to delete NetworkManager unmanaged.conf: {error}");
+        } else {
+            if let Err(error) = std::fs::remove_file(&nm_path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                log::warn!("Failed to delete NetworkManager unmanaged.conf: {error}");
+            }
+            let _ =
+                std::fs::remove_file("/etc/NetworkManager/conf.d/unmanaged.conf.vopono.created");
         }
         if let Err(error) = sudo_command(&["nmcli", "connection", "reload"]) {
             log::warn!("Failed to reload NetworkManager configuration: {error}");

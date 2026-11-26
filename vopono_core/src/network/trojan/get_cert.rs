@@ -60,8 +60,32 @@ pub fn get_cert(hostname: String, port: u16) -> anyhow::Result<String> {
     let connector = rustls_connector::RustlsConnector::from(Arc::new(client_config));
 
     let addr = format!("{hostname}:{port}");
-    let stream =
-        TcpStream::connect(&addr).with_context(|| format!("Failed to connect to {addr}"))?;
+    let timeout = std::time::Duration::from_secs(10);
+    let resolved = crate::diagnostics::resolve_bounded(&hostname, timeout)
+        .with_context(|| format!("Failed to resolve {hostname}"))?;
+    let mut last_err = None;
+    let mut stream = None;
+    for ip in resolved {
+        let sock = std::net::SocketAddr::new(ip, port);
+        match TcpStream::connect_timeout(&sock, timeout) {
+            Ok(s) => {
+                stream = Some(s);
+                break;
+            }
+            Err(e) => last_err = Some(e),
+        }
+    }
+    let stream = match stream {
+        Some(s) => s,
+        None => {
+            return Err(last_err.map_or_else(
+                || anyhow::anyhow!("Failed to connect to {addr}: no addresses resolved"),
+                |e| anyhow::Error::from(e).context(format!("Failed to connect to {addr}")),
+            ));
+        }
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
 
     // The `connect` method of `rustls_connector::TlsConnector` will use the
     // `hostname` to set up SNI (Server Name Indication) and for verification

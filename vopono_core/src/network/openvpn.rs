@@ -31,6 +31,10 @@ pub struct OpenVpn {
     #[serde(default)]
     pub(crate) recovery_address: Option<IpAddr>,
     #[serde(default)]
+    pub(crate) recovery_port: Option<u16>,
+    #[serde(default)]
+    pub(crate) recovery_udp: bool,
+    #[serde(default)]
     ns_name: Option<String>,
     #[serde(skip)]
     cleanup_enabled: bool,
@@ -194,6 +198,10 @@ impl OpenVpn {
         let id = handle.id();
         let effective_disable_ipv6 = disable_ipv6 || ipv6_disabled;
         let mut recovery_address = None;
+        let mut recovery_port = None;
+        let mut recovery_udp = remotes
+            .first()
+            .is_some_and(|r| r.protocol == OpenVpnProtocol::UDP);
         let setup_result = (|| -> anyhow::Result<Vec<IpAddr>> {
             const MAX_STARTUP_LOG_BYTES: usize = 4 * 1024 * 1024;
             let mut line_buffer = String::with_capacity(4096);
@@ -203,10 +211,7 @@ impl OpenVpn {
 
             // Parse DNS headers and active connected peer IP from OpenVPN log
             let dns_regex = Regex::new(r"dhcp-option (?:DNS6|DNS) ([^,\s']+)").unwrap();
-            let peer_regex = Regex::new(
-                r"Peer Connection Initiated with \[AF_INET6?\](?:\[::ffff:)?([0-9a-fA-F:.]+)(?:\])?:(\d+)",
-            )
-            .unwrap();
+            let peer_regex = openvpn_peer_regex();
             let mut openvpn_dns_servers = Vec::new();
             let mut connected_peers: Vec<(IpAddr, u16)> = Vec::new();
             let mut connect_state: Option<OpenVpnStartupState> = None;
@@ -250,8 +255,7 @@ impl OpenVpn {
                     }
                 }
 
-                if let Some(caps) = peer_regex.captures(&line_buffer)
-                    && let (Ok(ip), Ok(port)) = (caps[1].parse::<IpAddr>(), caps[2].parse::<u16>())
+                if let Some((ip, port)) = parse_openvpn_peer_line(&line_buffer, &peer_regex)
                     && !connected_peers.contains(&(ip, port))
                 {
                     connected_peers.push((ip, port));
@@ -349,6 +353,10 @@ impl OpenVpn {
             }
 
             recovery_address = connected_peers.first().map(|(ip, _)| *ip);
+            recovery_port = connected_peers.first().map(|(_, port)| *port);
+            if let Some(first_remote) = remotes.first() {
+                recovery_udp = first_remote.protocol == OpenVpnProtocol::UDP;
+            }
             let pinned_remotes = if supervised
                 && let Some((connected_ip, _)) = connected_peers.first()
                 && remotes
@@ -444,6 +452,8 @@ impl OpenVpn {
             supervised,
             recovery_host,
             recovery_address,
+            recovery_port,
+            recovery_udp,
             ns_name: Some(netns.name.clone()),
             cleanup_enabled: true,
         })
@@ -680,6 +690,38 @@ pub fn killswitch(
                     )?;
                 }
 
+                if let Some(ss) = netns.shadowsocks.as_ref()
+                    && let (Some(ss_ip), Some(ss_port)) = (ss.server_ip, ss.server_port)
+                {
+                    let ss_ipcmd = if ss_ip.is_ipv4() {
+                        "iptables"
+                    } else {
+                        "ip6tables"
+                    };
+                    if ss_ipcmd == *ipcmd {
+                        let address = ss_ip.to_string();
+                        let port = ss_port.to_string();
+                        NetworkNamespace::exec(
+                            &netns.name,
+                            &[
+                                ipcmd,
+                                "-A",
+                                "OUTPUT",
+                                "-p",
+                                "tcp",
+                                "-m",
+                                "tcp",
+                                "-d",
+                                address.as_str(),
+                                "--dport",
+                                port.as_str(),
+                                "-j",
+                                "ACCEPT",
+                            ],
+                        )?;
+                    }
+                }
+
                 if *ipcmd == "ip6tables" {
                     add_iptables_neighbor_discovery_rules(netns)?;
                 }
@@ -788,6 +830,34 @@ pub fn killswitch(
                 )?;
             }
 
+            if let Some(ss) = netns.shadowsocks.as_ref()
+                && let (Some(ss_ip), Some(ss_port)) = (ss.server_ip, ss.server_port)
+                && (!disable_ipv6 || ss_ip.is_ipv4())
+            {
+                let address_family = if ss_ip.is_ipv4() { "ip" } else { "ip6" };
+                let address = ss_ip.to_string();
+                let port = ss_port.to_string();
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[
+                        "nft",
+                        "add",
+                        "rule",
+                        "inet",
+                        &netns.name,
+                        "output",
+                        address_family,
+                        "daddr",
+                        address.as_str(),
+                        "tcp",
+                        "dport",
+                        port.as_str(),
+                        "counter",
+                        "accept",
+                    ],
+                )?;
+            }
+
             NetworkNamespace::exec(
                 &netns.name,
                 &[
@@ -855,6 +925,24 @@ pub fn killswitch(
         }
     }
     Ok(())
+}
+
+fn openvpn_peer_regex() -> Regex {
+    Regex::new(
+        r"Peer Connection Initiated with \[AF_INET6?\](?:\[)?(?:(?i)::ffff:)?([0-9a-fA-F:.]+)(?:\])?:(\d+)",
+    )
+    .unwrap()
+}
+
+fn parse_openvpn_peer_line(line: &str, peer_regex: &Regex) -> Option<(IpAddr, u16)> {
+    let caps = peer_regex.captures(line)?;
+    let ip = caps[1].parse::<IpAddr>().ok()?;
+    let port = caps[2].parse::<u16>().ok()?;
+    let normalized = match ip {
+        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+    };
+    Some((normalized, port))
 }
 
 #[derive(Debug)]
@@ -1200,6 +1288,46 @@ mod tests {
         assert_eq!(
             parse_openvpn_startup_state(log),
             Some(OpenVpnStartupState::OptionsError)
+        );
+    }
+
+    #[test]
+    fn parses_ipv4_ipv4_mapped_and_bracketed_ipv6_peer_lines() {
+        let re = openvpn_peer_regex();
+        assert_eq!(
+            parse_openvpn_peer_line(
+                "Peer Connection Initiated with [AF_INET]198.51.100.7:1194",
+                &re
+            ),
+            Some(("198.51.100.7".parse().unwrap(), 1194))
+        );
+        assert_eq!(
+            parse_openvpn_peer_line(
+                "Peer Connection Initiated with [AF_INET6]::ffff:198.51.100.7:1194",
+                &re
+            ),
+            Some(("198.51.100.7".parse().unwrap(), 1194))
+        );
+        assert_eq!(
+            parse_openvpn_peer_line(
+                "Peer Connection Initiated with [AF_INET6][::ffff:198.51.100.7]:443",
+                &re
+            ),
+            Some(("198.51.100.7".parse().unwrap(), 443))
+        );
+        assert_eq!(
+            parse_openvpn_peer_line(
+                "Peer Connection Initiated with [AF_INET6][2001:db8::1]:1194",
+                &re
+            ),
+            Some(("2001:db8::1".parse().unwrap(), 1194))
+        );
+        assert_eq!(
+            parse_openvpn_peer_line(
+                "Peer Connection Initiated with [AF_INET6]2001:db8::1:1194",
+                &re
+            ),
+            Some(("2001:db8::1".parse().unwrap(), 1194))
         );
     }
 

@@ -83,7 +83,9 @@ impl Monitor {
             let _completion = Completion(completed);
             vopono_core::util::set_config_owner_override(owner);
             vopono_core::util::set_config_dir_override(base.clone());
-            vopono_core::util::set_helper_exe_override(std::env::current_exe().ok());
+            vopono_core::util::set_helper_exe_override(
+                vopono_core::util::current_vopono_exe().ok(),
+            );
             let Some(base) = base else {
                 return;
             };
@@ -122,6 +124,7 @@ impl Monitor {
             let mut route_signature = recovery_state
                 .as_ref()
                 .and_then(vopono_core::network::recovery::signature);
+            let mut route_lost = false;
             loop {
                 if receiver.try_recv().is_ok() || !Path::new("/run/netns").join(&name).exists() {
                     break;
@@ -143,18 +146,24 @@ impl Monitor {
                     let next = recovery_state
                         .as_ref()
                         .and_then(vopono_core::network::recovery::signature);
-                    if next.is_some() && next != route_signature {
+                    if next.is_none() {
+                        route_lost = true;
+                    } else if route_lost || next != route_signature {
                         // Only reset backoff once past the grace period (or if the
-                        // route table itself changed rather than pure GeoDNS IP rotation)
+                        // route table itself changed or recovered after route loss)
                         // so rotating round-robin DNS records cannot starve recovery at 0/1.
-                        let route_changed = match (&route_signature, &next) {
-                            (Some((_, old_route)), Some((_, new_route))) => old_route != new_route,
-                            _ => true,
-                        };
+                        let route_changed = route_lost
+                            || match (&route_signature, &next) {
+                                (Some((_, old_route)), Some((_, new_route))) => {
+                                    old_route != new_route
+                                }
+                                _ => true,
+                            };
                         if route_changed || failures > 32 {
                             failures = failures.min(1);
                         }
                         route_signature = next;
+                        route_lost = false;
                     }
                 }
                 recovery_was_enabled = recover;
@@ -327,7 +336,16 @@ fn now() -> u64 {
         .as_secs()
 }
 fn should_recover(failures: u32) -> bool {
-    (2..=32).contains(&failures) && failures.is_power_of_two()
+    if failures < 2 {
+        return false;
+    }
+    if failures <= 32 {
+        failures.is_power_of_two()
+    } else {
+        // After exponential backoff reaches 32 probes (~8 min), keep retrying
+        // periodically so prolonged outages still recover once the network returns.
+        failures.is_multiple_of(32)
+    }
 }
 
 fn probe_ran(status: &crate::check::ConnectivityStatus) -> bool {
@@ -405,8 +423,8 @@ mod tests {
     use super::*;
     #[test]
     fn recovery_has_grace_period_and_bounded_exponential_backoff() {
-        let attempts: Vec<_> = (0..1000).filter(|n| should_recover(*n)).collect();
-        assert_eq!(attempts, vec![2, 4, 8, 16, 32]);
+        let attempts: Vec<_> = (0..130).filter(|n| should_recover(*n)).collect();
+        assert_eq!(attempts, vec![2, 4, 8, 16, 32, 64, 96, 128]);
     }
 
     fn sample() -> crate::check::ConnectivityStatus {

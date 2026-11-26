@@ -21,6 +21,8 @@ const WARP_TUNNEL_INTERFACE_PREFIXES: &[&str] = &["CloudflareWARP", "warp"];
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Warp {
     pub(crate) pid: u32,
+    #[serde(default)]
+    ns_name: Option<String>,
     #[serde(skip)]
     cleanup_enabled: bool,
 }
@@ -72,6 +74,7 @@ impl Warp {
 
         Ok(Self {
             pid: id,
+            ns_name: Some(netns.name.clone()),
             cleanup_enabled: true,
         })
     }
@@ -119,14 +122,28 @@ impl Drop for Warp {
             return;
         }
         let pid = nix::unistd::Pid::from_raw(self.pid as i32);
-        match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
-            Ok(_) => debug!("Killed warp-svc (pid: {})", self.pid),
-            Err(e) => error!("Failed to kill warp-svc (pid: {}): {:?}", self.pid, e),
+        let pid_matches = self.ns_name.as_deref().is_none_or(|ns| {
+            crate::util::process_is_in_network_namespace(self.pid, ns).unwrap_or(false)
+        });
+        if pid_matches {
+            match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
+                Ok(_) => debug!("Killed warp-svc (pid: {})", self.pid),
+                Err(e) => error!("Failed to kill warp-svc (pid: {}): {:?}", self.pid, e),
+            }
+        } else {
+            debug!(
+                "Skipping warp-svc kill for pid {}: no longer in target namespace",
+                self.pid
+            );
         }
         while matches!(
             nix::sys::wait::waitpid(pid, None),
             Err(nix::errno::Errno::EINTR)
         ) {}
+        if let Some(ns_name) = self.ns_name.as_deref() {
+            let dir_path = format!("/etc/netns/{ns_name}");
+            let _ = std::fs::remove_dir_all(&dir_path);
+        }
     }
 }
 

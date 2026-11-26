@@ -2,9 +2,6 @@ pub(super) use wireguard::diagnostic_catalogue;
 mod openvpn;
 mod wireguard;
 
-use std::fs::File;
-use std::io::{BufRead, BufReader};
-
 use super::{
     ConfigurationChoice, Input, OpenVpnProvider, Password, Provider, UiClient, WireguardProvider,
 };
@@ -32,13 +29,13 @@ impl PrivateInternetAccess {
     /// Returns None if the file doesn't exist or doesn't contain valid credentials.
     fn read_cached_credentials(&self) -> Option<(String, String)> {
         let auth_path = self.provider_dir().ok()?.join("openvpn/auth.txt");
-        let file = File::open(auth_path).ok()?;
-        let reader = BufReader::new(file);
-        let mut lines = reader.lines();
-        let username = lines.next()?.ok()?;
-        let password = lines.next()?.ok()?;
-        if validate_pia_auth(&username, &password).is_ok() {
-            Some((username, password))
+        let bytes = crate::util::owner_write::read_file_as_config_owner(&auth_path).ok()?;
+        let content = String::from_utf8(bytes).ok()?;
+        let mut lines = content.lines();
+        let username = lines.next()?;
+        let password = lines.next()?;
+        if validate_pia_auth(username, password).is_ok() {
+            Some((username.to_string(), password.to_string()))
         } else {
             None
         }

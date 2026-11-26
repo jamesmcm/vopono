@@ -40,7 +40,10 @@ impl HostMasquerade {
         // Recovery also operates on inert snapshots. Only the owning
         // namespace guard may remove the replacement when it is dropped.
         replacement.set_cleanup_enabled(self.cleanup_enabled);
-        self.remove_rules();
+        {
+            let _nft_guard = host_nft_lock();
+            self.remove_rules();
+        }
         self.set_cleanup_enabled(false);
         *self = replacement;
         Ok(true)
@@ -116,9 +119,16 @@ impl HostMasquerade {
         interface: NetworkInterface,
         firewall: Firewall,
     ) -> anyhow::Result<Self> {
+        let mut guard = HostMasquerade {
+            ipv4_mask: None,
+            ipv6_mask: None,
+            interface: interface.clone(),
+            firewall,
+            cleanup_enabled: true,
+        };
         match firewall {
             Firewall::IpTables => {
-                if let Some(ref mask) = ipv4_mask {
+                if let Some(mask) = ipv4_mask {
                     // Insert before provider-managed chains such as piavpn.POSTROUTING.
                     // If those chains run first they can consume or block namespace
                     // traffic before vopono's MASQUERADE rule is reached.
@@ -129,7 +139,7 @@ impl HostMasquerade {
                         "-I",
                         "POSTROUTING",
                         "-s",
-                        mask,
+                        &mask,
                         "-o",
                         &interface.name,
                         "-j",
@@ -141,12 +151,13 @@ impl HostMasquerade {
                             mask, interface.name
                         )
                     })?;
+                    guard.ipv4_mask = Some(mask);
                 } else {
                     log::error!("IPv4 mask was None for masquerade rule!");
                 }
 
                 // Will be None if IPv6 disabled
-                if let Some(ref mask) = ipv6_mask {
+                if let Some(mask) = ipv6_mask {
                     sudo_command(&[
                         "ip6tables",
                         "-t",
@@ -154,7 +165,7 @@ impl HostMasquerade {
                         "-I",
                         "POSTROUTING",
                         "-s",
-                        mask,
+                        &mask,
                         "-o",
                         &interface.name,
                         "-j",
@@ -166,9 +177,16 @@ impl HostMasquerade {
                             mask, interface.name
                         )
                     })?;
+                    guard.ipv6_mask = Some(mask);
                 }
             }
             Firewall::NfTables => {
+                let comment =
+                    Self::nft_comment(ipv4_mask.as_deref(), ipv6_mask.as_deref(), &interface.name);
+                let quoted_if = format!("\"{}\"", interface.name);
+                // Hold the lock across table/chain creation and rule insertion so
+                // a concurrent Drop cannot delete the empty table in between.
+                let _nft_guard = host_nft_lock();
                 sudo_command(&["nft", "add", "table", "inet", "vopono_nat"])
                     .context("Failed to create nft table vopono_nat")?;
                 sudo_command(&[
@@ -181,10 +199,6 @@ impl HostMasquerade {
                     "{ type nat hook postrouting priority 100 ; }",
                 ])
                 .context("Failed to create nft postrouting chain in vopono_nat")?;
-                let comment =
-                    Self::nft_comment(ipv4_mask.as_deref(), ipv6_mask.as_deref(), &interface.name);
-                let quoted_if = format!("\"{}\"", interface.name);
-                let _nft_guard = host_nft_lock();
 
                 if let Some(ref mask) = ipv4_mask {
                     sudo_command(&[
@@ -211,8 +225,8 @@ impl HostMasquerade {
                         )
                     })?;
                 }
-                if let Some(ref mask) = ipv6_mask {
-                    sudo_command(&[
+                if let Some(ref mask) = ipv6_mask
+                    && let Err(error) = sudo_command(&[
                         "nft",
                         "add",
                         "rule",
@@ -234,17 +248,20 @@ impl HostMasquerade {
                             "Failed to add nftables IPv6 masquerade rule, mask: {}, interface: {}",
                             mask, interface.name
                         )
-                    })?;
+                    })
+                {
+                    let _ = delete_nft_rules_with_comment("vopono_nat", &comment);
+                    if nft_table_has_no_rules("vopono_nat") {
+                        let _ = sudo_command(&["nft", "delete", "table", "inet", "vopono_nat"]);
+                    }
+                    guard.cleanup_enabled = false;
+                    return Err(error);
                 }
+                guard.ipv4_mask = ipv4_mask;
+                guard.ipv6_mask = ipv6_mask;
             }
         }
-        Ok(HostMasquerade {
-            ipv4_mask,
-            ipv6_mask,
-            interface,
-            firewall,
-            cleanup_enabled: true,
-        })
+        Ok(guard)
     }
 }
 
@@ -310,7 +327,10 @@ impl FirewallException {
         let mut replacement =
             Self::add_firewall_exception(first, second, self.firewall, self.disable_ipv6)?;
         replacement.set_cleanup_enabled(self.cleanup_enabled);
-        self.remove_rules();
+        {
+            let _nft_guard = host_nft_lock();
+            self.remove_rules();
+        }
         self.set_cleanup_enabled(false);
         *self = replacement;
         Ok(true)
@@ -509,6 +529,12 @@ impl FirewallException {
                 })
             }
             Firewall::NfTables => {
+                let comment = Self::nft_comment(&host_interface.name, &ns_interface.name);
+                let quoted_host = format!("\"{}\"", host_interface.name);
+                let quoted_ns = format!("\"{}\"", ns_interface.name);
+                // Hold the lock across table/chain creation and rule insertion so
+                // a concurrent Drop cannot delete the empty table in between.
+                let _nft_guard = host_nft_lock();
                 sudo_command(&["nft", "add", "table", "inet", "vopono_bridge"])
                     .context("Failed to create nft table vopono_bridge")?;
 
@@ -523,90 +549,100 @@ impl FirewallException {
                 ])
                 .context("Failed to create nft forward chain in vopono_bridge")?;
 
-                let comment = Self::nft_comment(&host_interface.name, &ns_interface.name);
-                let quoted_host = format!("\"{}\"", host_interface.name);
-                let quoted_ns = format!("\"{}\"", ns_interface.name);
-                let _nft_guard = host_nft_lock();
-                sudo_command(&[
-                    "nft",
-                    "add",
-                    "rule",
-                    "inet",
-                    "vopono_bridge",
-                    "forward",
-                    "iifname",
-                    &quoted_host,
-                    "oifname",
-                    &quoted_ns,
-                    "counter",
-                    "accept",
-                    "comment",
-                    &comment,
-                ])
-                .with_context(|| {
-                    format!(
-                        "Failed to add nftables bridge input accept rule, host_interface: {}, namespace interface: {}",
-                        host_interface.name, ns_interface.name
-                    )
-                })?;
-
-                sudo_command(&[
-                    "nft",
-                    "add",
-                    "rule",
-                    "inet",
-                    "vopono_bridge",
-                    "forward",
-                    "oifname",
-                    &quoted_host,
-                    "iifname",
-                    &quoted_ns,
-                    "counter",
-                    "accept",
-                    "comment",
-                    &comment,
-                ])
-                .with_context(|| {
-                    format!(
-                        "Failed to add nftables bridge output accept rule, host_interface: {}, namespace interface: {}",
-                        host_interface.name, ns_interface.name
-                    )
-                })?;
-
-                // If Docker is using the iptables frontend with the nf_tables backend
-                // (iptables-nft), its FORWARD base chain can still have policy drop.
-                // An accept in vopono_bridge is not final across later nft base chains,
-                // so add the same exceptions to Docker's pre-forwarding user chain.
-                let docker_user_ipv4 =
-                    add_docker_user_exception("iptables", &host_interface, &ns_interface)?;
-                let docker_user_ipv6 = if disable_ipv6 {
-                    false
-                } else {
-                    add_docker_user_exception("ip6tables", &host_interface, &ns_interface)?
-                };
-                // UFW keeps primary chains hooked into FORWARD when disabled
-                // with MANAGE_BUILTINS=no. When iptables is backed by
-                // nf_tables, those chains can still run after vopono's nft
-                // base chain, so add early UFW exceptions too.
-                let ufw_forward_ipv4 =
-                    add_ufw_forward_exception("iptables", &host_interface, &ns_interface)?;
-                let ufw_forward_ipv6 = if disable_ipv6 {
-                    false
-                } else {
-                    add_ufw_forward_exception("ip6tables", &host_interface, &ns_interface)?
-                };
-
-                Ok(FirewallException {
-                    host_interface,
-                    ns_interface,
+                let mut guard = FirewallException {
+                    host_interface: host_interface.clone(),
+                    ns_interface: ns_interface.clone(),
                     firewall,
                     disable_ipv6,
-                    docker_user_ipv4,
-                    docker_user_ipv6,
-                    ufw_forward_ipv4,
-                    ufw_forward_ipv6,
-                    cleanup_enabled: true,
-                })
+                    docker_user_ipv4: false,
+                    docker_user_ipv6: false,
+                    ufw_forward_ipv4: false,
+                    ufw_forward_ipv6: false,
+                    cleanup_enabled: false,
+                };
+                let setup = (|| -> anyhow::Result<()> {
+                    sudo_command(&[
+                        "nft",
+                        "add",
+                        "rule",
+                        "inet",
+                        "vopono_bridge",
+                        "forward",
+                        "iifname",
+                        &quoted_host,
+                        "oifname",
+                        &quoted_ns,
+                        "counter",
+                        "accept",
+                        "comment",
+                        &comment,
+                    ])
+                    .with_context(|| {
+                        format!(
+                            "Failed to add nftables bridge input accept rule, host_interface: {}, namespace interface: {}",
+                            host_interface.name, ns_interface.name
+                        )
+                    })?;
+
+                    sudo_command(&[
+                        "nft",
+                        "add",
+                        "rule",
+                        "inet",
+                        "vopono_bridge",
+                        "forward",
+                        "oifname",
+                        &quoted_host,
+                        "iifname",
+                        &quoted_ns,
+                        "counter",
+                        "accept",
+                        "comment",
+                        &comment,
+                    ])
+                    .with_context(|| {
+                        format!(
+                            "Failed to add nftables bridge output accept rule, host_interface: {}, namespace interface: {}",
+                            host_interface.name, ns_interface.name
+                        )
+                    })?;
+
+                    // If Docker is using the iptables frontend with the nf_tables backend
+                    // (iptables-nft), its FORWARD base chain can still have policy drop.
+                    // An accept in vopono_bridge is not final across later nft base chains,
+                    // so add the same exceptions to Docker's pre-forwarding user chain.
+                    guard.docker_user_ipv4 =
+                        add_docker_user_exception("iptables", &host_interface, &ns_interface)?;
+                    guard.docker_user_ipv6 = if disable_ipv6 {
+                        false
+                    } else {
+                        add_docker_user_exception("ip6tables", &host_interface, &ns_interface)?
+                    };
+                    // UFW keeps primary chains hooked into FORWARD when disabled
+                    // with MANAGE_BUILTINS=no. When iptables is backed by
+                    // nf_tables, those chains can still run after vopono's nft
+                    // base chain, so add early UFW exceptions too.
+                    guard.ufw_forward_ipv4 =
+                        add_ufw_forward_exception("iptables", &host_interface, &ns_interface)?;
+                    guard.ufw_forward_ipv6 = if disable_ipv6 {
+                        false
+                    } else {
+                        add_ufw_forward_exception("ip6tables", &host_interface, &ns_interface)?
+                    };
+                    Ok(())
+                })();
+                if let Err(error) = setup {
+                    guard.remove_rules();
+                    if nft_table_has_no_rules("vopono_bridge") {
+                        delete_firewall_rule(
+                            &["nft", "delete", "table", "inet", "vopono_bridge"],
+                            "nftables namespace bridge table",
+                        );
+                    }
+                    return Err(error);
+                }
+                guard.cleanup_enabled = true;
+                Ok(guard)
             }
         }
     }

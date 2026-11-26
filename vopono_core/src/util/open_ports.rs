@@ -188,62 +188,90 @@ pub fn close_port_in_namespace(
                         ],
                     );
                 }
+                // Also remove any OUTPUT veth-reply rule installed for the initial port.
+                if let Ok(output) =
+                    NetworkNamespace::exec_with_output(netns_name, &[iptables_cmd, "-S", "OUTPUT"])
+                    && output.status.success()
+                {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        if let Some(rest) = line.strip_prefix("-A OUTPUT ")
+                            && rest.contains(&format!("--sport {port_str} "))
+                            && rest.contains("--ctdir REPLY")
+                            && let Ok(tokens) = shell_words::split(rest)
+                        {
+                            let mut args = vec![iptables_cmd, "-D", "OUTPUT"];
+                            args.extend(tokens.iter().map(String::as_str));
+                            let _ = NetworkNamespace::exec(netns_name, &args);
+                        }
+                    }
+                }
             }
         }
         Firewall::NfTables => {
-            let Ok(output) = NetworkNamespace::exec_with_output(
-                netns_name,
-                &["nft", "-j", "list", "chain", "inet", netns_name, "input"],
-            ) else {
-                return;
-            };
-            if !output.status.success() {
-                return;
-            }
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
-                return;
-            };
-            let Some(items) = value["nftables"].as_array() else {
-                return;
-            };
-            for item in items {
-                let Some(rule) = item.get("rule") else {
+            for (chain, field) in [("input", "dport"), ("output", "sport")] {
+                let Ok(output) = NetworkNamespace::exec_with_output(
+                    netns_name,
+                    &["nft", "-j", "list", "chain", "inet", netns_name, chain],
+                ) else {
                     continue;
                 };
-                let Some(handle) = rule["handle"].as_u64() else {
+                if !output.status.success() {
+                    continue;
+                }
+                let Ok(value) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
                     continue;
                 };
-                let Some(exprs) = rule["expr"].as_array() else {
+                let Some(items) = value["nftables"].as_array() else {
                     continue;
                 };
-                let matches_port = exprs.iter().any(|expr| {
-                    expr.get("match")
-                        .map(|m| {
-                            let is_dport =
-                                m.pointer("/left/payload/field").and_then(|f| f.as_str())
-                                    == Some("dport");
-                            let is_port =
-                                m.get("right").and_then(|r| r.as_u64()) == Some(u64::from(port));
-                            is_dport && is_port
-                        })
-                        .unwrap_or(false)
-                });
-                let is_accept = exprs.iter().any(|expr| expr.get("accept").is_some());
-                if matches_port && is_accept {
-                    let handle_str = handle.to_string();
-                    let _ = NetworkNamespace::exec(
-                        netns_name,
-                        &[
-                            "nft",
-                            "delete",
-                            "rule",
-                            "inet",
+                for item in items {
+                    let Some(rule) = item.get("rule") else {
+                        continue;
+                    };
+                    let Some(handle) = rule["handle"].as_u64() else {
+                        continue;
+                    };
+                    let Some(exprs) = rule["expr"].as_array() else {
+                        continue;
+                    };
+                    let matches_port = exprs.iter().any(|expr| {
+                        expr.get("match")
+                            .map(|m| {
+                                let is_field =
+                                    m.pointer("/left/payload/field").and_then(|f| f.as_str())
+                                        == Some(field);
+                                let is_port = m.get("right").and_then(|r| r.as_u64())
+                                    == Some(u64::from(port));
+                                is_field && is_port
+                            })
+                            .unwrap_or(false)
+                    });
+                    let matches_reply = chain == "input"
+                        || exprs.iter().any(|expr| {
+                            expr.get("match").is_some_and(|m| {
+                                m.pointer("/left/ct/key").and_then(|k| k.as_str())
+                                    == Some("direction")
+                                    && m.get("right").and_then(|r| r.as_str()) == Some("reply")
+                            })
+                        });
+                    let is_accept = exprs.iter().any(|expr| expr.get("accept").is_some());
+                    if matches_port && matches_reply && is_accept {
+                        let handle_str = handle.to_string();
+                        let _ = NetworkNamespace::exec(
                             netns_name,
-                            "input",
-                            "handle",
-                            &handle_str,
-                        ],
-                    );
+                            &[
+                                "nft",
+                                "delete",
+                                "rule",
+                                "inet",
+                                netns_name,
+                                chain,
+                                "handle",
+                                &handle_str,
+                            ],
+                        );
+                    }
                 }
             }
         }

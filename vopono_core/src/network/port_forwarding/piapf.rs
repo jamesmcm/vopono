@@ -19,6 +19,7 @@ pub struct Piapf {
     loop_thread_handle: Option<JoinHandle<()>>,
     send_channel: Sender<bool>,
     params: ThreadParamsImpl,
+    cleanup_enabled: bool,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -31,6 +32,8 @@ pub struct ThreadParamsImpl {
     pub hostname: String,
     pub gateway: String,
     pub pia_cert_path: String,
+    #[serde(default)]
+    pub runtime_dir: Option<std::path::PathBuf>,
     pub callback: Option<CallbackCommand>,
     #[serde(default)]
     pub firewall: Option<crate::network::firewall::Firewall>,
@@ -154,7 +157,7 @@ impl Piapf {
 
         let pia_token = PrivateInternetAccess::get_pia_token(&pia_user, &pia_pass)?;
         let raw_cert_path = pia.pia_cert_path()?;
-        let pia_cert_path = if crate::util::is_daemon_mode() {
+        let (pia_cert_path, runtime_dir_guard) = if crate::util::is_daemon_mode() {
             // Freeze the PIA CA certificate into a root-owned runtime directory
             // so root `curl --cacert` never opens a user-writable path directly.
             let cert_bytes = crate::util::owner_write::read_file_as_config_owner(&raw_cert_path)
@@ -164,13 +167,13 @@ impl Piapf {
                         raw_cert_path.display()
                     )
                 })?;
-            let runtime_dir = crate::network::etc_overlay::trusted_runtime_dir("piapf-")?.keep();
-            let frozen_cert = runtime_dir.join("ca.rsa.4096.crt");
+            let runtime_dir = crate::network::etc_overlay::trusted_runtime_dir("piapf-")?;
+            let frozen_cert = runtime_dir.path().join("ca.rsa.4096.crt");
             let mut file = crate::util::create_private_file(&frozen_cert)?;
             std::io::Write::write_all(&mut file, &cert_bytes)?;
-            frozen_cert.display().to_string()
+            (frozen_cert.display().to_string(), Some(runtime_dir))
         } else {
-            raw_cert_path.display().to_string()
+            (raw_cert_path.display().to_string(), None)
         };
 
         log::info!("PIA pia_cert_path: {pia_cert_path}");
@@ -239,6 +242,7 @@ impl Piapf {
             hostname: vpn_hostname,
             gateway: vpn_gateway,
             pia_cert_path,
+            runtime_dir: runtime_dir_guard.as_ref().map(|d| d.path().to_path_buf()),
             signature,
             payload,
             port,
@@ -250,7 +254,11 @@ impl Piapf {
             firewall: Some(ns.firewall),
             ipv6_enabled,
         };
-        Self::resume(params)
+        let forwarder = Self::resume(params)?;
+        if let Some(dir) = runtime_dir_guard {
+            let _ = dir.keep();
+        }
+        Ok(forwarder)
     }
 
     pub fn resume(params: ThreadParamsImpl) -> anyhow::Result<Self> {
@@ -270,6 +278,7 @@ impl Piapf {
             loop_thread_handle: Some(handle),
             send_channel: send,
             params: retained,
+            cleanup_enabled: true,
         })
     }
 }
@@ -348,6 +357,11 @@ impl Drop for Piapf {
             self.send_channel.send(true).ok();
             h.join().ok();
         }
+        if self.cleanup_enabled
+            && let Some(runtime_dir) = &self.params.runtime_dir
+        {
+            let _ = std::fs::remove_dir_all(runtime_dir);
+        }
     }
 }
 
@@ -360,5 +374,8 @@ impl Forwarder for Piapf {
     }
     fn stop_handle(&self) -> Option<std::sync::mpsc::Sender<bool>> {
         Some(self.send_channel.clone())
+    }
+    fn disarm(&mut self) {
+        self.cleanup_enabled = false;
     }
 }

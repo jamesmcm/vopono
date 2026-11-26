@@ -26,6 +26,10 @@ pub struct SshProxy {
     pub(crate) ssh_pid: u32,
     pub(crate) redsocks_pid: u32,
     pub listen_port: u16,
+    #[serde(default)]
+    ns_name: Option<String>,
+    #[serde(default)]
+    runtime_dir: Option<PathBuf>,
     #[serde(skip)]
     cleanup_enabled: bool,
 }
@@ -72,6 +76,10 @@ impl SshProxy {
         )?;
         info!("Launching SSH dynamic proxy on socks5h://127.0.0.1:{listen_port}");
         let mut ssh = command_in_namespace(netns, &ssh_command, user, group)?;
+        if crate::util::is_daemon_mode() {
+            ssh.stdin(Stdio::null());
+            ssh.stdout(Stdio::null());
+        }
         ssh.stderr(Stdio::piped());
         let mut ssh = ssh.spawn().context("Failed to launch SSH dynamic proxy")?;
         let ssh_pid = ssh.id();
@@ -81,22 +89,30 @@ impl SshProxy {
             return Err(e);
         }
 
-        let mut config = tempfile::NamedTempFile::new()
-            .context("Failed to create temporary redsocks configuration")?;
-        write!(
-            config,
-            "{}",
-            redsocks_config(listen_port, REDSOCKS_PORT, DNSTC_PORT)
-        )?;
-        config.flush()?;
+        let runtime_dir = super::etc_overlay::trusted_runtime_dir("redsocks-")
+            .context("Failed to create runtime directory for redsocks configuration")?;
+        let config_path = runtime_dir.path().join("redsocks.conf");
+        {
+            let mut config = crate::util::create_private_file(&config_path)
+                .context("Failed to create temporary redsocks configuration")?;
+            write!(
+                config,
+                "{}",
+                redsocks_config(listen_port, REDSOCKS_PORT, DNSTC_PORT)
+            )?;
+            config.flush()?;
+        }
 
         let redsocks_command = vec![
             "redsocks".to_owned(),
             "-c".to_owned(),
-            config.path().to_string_lossy().into_owned(),
+            config_path.to_string_lossy().into_owned(),
         ];
         info!("Launching redsocks transparent TCP proxy");
         let mut redsocks = command_in_namespace(netns, &redsocks_command, None, None)?;
+        if crate::util::is_daemon_mode() {
+            redsocks.stdin(Stdio::null());
+        }
         redsocks.stdout(Stdio::null());
         let mut redsocks = match redsocks.spawn() {
             Ok(child) => child,
@@ -132,6 +148,8 @@ impl SshProxy {
             ssh_pid,
             redsocks_pid,
             listen_port,
+            ns_name: Some(netns.name.clone()),
+            runtime_dir: Some(runtime_dir.keep()),
             cleanup_enabled: true,
         })
     }
@@ -544,6 +562,21 @@ fn setup_iptables(
     }
     if use_killswitch {
         for command in [
+            vec!["iptables", "-P", "INPUT", "DROP"],
+            vec!["iptables", "-P", "FORWARD", "DROP"],
+            vec!["iptables", "-P", "OUTPUT", "DROP"],
+            vec![
+                "iptables",
+                "-A",
+                "INPUT",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "RELATED,ESTABLISHED",
+                "-j",
+                "ACCEPT",
+            ],
+            vec!["iptables", "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"],
             vec!["iptables", "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"],
             vec![
                 "iptables", "-A", "OUTPUT", "-d", &endpoint, "-p", "tcp", "--dport", &port, "-j",
@@ -614,6 +647,8 @@ fn setup_nftables(
             "meta",
             "nfproto",
             "ipv4",
+            "meta",
+            "l4proto",
             "tcp",
             "redirect",
             "to",
@@ -640,50 +675,100 @@ fn setup_nftables(
         NetworkNamespace::exec(&netns.name, &command)?;
     }
     if use_killswitch {
-        NetworkNamespace::exec(
-            &netns.name,
-            &[
-                "nft",
-                "add",
-                "chain",
-                "inet",
-                "vopono_ssh",
-                "output_filter",
-                "{ type filter hook output priority filter; policy drop; }",
-            ],
-        )?;
-        NetworkNamespace::exec(
-            &netns.name,
-            &[
+        // Place filter rules in the namespace's standard `inet <netns>` table so
+        // `--open-hosts`, `--allow-host-access`, and `--open-ports` rules inserted
+        // into that table are honored rather than dropped by a separate base chain.
+        for command in [
+            vec![
                 "nft",
                 "add",
                 "rule",
                 "inet",
-                "vopono_ssh",
-                "output_filter",
-                "oifname",
-                "lo",
+                &netns.name,
+                "input",
+                "ct",
+                "state",
+                "related,established",
+                "counter",
                 "accept",
             ],
-        )?;
-        NetworkNamespace::exec(
-            &netns.name,
-            &[
+            vec![
                 "nft",
                 "add",
                 "rule",
                 "inet",
-                "vopono_ssh",
-                "output_filter",
+                &netns.name,
+                "input",
+                "iifname",
+                "lo",
+                "counter",
+                "accept",
+            ],
+            vec![
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "input",
+                "counter",
+                "drop",
+            ],
+            vec![
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "forward",
+                "counter",
+                "drop",
+            ],
+            vec![
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "output",
+                "oifname",
+                "lo",
+                "counter",
+                "accept",
+            ],
+            vec![
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "output",
                 "ip",
                 "daddr",
                 &endpoint,
                 "tcp",
                 "dport",
                 &port,
+                "counter",
                 "accept",
             ],
-        )?;
+            vec![
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "output",
+                "counter",
+                "reject",
+                "with",
+                "icmpx",
+                "type",
+                "admin-prohibited",
+            ],
+        ] {
+            NetworkNamespace::exec(&netns.name, &command)?;
+        }
     }
     Ok(())
 }
@@ -701,13 +786,31 @@ fn kill_process_group(pid: u32, name: &str) {
     ) {}
 }
 
+fn kill_process_group_in_ns(pid: u32, ns_name: Option<&str>, name: &str) {
+    let pid_matches = ns_name
+        .is_none_or(|ns| crate::util::process_is_in_network_namespace(pid, ns).unwrap_or(false));
+    if pid_matches {
+        kill_process_group(pid, name);
+    } else {
+        debug!("Skipping {name} kill for pid {pid}: no longer in target namespace");
+        let raw = nix::unistd::Pid::from_raw(pid as i32);
+        while matches!(
+            nix::sys::wait::waitpid(raw, None),
+            Err(nix::errno::Errno::EINTR)
+        ) {}
+    }
+}
+
 impl Drop for SshProxy {
     fn drop(&mut self) {
         if !self.cleanup_enabled {
             return;
         }
-        kill_process_group(self.redsocks_pid, "redsocks");
-        kill_process_group(self.ssh_pid, "SSH proxy");
+        kill_process_group_in_ns(self.redsocks_pid, self.ns_name.as_deref(), "redsocks");
+        kill_process_group_in_ns(self.ssh_pid, self.ns_name.as_deref(), "SSH proxy");
+        if let Some(runtime) = &self.runtime_dir {
+            let _ = std::fs::remove_dir_all(runtime);
+        }
     }
 }
 

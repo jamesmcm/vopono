@@ -395,21 +395,25 @@ fn apparmor_denials(logs: Option<&str>) -> Diagnostic {
         );
     };
     let denied = logs.lines().any(|line| {
-        let fields = shell_words::split(line).unwrap_or_default();
-        fields.iter().any(|s| s == "apparmor=DENIED")
-            && fields.iter().any(|s| {
-                matches!(
-                    s.as_str(),
-                    "comm=wg"
-                        | "comm=awg"
-                        | "profile=wg"
-                        | "profile=awg"
-                        | "profile=/usr/bin/wg"
-                        | "profile=/usr/sbin/wg"
-                        | "profile=/usr/bin/awg"
-                        | "profile=/usr/sbin/awg"
-                )
-            })
+        let has_denied = line.split_whitespace().any(|tok| {
+            let unquoted = tok.replace('"', "");
+            unquoted == "apparmor=DENIED"
+        });
+        let has_wg_comm = line.split_whitespace().any(|tok| {
+            let unquoted = tok.replace('"', "");
+            matches!(
+                unquoted.as_str(),
+                "comm=wg"
+                    | "comm=awg"
+                    | "profile=wg"
+                    | "profile=awg"
+                    | "profile=/usr/bin/wg"
+                    | "profile=/usr/sbin/wg"
+                    | "profile=/usr/bin/awg"
+                    | "profile=/usr/sbin/awg"
+            )
+        });
+        has_denied && has_wg_comm
     });
     Diagnostic::new(
         Code::AppArmor,

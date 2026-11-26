@@ -315,11 +315,12 @@ fn validate_config_inner(
         }
         Protocol::OpenVpn => crate::network::openvpn_config::validate(&content, path, openvpn_auth)
             .and_then(|()| crate::network::openvpn_config::endpoints(&content))
-            .map_err(|_| {
+            .map_err(|error| {
+                let message = format!("OpenVPN configuration invalid: {error}");
                 Diagnostic::new(
                     DiagnosticCode::ProviderConfig,
                     DiagnosticState::Fail,
-                    "OpenVPN configuration is unreadable, malformed, or references unsupported or missing files",
+                    &message,
                     Some("Check OpenVPN configuration directives, inline blocks, and referenced key/auth files"),
                 )
             }),

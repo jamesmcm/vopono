@@ -311,17 +311,20 @@ impl Server {
             }
             "doctor" => {
                 let input: DoctorInput = arguments_as(arguments)?;
+                let timeout_secs =
+                    (25u64.saturating_add(input.timeout_ms.saturating_mul(8) / 1000)).min(60);
                 let args = self.doctor_args(input)?;
-                jobs::json_command(&args, Duration::from_secs(25), &self.stopping).map_err(|err| {
-                    let text = err.to_string();
-                    if text.contains("timed out") || text.contains("output limit") {
-                        anyhow::anyhow!(
-                            "Doctor could not complete within its output/time limits; select one namespace or use health for cached evidence"
-                        )
-                    } else {
-                        anyhow::anyhow!("Doctor command failed before producing a JSON report")
-                    }
-                })
+                jobs::json_command(&args, Duration::from_secs(timeout_secs), &self.stopping)
+                    .map_err(|err| {
+                        let text = err.to_string();
+                        if text.contains("timed out") || text.contains("output limit") {
+                            anyhow::anyhow!(
+                                "Doctor could not complete within its output/time limits; select one namespace or use health for cached evidence"
+                            )
+                        } else {
+                            anyhow::anyhow!("Doctor command failed before producing a JSON report")
+                        }
+                    })
             }
             "check" => {
                 let input: CheckInput = arguments_as(arguments)?;
@@ -357,7 +360,10 @@ impl Server {
                         "Daemon rejected or could not complete the connectivity check for this namespace"
                     ),
                 })?;
-                let failed = !status.connected;
+                let dns_probe_unavailable = status.dns.as_ref().is_some_and(|dns| {
+                    dns.code == Some(vopono_core::diagnostics::DiagnosticCode::ProbeUnavailable)
+                });
+                let failed = !status.connected || dns_probe_unavailable;
                 Ok((
                     serde_json::to_value(crate::check::ConnectivityDocument {
                         version: 1,
@@ -452,7 +458,7 @@ const TOOL_NAMES: &[&str] = &[
 ];
 fn tools(allow_command: bool, timeout: u64) -> Vec<Value> {
     let string = json!({"type":"string","minLength":1,"maxLength":128});
-    let namespace = json!({"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9_-])?$"});
+    let namespace = json!({"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z](?:[A-Za-z0-9._-]{0,62}[A-Za-z0-9_-])?$"});
     let profile =
         json!({"type":"string","minLength":1,"maxLength":64,"pattern":"^[A-Za-z0-9_-]{1,64}$"});
     let definitions = [

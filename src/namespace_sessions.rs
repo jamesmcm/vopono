@@ -485,15 +485,30 @@ impl Session {
             return;
         }
         self.registered = false;
+        let holds_setup = SETUP_TRANSITION.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|transition| transition.0 == self.ns.name)
+        });
+        let _transition = (!holds_setup).then(|| lock_namespace(&self.ns.name));
+        let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(entry) = sessions.get_mut(&self.ns.name)
+            && Arc::ptr_eq(&entry.valid, &self.valid)
         {
-            let _transition = lock_namespace(&self.ns.name);
-            let mut sessions = SESSIONS.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(entry) = sessions.get_mut(&self.ns.name)
-                && Arc::ptr_eq(&entry.valid, &self.valid)
-            {
-                entry.applications = entry.applications.saturating_sub(1);
-            }
+            entry.applications = entry.applications.saturating_sub(1);
         }
+    }
+
+    /// Tear down or detach a session whose post-registration bookkeeping failed
+    /// before entering `run_until_unused()`.
+    pub fn abort_failed_launch(mut self) {
+        self.unregister_application();
+        if self.controller {
+            self.forwarder_released.store(true, Ordering::Release);
+            remove_session(&self.ns.name, &self.valid);
+        }
+        // `self` drops here: if controller, `ns` and `forwarder` clean up;
+        // if attached non-controller, `ns` is already detached.
     }
 
     /// Run only after the request has replied and released its client resources.
@@ -550,9 +565,14 @@ impl Session {
                 relay_retry_at = std::time::Instant::now() + Duration::from_secs(5);
             }
             if !stopping
+                && !self.stop_forwarder_for_teardown.load(Ordering::Acquire)
                 && let Some(snapshot) = self.pending_forwarder.clone()
                 && std::time::Instant::now() >= lease_retry_at
             {
+                // Keep `forwarder_released = false` while restoration is in
+                // flight so `stop_daemon_namespace` waits before deleting the
+                // namespace.
+                self.forwarder_released.store(false, Ordering::Release);
                 // Release the transition lock while performing network I/O and
                 // user callback execution so stop/launch requests cannot deadlock.
                 drop(transition);
@@ -569,6 +589,8 @@ impl Session {
                     if let Ok(mut forwarder) = restored {
                         forwarder.disarm();
                     }
+                    self.pending_forwarder = None;
+                    self.forwarder_released.store(true, Ordering::Release);
                     continue;
                 }
                 match restored {
@@ -583,8 +605,10 @@ impl Session {
                             entry.forwarder_stop = Some(stop);
                         }
                         self.forwarder_released.store(false, Ordering::Release);
-                        if let Err(error) =
-                            vopono_core::util::open_ports(&self.ns, &[port], self.ns.firewall)
+                        let previous_port = self.ns.state.port_forwarding.as_ref().map(|s| s.port);
+                        if previous_port != Some(port)
+                            && let Err(error) =
+                                vopono_core::util::open_ports(&self.ns, &[port], self.ns.firewall)
                         {
                             log::warn!(
                                 "Could not open restored forwarded port {port} in {}: {error:#}",
@@ -606,6 +630,7 @@ impl Session {
                         }
                     }
                     Err(_) => {
+                        self.forwarder_released.store(true, Ordering::Release);
                         log::warn!(
                             "Could not resume provider port lease for {}; will retry",
                             self.ns.name
@@ -753,7 +778,9 @@ pub fn restore_all() -> anyhow::Result<()> {
                     uid,
                     nix::unistd::Gid::from_raw(runtime.gid),
                 )));
-                vopono_core::util::set_helper_exe_override(std::env::current_exe().ok());
+                vopono_core::util::set_helper_exe_override(
+                    vopono_core::util::current_vopono_exe().ok(),
+                );
                 let lock_dir = vopono_core::util::vopono_dir()?.join("locks").join(&name);
                 if crate::namespace_ownership::is_stopping(&name, uid)? {
                     if runtime.daemon_pid != std::process::id() {

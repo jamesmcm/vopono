@@ -551,6 +551,29 @@ fn namespace_report(command: &DoctorCommand) -> Report {
         .is_some_and(|d| d.status.available && d.status.compatible);
     for ns in &mut report.namespaces {
         ns.network = namespace_environment(&ns.id, command, daemon_usable);
+        // If the tunnel has no IPv6 route (e.g., IPv4-only OpenVPN or WireGuard
+        // config) and IPv4 succeeded, do not fail the report on IPv6 unless the
+        // tunnel actually advertises an IPv6 route.
+        if !command.skip_ipv6
+            && ns.connectivity.as_ref().is_some_and(|c| c.connected)
+            && let Some(network) = ns.network.as_ref()
+            && !network.tunnel_interfaces.is_empty()
+            && !network.routes.iter().any(|route| {
+                route.family == "ipv6" && network.tunnel_interfaces.contains(&route.interface)
+            })
+        {
+            for diag in &mut ns.diagnostics {
+                if diag.code == Code::TunnelConnectivity
+                    && diag.state == State::Fail
+                    && diag.message.starts_with("IPv6 TCP")
+                {
+                    diag.state = State::Skipped;
+                    diag.message =
+                        "IPv6 TCP probe skipped: tunnel interface does not route IPv6".into();
+                    diag.action = None;
+                }
+            }
+        }
     }
     if !command.offline {
         report.diagnostics.insert(

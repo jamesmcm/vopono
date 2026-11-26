@@ -117,10 +117,14 @@ pub fn status() -> DaemonStatus {
     if set_socket_timeouts(&stream).is_err() {
         return snapshot;
     }
+    let Ok(credentials) = getsockopt(&socket.as_fd(), PeerCredentials) else {
+        return snapshot;
+    };
+    if credentials.uid() != 0 {
+        return snapshot;
+    }
     snapshot.available = true;
-    snapshot.pid = getsockopt(&socket.as_fd(), PeerCredentials)
-        .ok()
-        .map(|credentials| credentials.pid() as u32);
+    snapshot.pid = Some(credentials.pid() as u32);
 
     // Handshake so `compatible` compares the daemon's real version against
     // this client instead of unconditionally reporting success.
@@ -209,7 +213,9 @@ fn warn_on_client_version_mismatch(client_version: &str) {
 ///
 /// Propagates handshake transport/timeout errors so callers never reuse a
 /// dropped or protocol-desynchronized socket.
-pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) -> anyhow::Result<()> {
+pub(crate) fn exchange_versions_with_daemon(
+    conn: &mut LocalSocketStream,
+) -> anyhow::Result<String> {
     let own = env!("CARGO_PKG_VERSION");
     set_socket_timeouts_for(conn, DAEMON_HANDSHAKE_TIMEOUT_SECONDS)?;
     let daemon_version = client_handshake(conn);
@@ -225,7 +231,7 @@ pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) -> any
             "Daemon vopono version {daemon_version} is incompatible with client version {own}; update vopono and restart the daemon."
         ),
     }
-    Ok(())
+    Ok(daemon_version)
 }
 
 /// Version handshake on an already authenticated connection.
@@ -723,6 +729,98 @@ fn copy_pty_output(mut reader: File, mut output: PtyOutput, prefix: &[u8], done:
     }
 }
 
+/// Relay a JSON launch notice followed by non-TTY child stdout to the client's
+/// stdout descriptor so `{"event":"launched",...}` is always line 1 without
+/// mid-line interleaving.
+fn copy_json_stdout(mut pipe_read: File, client_stdout: File, prefix: Vec<u8>) {
+    let Ok(mut output) = PtyOutput::new(client_stdout) else {
+        return;
+    };
+    let mut prefix_slice = prefix.as_slice();
+    while !prefix_slice.is_empty() {
+        match output.write(prefix_slice) {
+            Ok(0) => return,
+            Ok(count) => prefix_slice = &prefix_slice[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                fd_writable(output.file.as_raw_fd(), 25);
+            }
+            Err(_) => return,
+        }
+    }
+    let mut buf = [0u8; 16 * 1024];
+    loop {
+        let count = match pipe_read.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        let mut written = 0;
+        while written < count {
+            match output.write(&buf[written..count]) {
+                Ok(0) => return,
+                Ok(n) => written += n,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    fd_writable(output.file.as_raw_fd(), 25);
+                }
+                Err(_) => return,
+            }
+        }
+    }
+}
+
+/// Open a non-blocking stdin handle when possible so `stdin_copier` can never
+/// block indefinitely if another reader consumes data after `poll()`.
+struct NonBlockingStdin {
+    file: File,
+    socket: bool,
+}
+
+impl NonBlockingStdin {
+    fn new(file: File) -> Self {
+        let Ok(meta) = file.metadata() else {
+            return Self {
+                file,
+                socket: false,
+            };
+        };
+        let kind = meta.file_type();
+        if kind.is_socket() {
+            return Self { file, socket: true };
+        }
+        if (kind.is_fifo() || kind.is_char_device())
+            && let Ok(nonblocking) = OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+                .open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        {
+            return Self {
+                file: nonblocking,
+                socket: false,
+            };
+        }
+        Self {
+            file,
+            socket: false,
+        }
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.socket {
+            nix::sys::socket::recv(
+                self.file.as_raw_fd(),
+                buf,
+                nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+            )
+            .map_err(std::io::Error::from)
+        } else {
+            self.file.read(buf)
+        }
+    }
+}
+
 fn write_pty_input(terminal: &mut File, mut bytes: &[u8], done: &AtomicBool) -> bool {
     while !bytes.is_empty() && !done.load(Ordering::Acquire) {
         match terminal.write(bytes) {
@@ -806,18 +904,27 @@ fn wait_for_application(
     });
 
     // stdin copier: client stdin -> pty master
-    let mut stdin_reader = client_stdin;
+    let mut stdin_reader = NonBlockingStdin::new(client_stdin);
     let mut pty_writer = pty_master_file_w;
     let child_pgid_for_stdin = child_pgid; // Pid is Copy; used for optional SIGHUP on EOF
     let child_done_for_stdin = Arc::clone(&child_done);
     let stdin_copier = thread::spawn(move || {
         let mut buf = [0u8; 4096];
         while !child_done_for_stdin.load(Ordering::Acquire) {
-            if !fd_readable(stdin_reader.as_raw_fd(), 50) {
+            if !fd_readable(stdin_reader.file.as_raw_fd(), 50) {
                 continue;
             }
-            let Ok(n) = stdin_reader.read(&mut buf) else {
-                break;
+            let n = match stdin_reader.read(&mut buf) {
+                Ok(n) => n,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => break,
             };
             if n == 0 {
                 // Client reached EOF (Ctrl-D in cooked mode or client closed input).
@@ -1045,10 +1152,12 @@ fn handle_client(
     // Read a framed request (length-prefixed u32 then payload). Newer
     // clients announce their version first so skew can be flagged here.
     let mut request = read_request(&mut conn)?;
-    if let DaemonRequest::ClientVersion(client_version) = &request {
+    let mut client_version: Option<String> = None;
+    if let DaemonRequest::ClientVersion(version) = &request {
         // Handshake: flag skew on our side, tell the client ours, then read
         // the actual request frame.
-        warn_on_client_version_mismatch(client_version);
+        warn_on_client_version_mismatch(version);
+        client_version = Some(version.clone());
         let response = DaemonResponse::Version(env!("CARGO_PKG_VERSION").to_string());
         let _ = write_response(&mut conn, &response);
         request = read_request(&mut conn)?;
@@ -1062,7 +1171,7 @@ fn handle_client(
     ) {
         // Writes use a dropped-privilege subprocess so the kernel, rather
         // than a post-hoc chown, enforces ownership.
-        vopono_core::util::set_helper_exe_override(std::env::current_exe().ok());
+        vopono_core::util::set_helper_exe_override(vopono_core::util::current_vopono_exe().ok());
         vopono_core::util::set_config_owner_override(Some((uid, gid)));
         let provided_config_home = request_client_config_home(&request);
         let config_base = adopt_client_config_base(provided_config_home, &user, uid)
@@ -1083,7 +1192,7 @@ fn handle_client(
             let mut exec_command: ExecCommand = serde_json::from_slice(&cmd)?;
             exec_command.user = Some(user.name);
             exec_command.group = Some(group.name);
-            let json = exec_command.json;
+            let mut json = exec_command.json;
             let execution = (|| -> anyhow::Result<()> {
                 // Read the execution request and its descriptors before refusing
                 // admission, so the client can receive the structured error.
@@ -1094,6 +1203,7 @@ fn handle_client(
                 // Execution may wait for an application for an arbitrary duration.
                 clear_socket_timeouts(&conn)?;
                 crate::profiles::prepare(&mut exec_command)?;
+                json = exec_command.json;
                 let requested_application = exec_command.application.clone();
                 let silent = exec_command.silent;
                 let keep_alive = exec_command.keep_alive;
@@ -1103,7 +1213,7 @@ fn handle_client(
 
                 // `--create-netns-only`: bring up the namespace and leave it alive
                 // without spawning an application. The client learns the namespace
-                // name and exits; `vopono stop --namespace` tears it down later.
+                // name and exits; `vopono stop namespace` tears it down later.
                 if exec_command.create_netns_only {
                     let mut setup = crate::exec::setup_daemon_namespace_only(
                         exec_command,
@@ -1134,6 +1244,12 @@ fn handle_client(
                             setup.ns.detach();
                             return Err(error);
                         }
+                        for port in new_ports {
+                            if !setup.ns.state.host_forwarded_ports.contains(&port) {
+                                setup.ns.state.host_forwarded_ports.push(port);
+                            }
+                        }
+                        let _ = setup.ns.write_lockfile_in_place("");
                     }
                     if let Err(error) =
                         crate::namespace_ownership::mark_persistent(&setup.ns.name, uid)
@@ -1143,25 +1259,31 @@ fn handle_client(
                         }
                         return Err(error);
                     }
-                    let session = session.insert(crate::namespace_sessions::Session::register(
+                    let registered = session.insert(crate::namespace_sessions::Session::register(
                         setup.ns,
                         uid,
                         setup.forwarder,
                         monitor,
                         recover,
                     ));
-                    session.retain_proxies(proxies);
-                    session.persist_options()?;
+                    registered.retain_proxies(proxies);
+                    if let Err(error) = registered.persist_options() {
+                        if let Some(aborted) = session.take() {
+                            aborted.abort_failed_launch();
+                        }
+                        return Err(error);
+                    }
                     drop(transition);
                     // No child will consume the received SCM_RIGHTS descriptors in
                     // this branch, so take ownership and close all three locally.
                     let (_client_stdin, client_stdout, _client_stderr) =
                         client_fds.take().expect("client fds present");
+                    let registered = session.as_ref().expect("registered session");
                     if json {
                         let report = crate::exec::launch_report_for_daemon(
-                            &session.ns,
+                            &registered.ns,
                             0,
-                            session.forwarded_port(),
+                            registered.forwarded_port(),
                             setup.reused,
                         );
                         write_client_notice(client_stdout, format!("{report}\n").as_bytes());
@@ -1170,7 +1292,7 @@ fn handle_client(
                             client_stdout,
                             format!(
                                 "{}\n",
-                                crate::exec::human_launch_report(&session.ns, setup.reused)
+                                crate::exec::human_launch_report(&registered.ns, setup.reused)
                             )
                             .as_bytes(),
                         );
@@ -1193,13 +1315,6 @@ fn handle_client(
                 };
                 let client_has_tty = stdin_is_tty;
                 let pty_bridges_stdout = client_has_tty && stdout_is_tty;
-                let client_report_out = if !pty_bridges_stdout && (!silent || json) {
-                    Some(nix::unistd::dup(
-                        client_fds.as_ref().expect("client fds present").1.as_fd(),
-                    )?)
-                } else {
-                    None
-                };
                 let human_notice_fd = if !json && !silent {
                     Some(nix::unistd::dup(
                         client_fds.as_ref().expect("client fds present").2.as_fd(),
@@ -1207,6 +1322,10 @@ fn handle_client(
                 } else {
                     None
                 };
+                // In non-TTY JSON mode, buffer child stdout through a pipe so the
+                // launch report is always emitted as line 1 with no mid-line
+                // interleaving against fast applications.
+                let mut json_stdout_relay: Option<(OwnedFd, OwnedFd)> = None;
                 let (mut application, ns, host_proxies, reused): (
                     vopono_core::network::application_wrapper::ApplicationWrapper,
                     vopono_core::network::netns::NetworkNamespace,
@@ -1226,6 +1345,10 @@ fn handle_client(
                     let fds = client_fds.as_ref().expect("client fds present");
                     let child_out = if stdout_is_tty {
                         nix::unistd::dup(p.slave.as_fd())?
+                    } else if json {
+                        let (pipe_read, pipe_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC)?;
+                        json_stdout_relay = Some((pipe_read, nix::unistd::dup(fds.1.as_fd())?));
+                        pipe_write
                     } else {
                         nix::unistd::dup(fds.1.as_fd())?
                     };
@@ -1244,10 +1367,18 @@ fn handle_client(
                     )?;
                     pty_master = Some(p.master);
                 } else {
+                    let (in_fd, out_fd, err_fd) = client_fds.take().expect("client fds present");
+                    let child_out = if json {
+                        let (pipe_read, pipe_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC)?;
+                        json_stdout_relay = Some((pipe_read, out_fd));
+                        pipe_write
+                    } else {
+                        out_fd
+                    };
                     (application, ns, host_proxies, reused) = execute_as_daemon_with_stdio(
                         exec_command,
                         false,
-                        client_fds.take(),
+                        Some((in_fd, child_out, err_fd)),
                         false,
                         Some(forwarded_env.clone()),
                     )?;
@@ -1268,7 +1399,7 @@ fn handle_client(
                     },
                 );
 
-                let session = session.insert(crate::namespace_sessions::Session::register(
+                let registered = session.insert(crate::namespace_sessions::Session::register(
                     ns,
                     uid,
                     application.port_forwarding,
@@ -1278,55 +1409,67 @@ fn handle_client(
                 if keep_alive {
                     info!(
                         "Keep-alive flag active - marking network namespace {} persistent",
-                        session.ns.name
+                        registered.ns.name
                     );
                     if let Err(error) =
-                        crate::namespace_ownership::mark_persistent(&session.ns.name, uid)
+                        crate::namespace_ownership::mark_persistent(&registered.ns.name, uid)
                     {
                         let _ = application.handle.kill();
                         let _ = application.handle.wait();
+                        if let Some(aborted) = session.take() {
+                            aborted.abort_failed_launch();
+                        }
                         return Err(error);
                     }
                 }
-                session.retain_proxies(host_proxies);
-                if let Err(error) = session.persist_options() {
+                registered.retain_proxies(host_proxies);
+                if let Err(error) = registered.persist_options() {
                     let _ = application.handle.kill();
                     let _ = application.handle.wait();
+                    if let Some(aborted) = session.take() {
+                        aborted.abort_failed_launch();
+                    }
                     return Err(error);
                 }
-                let forwarded_port = session.forwarded_port();
+                let forwarded_port = registered.forwarded_port();
                 let mut launch_notice = if json {
                     let report = crate::exec::launch_report_for_daemon(
-                        &session.ns,
+                        &registered.ns,
                         application.handle.id(),
                         forwarded_port,
                         reused,
                     );
                     Some(format!("{report}\n"))
-                } else if !silent {
+                } else if !silent && pty_bridges_stdout {
                     forwarded_port.map(|port| format!("Port Forwarding on port {port}\n"))
                 } else {
                     None
                 };
-                drop(transition);
-                if let Some(fd) = human_notice_fd {
-                    write_client_notice(
-                        fd,
-                        format!(
-                            "{}\n",
-                            crate::exec::human_launch_report(&session.ns, reused)
-                        )
-                        .as_bytes(),
+                let human_notice = (!json && !silent).then(|| {
+                    let mut text = format!(
+                        "{}\n",
+                        crate::exec::human_launch_report(&registered.ns, reused)
                     );
-                }
-                // Write launch summary / forwarded port notice AFTER releasing the
-                // namespace transition lock so a stalled client pipe cannot deadlock
-                // operations on this namespace.
-                if let Some(dup_fd) = client_report_out
-                    && let Some(notice) = launch_notice.take()
+                    if !pty_bridges_stdout && let Some(port) = forwarded_port {
+                        text.push_str(&format!("Port Forwarding on port {port}\n"));
+                    }
+                    text
+                });
+                drop(transition);
+                if let Some(fd) = human_notice_fd
+                    && let Some(notice) = human_notice
                 {
-                    write_client_notice(dup_fd, notice.as_bytes());
+                    write_client_notice(fd, notice.as_bytes());
                 }
+                let json_relay_thread = if let Some((pipe_read, client_stdout)) = json_stdout_relay
+                {
+                    let prefix = launch_notice.take().unwrap_or_default().into_bytes();
+                    Some(thread::spawn(move || {
+                        copy_json_stdout(File::from(pipe_read), File::from(client_stdout), prefix);
+                    }))
+                } else {
+                    None
+                };
 
                 let status = wait_for_application(
                     &mut application.handle,
@@ -1342,6 +1485,9 @@ fn handle_client(
                         }
                     }),
                 )?;
+                if let Some(relay) = json_relay_thread {
+                    let _ = relay.join();
+                }
 
                 // Remove this application's status before the namespace controller
                 // waits for other clients, detached children or explicit persistence.
@@ -1352,7 +1498,10 @@ fn handle_client(
                 Ok(())
             })();
             if let Err(error) = execution {
-                if json {
+                let supports_json_error = client_version
+                    .as_deref()
+                    .is_some_and(|version| version_at_least(version, (1, 1, 0)));
+                if json && supports_json_error {
                     write_response(
                         &mut conn,
                         &DaemonResponse::Json(serde_json::to_vec(

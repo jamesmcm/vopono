@@ -79,7 +79,7 @@ pub(crate) fn prepare(argv: &[&str], runtime: &Path) -> anyhow::Result<Vec<Strin
     )?;
     fs::set_permissions(&plan, fs::Permissions::from_mode(0o600))?;
     Ok(vec![
-        std::env::current_exe()?
+        crate::util::current_vopono_exe()?
             .to_str()
             .context("Invalid helper path")?
             .to_owned(),
@@ -212,13 +212,9 @@ pub fn run(path: &Path) -> anyhow::Result<()> {
         for signal in signals.pending() {
             if signal == signal_hook::consts::SIGUSR1 {
                 let recovery = runtime.join(RECOVERY_PROFILE).is_file();
-                if !recovery && let Some(child) = &child {
-                    let _ = nix::sys::signal::kill(
-                        nix::unistd::Pid::from_raw(child.id() as i32),
-                        nix::sys::signal::Signal::SIGUSR1,
-                    );
-                    continue;
-                }
+                // Always respawn cleanly on recovery so wedged children or
+                // fixed-local-port/persist-local-ip sessions reset completely
+                // instead of hitting `--connect-retry-max 1`.
                 if let Some(mut child) = child.take() {
                     terminate(&mut child);
                 }

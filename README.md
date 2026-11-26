@@ -122,7 +122,7 @@ protocol = "Wireguard"
 server = "usa-us22"
 ```
 
-Note that the values are case-sensitive.
+Provider, protocol, and firewall values are case-insensitive.
 
 See the [vopono User Guide](USERGUIDE.md) for much more detailed usage instructions
 (including handling daemons and servers).

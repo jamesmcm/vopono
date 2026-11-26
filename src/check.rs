@@ -443,7 +443,7 @@ fn probe_namespace_inner(
     skip_ipv6: bool,
     skip_dns: bool,
 ) -> OutcomeView {
-    let exe = std::env::current_exe().context("Failed to locate the vopono binary");
+    let exe = vopono_core::util::current_vopono_exe().context("Failed to locate the vopono binary");
     let launched = exe.and_then(|exe| {
         let ip_bin = vopono_core::diagnostics::host::system_tool("ip")
             .unwrap_or_else(|| std::path::PathBuf::from("ip"));

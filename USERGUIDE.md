@@ -91,7 +91,7 @@ for debugging connection issues.
 
 In daemon mode, `--create-netns-only` creates the namespace, prints its
 name to stdout, and returns immediately; the namespace is left running
-until you stop it with `vopono stop --namespace <name>`.
+until you stop it with `vopono stop namespace <name>`.
 
 This can also be used to launch an application without sudo via firejail
 - e.g. (where `none` is passed as the dummy application):
@@ -265,11 +265,11 @@ server = "usa-us22"
 postup = "/home/archie/postup.sh"
 predown = "/home/archie/predown.sh"
 user = "archie"
-dns = "8.8.8.8"
+dns = ["8.8.8.8"]
 # custom = "/home/user/vpn/mycustomconfig.ovpn"
 ```
 
-Note that the values are case-sensitive. If you use a custom config file
+Provider, protocol, and firewall values are case-insensitive. If you use a custom config file
 then you should not set the provider or server (setting the protocol is
 also optional).
 
@@ -676,7 +676,7 @@ Note for same daemons you may need to use the `-k` keep-alive option in
 case the process ID changes (you will then need to manually kill the
 daemon after finishing). In daemon mode, `-k` leaves the namespace
 running after the application exits and `-f` starts the host->namespace
-proxy; stop it later with `vopono stop --namespace <name>`. For security,
+proxy; stop it later with `vopono stop namespace <name>`. For security,
 the system daemon only permits host forwarding on unprivileged ports
 (`1024` and above).
 
@@ -847,8 +847,8 @@ a tab separated table:
 
 ```bash
 $ vopono list namespaces
-namespace       provider        protocol        num_applications        uptime
-vopono_tig_us_losangeles        TigerVpn        OpenVpn 2       28s
+namespace       provider        protocol        applications    state   uptime
+vopono_tig_us_losangeles        TigerVpn        OpenVpn 2       active  28s
 
 $ vopono list applications
 namespace       provider        protocol        application     uptime
@@ -883,7 +883,7 @@ Some countries / ISPs have heavier censorship using Deep Packet Inspection, etc.
 --trojan-host <TROJAN_HOST>
     Trojan server address - hostname or IP, will not verify SSL if IP address is given. Port is optional (default is 443)
 --trojan-password <TROJAN_PASSWORD>
-    Trojan server password Set this in ~/.config/vopono/vopono.toml or use --trojan-config to avoid setting this in the command line
+    Trojan server password Set this in ~/.config/vopono/config.toml or use --trojan-config to avoid setting this in the command line
 --trojan-no-verify
     Disable SSL verification for Trojan server
 --trojan-config <TROJAN_CONFIG>
@@ -896,7 +896,7 @@ Standard Wireguard forwarding example:
 $ vopono -v exec --protocol wireguard --custom ~/AirVPN_Czech-Republic_UDP-1637-Entry3.conf --trojan-host your_trojan_domain.xyz --trojan-password your_trojan_password firefox-developer-edition
 ```
 
-Note you can use the `~/.config/vopono/vopono.toml` file to store your password or provide a custom Trojan config JSON to avoid passing it on the command line.
+Note you can use the `~/.config/vopono/config.toml` file to store your password or provide a custom Trojan config JSON to avoid passing it on the command line.
 
 Custom Trojan JSON example:
 

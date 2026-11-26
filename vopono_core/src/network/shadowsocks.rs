@@ -23,6 +23,12 @@ use std::str::FromStr;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Shadowsocks {
     pub(crate) pid: u32,
+    #[serde(default)]
+    pub(crate) ns_name: Option<String>,
+    #[serde(default)]
+    pub(crate) server_ip: Option<IpAddr>,
+    #[serde(default)]
+    pub(crate) server_port: Option<u16>,
     #[serde(skip)]
     cleanup_enabled: bool,
 }
@@ -80,6 +86,9 @@ impl Shadowsocks {
 
         Ok(Self {
             pid: handle.id(),
+            ns_name: Some(netns.name.clone()),
+            server_ip: Some(*route),
+            server_port: Some(port),
             cleanup_enabled: true,
         })
     }
@@ -140,9 +149,19 @@ impl Drop for Shadowsocks {
             return;
         }
         let pid = nix::unistd::Pid::from_raw(self.pid as i32);
-        match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
-            Ok(_) => debug!("Killed Shadowsocks (pid: {})", self.pid),
-            Err(e) => error!("Failed to kill Shadowsocks (pid: {}): {:?}", self.pid, e),
+        let pid_matches = self.ns_name.as_deref().is_none_or(|ns| {
+            crate::util::process_is_in_network_namespace(self.pid, ns).unwrap_or(false)
+        });
+        if pid_matches {
+            match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
+                Ok(_) => debug!("Killed Shadowsocks (pid: {})", self.pid),
+                Err(e) => error!("Failed to kill Shadowsocks (pid: {}): {:?}", self.pid, e),
+            }
+        } else {
+            debug!(
+                "Skipping Shadowsocks kill for pid {}: no longer in target namespace",
+                self.pid
+            );
         }
         while matches!(
             nix::sys::wait::waitpid(pid, None),

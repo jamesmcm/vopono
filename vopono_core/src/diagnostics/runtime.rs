@@ -23,7 +23,13 @@ pub fn skip_ipv4(state: &NamespaceSnapshot) -> bool {
 
 fn skip_tunnel_family(state: &NamespaceSnapshot, ipv6: bool) -> bool {
     if let Some(wg) = &state.wireguard {
-        return !wg.interface_addresses.iter().any(|ip| ip.is_ipv6() == ipv6);
+        let has_address = wg.interface_addresses.iter().any(|ip| ip.is_ipv6() == ipv6);
+        let has_route = if ipv6 {
+            wg.routed_ipv6.unwrap_or(true)
+        } else {
+            wg.routed_ipv4.unwrap_or(true)
+        };
+        return !(has_address && has_route);
     }
     if state.openvpn.is_some() {
         let text = host::read_command(
@@ -94,7 +100,9 @@ pub fn collect(
                 Err(_) => diagnostics.push(Diagnostic::new(Code::EndpointDns, State::Warning, "Host cannot resolve the frozen VPN endpoint; an existing IP-based tunnel can still work, but reconnection may fail", Some("Inspect host DNS or regenerate a provider IP-address profile; namespace DNS does not bootstrap the VPN endpoint"))),
             }
         }
-        match topology::namespace_network_until(state, false, skip_ipv6, 250, deadline) {
+        // Periodic background monitoring stays passive (offline=true) so it
+        // never opens live TCP connections to user services on --open-ports/--forward.
+        match topology::namespace_network_until(state, true, skip_ipv6, 250, deadline) {
             Ok(network) => diagnostics.extend(network.diagnostics),
             Err(_) => diagnostics.push(Diagnostic::new(
                 Code::ProbeUnavailable,

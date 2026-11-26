@@ -319,7 +319,10 @@ fn setup_namespace_inner(
     {
         let dir = vopono_dir()?;
         if !vopono_core::util::ensure_dir_as_config_owner(&dir, Some(0o700))? {
-            if vopono_core::util::is_daemon_mode() {
+            let is_root_owner = vopono_core::util::resolve_config_owner()?
+                .0
+                .is_some_and(|uid| uid.is_root());
+            if vopono_core::util::is_daemon_mode() && !is_root_owner {
                 anyhow::bail!("daemon config owner unavailable");
             }
             create_dir_all(&dir)?;
@@ -554,17 +557,40 @@ fn setup_namespace_inner(
             }
         }
 
+        if vopono_core::util::is_daemon_mode() {
+            const MAX_DAEMON_OPEN_HOSTS: usize = 128;
+            const MAX_DAEMON_OPEN_PORTS: usize = 64;
+            if let Some(hosts) = parsed_command.open_hosts.as_ref() {
+                anyhow::ensure!(
+                    hosts.len() <= MAX_DAEMON_OPEN_HOSTS,
+                    "Too many --open-hosts entries for daemon mode (maximum {MAX_DAEMON_OPEN_HOSTS})"
+                );
+            }
+            if let Some(ports) = parsed_command.open_ports.as_ref() {
+                anyhow::ensure!(
+                    ports.len() <= MAX_DAEMON_OPEN_PORTS,
+                    "Too many --open-ports entries for daemon mode (maximum {MAX_DAEMON_OPEN_PORTS})"
+                );
+            }
+            if let Some(forwards) = parsed_command.forward.as_ref() {
+                anyhow::ensure!(
+                    forwards.len() <= MAX_DAEMON_OPEN_PORTS,
+                    "Too many --forward entries for daemon mode (maximum {MAX_DAEMON_OPEN_PORTS})"
+                );
+            }
+        }
+
         let target_subnet = {
             let _allocation = SUBNET_ALLOCATION.lock().unwrap_or_else(|p| p.into_inner());
             let target_subnet = get_target_subnet()?;
-            ns.add_routing(
-                target_subnet,
-                parsed_command.open_hosts.as_ref(),
-                parsed_command.allow_host_access,
-                parsed_command.disable_ipv6,
-            )?;
+            ns.add_veth_routing(target_subnet, parsed_command.disable_ipv6)?;
             target_subnet
         };
+        ns.add_host_routes(
+            parsed_command.open_hosts.as_ref(),
+            parsed_command.allow_host_access,
+            parsed_command.disable_ipv6,
+        )?;
         ns.enable_unprivileged_ping()?;
 
         if parsed_command.firewall == vopono_core::network::firewall::Firewall::NfTables {
@@ -685,9 +711,27 @@ fn setup_namespace_inner(
                 )?;
                 set_env_vars(&ns, forwarder.as_deref(), &mut cmd, &host_env_vars);
                 let mut child = cmd.spawn()?;
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
+                if vopono_core::util::is_daemon_mode() {
+                    // Bound daemon hook waiting so long-lived postup commands do not
+                    // accumulate OS threads indefinitely.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    std::thread::spawn(move || {
+                        while std::time::Instant::now() < deadline {
+                            match child.try_wait() {
+                                Ok(Some(_)) | Err(_) => return,
+                                Ok(None) => {
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                }
+                            }
+                        }
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    });
+                } else {
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                }
             }
         }
     }
@@ -795,12 +839,19 @@ fn host_forward_proxies(
         .as_ref()
         .context("No IPv4 veth pair IP available for --forward")?
         .namespace_ip;
+    let owner_uid = if vopono_core::util::is_daemon_mode() {
+        vopono_core::util::resolve_config_owner()
+            .ok()
+            .and_then(|(uid, _)| uid.map(|u| u.as_raw()))
+    } else {
+        None
+    };
     let mut proxies = Vec::new();
     for port in ports {
         validate_host_forward_port(port, allow_privileged_ports)?;
         let target = SocketAddr::new(namespace_ip, port);
         debug!("Forwarding port: {port}, {target}");
-        let proxy = TcpProxy::new(port, target, false).with_context(|| {
+        let proxy = TcpProxy::new_for_uid(port, target, false, owner_uid).with_context(|| {
             format!(
                 "Could not bind host TCP port {port} for namespace {}",
                 ns.name

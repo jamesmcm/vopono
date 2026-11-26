@@ -228,6 +228,40 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
         )?;
         peer.address = address;
     } else if let Some(openvpn) = &state.openvpn {
+        // Clear any stale host UDP conntrack entry for the OpenVPN remote before
+        // restarting the child, matching WireGuard recovery on underlay changes.
+        if openvpn.recovery_udp
+            && let (Some(address), Some(port)) = (openvpn.recovery_address, openvpn.recovery_port)
+            && let Some(veth_ips) = &state.veth_pair_ips
+        {
+            let ns_ip = if address.is_ipv4() {
+                veth_ips.ipv4.as_ref().map(|pair| pair.namespace_ip)
+            } else {
+                veth_ips.ipv6.as_ref().map(|pair| pair.namespace_ip)
+            };
+            if let Some(ns_ip) = ns_ip {
+                let remote = SocketAddr::new(address, port);
+                if let Ok(output) = NetworkNamespace::exec_with_output(&state.name, &["ss", "-Hnu"])
+                    && output.status.success()
+                {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        let fields: Vec<&str> = line.split_whitespace().collect();
+                        if let (Some(local), Some(peer)) = (fields.get(3), fields.get(4))
+                            && peer.parse::<SocketAddr>().ok() == Some(remote)
+                            && let Some(local_port) = local
+                                .rsplit_once(':')
+                                .and_then(|(_, p)| p.parse::<u16>().ok())
+                        {
+                            let _ = super::conntrack::delete_udp(
+                                SocketAddr::new(ns_ip, local_port),
+                                remote,
+                            );
+                        }
+                    }
+                }
+            }
+        }
         // OpenVPN restarts from the frozen configuration. Automatic endpoint
         // DNS rotation currently only updates WireGuard kill-switch rules;
         // OpenVPN profiles that rotate to a new IP may require an explicit

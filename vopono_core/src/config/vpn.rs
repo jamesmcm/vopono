@@ -118,7 +118,15 @@ pub fn verify_auth(
             provider.validate_auth(username, password)?;
             Ok(Some(auth_file))
         }
-        Err(_) => {
+        Err(error) => {
+            // Only prompt for credentials when the auth file does not exist.
+            // If an existing path/symlink failed dropped-privilege reading,
+            // fail closed instead of falling back to privileged reads/prompts.
+            if std::fs::symlink_metadata(&auth_file).is_ok() {
+                return Err(error).with_context(|| {
+                    format!("Failed to read OpenVPN auth file {}", auth_file.display())
+                });
+            }
             debug!(
                 "No auth file: {} - prompting user",
                 auth_file.to_string_lossy()

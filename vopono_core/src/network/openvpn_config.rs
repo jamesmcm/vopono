@@ -46,6 +46,7 @@ fn allowed(option: &str) -> bool {
             | "port"
             | "rport"
             | "disable-dco"
+            | "disable-occ"
             | "persist-key"
             | "persist-tun"
             | "persist-remote-ip"
@@ -53,23 +54,30 @@ fn allowed(option: &str) -> bool {
             | "auth-nocache"
             | "auth-retry"
             | "auth-token"
+            | "auth-token-user"
             | "key-direction"
+            | "keysize"
+            | "prng"
             | "cipher"
             | "data-ciphers"
             | "data-ciphers-fallback"
             | "ncp-ciphers"
+            | "ncp-disable"
             | "auth"
             | "tls-cipher"
             | "tls-ciphersuites"
             | "tls-version-min"
             | "tls-version-max"
             | "tls-cert-profile"
+            | "tls-groups"
+            | "ecdh-curve"
             | "remote-cert-tls"
             | "remote-cert-ku"
             | "remote-cert-eku"
             | "verify-x509-name"
             | "verify-hash"
             | "x509-username-field"
+            | "x509-track"
             | "ns-cert-type"
             | "reneg-sec"
             | "reneg-bytes"
@@ -79,14 +87,18 @@ fn allowed(option: &str) -> bool {
             | "ping"
             | "ping-exit"
             | "ping-restart"
+            | "ping-timer-rem"
             | "keepalive"
             | "connect-retry"
             | "connect-retry-max"
             | "connect-timeout"
+            | "server-poll-timeout"
+            | "session-timeout"
             | "explicit-exit-notify"
             | "float"
             | "pull"
             | "pull-filter"
+            | "allow-pull-fqdn"
             | "route"
             | "route-ipv6"
             | "route-nopull"
@@ -95,17 +107,27 @@ fn allowed(option: &str) -> bool {
             | "route-delay"
             | "route-metric"
             | "route-gateway"
+            | "route-method"
+            | "max-routes"
             | "dhcp-option"
             | "block-outside-dns"
+            | "register-dns"
+            | "tun-ipv6"
             | "tun-mtu"
             | "tun-mtu-extra"
             | "link-mtu"
             | "mssfix"
+            | "mtu-disc"
+            | "mtu-test"
             | "fragment"
             | "sndbuf"
             | "rcvbuf"
+            | "txqueuelen"
+            | "tcp-queue-limit"
+            | "shaper"
             | "fast-io"
             | "comp-lzo"
+            | "comp-noadapt"
             | "compress"
             | "allow-compression"
             | "topology"
@@ -125,14 +147,18 @@ fn allowed(option: &str) -> bool {
             | "replay-warnings"
             | "http-proxy-option"
             | "http-proxy-retry"
+            | "http-proxy-timeout"
             | "socks-proxy-retry"
             | "allow-recursive-routing"
             | "inactive"
+            | "single-session"
             | "push-peer-info"
             | "preresolve"
             | "tls-exit"
             | "tls-crypt-v2-allow-noncookie"
             | "auth-gen-token"
+            | "compat-mode"
+            | "ignore-unknown-option"
     )
 }
 fn input_file(option: &str) -> bool {
@@ -195,13 +221,15 @@ pub(crate) fn validate(content: &str, config: &Path, auth: Option<&Path>) -> any
     let mut referenced_bytes = 0usize;
     sanitize_with_auth(content, auth.is_some(), |reference, _| {
         let path = config.parent().unwrap_or(Path::new(".")).join(reference);
-        let bytes = crate::util::owner_write::read_file_as_config_owner(&path)?;
+        let bytes = crate::util::owner_write::read_file_as_config_owner(&path).map_err(|_| {
+            anyhow::anyhow!("Referenced OpenVPN input file is missing or unreadable")
+        })?;
         account_reference(&bytes, &mut referenced_files, &mut referenced_bytes)?;
         Ok(path)
     })?;
     if let Some(auth) = auth {
         crate::util::owner_write::read_file_as_config_owner(auth)
-            .context("Could not load the selected OpenVPN auth file")?;
+            .map_err(|_| anyhow::anyhow!("Selected OpenVPN auth file is missing or unreadable"))?;
     }
     Ok(())
 }
@@ -220,6 +248,35 @@ enum ConfigLine<'a> {
     },
     ConnectionStart,
     ConnectionEnd,
+}
+
+/// Strip unquoted `#` or `;` inline comments matching OpenVPN's line parser.
+fn strip_inline_comment(line: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && !in_single {
+            escaped = true;
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            continue;
+        }
+        if !in_single && !in_double && matches!(ch, '#' | ';') {
+            return line[..idx].trim_end();
+        }
+    }
+    line
 }
 
 fn parse_lines(content: &str) -> anyhow::Result<Vec<ConfigLine<'_>>> {
@@ -264,11 +321,15 @@ fn parse_lines(content: &str) -> anyhow::Result<Vec<ConfigLine<'_>>> {
             inline = Some(tag);
             output.push(ConfigLine::Inline { raw: line, tag });
         } else {
-            let fields = shell_words::split(line)
+            let stripped = strip_inline_comment(line);
+            if stripped.is_empty() {
+                continue;
+            }
+            let fields = shell_words::split(stripped)
                 .map_err(|_| anyhow::anyhow!("Malformed OpenVPN directive on line {number}"))?;
             ensure!(!fields.is_empty(), "Empty OpenVPN directive");
             output.push(ConfigLine::Directive {
-                raw: line,
+                raw: stripped,
                 fields,
                 number,
             });
@@ -442,8 +503,8 @@ pub(crate) fn endpoints(content: &str) -> anyhow::Result<Vec<crate::diagnostics:
         }
     }
     ensure!(
-        !endpoints.is_empty() && endpoints.len() <= 16,
-        "Expected 1-16 OpenVPN endpoints"
+        !endpoints.is_empty() && endpoints.len() <= 256,
+        "Expected 1-256 OpenVPN endpoints"
     );
     Ok(endpoints)
 }
@@ -505,6 +566,13 @@ fn sanitize_with_auth(
         if override_auth && option == "auth-user-pass" {
             continue;
         }
+        // Commercial provider bundles (e.g. ProtonVPN, IVPN) commonly include
+        // `script-security 2` even after `up`/`down` hooks are removed. Since
+        // daemon mode rejects all script hooks and passes `--script-security 1`
+        // after `--config`, omit this directive from the frozen snapshot.
+        if option == "script-security" {
+            continue;
+        }
         if option == "dns-updown" {
             ensure!(
                 fields.len() == 2 && fields[1] == "disable",
@@ -532,17 +600,17 @@ fn sanitize_with_auth(
         }
         if option == "setenv" {
             let variable = fields.get(1).map(String::as_str).unwrap_or("");
-            let safe_variable = variable == "CLIENT_CERT"
-                || variable.starts_with("UV_")
-                    && variable
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'_');
+            let safe_variable = fields.len() == 3
+                && (variable == "CLIENT_CERT"
+                    || variable.starts_with("UV_")
+                        && variable
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_'));
             let safe_optional = variable == "opt"
-                && fields
-                    .get(2)
-                    .is_some_and(|option| option == "block-outside-dns");
+                && fields.len() >= 3
+                && fields.get(2).is_some_and(|opt| allowed(opt));
             ensure!(
-                fields.len() == 3 && (safe_variable || safe_optional),
+                safe_variable || safe_optional,
                 "Unsafe OpenVPN environment directive in daemon configuration"
             );
             output.push_str(line);
@@ -571,8 +639,7 @@ fn sanitize_with_auth(
                     output.push_str(path);
                     if let Some(direction) = fields.get(2) {
                         ensure!(
-                            matches!(option, "tls-auth" | "secret")
-                                && (direction == "0" || direction == "1"),
+                            option == "tls-auth" && (direction == "0" || direction == "1"),
                             "Invalid TLS key direction"
                         );
                         output.push(' ');
@@ -799,5 +866,34 @@ mod tests {
         assert_eq!(copied, ["ca file.crt", "ta.key"]);
         assert!(safe.contains("tls-auth /run/private/input-2 1"));
         assert!(!safe.contains("ta.key"));
+    }
+
+    #[test]
+    fn accepts_provider_directives_inline_semicolons_and_strips_script_security() {
+        let mut config = String::from(
+            "client ; inline semicolon comment\n\
+             dev tun ; tunnel device\n\
+             proto udp\n\
+             ping-timer-rem\n\
+             server-poll-timeout 10\n\
+             disable-occ\n\
+             tun-ipv6\n\
+             ignore-unknown-option data-ciphers\n\
+             script-security 2\n\
+             setenv opt disable-dco\n",
+        );
+        for i in 1..=64 {
+            config.push_str(&format!("remote 198.51.100.{i} 1194 ; server #{i}\n"));
+        }
+        let safe = sanitize(&config, |_, _| unreachable!()).unwrap();
+        assert!(!safe.contains("script-security"));
+        assert!(safe.contains("ping-timer-rem"));
+        assert!(safe.contains("server-poll-timeout 10"));
+        assert!(safe.contains("disable-occ"));
+        assert!(safe.contains("setenv opt disable-dco"));
+        let remotes = endpoints(&config).unwrap();
+        assert_eq!(remotes.len(), 64);
+        assert_eq!(remotes[0].host, "198.51.100.1");
+        assert_eq!(remotes[63].host, "198.51.100.64");
     }
 }
