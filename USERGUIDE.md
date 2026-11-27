@@ -212,8 +212,10 @@ The report shows the connection in use and whether the launch reused an existing
 namespace. `server` is the selected provider server ID or custom endpoint when
 available. The GUI shows these details on the Launch and Logs screens.
 
-Scan stdout for `"event":"launched"` rather than assuming it is the first
-line - host-side setup commands may print earlier lines.
+Scan stdout for `"event":"launched"`. Direct sudo setup commands can print
+earlier lines. With daemon forwarding and redirected stdout, vopono drains
+buffered output briefly after the launched application exits. A background
+descendant that needs to keep writing should redirect its output independently.
 
 Every completed `vopono sync` also updates `~/.config/vopono/.last-sync`
 with the timestamp, provider and protocol, so frontends can detect newly
@@ -1918,9 +1920,10 @@ The default limit is four active jobs, configurable with `--max-jobs` up to
 eight. The default job lifetime is 300 seconds, including tunnel setup; set
 `--max-job-seconds` up to 3600 to change the upper bound. Each call can request a
 shorter `timeout_seconds`. Expiry requests cancellation and sets `timed_out: true`
-in `job_status`. VPN setup may still be
-in progress when cancellation is requested. The `finished` flag means tracking
-has ended; `indeterminate` or `cleanup_pending: true` still requires inspection.
+in `job_status`. A cancelled job still in VPN setup is blocked from starting
+its application. Cleanup can wait for the current setup operation to return.
+The `finished` flag means tracking has ended. Inspect the namespace if the
+result is `indeterminate` or `cleanup_pending: true`.
 Each session retains up to 64 recent jobs; completed jobs are
 evicted as new ones arrive. Unresolved cleanup records are retained; if they fill
 the history, further launches are rejected until you resolve those cleanups or

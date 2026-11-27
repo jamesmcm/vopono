@@ -279,7 +279,7 @@ fn strip_inline_comment(line: &str) -> &str {
     line
 }
 
-fn parse_lines(content: &str) -> anyhow::Result<Vec<ConfigLine<'_>>> {
+fn parse_lines(content: &str, trusted: bool) -> anyhow::Result<Vec<ConfigLine<'_>>> {
     ensure!(
         !content.contains('\0'),
         "NUL bytes are not supported in OpenVPN configurations"
@@ -317,7 +317,10 @@ fn parse_lines(content: &str) -> anyhow::Result<Vec<ConfigLine<'_>>> {
                 .strip_prefix('<')
                 .and_then(|s| s.strip_suffix('>'))
                 .context("Malformed inline OpenVPN block")?;
-            ensure!(inline_file(tag), "Unsupported inline OpenVPN block");
+            ensure!(
+                trusted || inline_file(tag),
+                "Unsupported inline OpenVPN block"
+            );
             inline = Some(tag);
             output.push(ConfigLine::Inline { raw: line, tag });
         } else {
@@ -349,7 +352,7 @@ pub(crate) fn freeze_recovery_remotes(
     disable_ipv6: bool,
 ) -> anyhow::Result<String> {
     endpoints(content)?;
-    let lines = parse_lines(content)?;
+    let lines = parse_lines(content, false)?;
     let mut protocols = vec![None];
     let mut group = 0;
     let mut remote_count = 0;
@@ -429,6 +432,15 @@ pub(crate) fn freeze_recovery_remotes(
 }
 
 pub(crate) fn endpoints(content: &str) -> anyhow::Result<Vec<crate::diagnostics::Endpoint>> {
+    remote_endpoints(content, false)
+}
+
+/// Inspect top-level remotes without applying daemon restrictions to a trusted
+/// profile. OpenVPN itself processes its working directory and any includes.
+pub(crate) fn remote_endpoints(
+    content: &str,
+    trusted: bool,
+) -> anyhow::Result<Vec<crate::diagnostics::Endpoint>> {
     use crate::diagnostics::{Endpoint, valid_host};
     struct Group {
         tcp: bool,
@@ -441,7 +453,7 @@ pub(crate) fn endpoints(content: &str) -> anyhow::Result<Vec<crate::diagnostics:
         remotes: Vec::new(),
     }];
     let mut current = 0;
-    for line in parse_lines(content)? {
+    for line in parse_lines(content, trusted)? {
         let fields = match line {
             ConfigLine::Inline { .. } => continue,
             ConfigLine::ConnectionStart => {
@@ -476,7 +488,9 @@ pub(crate) fn endpoints(content: &str) -> anyhow::Result<Vec<crate::diagnostics:
                     .parse()
                     .map_err(|_| anyhow::anyhow!("Invalid OpenVPN port"))?;
             }
-            "config" | "cd" => anyhow::bail!("Nested OpenVPN configuration is unsupported"),
+            "config" | "cd" if !trusted => {
+                anyhow::bail!("Nested OpenVPN configuration is unsupported")
+            }
             _ => {}
         }
     }
@@ -539,7 +553,7 @@ fn sanitize_with_auth(
 ) -> anyhow::Result<String> {
     let mut output = String::new();
     let mut file_index = 0;
-    for entry in parse_lines(content)? {
+    for entry in parse_lines(content, false)? {
         let (line, fields, number) = match entry {
             ConfigLine::Inline { raw, tag } => {
                 if !override_auth || tag != "auth-user-pass" {

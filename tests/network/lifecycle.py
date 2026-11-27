@@ -34,8 +34,14 @@ for abrupt in (False, True):
         wait_for(echo)
     else:
         with socket.socket() as blocker:
-            def occupy_relay_port():
+            blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+            def bind_blocker():
                 blocker.bind(('127.0.0.1', 43130))
+                return True
+
+            def occupy_relay_port():
+                wait_for(bind_blocker, seconds=5)
                 blocker.listen()
 
             ctx.restart(after_exit=occupy_relay_port)

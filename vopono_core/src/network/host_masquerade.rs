@@ -26,9 +26,7 @@ impl HostMasquerade {
         &mut self,
         interface: NetworkInterface,
     ) -> anyhow::Result<bool> {
-        if self.interface.name == interface.name {
-            return Ok(false);
-        }
+        let interface_changed = self.interface.name != interface.name;
         // Create the replacement first so a failure leaves the working rule in
         // place. Then remove exactly the old generation before swapping it out.
         let mut replacement = Self::add_masquerade_rule(
@@ -40,13 +38,13 @@ impl HostMasquerade {
         // Recovery also operates on inert snapshots. Only the owning
         // namespace guard may remove the replacement when it is dropped.
         replacement.set_cleanup_enabled(self.cleanup_enabled);
-        {
+        if interface_changed {
             let _nft_guard = host_nft_lock();
             self.remove_rules();
         }
         self.set_cleanup_enabled(false);
         *self = replacement;
-        Ok(true)
+        Ok(interface_changed)
     }
 
     fn nft_comment(ipv4_mask: Option<&str>, ipv6_mask: Option<&str>, interface: &str) -> String {
@@ -119,149 +117,72 @@ impl HostMasquerade {
         interface: NetworkInterface,
         firewall: Firewall,
     ) -> anyhow::Result<Self> {
-        let mut guard = HostMasquerade {
-            ipv4_mask: None,
-            ipv6_mask: None,
-            interface: interface.clone(),
-            firewall,
-            cleanup_enabled: true,
-        };
         match firewall {
             Firewall::IpTables => {
-                if let Some(mask) = ipv4_mask {
-                    // Insert before provider-managed chains such as piavpn.POSTROUTING.
-                    // If those chains run first they can consume or block namespace
-                    // traffic before vopono's MASQUERADE rule is reached.
-                    sudo_command(&[
-                        "iptables",
-                        "-t",
-                        "nat",
-                        "-I",
-                        "POSTROUTING",
-                        "-s",
-                        &mask,
-                        "-o",
-                        &interface.name,
-                        "-j",
-                        "MASQUERADE",
-                    ])
-                    .with_context(|| {
-                        format!(
-                            "Failed to add iptables masquerade rule, mask: {}, interface: {}",
-                            mask, interface.name
+                let add_rule = |program, mask: Option<&str>| {
+                    mask.map_or(Ok(false), |mask| {
+                        ensure_iptables_rule(
+                            program,
+                            Some("nat"),
+                            "POSTROUTING",
+                            &["-s", mask, "-o", &interface.name, "-j", "MASQUERADE"],
                         )
-                    })?;
-                    guard.ipv4_mask = Some(mask);
-                } else {
-                    log::error!("IPv4 mask was None for masquerade rule!");
-                }
-
-                // Will be None if IPv6 disabled
-                if let Some(mask) = ipv6_mask {
-                    sudo_command(&[
-                        "ip6tables",
-                        "-t",
-                        "nat",
-                        "-I",
-                        "POSTROUTING",
-                        "-s",
-                        &mask,
-                        "-o",
-                        &interface.name,
-                        "-j",
-                        "MASQUERADE",
-                    ])
-                    .with_context(|| {
-                        format!(
-                            "Failed to add ip6tables masquerade rule, mask: {}, interface: {}",
-                            mask, interface.name
-                        )
-                    })?;
-                    guard.ipv6_mask = Some(mask);
+                    })
+                };
+                let added_ipv4 = add_rule("iptables", ipv4_mask.as_deref())?;
+                if let Err(error) = add_rule("ip6tables", ipv6_mask.as_deref()) {
+                    if added_ipv4 && let Some(mask) = ipv4_mask.as_deref() {
+                        delete_firewall_rule(
+                            &[
+                                "iptables",
+                                "-t",
+                                "nat",
+                                "-D",
+                                "POSTROUTING",
+                                "-s",
+                                mask,
+                                "-o",
+                                &interface.name,
+                                "-j",
+                                "MASQUERADE",
+                            ],
+                            "partially installed IPv4 masquerade rule",
+                        );
+                    }
+                    return Err(error);
                 }
             }
             Firewall::NfTables => {
                 let comment =
                     Self::nft_comment(ipv4_mask.as_deref(), ipv6_mask.as_deref(), &interface.name);
-                let quoted_if = format!("\"{}\"", interface.name);
-                // Hold the lock across table/chain creation and rule insertion so
-                // a concurrent Drop cannot delete the empty table in between.
-                let _nft_guard = host_nft_lock();
-                sudo_command(&["nft", "add", "table", "inet", "vopono_nat"])
-                    .context("Failed to create nft table vopono_nat")?;
-                sudo_command(&[
-                    "nft",
-                    "add",
-                    "chain",
-                    "inet",
+                let rules = [("ip", &ipv4_mask), ("ip6", &ipv6_mask)]
+                    .into_iter()
+                    .filter_map(|(family, mask)| {
+                        let mask = mask.as_ref()?;
+                        Some(mask.parse::<ipnet::IpNet>().map(|mask| {
+                            format!(
+                                "oifname \"{}\" {family} saddr {mask} counter masquerade",
+                                interface.name
+                            )
+                        }))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                replace_nft_rules(
                     "vopono_nat",
                     "postrouting",
-                    "{ type nat hook postrouting priority 100 ; }",
-                ])
-                .context("Failed to create nft postrouting chain in vopono_nat")?;
-
-                if let Some(ref mask) = ipv4_mask {
-                    sudo_command(&[
-                        "nft",
-                        "add",
-                        "rule",
-                        "inet",
-                        "vopono_nat",
-                        "postrouting",
-                        "oifname",
-                        &quoted_if,
-                        "ip",
-                        "saddr",
-                        mask,
-                        "counter",
-                        "masquerade",
-                        "comment",
-                        &comment,
-                    ])
-                    .with_context(|| {
-                        format!(
-                            "Failed to add nftables IPv4 masquerade rule, mask: {}, interface: {}",
-                            mask, interface.name
-                        )
-                    })?;
-                }
-                if let Some(ref mask) = ipv6_mask
-                    && let Err(error) = sudo_command(&[
-                        "nft",
-                        "add",
-                        "rule",
-                        "inet",
-                        "vopono_nat",
-                        "postrouting",
-                        "oifname",
-                        &quoted_if,
-                        "ip6",
-                        "saddr",
-                        mask,
-                        "counter",
-                        "masquerade",
-                        "comment",
-                        &comment,
-                    ])
-                    .with_context(|| {
-                        format!(
-                            "Failed to add nftables IPv6 masquerade rule, mask: {}, interface: {}",
-                            mask, interface.name
-                        )
-                    })
-                {
-                    let _ = delete_nft_rules_with_comment("vopono_nat", &comment);
-                    if nft_table_has_no_rules("vopono_nat") {
-                        let _ = sudo_command(&["nft", "delete", "table", "inet", "vopono_nat"]);
-                    }
-                    guard.cleanup_enabled = false;
-                    return Err(error);
-                }
-                guard.ipv4_mask = ipv4_mask;
-                guard.ipv6_mask = ipv6_mask;
+                    "{ type nat hook postrouting priority 100; }",
+                    &comment,
+                    &rules,
+                )?;
             }
         }
-        Ok(guard)
+        Ok(Self {
+            ipv4_mask,
+            ipv6_mask,
+            interface,
+            firewall,
+            cleanup_enabled: true,
+        })
     }
 }
 
@@ -317,6 +238,7 @@ impl FirewallException {
             &self.ns_interface
         };
         if current_host.name == interface.name {
+            self.ensure_rules()?;
             return Ok(false);
         }
         let (first, second) = if self.ns_interface.name == veth {
@@ -447,204 +369,67 @@ impl FirewallException {
         firewall: Firewall,
         disable_ipv6: bool,
     ) -> anyhow::Result<Self> {
-        match firewall {
+        let mut guard = Self {
+            host_interface,
+            ns_interface,
+            firewall,
+            disable_ipv6,
+            docker_user_ipv4: false,
+            docker_user_ipv6: false,
+            ufw_forward_ipv4: false,
+            ufw_forward_ipv6: false,
+            cleanup_enabled: false,
+        };
+        guard.cleanup_enabled = true;
+        guard.ensure_rules()?;
+        Ok(guard)
+    }
+
+    fn ensure_rules(&mut self) -> anyhow::Result<()> {
+        let (host, ns) = (&self.host_interface, &self.ns_interface);
+        match self.firewall {
             Firewall::IpTables => {
-                sudo_command(&[
-                    "iptables",
-                    "-I",
-                    "FORWARD",
-                    "-i",
-                    &host_interface.name,
-                    "-o",
-                    &ns_interface.name,
-                    "-j",
-                    "ACCEPT",
-                ])
-                .with_context(|| {
-                    format!(
-                        "Failed to add iptables host input exception, host interface: {}, namespace interface: {}",
-                        host_interface.name, ns_interface.name
-                    )
-                })?;
-                sudo_command(&[
-                    "iptables",
-                    "-I",
-                    "FORWARD",
-                    "-o",
-                    &host_interface.name,
-                    "-i",
-                    &ns_interface.name,
-                    "-j",
-                    "ACCEPT",
-                ])
-                .with_context(|| {
-                    format!(
-                        "Failed to add iptables host output exception, host interface: {}, namespace interface: {}",
-                        host_interface.name, ns_interface.name
-                    )
-                })?;
-                if !disable_ipv6 {
-                    sudo_command(&[
-                        "ip6tables",
-                        "-I",
-                        "FORWARD",
-                        "-i",
-                        &host_interface.name,
-                        "-o",
-                        &ns_interface.name,
-                        "-j",
-                        "ACCEPT",
-                    ])?;
-                    sudo_command(&[
-                        "ip6tables",
-                        "-I",
-                        "FORWARD",
-                        "-o",
-                        &host_interface.name,
-                        "-i",
-                        &ns_interface.name,
-                        "-j",
-                        "ACCEPT",
-                    ])?;
+                add_forward_chain_exception("iptables", "FORWARD", host, ns)?;
+                if !self.disable_ipv6 {
+                    add_forward_chain_exception("ip6tables", "FORWARD", host, ns)?;
                 }
-
-                let ufw_forward_ipv4 =
-                    add_ufw_forward_exception("iptables", &host_interface, &ns_interface)?;
-                let ufw_forward_ipv6 = if disable_ipv6 {
-                    false
-                } else {
-                    add_ufw_forward_exception("ip6tables", &host_interface, &ns_interface)?
-                };
-
-                Ok(FirewallException {
-                    host_interface,
-                    ns_interface,
-                    firewall,
-                    disable_ipv6,
-                    docker_user_ipv4: false,
-                    docker_user_ipv6: false,
-                    ufw_forward_ipv4,
-                    ufw_forward_ipv6,
-                    cleanup_enabled: true,
-                })
             }
             Firewall::NfTables => {
-                let comment = Self::nft_comment(&host_interface.name, &ns_interface.name);
-                let quoted_host = format!("\"{}\"", host_interface.name);
-                let quoted_ns = format!("\"{}\"", ns_interface.name);
-                // Hold the lock across table/chain creation and rule insertion so
-                // a concurrent Drop cannot delete the empty table in between.
-                let _nft_guard = host_nft_lock();
-                sudo_command(&["nft", "add", "table", "inet", "vopono_bridge"])
-                    .context("Failed to create nft table vopono_bridge")?;
-
-                sudo_command(&[
-                    "nft",
-                    "add",
-                    "chain",
-                    "inet",
+                let comment = Self::nft_comment(&host.name, &ns.name);
+                let rules = [
+                    format!(
+                        "iifname \"{}\" oifname \"{}\" counter accept",
+                        host.name, ns.name
+                    ),
+                    format!(
+                        "iifname \"{}\" oifname \"{}\" counter accept",
+                        ns.name, host.name
+                    ),
+                ];
+                replace_nft_rules(
                     "vopono_bridge",
                     "forward",
-                    "{ type filter hook forward priority filter - 10 ; }",
-                ])
-                .context("Failed to create nft forward chain in vopono_bridge")?;
-
-                let mut guard = FirewallException {
-                    host_interface: host_interface.clone(),
-                    ns_interface: ns_interface.clone(),
-                    firewall,
-                    disable_ipv6,
-                    docker_user_ipv4: false,
-                    docker_user_ipv6: false,
-                    ufw_forward_ipv4: false,
-                    ufw_forward_ipv6: false,
-                    cleanup_enabled: false,
-                };
-                let setup = (|| -> anyhow::Result<()> {
-                    sudo_command(&[
-                        "nft",
-                        "add",
-                        "rule",
-                        "inet",
-                        "vopono_bridge",
-                        "forward",
-                        "iifname",
-                        &quoted_host,
-                        "oifname",
-                        &quoted_ns,
-                        "counter",
-                        "accept",
-                        "comment",
-                        &comment,
-                    ])
-                    .with_context(|| {
-                        format!(
-                            "Failed to add nftables bridge input accept rule, host_interface: {}, namespace interface: {}",
-                            host_interface.name, ns_interface.name
-                        )
-                    })?;
-
-                    sudo_command(&[
-                        "nft",
-                        "add",
-                        "rule",
-                        "inet",
-                        "vopono_bridge",
-                        "forward",
-                        "oifname",
-                        &quoted_host,
-                        "iifname",
-                        &quoted_ns,
-                        "counter",
-                        "accept",
-                        "comment",
-                        &comment,
-                    ])
-                    .with_context(|| {
-                        format!(
-                            "Failed to add nftables bridge output accept rule, host_interface: {}, namespace interface: {}",
-                            host_interface.name, ns_interface.name
-                        )
-                    })?;
-
-                    // If Docker is using the iptables frontend with the nf_tables backend
-                    // (iptables-nft), its FORWARD base chain can still have policy drop.
-                    // An accept in vopono_bridge is not final across later nft base chains,
-                    // so add the same exceptions to Docker's pre-forwarding user chain.
-                    guard.docker_user_ipv4 =
-                        add_docker_user_exception("iptables", &host_interface, &ns_interface)?;
-                    guard.docker_user_ipv6 = if disable_ipv6 {
-                        false
-                    } else {
-                        add_docker_user_exception("ip6tables", &host_interface, &ns_interface)?
-                    };
-                    // UFW keeps primary chains hooked into FORWARD when disabled
-                    // with MANAGE_BUILTINS=no. When iptables is backed by
-                    // nf_tables, those chains can still run after vopono's nft
-                    // base chain, so add early UFW exceptions too.
-                    guard.ufw_forward_ipv4 =
-                        add_ufw_forward_exception("iptables", &host_interface, &ns_interface)?;
-                    guard.ufw_forward_ipv6 = if disable_ipv6 {
-                        false
-                    } else {
-                        add_ufw_forward_exception("ip6tables", &host_interface, &ns_interface)?
-                    };
-                    Ok(())
-                })();
-                if let Err(error) = setup {
-                    guard.remove_rules();
-                    if nft_table_has_no_rules("vopono_bridge") {
-                        delete_firewall_rule(
-                            &["nft", "delete", "table", "inet", "vopono_bridge"],
-                            "nftables namespace bridge table",
-                        );
-                    }
-                    return Err(error);
+                    "{ type filter hook forward priority filter - 10; }",
+                    &comment,
+                    &rules,
+                )?;
+                if docker_user_chain_active("iptables") {
+                    self.docker_user_ipv4 =
+                        add_forward_chain_exception("iptables", "DOCKER-USER", host, ns)?;
                 }
-                guard.cleanup_enabled = true;
-                Ok(guard)
+                if !self.disable_ipv6 && docker_user_chain_active("ip6tables") {
+                    self.docker_user_ipv6 =
+                        add_forward_chain_exception("ip6tables", "DOCKER-USER", host, ns)?;
+                }
             }
         }
+        // An accept in vopono_bridge is not final across later nft base chains.
+        // Maintain the corresponding exceptions in active UFW chains, too.
+        self.ufw_forward_ipv4 |= add_ufw_forward_exception("iptables", host, ns)?;
+        if !self.disable_ipv6 {
+            self.ufw_forward_ipv6 |= add_ufw_forward_exception("ip6tables", host, ns)?;
+        }
+        Ok(())
     }
 }
 
@@ -715,7 +500,7 @@ fn nft_token(value: &str) -> String {
 ///
 /// Comments include the namespace-specific masks/interfaces, so recovery can
 /// remove only the old generation without disturbing other namespaces.
-fn delete_nft_rules_with_comment(table: &str, comment: &str) -> anyhow::Result<()> {
+fn nft_rule_deletions(table: &str, comment: &str) -> anyhow::Result<String> {
     let listing = Command::new("nft")
         .args(["-j", "list", "table", "inet", table])
         .output()
@@ -726,7 +511,7 @@ fn delete_nft_rules_with_comment(table: &str, comment: &str) -> anyhow::Result<(
             || stderr.contains("does not exist")
             || stderr.contains("No such file")
         {
-            return Ok(());
+            return Ok(String::new());
         }
         bail!("Failed to list nftables table {table}: {}", stderr.trim());
     }
@@ -750,6 +535,36 @@ fn delete_nft_rules_with_comment(table: &str, comment: &str) -> anyhow::Result<(
             "delete rule inet {table} {chain} handle {handle}\n"
         ));
     }
+    Ok(batch)
+}
+
+fn delete_nft_rules_with_comment(table: &str, comment: &str) -> anyhow::Result<()> {
+    apply_nft_batch(table, &nft_rule_deletions(table, comment)?)
+}
+
+fn replace_nft_rules(
+    table: &str,
+    chain: &str,
+    chain_definition: &str,
+    comment: &str,
+    rules: &[String],
+) -> anyhow::Result<()> {
+    let _guard = host_nft_lock();
+    let deletions = nft_rule_deletions(table, comment)?;
+    let mut batch = format!(
+        "add table inet {table}\nadd chain inet {table} {chain} {chain_definition}\n{deletions}"
+    );
+    for rule in rules {
+        batch.push_str(&format!(
+            "add rule inet {table} {chain} {rule} comment \"{comment}\"\n"
+        ));
+    }
+    // Publish the whole generation in one transaction. Refreshing rules on the
+    // same uplink never creates an interval with partially installed policy.
+    apply_nft_batch(table, &batch)
+}
+
+fn apply_nft_batch(table: &str, batch: &str) -> anyhow::Result<()> {
     if batch.is_empty() {
         return Ok(());
     }
@@ -762,10 +577,10 @@ fn delete_nft_rules_with_comment(table: &str, comment: &str) -> anyhow::Result<(
     let outcome = Command::new("nft")
         .args(["-f", path])
         .output()
-        .context("Failed to apply nftables rule deletion")?;
+        .context("Failed to apply nftables rule batch")?;
     if !outcome.status.success() {
         bail!(
-            "Failed to delete nftables rules from {table}: {}",
+            "Failed to update nftables rules in {table}: {}",
             String::from_utf8_lossy(&outcome.stderr).trim()
         );
     }
@@ -850,53 +665,6 @@ fn forward_chain_active(iptables_cmd: &str, chain: &str) -> bool {
     }
 }
 
-fn add_docker_user_exception(
-    iptables_cmd: &str,
-    host_interface: &NetworkInterface,
-    ns_interface: &NetworkInterface,
-) -> anyhow::Result<bool> {
-    if !docker_user_chain_active(iptables_cmd) {
-        return Ok(false);
-    }
-
-    sudo_command(&[
-        iptables_cmd,
-        "-I",
-        "DOCKER-USER",
-        "-i",
-        &host_interface.name,
-        "-o",
-        &ns_interface.name,
-        "-j",
-        "ACCEPT",
-    ])
-    .with_context(|| {
-        format!(
-            "Failed to add {iptables_cmd} DOCKER-USER input exception, host interface: {}, namespace interface: {}",
-            host_interface.name, ns_interface.name
-        )
-    })?;
-    sudo_command(&[
-        iptables_cmd,
-        "-I",
-        "DOCKER-USER",
-        "-o",
-        &host_interface.name,
-        "-i",
-        &ns_interface.name,
-        "-j",
-        "ACCEPT",
-    ])
-    .with_context(|| {
-        format!(
-            "Failed to add {iptables_cmd} DOCKER-USER output exception, host interface: {}, namespace interface: {}",
-            host_interface.name, ns_interface.name
-        )
-    })?;
-
-    Ok(true)
-}
-
 fn delete_docker_user_exception(
     iptables_cmd: &str,
     host_interface: &NetworkInterface,
@@ -958,41 +726,58 @@ fn add_forward_chain_exception(
     host_interface: &NetworkInterface,
     ns_interface: &NetworkInterface,
 ) -> anyhow::Result<bool> {
-    sudo_command(&[
-        iptables_cmd,
-        "-I",
-        chain,
+    let input = [
         "-i",
         &host_interface.name,
         "-o",
         &ns_interface.name,
         "-j",
         "ACCEPT",
-    ])
-    .with_context(|| {
-        format!(
-            "Failed to add {iptables_cmd} {chain} input exception, host interface: {}, namespace interface: {}",
-            host_interface.name, ns_interface.name
-        )
-    })?;
-    sudo_command(&[
-        iptables_cmd,
-        "-I",
-        chain,
+    ];
+    let output = [
         "-o",
         &host_interface.name,
         "-i",
         &ns_interface.name,
         "-j",
         "ACCEPT",
-    ])
-    .with_context(|| {
-        format!(
-            "Failed to add {iptables_cmd} {chain} output exception, host interface: {}, namespace interface: {}",
-            host_interface.name, ns_interface.name
-        )
-    })?;
+    ];
+    let added_input = ensure_iptables_rule(iptables_cmd, None, chain, &input)?;
+    if let Err(error) = ensure_iptables_rule(iptables_cmd, None, chain, &output) {
+        if added_input {
+            let mut command = vec![iptables_cmd, "-D", chain];
+            command.extend(input);
+            delete_firewall_rule(&command, "partially installed forwarding exception");
+        }
+        return Err(error);
+    }
+    Ok(true)
+}
 
+fn ensure_iptables_rule(
+    program: &str,
+    table: Option<&str>,
+    chain: &str,
+    rule: &[&str],
+) -> anyhow::Result<bool> {
+    let mut command = vec![program];
+    if let Some(table) = table {
+        command.extend(["-t", table]);
+    }
+    let operation = command.len();
+    command.extend(["-C", chain]);
+    command.extend(rule);
+    let output = Command::new(program).args(&command[1..]).output()?;
+    if output.status.success() {
+        return Ok(false);
+    }
+    anyhow::ensure!(
+        output.status.code() == Some(1),
+        "Could not check {program} rule in {chain}: {}",
+        String::from_utf8_lossy(&output.stderr).trim(),
+    );
+    command[operation] = "-I";
+    sudo_command(&command)?;
     Ok(true)
 }
 

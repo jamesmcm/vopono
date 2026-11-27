@@ -131,6 +131,7 @@ pub fn perform_owner_write(request: &OwnerWriteRequest) -> anyhow::Result<()> {
                 Some(crate::status::FORWARDED_PORT_SIDECAR) => {
                     crate::status::FORWARDED_PORT_TEMP_PREFIX
                 }
+                Some(crate::status::HOST_RELAY_SIDECAR) => crate::status::HOST_RELAY_TEMP_PREFIX,
                 _ => ".vopono-tmp-",
             };
             let mut temporary = tempfile::Builder::new()

@@ -143,6 +143,18 @@ blocked
 ip -n peer link set wgpeer up
 wait_for dual_stack_ready
 blocked
+# A firewall reload can remove vopono's tables without changing the host
+# interface. Force a new UDP mapping so a cached conntrack entry cannot hide it.
+nft delete table inet vopono_nat
+nft delete table inet vopono_bridge
+wg_device=$(ip netns exec "$name" wg show interfaces)
+ip netns exec "$name" wg set "$wg_device" listen-port 0
+for _ in $(seq 1 75); do if dual_stack_ready 2>/dev/null; then break; fi; sleep 1; done
+dual_stack_ready
+nft list table inet vopono_nat >/dev/null
+nft list table inet vopono_bridge >/dev/null
+blocked
+echo 'PASS: recovery recreates missing host firewall rules on the same interface'
 # Explicit stop must be authoritative and idempotent at the resource level.
 client stop namespace "$name" --json > /dev/null
 [[ ! -e /run/netns/$name ]]

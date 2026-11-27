@@ -93,6 +93,20 @@ preflight = json.loads(ctx.client('doctor', '--custom', str(profile), '--offline
 assert any(d['code'] == 'provider_config' and d['state'] == 'pass'
            for d in preflight['diagnostics'])
 valid_profile = profile.read_text()
+trusted_profile = ctx.user_file('trusted-client.ovpn', f'cd "{scratch}"\n' + valid_profile)
+direct_env = {**os.environ, 'XDG_CONFIG_HOME': str(scratch / 'config'),
+              'SUDO_USER': ctx.user, 'SUDO_UID': str(ctx.uid), 'SUDO_GID': str(ctx.gid)}
+direct = subprocess.run(
+    [ctx.binary, 'exec', '--custom', str(trusted_profile), '--protocol', 'openvpn',
+     '--interface', 'uplink', '--firewall', 'nftables', 'printf trusted-openvpn'],
+    env=direct_env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+)
+assert direct.returncode == 0 and 'trusted-openvpn' in direct.stdout, direct.stderr
+refused = ctx.client('exec', '--custom', str(trusted_profile), '--protocol', 'openvpn',
+                     '--interface', 'uplink', '--firewall', 'nftables', '--json', 'true', check=False)
+assert refused.returncode != 0 and any('directive "cd"' in d['message']
+    for d in json.loads(refused.stdout)['error']['diagnostics'])
+print('PASS: trusted direct OpenVPN accepts a working-directory directive while the daemon refuses it', flush=True)
 # The installed service normally inherits umask 022. A private runtime
 # directory must also be created under that umask.
 ctx.restart(umask=0o022)

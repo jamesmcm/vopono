@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::Read;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -88,6 +88,13 @@ impl Job {
     fn finish(&self, result: anyhow::Result<DaemonResponse>, cleaned: bool) {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         match result {
+            Ok(DaemonResponse::LaunchCancelled { timed_out }) => {
+                self.cancel.store(true, Ordering::Release);
+                if timed_out {
+                    self.timed_out.store(true, Ordering::Release);
+                }
+                state.phase = "cancelled";
+            }
             Ok(DaemonResponse::Exit(code)) => {
                 state.exit_code = Some(code);
                 state.phase = if self.cancel.load(Ordering::Acquire) {
@@ -345,8 +352,11 @@ impl Jobs {
         command.custom_netns_name = Some(format!("mcp-{id}"));
         command.json = true;
         command.silent = false;
-        let request =
-            crate::daemon_client::prepare_execute_with_env(command, false, filtered_mcp_env())?;
+        let DaemonRequest::Execute { cmd, env } =
+            crate::daemon_client::prepare_execute_with_env(command, false, filtered_mcp_env())?
+        else {
+            unreachable!("execute preparation always produces an execute request");
+        };
         // Set O_NONBLOCK on pipe read ends before sending Execute so no post-send
         // setup call can fail and leak an untracked job.
         let (stdout_read, stdout_write) = pipe2(OFlag::O_CLOEXEC)?;
@@ -374,6 +384,12 @@ impl Jobs {
             stop_in_flight: Arc::new(AtomicBool::new(false)),
         });
         daemon::set_socket_timeouts_for(&conn, 5)?;
+        let deadline = Instant::now() + timeout;
+        let request = DaemonRequest::McpExecute {
+            cmd,
+            env,
+            deadline_ns: daemon::monotonic_ns()? + u64::try_from(timeout.as_nanos())?,
+        };
         daemon::write_framed(&mut conn, &wincode::serialize(&request)?)?;
         // Once Execute has been sent, track the job immediately so any later
         // setup failure transitions to indeterminate with tracked cleanup.
@@ -404,7 +420,7 @@ impl Jobs {
         let spawn_result = std::thread::Builder::new()
             .name("mcp-job".into())
             .spawn(move || {
-                let result = supervise(&worker_job, &mut conn, &mut stdout, &mut stderr, timeout);
+                let result = supervise(&worker_job, &mut conn, &mut stdout, &mut stderr, deadline);
                 drop(conn);
                 let cleaned = if result.is_err() && worker_job.cancel.load(Ordering::Acquire) {
                     // Cancellation already timed out in `supervise` with an in-flight stop;
@@ -608,9 +624,8 @@ fn supervise(
     conn: &mut LocalSocketStream,
     stdout: &mut File,
     stderr: &mut File,
-    timeout: Duration,
+    deadline: Instant,
 ) -> anyhow::Result<DaemonResponse> {
-    let deadline = Instant::now() + timeout;
     let mut cancellation: Option<Instant> = None;
     let mut last_stop_attempt: Option<Instant> = None;
     let mut running = false;
@@ -647,6 +662,13 @@ fn supervise(
             }
             job.cancel.store(true, Ordering::Release);
             job.state.lock().unwrap_or_else(|p| p.into_inner()).phase = "cancelling";
+            // Cancel directly on the execution connection so a pending launch
+            // can observe it without waiting on the namespace transition.
+            let LocalSocketStream::UdSocket(socket) = conn;
+            let _ = nix::sys::socket::shutdown(
+                socket.as_fd().as_raw_fd(),
+                nix::sys::socket::Shutdown::Write,
+            );
             // Send stop asynchronously so pipe draining and conn reads never stall.
             // Pass the job so a confirmed daemon stop clears cleanup_error even if
             // supervise() already timed out into "indeterminate".

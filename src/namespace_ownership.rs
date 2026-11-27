@@ -164,7 +164,7 @@ pub fn update_runtime_options(
     monitor: bool,
     recover: bool,
     host_ports: Vec<u16>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<std::path::PathBuf> {
     let _guard = OWNER_RECORD_LOCK
         .lock()
         .expect("owner record lock poisoned");
@@ -173,6 +173,7 @@ pub fn update_runtime_options(
         .runtime
         .as_mut()
         .context("Missing namespace runtime settings")?;
+    let config_base = runtime.config_base.clone();
     if runtime.monitor != monitor || runtime.recover != recover || runtime.host_ports != host_ports
     {
         runtime.monitor = monitor;
@@ -180,7 +181,7 @@ pub fn update_runtime_options(
         runtime.host_ports = host_ports;
         persist_record(name, &record)?;
     }
-    Ok(())
+    Ok(config_base)
 }
 
 pub fn update_snapshot(name: &str, uid: Uid, snapshot: NamespaceSnapshot) -> anyhow::Result<()> {

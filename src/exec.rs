@@ -59,6 +59,7 @@ pub fn execute_as_daemon_with_stdio(
     stdio_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
     take_controlling_tty: bool,
     forwarded_env: Option<std::collections::HashMap<String, String>>,
+    cancellation: Option<&crate::daemon::LaunchCancellation<'_>>,
 ) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace, HostProxies, bool)> {
     let uiclient = CliClient {};
     let silent = command.silent;
@@ -68,7 +69,14 @@ pub fn execute_as_daemon_with_stdio(
         parsed_command,
         forwarder,
         host_env_vars,
-    } = setup_namespace_with_env(command, &uiclient, true, false, forwarded_env.as_ref())?; // daemon: do not auto-sync
+    } = setup_namespace_with_env(
+        command,
+        &uiclient,
+        true,
+        false,
+        forwarded_env.as_ref(),
+        cancellation,
+    )?;
 
     // Do not pass through an audio endpoint discovered in the daemon's root
     // session. The client forwards its effective PULSE_SERVER when pactl can
@@ -127,10 +135,12 @@ pub fn execute_as_daemon_with_stdio(
         }
     }
 
+    include_host_relays(&mut ns, &host_proxies);
+
     if !existing_session {
         ns = ns.write_lockfile(&parsed_command.application)?;
     }
-    let mut application = match ApplicationWrapper::new(
+    let mut application = match ApplicationWrapper::new_with_launch_check(
         &ns,
         &parsed_command.application,
         parsed_command.user.clone(),
@@ -142,11 +152,17 @@ pub fn execute_as_daemon_with_stdio(
         pipe_io,
         stdio_fds,
         take_controlling_tty,
+        || cancellation.map_or(Ok(()), |guard| guard.check()),
     ) {
         Ok(app) => app,
         Err(error) => {
             if existing_session {
                 ns.detach();
+            }
+            let name = ns.name.clone();
+            drop(ns);
+            if !reused && !std::path::Path::new("/run/netns").join(&name).exists() {
+                crate::namespace_ownership::remove(&name);
             }
             return Err(error);
         }
@@ -160,6 +176,14 @@ pub fn execute_as_daemon_with_stdio(
         }
     }
     Ok((application, ns, host_proxies, reused))
+}
+
+pub(crate) fn include_host_relays(ns: &mut NetworkNamespace, new_proxies: &HostProxies) {
+    let ports = &mut ns.state.host_forwarded_ports;
+    ports.extend(crate::namespace_sessions::relay_ports(&ns.name));
+    ports.extend(new_proxies.iter().map(|(port, _)| *port));
+    ports.sort_unstable();
+    ports.dedup();
 }
 
 pub(crate) fn launch_report_for_daemon(
@@ -184,8 +208,14 @@ pub fn setup_daemon_namespace_only(
     forwarded_env: Option<std::collections::HashMap<String, String>>,
 ) -> anyhow::Result<NamespaceConfig> {
     let uiclient = CliClient {};
-    let mut setup =
-        setup_namespace_with_env(command, &uiclient, true, false, forwarded_env.as_ref())?;
+    let mut setup = setup_namespace_with_env(
+        command,
+        &uiclient,
+        true,
+        false,
+        forwarded_env.as_ref(),
+        None,
+    )?;
     if !crate::namespace_sessions::contains(&setup.ns.name) {
         setup.ns = setup.ns.write_lockfile(&setup.parsed_command.application)?;
     }
@@ -283,7 +313,7 @@ fn setup_namespace(
     verbose: bool,
     auto_sync_if_missing: bool,
 ) -> anyhow::Result<NamespaceConfig> {
-    setup_namespace_with_env(command, uiclient, verbose, auto_sync_if_missing, None)
+    setup_namespace_with_env(command, uiclient, verbose, auto_sync_if_missing, None, None)
 }
 
 fn setup_namespace_with_env(
@@ -292,17 +322,23 @@ fn setup_namespace_with_env(
     verbose: bool,
     auto_sync_if_missing: bool,
     client_env: Option<&std::collections::HashMap<String, String>>,
+    cancellation: Option<&crate::daemon::LaunchCancellation<'_>>,
 ) -> anyhow::Result<NamespaceConfig> {
     let diagnostic_command = command.clone();
-    setup_namespace_inner(command, uiclient, verbose, auto_sync_if_missing, client_env).map_err(
-        |error| {
-            crate::launch_diagnostics::command_failure_with_env(
-                &diagnostic_command,
-                error,
-                client_env,
-            )
-        },
+    setup_namespace_inner(
+        command,
+        uiclient,
+        verbose,
+        auto_sync_if_missing,
+        client_env,
+        cancellation,
     )
+    .map_err(|error| {
+        if error.is::<crate::daemon::LaunchCancelled>() {
+            return error;
+        }
+        crate::launch_diagnostics::command_failure_with_env(&diagnostic_command, error, client_env)
+    })
 }
 
 fn setup_namespace_inner(
@@ -311,7 +347,9 @@ fn setup_namespace_inner(
     verbose: bool,
     auto_sync_if_missing: bool,
     client_env: Option<&std::collections::HashMap<String, String>>,
+    cancellation: Option<&crate::daemon::LaunchCancellation<'_>>,
 ) -> anyhow::Result<NamespaceConfig> {
+    let check_cancellation = || cancellation.map_or(Ok(()), |guard| guard.check());
     // In daemon mode this runs as root: create the client config dir via the
     // dropped-privilege helper so it stays user-owned. A plain
     // create_dir_all() here would leave a root-owned dir that the
@@ -457,6 +495,7 @@ fn setup_namespace_inner(
         }
         crate::namespace_sessions::reserve(&ns_name, uid, monitor_requested)?;
     }
+    check_cancellation()?;
 
     let mut ns;
     let _sysctl;
@@ -693,12 +732,15 @@ fn setup_namespace_inner(
             vopono_core::util::open_hosts(&ns.name, &effective_hosts, parsed_command.firewall)?;
         }
 
+        check_cancellation()?;
+
         // Single source for forwarder creation and its lockfile-visible
         // status, so provider selection logic cannot drift between them.
         let setup = provider_port_forwarding(&parsed_command, &ns)?;
         ns.set_port_forwarding(setup.status);
         forwarder = setup.forwarder;
 
+        check_cancellation()?;
         if let Some(pucmd) = parsed_command.postup.clone() {
             let parsed_pucmd = parse_command_str(&pucmd)?;
             if !parsed_pucmd.is_empty() {
@@ -739,6 +781,7 @@ fn setup_namespace_inner(
     if let Some(uid) = daemon_uid
         && !reused
     {
+        check_cancellation()?;
         crate::namespace_ownership::tag(&ns, uid)?;
     }
 

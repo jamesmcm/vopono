@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import selectors
 import signal
+import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -247,3 +249,37 @@ for terminate in (False, True):
     wait_for(lambda: not Path('/run/netns', pending['namespace']).exists())
 
 print('PASS: MCP stdio, profile policy, real VPN jobs, bounded output, quotas, argv, cancel/timeout, crash and disconnect cleanup', flush=True)
+
+# Delay real VPN setup after dispatch, and cancel while the daemon holds the
+# namespace transition. The application must never run in either case.
+shim_dir = ctx.scratch / 'mcp-slow-setup-bin'
+shim_dir.mkdir()
+shim = shim_dir / 'wg'
+entered = ctx.scratch / 'mcp-setconf-entered'
+marker = ctx.scratch / 'config/mcp-late-application'
+shim.write_text('#!/bin/sh\n'
+                f'if [ "$1" = setconf ]; then touch {shlex.quote(str(entered))}; sleep 4; fi\n'
+                f'exec {shlex.quote(shutil.which("wg"))} "$@"\n')
+shim.chmod(0o755)
+original_path = os.environ['PATH']
+os.environ['PATH'] = f'{shim_dir}:{original_path}'
+try:
+    ctx.restart()
+    slow = MCP('--allow-command')
+    try:
+        for timeout in (1, 60):
+            entered.unlink(missing_ok=True)
+            job = slow.call('run_profile', profile='vpn', argv=['touch', str(marker)],
+                            timeout_seconds=timeout)
+            wait_for(entered.exists)
+            if timeout == 60:
+                slow.call('job_cancel', job_id=job['job_id'])
+            result = slow.finish(job)
+            assert result['state'] == 'cancelled' and result['timed_out'] == (timeout == 1), result
+            assert not marker.exists(), result
+    finally:
+        slow.close()
+finally:
+    os.environ['PATH'] = original_path
+    ctx.restart()
+print('PASS: MCP cancellation and timeout during tunnel setup prevent application launch', flush=True)

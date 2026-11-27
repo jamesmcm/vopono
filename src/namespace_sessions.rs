@@ -433,34 +433,49 @@ impl Session {
                 ports.into_iter().collect::<Vec<_>>(),
             )
         };
-        if !self.controller {
-            return crate::namespace_ownership::update_runtime_options(
+        let config_base = if self.controller {
+            let (_, gid) = vopono_core::util::config_owner_override()
+                .ok_or_else(|| anyhow::anyhow!("Missing authenticated config owner"))?;
+            let config_base = vopono_core::util::config_dir()?;
+            crate::namespace_ownership::save_runtime(
+                &self.ns.name,
+                self.uid,
+                crate::namespace_ownership::RuntimeSettings {
+                    config_base: config_base.clone(),
+                    gid: gid.as_raw(),
+                    monitor,
+                    recover,
+                    host_ports: host_ports.clone(),
+                    forwarder: self
+                        .forwarder
+                        .as_ref()
+                        .and_then(|forwarder| forwarder.snapshot())
+                        .or_else(|| self.pending_forwarder.clone()),
+                    daemon_pid: std::process::id(),
+                },
+            )?;
+            config_base
+        } else {
+            crate::namespace_ownership::update_runtime_options(
                 &self.ns.name,
                 self.uid,
                 monitor,
                 recover,
-                host_ports,
+                host_ports.clone(),
+            )?
+        };
+        if !host_ports.is_empty()
+            && let Err(error) = vopono_core::status::record_host_relays(
+                &config_base.join("vopono/locks").join(&self.ns.name),
+                &host_ports,
+            )
+        {
+            log::warn!(
+                "Could not publish host relays for {}: {error:#}",
+                self.ns.name
             );
         }
-        let (_, gid) = vopono_core::util::config_owner_override()
-            .ok_or_else(|| anyhow::anyhow!("Missing authenticated config owner"))?;
-        crate::namespace_ownership::save_runtime(
-            &self.ns.name,
-            self.uid,
-            crate::namespace_ownership::RuntimeSettings {
-                config_base: vopono_core::util::config_dir()?,
-                gid: gid.as_raw(),
-                monitor,
-                recover,
-                host_ports,
-                forwarder: self
-                    .forwarder
-                    .as_ref()
-                    .and_then(|forwarder| forwarder.snapshot())
-                    .or_else(|| self.pending_forwarder.clone()),
-                daemon_pid: std::process::id(),
-            },
-        )
+        Ok(())
     }
 
     pub fn forwarded_port(&self) -> Option<u16> {

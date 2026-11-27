@@ -69,10 +69,42 @@ impl ApplicationWrapper {
         stdio_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
         take_controlling_tty: bool,
     ) -> anyhow::Result<Self> {
+        Self::new_with_launch_check(
+            netns,
+            application,
+            user,
+            group,
+            working_directory,
+            port_forwarding,
+            silent,
+            host_env_vars,
+            pipe_io,
+            stdio_fds,
+            take_controlling_tty,
+            || Ok(()),
+        )
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_launch_check(
+        netns: &NetworkNamespace,
+        application: &str,
+        user: Option<String>,
+        group: Option<String>,
+        working_directory: Option<PathBuf>,
+        port_forwarding: Option<Box<dyn Forwarder>>,
+        silent: bool,
+        host_env_vars: &std::collections::HashMap<String, String>,
+        pipe_io: bool,
+        stdio_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
+        take_controlling_tty: bool,
+        before_launch: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self> {
         let app_vec = parse_command_str(application)?;
         let warning_stderr = stdio_fds
             .as_ref()
-            .map(|(_, _, stderr)| nix::unistd::dup(stderr.as_fd()))
+            .map(|(_, _, stderr)| stderr.as_fd().try_clone_to_owned())
             .transpose()?;
 
         let shared_process_name = app_vec.first().and_then(|program| {
@@ -129,6 +161,7 @@ impl ApplicationWrapper {
             working_directory,
             port_forwarding.as_deref(),
             host_env_vars,
+            before_launch,
         )?;
 
         let pid = handle.id();
@@ -208,6 +241,7 @@ impl ApplicationWrapper {
         set_dir: Option<PathBuf>,
         forwarder: Option<&dyn Forwarder>,
         host_env_vars: &std::collections::HashMap<String, String>,
+        before_launch: impl FnOnce() -> anyhow::Result<()>,
     ) -> anyhow::Result<(Child, Option<EtcOverlay>)> {
         let (prog, args) = command.split_first().context("Command cannot be empty")?;
         let mut handle: Command;
@@ -516,6 +550,7 @@ impl ApplicationWrapper {
                 Ok(())
             });
         }
+        before_launch()?;
         let child = handle.spawn()?;
         Ok((child, etc_overlay))
     }
@@ -532,7 +567,7 @@ fn report_warning(message: String, silent: bool, stderr_fd: Option<&OwnedFd>) {
         // client pipe/socket.
         let text = format!("warning: {message}\n");
         let bytes = text.as_bytes();
-        let Ok(dup_fd) = nix::unistd::dup(stderr_fd.as_fd()) else {
+        let Ok(dup_fd) = stderr_fd.as_fd().try_clone_to_owned() else {
             return;
         };
         let file = std::fs::File::from(dup_fd);

@@ -437,6 +437,12 @@ pub enum DaemonRequest {
         skip_ipv6: bool,
         timeout_ms: u64,
     },
+    /// MCP launches carry a deadline measured on the local monotonic clock.
+    McpExecute {
+        cmd: Vec<u8>,
+        env: std::collections::HashMap<String, String>,
+        deadline_ns: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug, Clone)]
@@ -481,6 +487,72 @@ pub enum DaemonResponse {
     Version(String),
     /// Serialized JSON document (e.g. a stop result or error document).
     Json(Vec<u8>),
+    LaunchCancelled {
+        timed_out: bool,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct LaunchCancelled {
+    timed_out: bool,
+}
+
+impl std::fmt::Display for LaunchCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.timed_out {
+            "Job deadline expired before application launch"
+        } else {
+            "Job was cancelled before application launch"
+        })
+    }
+}
+
+impl std::error::Error for LaunchCancelled {}
+
+pub(crate) fn monotonic_ns() -> std::io::Result<u64> {
+    let mut value = nix::libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Both peers are local and use the same CLOCK_MONOTONIC epoch.
+    if unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_MONOTONIC, &mut value) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(value.tv_sec as u64 * 1_000_000_000 + value.tv_nsec as u64)
+}
+
+pub(crate) struct LaunchCancellation<'a> {
+    conn: &'a LocalSocketStream,
+    deadline_ns: u64,
+}
+
+impl LaunchCancellation<'_> {
+    pub(crate) fn check(&self) -> anyhow::Result<()> {
+        if monotonic_ns()? >= self.deadline_ns {
+            return Err(LaunchCancelled { timed_out: true }.into());
+        }
+        let LocalSocketStream::UdSocket(socket) = self.conn;
+        let mut poll_fd = nix::libc::pollfd {
+            fd: socket.as_fd().as_raw_fd(),
+            events: nix::libc::POLLRDHUP,
+            revents: 0,
+        };
+        loop {
+            // The socket's write-half closure means its MCP job was cancelled
+            // or the client disconnected. Leave the read half open for the result.
+            if unsafe { nix::libc::poll(&mut poll_fd, 1, 0) } >= 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error.into());
+            }
+        }
+        if poll_fd.revents & (nix::libc::POLLRDHUP | nix::libc::POLLHUP) != 0 {
+            return Err(LaunchCancelled { timed_out: false }.into());
+        }
+        Ok(())
+    }
 }
 
 // Note: Output is bridged via passed file descriptors; no streaming over the socket.
@@ -732,42 +804,9 @@ fn copy_pty_output(mut reader: File, mut output: PtyOutput, prefix: &[u8], done:
 /// Relay a JSON launch notice followed by non-TTY child stdout to the client's
 /// stdout descriptor so `{"event":"launched",...}` is always line 1 without
 /// mid-line interleaving.
-fn copy_json_stdout(mut pipe_read: File, client_stdout: File, prefix: Vec<u8>) {
-    let Ok(mut output) = PtyOutput::new(client_stdout) else {
-        return;
-    };
-    let mut prefix_slice = prefix.as_slice();
-    while !prefix_slice.is_empty() {
-        match output.write(prefix_slice) {
-            Ok(0) => return,
-            Ok(count) => prefix_slice = &prefix_slice[count..],
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                fd_writable(output.file.as_raw_fd(), 25);
-            }
-            Err(_) => return,
-        }
-    }
-    let mut buf = [0u8; 16 * 1024];
-    loop {
-        let count = match pipe_read.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
-        };
-        let mut written = 0;
-        while written < count {
-            match output.write(&buf[written..count]) {
-                Ok(0) => return,
-                Ok(n) => written += n,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    fd_writable(output.file.as_raw_fd(), 25);
-                }
-                Err(_) => return,
-            }
-        }
+fn copy_json_stdout(pipe_read: File, client_stdout: File, prefix: &[u8], done: &AtomicBool) {
+    if let Ok(output) = PtyOutput::new(client_stdout) {
+        copy_pty_output(pipe_read, output, prefix, done);
     }
 }
 
@@ -875,7 +914,7 @@ fn wait_for_application(
     let mut exit_status = None;
     // Duplicate client FDs so we don't close the originals when Files drop
     let (client_stdin_fd, _, _) = client_fds.expect("PTY client fds retained");
-    let client_stdin_dup: OwnedFd = nix::unistd::dup(client_stdin_fd.as_fd())?;
+    let client_stdin_dup: OwnedFd = client_stdin_fd.as_fd().try_clone_to_owned()?;
     let client_stdin = File::from(client_stdin_dup);
     let pty_master_file_r = File::from(master_fd);
     // The master belongs to the daemon, so its clones can share nonblocking mode.
@@ -952,7 +991,7 @@ fn wait_for_application(
         (flags & OFlag::O_ACCMODE == OFlag::O_RDWR).then_some(client_stdin_fd)
     });
     let output_copier = if let Some(terminal) = terminal_fd {
-        let terminal = File::from(nix::unistd::dup(terminal.as_fd())?);
+        let terminal = File::from(terminal.as_fd().try_clone_to_owned()?);
         thread::spawn(move || match PtyOutput::new(terminal) {
             Ok(output) => copy_pty_output(
                 pty_master_file_r,
@@ -1163,6 +1202,15 @@ fn handle_client(
         request = read_request(&mut conn)?;
     }
 
+    let (request, deadline_ns) = match request {
+        DaemonRequest::McpExecute {
+            cmd,
+            env,
+            deadline_ns,
+        } => (DaemonRequest::Execute { cmd, env }, Some(deadline_ns)),
+        request => (request, None),
+    };
+
     // Only execute/stop requests access the client's config tree. Version
     // and connectivity requests must not create or require ~/.config.
     if matches!(
@@ -1210,6 +1258,17 @@ fn handle_client(
                 let monitor = exec_command.monitor;
                 let recover = exec_command.recover;
                 let transition = crate::namespace_sessions::begin_setup();
+                let cancellation = deadline_ns.map(|deadline_ns| LaunchCancellation {
+                    conn: &conn,
+                    deadline_ns,
+                });
+                if let Some(cancellation) = &cancellation {
+                    cancellation.check()?;
+                    anyhow::ensure!(
+                        !exec_command.create_netns_only,
+                        "MCP jobs require an application"
+                    );
+                }
 
                 // `--create-netns-only`: bring up the namespace and leave it alive
                 // without spawning an application. The client learns the namespace
@@ -1244,13 +1303,8 @@ fn handle_client(
                             setup.ns.detach();
                             return Err(error);
                         }
-                        for port in new_ports {
-                            if !setup.ns.state.host_forwarded_ports.contains(&port) {
-                                setup.ns.state.host_forwarded_ports.push(port);
-                            }
-                        }
-                        let _ = setup.ns.write_lockfile_in_place("");
                     }
+                    crate::exec::include_host_relays(&mut setup.ns, &proxies);
                     if let Err(error) =
                         crate::namespace_ownership::mark_persistent(&setup.ns.name, uid)
                     {
@@ -1316,9 +1370,14 @@ fn handle_client(
                 let client_has_tty = stdin_is_tty;
                 let pty_bridges_stdout = client_has_tty && stdout_is_tty;
                 let human_notice_fd = if !json && !silent {
-                    Some(nix::unistd::dup(
-                        client_fds.as_ref().expect("client fds present").2.as_fd(),
-                    )?)
+                    Some(
+                        client_fds
+                            .as_ref()
+                            .expect("client fds present")
+                            .2
+                            .as_fd()
+                            .try_clone_to_owned()?,
+                    )
                 } else {
                     None
                 };
@@ -1344,18 +1403,18 @@ fn handle_client(
                     );
                     let fds = client_fds.as_ref().expect("client fds present");
                     let child_out = if stdout_is_tty {
-                        nix::unistd::dup(p.slave.as_fd())?
+                        p.slave.as_fd().try_clone_to_owned()?
                     } else if json {
                         let (pipe_read, pipe_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC)?;
-                        json_stdout_relay = Some((pipe_read, nix::unistd::dup(fds.1.as_fd())?));
+                        json_stdout_relay = Some((pipe_read, fds.1.as_fd().try_clone_to_owned()?));
                         pipe_write
                     } else {
-                        nix::unistd::dup(fds.1.as_fd())?
+                        fds.1.as_fd().try_clone_to_owned()?
                     };
                     let child_err = if stderr_is_tty {
-                        nix::unistd::dup(p.slave.as_fd())?
+                        p.slave.as_fd().try_clone_to_owned()?
                     } else {
-                        nix::unistd::dup(fds.2.as_fd())?
+                        fds.2.as_fd().try_clone_to_owned()?
                     };
                     // Spawn child with PTY slave as stdin (and TTY outputs), letting it take controlling TTY in pre_exec
                     (application, ns, host_proxies, reused) = execute_as_daemon_with_stdio(
@@ -1364,6 +1423,7 @@ fn handle_client(
                         Some((p.slave, child_out, child_err)),
                         true,
                         Some(forwarded_env.clone()),
+                        cancellation.as_ref(),
                     )?;
                     pty_master = Some(p.master);
                 } else {
@@ -1381,6 +1441,7 @@ fn handle_client(
                         Some((in_fd, child_out, err_fd)),
                         false,
                         Some(forwarded_env.clone()),
+                        cancellation.as_ref(),
                     )?;
                 }
 
@@ -1461,11 +1522,18 @@ fn handle_client(
                 {
                     write_client_notice(fd, notice.as_bytes());
                 }
+                let json_relay_done = Arc::new(AtomicBool::new(false));
                 let json_relay_thread = if let Some((pipe_read, client_stdout)) = json_stdout_relay
                 {
                     let prefix = launch_notice.take().unwrap_or_default().into_bytes();
+                    let done = Arc::clone(&json_relay_done);
                     Some(thread::spawn(move || {
-                        copy_json_stdout(File::from(pipe_read), File::from(client_stdout), prefix);
+                        copy_json_stdout(
+                            File::from(pipe_read),
+                            File::from(client_stdout),
+                            &prefix,
+                            &done,
+                        );
                     }))
                 } else {
                     None
@@ -1484,10 +1552,12 @@ fn handle_client(
                             stderr_is_tty.then_some(stderr)
                         }
                     }),
-                )?;
+                );
+                json_relay_done.store(true, Ordering::Release);
                 if let Some(relay) = json_relay_thread {
                     let _ = relay.join();
                 }
+                let status = status?;
 
                 // Remove this application's status before the namespace controller
                 // waits for other clients, detached children or explicit persistence.
@@ -1498,6 +1568,14 @@ fn handle_client(
                 Ok(())
             })();
             if let Err(error) = execution {
+                if let Some(cancelled) = error.downcast_ref::<LaunchCancelled>() {
+                    return write_response(
+                        &mut conn,
+                        &DaemonResponse::LaunchCancelled {
+                            timed_out: cancelled.timed_out,
+                        },
+                    );
+                }
                 let supports_json_error = client_version
                     .as_deref()
                     .is_some_and(|version| version_at_least(version, (1, 1, 0)));
@@ -1622,6 +1700,9 @@ fn handle_client(
                 &mut conn,
                 &DaemonResponse::Json(serde_json::to_vec(&report)?),
             )?;
+        }
+        DaemonRequest::McpExecute { .. } => {
+            unreachable!("MCP request is normalized before dispatch")
         }
         DaemonRequest::Control(_) => {
             // Ignore unexpected control frame sent as the first message

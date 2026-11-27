@@ -19,6 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub(crate) const FORWARDED_PORT_SIDECAR: &str = "port-forwarding.json";
 pub(crate) const FORWARDED_PORT_TEMP_PREFIX: &str = "port-forwarding.tmp-";
 const FORWARDED_PORT_LEGACY_TEMP_PREFIX: &str = ".port-forwarding-";
+pub(crate) const HOST_RELAY_SIDECAR: &str = "host-relays.json";
+pub(crate) const HOST_RELAY_TEMP_PREFIX: &str = "host-relays.tmp-";
 const MAX_LOCK_WALK_ENTRIES: usize = 4096;
 pub(crate) const STOPPING_SIDECAR: &str = "stopping";
 
@@ -116,7 +118,11 @@ pub(crate) fn is_forwarded_port_sidecar(name: &str) -> bool {
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
     };
-    name == FORWARDED_PORT_SIDECAR
+    name == HOST_RELAY_SIDECAR
+        || name
+            .strip_prefix(HOST_RELAY_TEMP_PREFIX)
+            .is_some_and(valid_suffix)
+        || name == FORWARDED_PORT_SIDECAR
         || name
             .strip_prefix(FORWARDED_PORT_TEMP_PREFIX)
             .is_some_and(valid_suffix)
@@ -140,10 +146,28 @@ struct ForwardedPortSidecar {
 pub fn record_forwarded_port(locks_dir: &Path, ns_name: &str, port: u16) -> anyhow::Result<()> {
     let updated = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let sidecar = ForwardedPortSidecar { port, updated };
-    let dir = locks_dir.join(ns_name);
-    let path = dir.join(FORWARDED_PORT_SIDECAR);
-    let contents = serde_json::to_string(&sidecar)?;
-    if ensure_dir_as_config_owner(&dir, Some(0o700))? {
+    write_port_sidecar(
+        &locks_dir.join(ns_name),
+        FORWARDED_PORT_SIDECAR,
+        FORWARDED_PORT_TEMP_PREFIX,
+        &sidecar,
+    )
+}
+
+/// Publish the shared host relays alongside the creator's lockfile.
+pub fn record_host_relays(lock_dir: &Path, ports: &[u16]) -> anyhow::Result<()> {
+    write_port_sidecar(lock_dir, HOST_RELAY_SIDECAR, HOST_RELAY_TEMP_PREFIX, ports)
+}
+
+fn write_port_sidecar(
+    dir: &Path,
+    filename: &str,
+    temp_prefix: &str,
+    value: &(impl Serialize + ?Sized),
+) -> anyhow::Result<()> {
+    let path = dir.join(filename);
+    let contents = serde_json::to_string(value)?;
+    if ensure_dir_as_config_owner(dir, Some(0o700))? {
         anyhow::ensure!(
             write_file_as_config_owner(&path, &contents, Some(0o600))?,
             "Config-owner writer unexpectedly unavailable"
@@ -151,23 +175,22 @@ pub fn record_forwarded_port(locks_dir: &Path, ns_name: &str, port: u16) -> anyh
         return Ok(());
     }
 
-    std::fs::create_dir_all(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    chown_to_config_owner(&dir)?;
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    chown_to_config_owner(dir)?;
     let mut tmp = tempfile::Builder::new()
-        .prefix(".port-forwarding-")
-        .tempfile_in(&dir)?;
+        .prefix(temp_prefix)
+        .tempfile_in(dir)?;
     tmp.as_file()
         .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     tmp.write_all(contents.as_bytes())?;
     tmp.persist(&path).map_err(|e| e.error)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     chown_to_config_owner(&path)
 }
 
 /// Replace the reported forwarded port with the sidecar value when present.
 /// Provider and automatic flag still come from the embedded lockfile state.
-fn overlay_forwarded_port(locks_dir: &nix::dir::Dir, ns_name: &str, locks: &mut [LockfileStatus]) {
+fn overlay_port_sidecars(locks_dir: &nix::dir::Dir, ns_name: &str, locks: &mut [LockfileStatus]) {
     if crate::network::netns::validate_netns_name(ns_name).is_err() {
         return;
     }
@@ -177,6 +200,16 @@ fn overlay_forwarded_port(locks_dir: &nix::dir::Dir, ns_name: &str, locks: &mut 
     let Ok(ns_dir) = open_dir_at_nofollow(locks_dir, &ns_cstr) else {
         return;
     };
+    if let Ok(raw) = read_regular_file_at_nofollow(&ns_dir, HOST_RELAY_SIDECAR, 4096)
+        && let Ok(ports) = serde_json::from_slice::<Vec<u16>>(&raw)
+    {
+        for lock in locks.iter_mut() {
+            let reported = &mut lock.ns.state.host_forwarded_ports;
+            reported.extend(ports.iter().copied());
+            reported.sort_unstable();
+            reported.dedup();
+        }
+    }
     let Ok(raw) = read_regular_file_at_nofollow(&ns_dir, FORWARDED_PORT_SIDECAR, 64 * 1024) else {
         return;
     };
@@ -396,8 +429,8 @@ fn read_lock_namespaces_from_open_dir(
     // Forwarder renewals update the sidecar, not the RON lockfiles, so
     // reflect the latest forwarded port in every derived view.
     for (namespace, locks) in grouped_locks.iter_mut() {
-        overlay_forwarded_port(&locks_dir, namespace, &mut locks.primary);
-        overlay_forwarded_port(&locks_dir, namespace, &mut locks.client);
+        overlay_port_sidecars(&locks_dir, namespace, &mut locks.primary);
+        overlay_port_sidecars(&locks_dir, namespace, &mut locks.client);
     }
 
     Ok(LockNamespacesStatus {
@@ -609,6 +642,7 @@ pub(crate) fn remove_forwarded_port_sidecar(dir: &Path) {
         }
     };
     remove(&dir.join(FORWARDED_PORT_SIDECAR));
+    remove(&dir.join(HOST_RELAY_SIDECAR));
     remove(&dir.join(HEALTH_FILE));
     remove(&dir.join(STOPPING_SIDECAR));
     if let Ok(entries) = std::fs::read_dir(dir) {

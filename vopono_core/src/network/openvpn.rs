@@ -1131,8 +1131,9 @@ pub fn warn_on_scripts_config(path: &Path) -> anyhow::Result<bool> {
 pub fn get_remotes_from_config(path: &Path) -> anyhow::Result<Vec<Remote>> {
     let content =
         std::fs::read_to_string(path).context("Reading OpenVPN endpoint configuration")?;
-    let endpoints = super::openvpn_config::endpoints(&content)
-        .context("Could not parse OpenVPN remote configuration")?;
+    let endpoints =
+        super::openvpn_config::remote_endpoints(&content, !crate::util::is_daemon_mode())
+            .context("Could not parse OpenVPN remote configuration")?;
     endpoints
         .into_iter()
         .map(|endpoint| {

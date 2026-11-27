@@ -5,10 +5,13 @@ from pathlib import Path
 import pwd
 import pty
 import selectors
+import shlex
+import shutil
 import socket
 import subprocess
 import sys
 import time
+from common import Context
 
 
 binary, scratch_arg, user = sys.argv[1:]
@@ -101,9 +104,14 @@ client('exec', '--vopono-config', str(profile), '--profile', 'attach',
        '--interface', 'uplink', '--firewall', 'nftables')
 name = f'late_relay-u{uid}'
 port = 43158
+relay_app = Context(binary, scratch, user).user_file('late-relay.py', f"""
+import os
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+assert os.environ['VOPONO_HOST_FORWARDED_PORTS'] == '{port}'
+HTTPServer(('0.0.0.0', {port}), SimpleHTTPRequestHandler).serve_forever()
+""")
 application = subprocess.Popen(
-    base + ['exec', '--existing-netns', name, '--interface', 'uplink', '--monitor',
-            '--forward', str(port), f'python3 -m http.server {port} --bind 0.0.0.0'],
+    base + attach(name, 'python3 ' + str(relay_app), '--monitor', '--forward', str(port)),
     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
 )
 
@@ -124,8 +132,12 @@ try:
         return next(ns.get('health') for ns in status['namespaces'] if ns['id'] == name)
 
     wait_for(monitor_appears)
-    client('exec', '--existing-netns', name, '--interface', 'uplink', '--forward',
-           str(port), 'true')
+    entry = Context(binary, scratch, user).status(name)
+    assert entry['host_forwarded_ports'] == [port], entry
+    active = client(*attach(name, 'printenv VOPONO_HOST_FORWARDED_PORTS',
+                            '--forward', str(port), '--json')).stdout.splitlines()
+    assert json.loads(active[0])['host_forwarded_ports'] == [port], active
+    assert active[1:] == [str(port)], active
     assert relay_responds()
     with socket.socket(socket.AF_INET6) as reserved:
         reserved.bind(('::', 0))
@@ -141,6 +153,20 @@ finally:
     client('stop', 'namespace', name, '--json')
     application.wait(timeout=15)
 print('PASS: daemon YAML settings, create-only profile, late relay and monitor, and bind errors', flush=True)
+
+# The JSON relay must finish after the application exits even when a detached
+# descendant still holds its stdout open. Keep stderr separate from this test.
+name = f'reg_json_relay-u{uid}'
+try:
+    command = "sh -c 'sleep 30 2>/dev/null & printf finished'"
+    result = subprocess.run(base + launch('reg_json_relay', command, '--json'),
+                            stdin=subprocess.DEVNULL, capture_output=True,
+                            text=True, timeout=4, check=True)
+    event, output = result.stdout.splitlines()
+    assert json.loads(event)['event'] == 'launched' and output == 'finished', result
+finally:
+    client('stop', 'namespace', name, '--json', check=False)
+print('PASS: JSON exec publishes output and returns while a descendant holds stdout', flush=True)
 
 # More completed persistent requests than the per-user execution limit must
 # leave admission available. Each capture must finish before namespace stop.
@@ -387,3 +413,50 @@ for direct in (False, True):
         if flags:
             assert json.loads(result.stdout)['error']['diagnostics']
 print('PASS: direct/daemon early launch failures include redacted terminal/JSON evidence', flush=True)
+
+# Simulate NetworkManager and delay final namespace deletion so both stops
+# hold their ownership records while cleaning up their interfaces.
+ctx = Context(binary, scratch, user)
+nm_bin = scratch / 'nm-test-bin'
+nm_bin.mkdir()
+nmcli = nm_bin / 'nmcli'
+nmcli.write_text('#!/bin/sh\nexit 0\n')
+ip = nm_bin / 'ip'
+real_ip = shlex.quote(shutil.which('ip'))
+ip.write_text(f'#!/bin/sh\nif [ "$1" = netns ] && [ "$2" = delete ]; then sleep 2; fi\n'
+              f'exec {real_ip} "$@"\n')
+for executable in (nmcli, ip):
+    executable.chmod(0o755)
+conf_dir = Path('/etc/NetworkManager/conf.d')
+conf_dir.mkdir(parents=True, exist_ok=True)
+admin_config = conf_dir / 'unmanaged.conf'
+previous = admin_config.read_bytes() if admin_config.exists() else None
+admin_contents = b'[keyfile]\nunmanaged-devices=interface-name:admin-example\n'
+admin_config.write_bytes(admin_contents)
+original_path = os.environ['PATH']
+os.environ['PATH'] = f'{nm_bin}:{original_path}'
+try:
+    ctx.restart()
+    names = ('nm_a', 'nm_b')
+    for short in names:
+        client(*launch(short, '', '--create-netns-only'))
+    drop_ins = list(conf_dir.glob('90-vopono-nm_*.conf'))
+    assert len(drop_ins) == 2, drop_ins
+    stops = [
+        subprocess.Popen(base + ['stop', 'namespace', ctx.namespace(short), '--json'],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for short in names
+    ]
+    for stop in stops:
+        stdout, stderr = stop.communicate(timeout=15)
+        assert stop.returncode == 0 and json.loads(stdout)['namespace_removed'], stderr
+    assert admin_config.read_bytes() == admin_contents
+    assert all(not path.exists() for path in drop_ins), drop_ins
+finally:
+    os.environ['PATH'] = original_path
+    ctx.restart()
+    if previous is None:
+        admin_config.unlink()
+    else:
+        admin_config.write_bytes(previous)
+print('PASS: concurrent stops remove their NetworkManager drop-ins and preserve administrator config', flush=True)
