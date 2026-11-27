@@ -166,7 +166,12 @@ impl OpenVpnProvider for ProtonVPN {
             let file_contents = std::str::from_utf8(&file_contents)?;
             let file_contents = file_contents
                 .split('\n')
-                .filter(|&x| !(x.starts_with("up ") || x.starts_with("down ")))
+                .filter(|&x| {
+                    let trimmed = x.trim_start();
+                    !(trimmed.starts_with("up ")
+                        || trimmed.starts_with("down ")
+                        || trimmed.starts_with("script-security "))
+                })
                 .collect::<Vec<&str>>()
                 .join("\n");
 

@@ -32,8 +32,10 @@ impl PrivateInternetAccess {
 
     //This only works if openvpn was sync'd
     pub fn hostname_for_openvpn_conf(&self, config_file: &String) -> anyhow::Result<String> {
-        let pia_config_file = File::open(self.openvpn_config_file_path()?)?;
-        let pia_config: Config = serde_json::from_reader(pia_config_file)?;
+        let path = self.openvpn_config_file_path()?;
+        let bytes = crate::util::owner_write::read_file_as_config_owner(&path)
+            .with_context(|| format!("Failed to read PIA OpenVPN config map {}", path.display()))?;
+        let pia_config: Config = serde_json::from_slice(&bytes)?;
 
         let hostname = pia_config
             .hostname_lookup

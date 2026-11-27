@@ -4,8 +4,7 @@ use anyhow::{Context, anyhow};
 use log::{debug, info};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -109,18 +108,25 @@ pub fn verify_auth(
         return Ok(None);
     }
     let auth_file = auth_file.unwrap();
-    let file = File::open(&auth_file);
-    match file {
-        Ok(f) => {
+    match crate::util::owner_write::read_file_as_config_owner(&auth_file) {
+        Ok(bytes) => {
             debug!("Read auth file: {}", auth_file.to_string_lossy());
-            let bufreader = BufReader::new(f);
-            let mut iter = bufreader.lines();
-            let username = iter.next().with_context(|| "No username")??;
-            let password = iter.next().with_context(|| "No password")??;
-            provider.validate_auth(&username, &password)?;
+            let content = String::from_utf8(bytes).context("Auth file is not valid UTF-8")?;
+            let mut iter = content.lines();
+            let username = iter.next().with_context(|| "No username")?;
+            let password = iter.next().with_context(|| "No password")?;
+            provider.validate_auth(username, password)?;
             Ok(Some(auth_file))
         }
-        Err(_) => {
+        Err(error) => {
+            // Only prompt for credentials when the auth file does not exist.
+            // If an existing path/symlink failed dropped-privilege reading,
+            // fail closed instead of falling back to privileged reads/prompts.
+            if std::fs::symlink_metadata(&auth_file).is_ok() {
+                return Err(error).with_context(|| {
+                    format!("Failed to read OpenVPN auth file {}", auth_file.display())
+                });
+            }
             debug!(
                 "No auth file: {} - prompting user",
                 auth_file.to_string_lossy()

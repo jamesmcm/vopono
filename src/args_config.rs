@@ -2,7 +2,8 @@
 
 use std::{fs, net::IpAddr, path::PathBuf, str::FromStr};
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
+use clap::ValueEnum;
 use config::Config;
 use log::warn;
 use vopono_core::{
@@ -55,22 +56,242 @@ macro_rules! command_else_config_option_variant {
     // If None then read from Config .get("expr")
     // Returns None if absent in both
     ($field_id:ident, $command:ident, $config:ident) => {
-        $command.$field_id.map(|x| x.to_variant()).or_else(|| {
-            $config
-                .get(stringify!($field_id))
-                .or($config.get(&stringify!($field_id).replace('_', "-")))
-                .map_err(|_e| anyhow!("Failed to read config file"))
-                .ok()
-        })
+        $command
+            .$field_id
+            .map(|x| x.to_variant())
+            .or_else(|| config_variant(&$config, stringify!($field_id)))
     };
+}
+
+fn config_variant<T>(config: &Config, name: &str) -> Option<T>
+where
+    T: strum::IntoEnumIterator + Clone + std::fmt::Display + Send + Sync + 'static,
+{
+    config
+        .get_string(name)
+        .or_else(|_| config.get_string(&name.replace('_', "-")))
+        .ok()
+        .and_then(|value| crate::args::WrappedArg::<T>::from_str(&value, true).ok())
+        .map(|value| value.to_variant())
 }
 
 macro_rules! error_and_bail {
     // log to error and bail
     ($msg:literal) => {
         log::error!("{}", $msg);
-        anyhow::bail!($msg);
+        return Err(vopono_core::diagnostics::SetupError::Configuration($msg).into());
     };
+}
+
+/// Expand `~` and `$VAR` using the invoking user's home/environment instead of
+/// root's when running inside the daemon.
+pub(crate) fn expand_user_str(
+    input: &str,
+    user_name: Option<&str>,
+    client_env: Option<&std::collections::HashMap<String, String>>,
+) -> anyhow::Result<String> {
+    let home = if vopono_core::util::is_daemon_mode() {
+        user_name
+            .and_then(|name| nix::unistd::User::from_name(name).ok().flatten())
+            .map(|user| user.dir.to_string_lossy().into_owned())
+            .or_else(|| client_env.and_then(|env| env.get("HOME").cloned()))
+    } else {
+        std::env::var("HOME").ok()
+    };
+    let expanded = shellexpand::full_with_context(
+        input,
+        || home.clone(),
+        |var| -> Result<Option<String>, std::env::VarError> {
+            if let Some(env) = client_env {
+                Ok(env.get(var).cloned())
+            } else if vopono_core::util::is_daemon_mode() {
+                // Never expand root daemon environment variables for client config values.
+                Ok(None)
+            } else {
+                match std::env::var(var) {
+                    Ok(value) => Ok(Some(value)),
+                    Err(std::env::VarError::NotPresent) => Ok(None),
+                    Err(err) => Err(err),
+                }
+            }
+        },
+    )?;
+    Ok(expanded.into_owned())
+}
+
+/// Connection selection shared by execution, launch diagnostics and MCP doctor.
+/// Profile overlays are applied before this type reads CLI/config precedence.
+#[derive(Debug)]
+pub(crate) struct ConnectionSettings {
+    pub provider: Option<VpnProvider>,
+    pub protocol: Option<Protocol>,
+    pub server: Option<String>,
+    pub custom: Option<PathBuf>,
+}
+impl ConnectionSettings {
+    pub fn read(command: &ExecCommand, config: &Config) -> anyhow::Result<Self> {
+        Self::read_with_env(command, config, None)
+    }
+
+    pub fn read_with_env(
+        command: &ExecCommand,
+        config: &Config,
+        client_env: Option<&std::collections::HashMap<String, String>>,
+    ) -> anyhow::Result<Self> {
+        let cli_provider = command.provider.as_ref().map(|p| p.to_variant());
+        let cli_protocol = command.protocol.as_ref().map(|p| p.to_variant());
+        // Only inherit `custom` from config when CLI did not explicitly choose a
+        // non-Custom provider (e.g., `--provider mullvad`, `--existing-netns`) or
+        // a protocol that does not take a WireGuard/OpenVPN custom config (`ssh`, `warp`).
+        let custom: Option<PathBuf> = if command.existing_netns.is_some() {
+            None
+        } else if command.custom.is_some() {
+            command.custom.clone()
+        } else if cli_provider
+            .as_ref()
+            .is_some_and(|provider| *provider != VpnProvider::Custom)
+            || matches!(cli_protocol, Some(Protocol::Ssh | Protocol::Warp))
+        {
+            None
+        } else {
+            config
+                .get::<PathBuf>("custom")
+                .ok()
+                .filter(|path| !path.as_os_str().is_empty())
+        };
+        let custom = custom
+            .map(|path| {
+                // Avoid double-expanding paths already expanded and resolved by the client.
+                if command.literal_application && path.is_absolute() {
+                    return Ok(path);
+                }
+                expand_user_str(&path.to_string_lossy(), command.user.as_deref(), client_env)
+                    .map(PathBuf::from)
+                    .map_err(|_| {
+                        vopono_core::diagnostics::SetupError::Configuration(
+                            "Could not expand the custom configuration path",
+                        )
+                    })
+            })
+            .transpose()?;
+        let protocol = cli_protocol.or_else(|| config_variant(config, "protocol"));
+        let provider = if custom.is_some() {
+            Some(VpnProvider::Custom)
+        } else {
+            cli_provider
+                .or_else(|| config_variant(config, "provider"))
+                .or_else(|| (protocol == Some(Protocol::Ssh)).then_some(VpnProvider::Custom))
+        };
+        let protocol = if provider == Some(VpnProvider::None) {
+            Some(Protocol::None)
+        } else {
+            protocol
+        };
+        Ok(Self {
+            provider,
+            protocol,
+            server: command_else_config_option!(server, command, config),
+            custom,
+        })
+    }
+
+    pub fn detected_protocol(&self) -> anyhow::Result<Protocol> {
+        if let Some(protocol) = &self.protocol {
+            return Ok(protocol.clone());
+        }
+        if let Some(path) = &self.custom {
+            return get_config_file_protocol(path).map_err(|err| {
+                // Preserve underlying file read / permission errors instead of
+                // masking them behind a generic protocol-detection message.
+                let msg = err.to_string();
+                if msg.starts_with("Failed to read VPN config file") {
+                    err.context(format!(
+                        "Could not open custom VPN config {}; check the path and file permissions (or specify --protocol)",
+                        path.display()
+                    ))
+                } else {
+                    anyhow::Error::from(vopono_core::diagnostics::SetupError::Configuration(
+                        "Could not detect the custom VPN protocol; check the file or specify --protocol",
+                    ))
+                }
+            });
+        }
+        match self.provider.as_ref() {
+            Some(VpnProvider::None | VpnProvider::Custom) => Ok(Protocol::None),
+            Some(provider) => Ok(provider.get_dyn_provider().default_protocol()),
+            None => Err(vopono_core::diagnostics::SetupError::Configuration(
+                "Enter a VPN provider as a command-line argument or in the vopono config.toml file",
+            )
+            .into()),
+        }
+    }
+
+    fn for_execution(&self) -> anyhow::Result<(VpnProvider, Protocol, String)> {
+        use vopono_core::diagnostics::SetupError;
+        let provider = self.provider.clone().ok_or(SetupError::Configuration(
+            "Enter a VPN provider as a command-line argument or in the vopono config.toml file",
+        ))?;
+        let protocol = self.detected_protocol()?;
+        if provider == VpnProvider::Custom && self.custom.is_none() && protocol != Protocol::Ssh {
+            return Err(SetupError::Configuration(
+                "Must provide config file if using custom VPN Provider",
+            )
+            .into());
+        }
+        let server = if let Some(path) = &self.custom {
+            if protocol == Protocol::Ssh {
+                self.server.clone().ok_or(SetupError::Configuration(
+                    "SSH server or OpenSSH host alias must be provided with --server",
+                ))?
+            } else if protocol == Protocol::OpenConnect {
+                self.server.clone().unwrap_or_default()
+            } else {
+                path.file_stem()
+                    .and_then(|name| name.to_str())
+                    .ok_or(SetupError::Configuration(
+                        "Custom configuration must have a UTF-8 filename",
+                    ))?
+                    .to_owned()
+            }
+        } else {
+            self.server.clone().or_else(|| provider.default_server()).ok_or(SetupError::Configuration(
+                "VPN server prefix must be provided as a command-line argument or in the vopono config.toml file"
+            ))?
+        };
+        if (provider == VpnProvider::Warp) != (protocol == Protocol::Warp)
+            || (provider == VpnProvider::None) != (protocol == Protocol::None)
+            || (protocol == Protocol::Ssh && provider != VpnProvider::Custom)
+        {
+            return Err(SetupError::ProtocolNotSupported { provider, protocol }.into());
+        }
+        Ok((provider, protocol, server))
+    }
+
+    pub fn doctor_command(&self, offline: bool) -> Vec<String> {
+        let mut args = vec![
+            "doctor".into(),
+            "--json".into(),
+            "--timeout-ms".into(),
+            "500".into(),
+        ];
+        if let Some(path) = &self.custom {
+            args.push(format!("--custom={}", path.to_string_lossy()));
+        } else if let Some(provider) = &self.provider {
+            args.push(format!("--provider={}", provider.id()));
+            if let Some(server) = &self.server {
+                args.push(format!("--server={server}"));
+            }
+        }
+        if (self.custom.is_some() || self.provider.is_some())
+            && let Some(protocol) = &self.protocol
+        {
+            args.push(format!("--protocol={}", protocol.id()));
+        }
+        if offline {
+            args.push("--offline".into());
+        }
+        args
+    }
 }
 
 // TODO: Generate this from procedural macro?
@@ -118,48 +339,90 @@ impl ArgsConfig {
     /// Return new ExecCommand with args from config file if missing in CLI but present there
     /// Also handle CLI args consistency errors
     pub fn get_cli_or_config_args(command: ExecCommand, config: Config) -> anyhow::Result<Self> {
+        Self::get_cli_or_config_args_with_env(command, config, None)
+    }
+
+    pub fn get_cli_or_config_args_with_env(
+        command: ExecCommand,
+        config: Config,
+        client_env: Option<&std::collections::HashMap<String, String>>,
+    ) -> anyhow::Result<Self> {
         // TODO: Automate field mapping with procedural macro over ExecCommand struct?
-        let custom: Option<PathBuf> = command_else_config_option!(custom, command, config)
-            .and_then(|p| {
-                shellexpand::full(&p.to_string_lossy())
-                    .ok()
-                    .and_then(|s| PathBuf::from_str(s.as_ref()).ok())
-            });
+        let user_for_expand = command.user.clone();
+        let connection = ConnectionSettings::read_with_env(&command, &config, client_env)?;
+        let custom = connection.custom.clone();
         let auth_user_pass =
-            command_else_config_option!(auth_user_pass, command, config).and_then(|p| {
-                shellexpand::full(&p.to_string_lossy())
-                    .ok()
-                    .and_then(|s| PathBuf::from_str(s.as_ref()).ok())
+            command_else_config_option!(auth_user_pass, command, config).map(|p| {
+                if command.literal_application && p.is_absolute() {
+                    return p;
+                }
+                let raw = p.to_string_lossy();
+                expand_user_str(&raw, user_for_expand.as_deref(), client_env)
+                    .map(PathBuf::from)
+                    .unwrap_or(p)
             });
 
-        // Note application cannot be defined in config file
-        let application: String = shellexpand::full(&command.application)
-            .map_err(|e| {
-                anyhow!(
-                    "Shell expansion error for application: {:?}, error: {:?}",
-                    command.application,
-                    e
-                )
-            })
-            .map(|c| c.to_string())?;
+        let application = if !command.create_netns_only
+            && command.application.is_empty()
+            && command.profile.is_some()
+        {
+            config
+                .get_string("application")
+                .map_err(|_| anyhow!("Named profile requires an application"))?
+        } else {
+            command.application.clone()
+        };
+        anyhow::ensure!(
+            !application.is_empty() || command.create_netns_only,
+            vopono_core::diagnostics::SetupError::Configuration(
+                "An application or --profile is required (except with --create-netns-only)"
+            )
+        );
+        let application: String = if command.literal_application {
+            application
+        } else {
+            expand_user_str(&application, user_for_expand.as_deref(), client_env)
+                .context("Failed to expand the application command")?
+        };
         let custom_netns_name = command_else_config_option!(custom_netns_name, command, config);
         let open_hosts = command_else_config_option!(open_hosts, command, config);
         let hosts = command_else_config_option!(hosts, command, config);
         let open_ports = command_else_config_option!(open_ports, command, config);
         let forward = command_else_config_option!(forward, command, config);
-        let postup = command_else_config_option!(postup, command, config)
-            .and_then(|p| shellexpand::full(&p).ok().map(|s| s.into_owned()));
-        let predown = command_else_config_option!(predown, command, config)
-            .and_then(|p| shellexpand::full(&p).ok().map(|s| s.into_owned()));
+        let postup = command_else_config_option!(postup, command, config).map(|p| {
+            if command.literal_application {
+                p
+            } else {
+                expand_user_str(&p, user_for_expand.as_deref(), client_env).unwrap_or(p)
+            }
+        });
+        let predown = command_else_config_option!(predown, command, config).map(|p| {
+            if command.literal_application {
+                p
+            } else {
+                expand_user_str(&p, user_for_expand.as_deref(), client_env).unwrap_or(p)
+            }
+        });
         let group = command_else_config_option!(group, command, config);
         let working_directory = command_else_config_option!(working_directory, command, config)
-            .and_then(|p| shellexpand::full(&p).ok().map(|s| s.into_owned()));
+            .map(|p| {
+                if command.literal_application && std::path::Path::new(&p).is_absolute() {
+                    p
+                } else {
+                    expand_user_str(&p, user_for_expand.as_deref(), client_env).unwrap_or(p)
+                }
+            });
         let dns = command_else_config_option!(dns, command, config);
         let user = command_else_config_option!(user, command, config)
             .or_else(|| std::env::var("SUDO_USER").ok());
         let port_forwarding_callback =
-            command_else_config_option!(port_forwarding_callback, command, config)
-                .and_then(|p| shellexpand::full(&p).ok().map(|s| s.into_owned()));
+            command_else_config_option!(port_forwarding_callback, command, config).map(|p| {
+                if command.literal_application {
+                    p
+                } else {
+                    expand_user_str(&p, user_for_expand.as_deref(), client_env).unwrap_or(p)
+                }
+            });
 
         let no_proxy = command_else_config_bool!(no_proxy, command, config);
         let keep_alive = command_else_config_bool!(keep_alive, command, config);
@@ -226,83 +489,22 @@ impl ArgsConfig {
             ),
         }
 
-        let provider: VpnProvider;
-        let server: String;
-        let protocol: Protocol;
-
-        // Assign protocol and server from args or vopono config file or custom config if used
-        if let Some(path) = &custom {
-            protocol = command_else_config_option!(protocol, command, config)
-                .map(|x| x.to_variant())
-                .ok_or_else(|| anyhow!("."))
-                .or_else(|_| get_config_file_protocol(path))?;
-
-            provider = VpnProvider::Custom;
-
-            if protocol == Protocol::Ssh {
-                server = command_else_config_option!(server, command, config).ok_or_else(|| {
-                    anyhow!("SSH server or OpenSSH host alias must be provided with --server")
-                })?;
-            } else if protocol != Protocol::OpenConnect {
-                // Encode filename with base58 so we can fit it within 16 chars for the veth pair name
-                let sname = bs58::encode(&path.to_str().unwrap()).into_string();
-
-                server = sname[0..std::cmp::min(11, sname.len())].to_string();
-            } else {
-                // For OpenConnect the server-name can be provided via the usual config or
-                // command-line-options. Since it also can be provided via the custom-config we will
-                // set an empty-string if it isn't provided.
-                server = command_else_config_option!(server, command, config).unwrap_or_default();
-            }
-        } else {
-            // Get server and provider
-            let requested_protocol = command_else_config_option_variant!(protocol, command, config);
-            provider = command_else_config_option_variant!(provider, command, config)
-                .or_else(|| {
-                    (requested_protocol == Some(Protocol::Ssh)).then_some(VpnProvider::Custom)
-                })
-                .ok_or_else(|| {
-                    let msg =
-                "Enter a VPN provider as a command-line argument or in the vopono config.toml file";
-                    log::error!("{msg}");
-                    anyhow!(msg)
-                })?;
-
-            if provider == VpnProvider::Custom && requested_protocol != Some(Protocol::Ssh) {
-                error_and_bail!("Must provide config file if using custom VPN Provider");
-            }
-
-            server = command_else_config_option!(server, command, config)
-                .or_else(|| provider.default_server())
-                .ok_or_else(|| {
-                    let msg = "VPN server prefix must be provided as a command-line argument or in the vopono config.toml file";
-                    log::error!("{msg}"); anyhow!(msg)})?;
-
-            // `--provider None` launches an isolated namespace without any VPN
-            // service; it overrides protocol settings from CLI args or the
-            // vopono config file rather than failing the None/None pairing
-            // check below.
-            protocol = if provider == VpnProvider::None {
-                if let Some(requested) = requested_protocol.filter(|p| *p != Protocol::None) {
-                    warn!("Provider None ignores the configured protocol ({requested})");
-                }
-                Protocol::None
-            } else {
-                requested_protocol.unwrap_or_else(|| provider.get_dyn_provider().default_protocol())
-            };
-        }
+        let (provider, protocol, server) = connection.for_execution()?;
 
         // TODO: Error handling
         let trojan_host = command_else_config_option!(trojan_host, command, config);
 
         let trojan_password = command_else_config_option!(trojan_password, command, config);
         let trojan_no_verify = command_else_config_bool!(trojan_no_verify, command, config);
-        let trojan_config =
-            command_else_config_option!(trojan_config, command, config).and_then(|p| {
-                shellexpand::full(&p.to_string_lossy())
-                    .ok()
-                    .and_then(|s| PathBuf::from_str(s.as_ref()).ok())
-            });
+        let trojan_config = command_else_config_option!(trojan_config, command, config).map(|p| {
+            if command.literal_application && p.is_absolute() {
+                return p;
+            }
+            let raw = p.to_string_lossy();
+            expand_user_str(&raw, user_for_expand.as_deref(), client_env)
+                .map(PathBuf::from)
+                .unwrap_or(p)
+        });
 
         if (trojan_host.is_some() || trojan_config.is_some()) && protocol != Protocol::Wireguard {
             error_and_bail!("Trojan is currently only supported for Wireguard forwarding");
@@ -314,28 +516,6 @@ impl ArgsConfig {
             && (trojan_host.is_some() || trojan_password.is_some() || trojan_no_verify)
         {
             warn!("Trojan config file provided - ignoring other trojan settings");
-        }
-
-        if (provider == VpnProvider::Warp && protocol != Protocol::Warp)
-            || (provider != VpnProvider::Warp && protocol == Protocol::Warp)
-        {
-            error_and_bail!("Cloudflare Warp protocol must use Warp provider");
-        }
-
-        if provider == VpnProvider::None && custom.is_some() {
-            error_and_bail!("Custom config cannot be set when using None provider");
-        }
-
-        if (provider == VpnProvider::None && protocol != Protocol::None)
-            || (provider != VpnProvider::None && protocol == Protocol::None)
-        {
-            error_and_bail!(
-                "None protocol must use None provider - will run not run any VPN service inside netns"
-            );
-        }
-
-        if protocol == Protocol::Ssh && provider != VpnProvider::Custom {
-            error_and_bail!("SSH protocol must use the Custom provider");
         }
 
         let ssh_proxy_port = command
@@ -397,30 +577,173 @@ impl ArgsConfig {
 
     /// Read vopono config file to Config struct
     pub fn get_config_file(command: &ExecCommand) -> anyhow::Result<Config> {
-        let default_config_path = vopono_dir()
-            .map(|p| p.join("config.toml"))
-            .ok()
-            .filter(|v| fs::exists(v).unwrap_or(false));
+        let is_daemon = vopono_core::util::is_daemon_mode();
+        let explicit_config = command.vopono_config.is_some();
+        let default_config_path = if is_daemon {
+            // Avoid probing fs::exists() as root in daemon mode; the unprivileged
+            // helper attempts the read below and treats ENOENT as absent.
+            vopono_dir().map(|p| p.join("config.toml")).ok()
+        } else {
+            vopono_dir()
+                .map(|p| p.join("config.toml"))
+                .ok()
+                .filter(|v| fs::exists(v).unwrap_or(false))
+        };
 
-        let config_path = command.vopono_config.clone().or(default_config_path);
-
+        let mut config_path = command.vopono_config.clone().or(default_config_path);
         let mut vopono_config_settings_builder = config::Config::builder();
 
-        if let Some(path) = config_path.clone() {
-            vopono_config_settings_builder =
-                vopono_config_settings_builder.add_source(config::File::from(path));
+        if let Some(path) = &mut config_path {
+            if is_daemon {
+                use config::FileFormat;
+                const FORMATS: &[(&str, FileFormat)] = &[
+                    ("toml", FileFormat::Toml),
+                    ("json", FileFormat::Json),
+                    ("yaml", FileFormat::Yaml),
+                    ("yml", FileFormat::Yaml),
+                    ("ini", FileFormat::Ini),
+                    ("ron", FileFormat::Ron),
+                    ("json5", FileFormat::Json5),
+                ];
+                // Read strictly through the privilege-dropped helper (never probing
+                // path.is_file() as root) so daemon mode cannot act as an existence oracle.
+                let ext_format = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .and_then(|ext| {
+                        FORMATS
+                            .iter()
+                            .find_map(|(name, fmt)| (*name == ext).then_some(*fmt))
+                    });
+                let read_result: anyhow::Result<Option<(Vec<u8>, FileFormat)>> =
+                    if let Some(format) = ext_format {
+                        match vopono_core::util::owner_write::read_file_as_config_owner(path) {
+                            Ok(bytes) => Ok(Some((bytes, format))),
+                            Err(err)
+                                if !explicit_config
+                                    && (err.chain().any(|cause| {
+                                        cause.downcast_ref::<std::io::Error>().is_some_and(|io| {
+                                            io.kind() == std::io::ErrorKind::NotFound
+                                        })
+                                    }) || format!("{err:#}")
+                                        .contains("No such file or directory")) =>
+                            {
+                                Ok(None)
+                            }
+                            Err(_) => Err(anyhow::Error::new(
+                                vopono_core::diagnostics::Diagnostic::new(
+                                    vopono_core::diagnostics::DiagnosticCode::ProviderConfig,
+                                    vopono_core::diagnostics::DiagnosticState::Fail,
+                                    &format!(
+                                        "Could not read the vopono configuration file {}",
+                                        path.display()
+                                    ),
+                                    Some("Check that the file exists and is readable by your user"),
+                                ),
+                            )),
+                        }
+                    } else {
+                        let mut found = None;
+                        for (ext, format) in FORMATS {
+                            let mut candidate = path.as_os_str().to_owned();
+                            candidate.push(format!(".{ext}"));
+                            let candidate = PathBuf::from(candidate);
+                            if let Ok(bytes) =
+                                vopono_core::util::owner_write::read_file_as_config_owner(
+                                    &candidate,
+                                )
+                            {
+                                *path = candidate;
+                                found = Some((bytes, *format));
+                                break;
+                            }
+                        }
+                        if let Some(result) = found {
+                            Ok(Some(result))
+                        } else {
+                            Err(anyhow::Error::new(
+                                vopono_core::diagnostics::Diagnostic::new(
+                                    vopono_core::diagnostics::DiagnosticCode::ProviderConfig,
+                                    vopono_core::diagnostics::DiagnosticState::Fail,
+                                    &format!(
+                                        "Could not read or find the vopono configuration file {}",
+                                        path.display()
+                                    ),
+                                    Some("Check the file path, extension and read permissions"),
+                                ),
+                            ))
+                        }
+                    };
+                if let Some((bytes, format)) = read_result? {
+                    let content = String::from_utf8(bytes).map_err(|_| {
+                        anyhow::Error::new(vopono_core::diagnostics::Diagnostic::new(
+                            vopono_core::diagnostics::DiagnosticCode::ProviderConfig,
+                            vopono_core::diagnostics::DiagnosticState::Fail,
+                            &format!(
+                                "Vopono configuration {} must be valid UTF-8",
+                                path.display()
+                            ),
+                            Some("Ensure the configuration file is UTF-8 encoded"),
+                        ))
+                    })?;
+                    vopono_config_settings_builder = vopono_config_settings_builder
+                        .add_source(config::File::from_str(&content, format));
+                }
+            } else {
+                vopono_config_settings_builder =
+                    vopono_config_settings_builder.add_source(config::File::from(path.clone()));
+            }
         }
 
-        vopono_config_settings_builder.build().map_err(|e| {
-            let msg = format!(
-                "Failed to parse config from: {}, err: {}",
-                config_path.unwrap().to_string_lossy(),
-                e
-            );
-            log::error!("{msg}");
-            anyhow!(msg)
-        })
+        let settings = vopono_config_settings_builder.build().map_err(|error| {
+            let path = config_path
+                .as_deref()
+                .unwrap_or_else(|| std::path::Path::new("config.toml"));
+            redacted_config_parse_error(path, &error)
+        })?;
+        crate::profiles::select(settings, command.profile.as_deref())
     }
+}
+
+pub(crate) fn load_config_file_redacted(path: &std::path::Path) -> anyhow::Result<Config> {
+    Config::builder()
+        .add_source(config::File::from(path.to_path_buf()))
+        .build()
+        .map_err(|error| redacted_config_parse_error(path, &error))
+}
+
+fn redacted_config_parse_error(
+    path: &std::path::Path,
+    error: &config::ConfigError,
+) -> anyhow::Error {
+    // Include only the first summary line (e.g., line/column location) without
+    // echoing raw file snippets that could contain secrets.
+    let summary = error
+        .to_string()
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(160)
+        .collect::<String>();
+    let message = if summary.is_empty() {
+        format!(
+            "Could not read or parse the vopono configuration file {}",
+            path.display()
+        )
+    } else {
+        format!(
+            "Could not read or parse the vopono configuration file {}: {summary}",
+            path.display()
+        )
+    };
+    anyhow::Error::new(vopono_core::diagnostics::Diagnostic::new(
+        vopono_core::diagnostics::DiagnosticCode::ProviderConfig,
+        vopono_core::diagnostics::DiagnosticState::Fail,
+        &message,
+        Some("Check that the file is readable and its syntax matches the file extension"),
+    ))
 }
 
 #[cfg(test)]
@@ -430,6 +753,102 @@ mod tests {
     use clap::Parser;
     use config::Config;
     use std::path::Path;
+
+    #[test]
+    fn connection_selection_is_shared_and_honors_cli_and_profile_precedence() {
+        let config = Config::builder().add_source(config::File::from_str(
+            "provider='mullvad'\nprotocol='wireguard'\nserver='se'\n[profiles.custom]\ncustom='/tmp/client.ovpn'\nprotocol='openvpn'\n",
+            config::FileFormat::Toml,
+        )).build().unwrap();
+        let config = crate::profiles::select(config, Some("custom")).unwrap();
+        for (explicit, expected) in [
+            (None, vopono_core::config::vpn::Protocol::OpenVpn),
+            (
+                Some("wireguard"),
+                vopono_core::config::vpn::Protocol::Wireguard,
+            ),
+        ] {
+            let mut argv = vec!["vopono", "exec", "--profile", "custom"];
+            if let Some(protocol) = explicit {
+                argv.extend(["--protocol", protocol]);
+            }
+            let Some(Command::Exec(command)) = App::try_parse_from(argv).unwrap().cmd else {
+                unreachable!()
+            };
+            let settings = super::ConnectionSettings::read(&command, &config).unwrap();
+            let (provider, protocol, _) = settings.for_execution().unwrap();
+            assert_eq!(
+                provider,
+                vopono_core::config::providers::VpnProvider::Custom
+            );
+            assert_eq!(protocol, expected);
+            let args = settings.doctor_command(true);
+            assert!(args.iter().any(|arg| arg == "--custom=/tmp/client.ovpn"));
+            assert!(
+                !args
+                    .iter()
+                    .any(|arg| arg.starts_with("--provider") || arg.starts_with("--server"))
+            );
+            assert!(
+                args.iter()
+                    .any(|arg| arg == &format!("--protocol={}", expected.id()))
+            );
+        }
+    }
+
+    #[test]
+    fn global_custom_does_not_override_cli_provider_or_provider_profile() {
+        let raw_config = Config::builder()
+            .add_source(config::File::from_str(
+                "custom='/tmp/global.ovpn'\nprotocol='openvpn'\n[profiles.mullvad_se]\nprovider='mullvad'\nprotocol='wireguard'\nserver='se'\n",
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap();
+
+        // Explicit CLI --provider overrides global custom.
+        let Some(Command::Exec(cli_cmd)) = App::try_parse_from([
+            "vopono",
+            "exec",
+            "--provider",
+            "mullvad",
+            "--server",
+            "se",
+            "true",
+        ])
+        .unwrap()
+        .cmd
+        else {
+            unreachable!()
+        };
+        let cli_settings = super::ConnectionSettings::read(&cli_cmd, &raw_config).unwrap();
+        assert!(cli_settings.custom.is_none());
+        let (provider, _, server) = cli_settings.for_execution().unwrap();
+        assert_eq!(
+            provider,
+            vopono_core::config::providers::VpnProvider::Mullvad
+        );
+        assert_eq!(server, "se");
+
+        // Profile with explicit provider suppresses global custom.
+        let selected = crate::profiles::select(raw_config, Some("mullvad_se")).unwrap();
+        let Some(Command::Exec(profile_cmd)) =
+            App::try_parse_from(["vopono", "exec", "--profile", "mullvad_se", "true"])
+                .unwrap()
+                .cmd
+        else {
+            unreachable!()
+        };
+        let profile_settings = super::ConnectionSettings::read(&profile_cmd, &selected).unwrap();
+        assert!(profile_settings.custom.is_none());
+        let (provider, protocol, server) = profile_settings.for_execution().unwrap();
+        assert_eq!(
+            provider,
+            vopono_core::config::providers::VpnProvider::Mullvad
+        );
+        assert_eq!(protocol, vopono_core::config::vpn::Protocol::Wireguard);
+        assert_eq!(server, "se");
+    }
 
     fn custom_openvpn_command(auth_user_pass: Option<&str>) -> crate::args::ExecCommand {
         let mut args = vec![
@@ -487,6 +906,46 @@ mod tests {
         assert_eq!(
             args.auth_user_pass,
             Some(Path::new("config-auth.txt").to_path_buf())
+        );
+    }
+
+    #[test]
+    fn profile_enum_values_accept_cli_spellings_and_literal_argv_is_not_expanded() {
+        let app = App::try_parse_from([
+            "vopono",
+            "exec",
+            "--interface",
+            "lo",
+            "--profile",
+            "agent",
+            "printf '$HOME' '$VOPONO_UNSET_MCP_LITERAL'",
+        ])
+        .unwrap();
+        let Command::Exec(mut command) = app.cmd.unwrap() else {
+            unreachable!()
+        };
+        command.literal_application = true;
+        let config = Config::builder()
+            .add_source(config::File::from_str(
+                "[profiles.agent]\nprovider='none'\nprotocol='none'\nfirewall='nftables'\n",
+                config::FileFormat::Toml,
+            ))
+            .build()
+            .unwrap();
+        let config = crate::profiles::select(config, Some("agent")).unwrap();
+        let args = ArgsConfig::get_cli_or_config_args(command, config).unwrap();
+        assert_eq!(
+            args.provider,
+            vopono_core::config::providers::VpnProvider::None
+        );
+        assert_eq!(args.protocol, vopono_core::config::vpn::Protocol::None);
+        assert_eq!(
+            args.firewall,
+            vopono_core::network::firewall::Firewall::NfTables
+        );
+        assert_eq!(
+            vopono_core::util::parse_command_str(&args.application).unwrap(),
+            ["printf", "$HOME", "$VOPONO_UNSET_MCP_LITERAL"]
         );
     }
 }

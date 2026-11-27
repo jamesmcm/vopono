@@ -1,21 +1,21 @@
 mod airvpn;
 pub mod azirevpn;
+pub mod diagnostics;
 mod ivpn;
 mod mozilla;
 mod mullvad;
 mod nordvpn;
 pub mod pia;
 pub mod protonvpn;
+pub mod transaction;
 mod ui;
 mod warp;
 
 use crate::config::vpn::Protocol;
 use crate::util::vopono_dir;
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::File,
-    io::{BufRead, BufReader},
     net::IpAddr,
     path::{Path, PathBuf},
 };
@@ -171,20 +171,18 @@ impl VpnProvider {
     pub fn get_dyn_openvpn_provider(&self) -> anyhow::Result<Box<dyn OpenVpnProvider>> {
         match self {
             Self::PrivateInternetAccess => Ok(Box::new(pia::PrivateInternetAccess {})),
-            Self::Mullvad => Err(anyhow!(
-                "Mullvad does not support OpenVPN as of January 2026"
-            )),
             Self::ProtonVPN => Ok(Box::new(protonvpn::ProtonVPN {})),
-            Self::AzireVPN => Err(anyhow!(
-                "AzireVPN does not support OpenVPN as of March 2025"
-            )),
             Self::AirVPN => Ok(Box::new(airvpn::AirVPN {})),
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::NordVPN => Ok(Box::new(nordvpn::NordVPN {})),
-            Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
-            Self::MozillaVPN => Err(anyhow!("MozillaVPN only supports Wireguard!")),
-            Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
             Self::None => unimplemented!("None provider runs no protocol"),
+            Self::Mullvad | Self::AzireVPN | Self::Warp | Self::MozillaVPN | Self::Custom => {
+                Err(crate::diagnostics::SetupError::ProtocolNotSupported {
+                    provider: self.clone(),
+                    protocol: Protocol::OpenVpn,
+                }
+                .into())
+            }
         }
     }
 
@@ -197,10 +195,12 @@ impl VpnProvider {
             Self::AirVPN => Ok(Box::new(airvpn::AirVPN {})),
             Self::IVPN => Ok(Box::new(ivpn::IVPN {})),
             Self::NordVPN => Ok(Box::new(nordvpn::NordVPN {})),
-            Self::Custom => Err(anyhow!("Custom provider uses separate logic")),
-            Self::Warp => Err(anyhow!("Cloudflare Warp supports only the Warp protocol")),
             Self::None => unimplemented!("None provider runs no protocol"),
-            _ => Err(anyhow!("Wireguard not implemented")),
+            _ => Err(crate::diagnostics::SetupError::ProtocolNotSupported {
+                provider: self.clone(),
+                protocol: Protocol::Wireguard,
+            }
+            .into()),
         }
     }
 
@@ -263,13 +263,14 @@ pub trait OpenVpnProvider: Provider {
     fn load_openvpn_auth(&self) -> anyhow::Result<(String, String)> {
         let auth_file = self.auth_file_path()?;
         if let Some(auth_file) = auth_file {
-            let mut reader = BufReader::new(File::open(auth_file)?);
-            let mut user = String::new();
-            reader.read_line(&mut user)?;
-            let mut pass = String::new();
-            reader.read_line(&mut pass)?;
-            let user = user.trim_end_matches(['\r', '\n']).to_string();
-            let pass = pass.trim_end_matches(['\r', '\n']).to_string();
+            let bytes = crate::util::owner_write::read_file_as_config_owner(&auth_file)
+                .with_context(|| {
+                    format!("Failed to read OpenVPN auth file {}", auth_file.display())
+                })?;
+            let content = String::from_utf8(bytes).context("Auth file is not valid UTF-8")?;
+            let mut lines = content.lines();
+            let user = lines.next().unwrap_or_default().to_string();
+            let pass = lines.next().unwrap_or_default().to_string();
             self.validate_auth(&user, &pass)?;
             Ok((user, pass))
         } else {

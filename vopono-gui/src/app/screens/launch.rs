@@ -5,6 +5,9 @@ use eframe::egui;
 impl VoponoGuiApp {
     pub(super) fn launch_view(&mut self, ui: &mut egui::Ui) {
         ui.heading("Launch");
+        if let Some(details) = &self.last_launch_details {
+            ui.label(details);
+        }
         let vpn_choices = self.vpn_choices();
         let mut delete_custom = None;
         ui.columns(2, |columns| {
@@ -94,6 +97,16 @@ impl VoponoGuiApp {
             ui.checkbox(
                 &mut self.gui_config.launch.gamepad_enabled,
                 "Gamepad controls",
+            );
+        });
+        ui.checkbox(
+            &mut self.gui_config.launch.monitor,
+            "Monitor connection health (requires daemon)",
+        );
+        ui.add_enabled_ui(self.gui_config.launch.monitor, |ui| {
+            ui.checkbox(
+                &mut self.gui_config.launch.recover,
+                "Repair network or tunnel after connectivity failures",
             );
         });
         if self.gui_config.launch.port_forwarding {

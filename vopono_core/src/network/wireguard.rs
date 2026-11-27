@@ -5,7 +5,7 @@ use crate::network::wireguard_config::WireguardConfig;
 use crate::util::sudo_command;
 use anyhow::{Context, anyhow};
 use ipnet::IpNet;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
@@ -16,7 +16,7 @@ use std::str::FromStr;
 use tempfile::NamedTempFile;
 
 const DEFAULT_PERSISTENT_KEEPALIVE_SECS: &str = "25";
-const WIREGUARD_FWMARK: &str = "51820";
+pub(crate) const WIREGUARD_FWMARK: &str = "51820";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Wireguard {
@@ -29,11 +29,19 @@ pub struct Wireguard {
     pub firewall: Firewall,
     pub if_name: String,
     pub interface_addresses: Vec<IpAddr>,
+    #[serde(default)]
+    pub(crate) routed_ipv4: Option<bool>,
+    #[serde(default)]
+    pub(crate) routed_ipv6: Option<bool>,
+    #[serde(default)]
+    pub(crate) recovery: Option<super::recovery::Peer>,
 }
 
 impl Wireguard {
     pub fn config_from_file(config_file: &Path) -> anyhow::Result<WireguardConfig> {
-        let config_string = std::fs::read_to_string(config_file)
+        let bytes = crate::util::owner_write::read_file_as_config_owner(config_file)
+            .context(format!("Reading Wireguard config file: {:?}", config_file))?;
+        let config_string = String::from_utf8(bytes)
             .context(format!("Reading Wireguard config file: {:?}", config_file))?;
 
         WireguardConfig::from_str(&config_string)
@@ -58,15 +66,16 @@ impl Wireguard {
         let executable_wg = executable_wg.unwrap_or("wg").to_string();
         let ip_link_type = ip_link_type.unwrap_or("wireguard").to_string();
 
-        if let Err(x) = which::which(&executable_wg) {
-            error!("{executable_wg} binary not found. Is wireguard-tools installed and on PATH?");
-            return Err(anyhow!(
-                "{executable_wg} binary not found. Is wireguard-tools installed and on PATH?: {:?}",
-                x
-            ));
+        if which::which(&executable_wg).is_err() {
+            return Err(crate::diagnostics::SetupError::DependencyMissing(
+                if executable_wg == "awg" { "awg" } else { "wg" },
+            )
+            .into());
         }
 
-        let mut config_string = std::fs::read_to_string(&config_file)
+        let config_bytes = crate::util::owner_write::read_file_as_config_owner(&config_file)
+            .context(format!("Reading Wireguard config file: {:?}", config_file))?;
+        let mut config_string = String::from_utf8(config_bytes)
             .context(format!("Reading Wireguard config file: {:?}", config_file))?;
 
         // Replace Endpoint with Trojan server for Wireguard forwarding
@@ -112,6 +121,11 @@ impl Wireguard {
             );
         }
 
+        let kernel_ipv6_disabled = std::fs::read_to_string("/sys/module/ipv6/parameters/disable")
+            .map(|value| value.trim() == "1")
+            .unwrap_or(false);
+        let effective_disable_ipv6 = disable_ipv6 || kernel_ipv6_disabled;
+
         // Resolve the peer with the host resolver before configuring WireGuard. A provider's
         // tunnel DNS is not reachable until WireGuard is connected, so passing a hostname to
         // `wg setconf` would create a DNS bootstrap dependency inside the namespace.
@@ -120,12 +134,12 @@ impl Wireguard {
             .endpoint
             .resolve_ips()
             .context("Failed to resolve Wireguard peer endpoint")?;
-        let peer_endpoint_ip =
-            select_endpoint_ip(&endpoint_addresses, disable_ipv6).with_context(|| {
+        let peer_endpoint_ip = select_endpoint_ip(&endpoint_addresses, effective_disable_ipv6)
+            .with_context(|| {
                 format!(
                     "No usable Wireguard endpoint found for {}{}",
                     config.peer.endpoint,
-                    if disable_ipv6 {
+                    if effective_disable_ipv6 {
                         " while IPv6 is disabled"
                     } else {
                         ""
@@ -138,6 +152,15 @@ impl Wireguard {
         );
         let peer_endpoint =
             SocketAddr::new(peer_endpoint_ip, config.peer.endpoint.port()).to_string();
+        let recovery = super::recovery::Peer {
+            host: config.peer.endpoint.ip_or_hostname(),
+            port: config.peer.endpoint.port(),
+            public_key: config.peer.public_key.clone(),
+            address: peer_endpoint_ip,
+            disable_ipv6: effective_disable_ipv6,
+            persistent_keepalive: config.peer.keepalive.clone(),
+            allowed_ips: config.peer.allowed_ips.clone(),
+        };
         let endpoint_line = Regex::new(r"(?m)^Endpoint\s*=.*$")?;
         config_string = endpoint_line
             .replace_all(&config_string, format!("Endpoint = {peer_endpoint}"))
@@ -165,13 +188,23 @@ impl Wireguard {
             "H3",
             "H4",
         ];
-        let mut wg_temp_file =
-            NamedTempFile::new().context("Creating temporary Wireguard config")?;
+        let mut wg_temp_file = if nix::unistd::geteuid().is_root() {
+            NamedTempFile::new_in("/run")
+        } else {
+            NamedTempFile::new()
+        }
+        .context("Creating temporary Wireguard config")?;
+
         write!(
             wg_temp_file,
             "{}",
             config_string
-                .split('\n')
+                .lines()
+                .map(|line| {
+                    let line = line.trim_end_matches('\r');
+                    line.split('#').next().unwrap_or(line).trim_end()
+                })
+                .filter(|x| !x.is_empty())
                 .filter(|x| x
                     .split_once('=')
                     .map(|(key, _)| allow_keys.contains(&key.trim()))
@@ -180,58 +213,122 @@ impl Wireguard {
                 .collect::<Vec<&str>>()
                 .join("\n")
         )?;
-        if firewall == Firewall::NfTables {
-            let peer_port = config.peer.endpoint.port().to_string();
-            let peer_ip_str = peer_endpoint_ip.to_string();
-            let ip_family = if peer_endpoint_ip.is_ipv4() {
-                "ip"
-            } else {
-                "ip6"
-            };
+        let peer_port = config.peer.endpoint.port().to_string();
+        let peer_ip_str = peer_endpoint_ip.to_string();
+        match firewall {
+            Firewall::NfTables => {
+                if !(effective_disable_ipv6 && peer_endpoint_ip.is_ipv6()) {
+                    let ip_family = if peer_endpoint_ip.is_ipv4() {
+                        "ip"
+                    } else {
+                        "ip6"
+                    };
 
-            debug!("Opening firewall for Wireguard peer (out): {peer_ip_str} dport {peer_port}");
-            // Allow the initial OUTGOING connection packet.
-            NetworkNamespace::exec(
-                &namespace.name,
-                &[
-                    "nft",
-                    "add",
-                    "rule",
-                    "inet",
-                    &namespace.name,
-                    "output",
-                    ip_family,
-                    "daddr",
-                    &peer_ip_str,
-                    "udp",
-                    "dport",
-                    &peer_port,
-                    "counter",
-                    "accept",
-                ],
-            )?;
+                    debug!(
+                        "Opening firewall for Wireguard peer (out): {peer_ip_str} dport {peer_port}"
+                    );
+                    // Allow the initial OUTGOING connection packet.
+                    NetworkNamespace::exec(
+                        &namespace.name,
+                        &[
+                            "nft",
+                            "add",
+                            "rule",
+                            "inet",
+                            &namespace.name,
+                            "output",
+                            "meta",
+                            "mark",
+                            WIREGUARD_FWMARK,
+                            ip_family,
+                            "daddr",
+                            &peer_ip_str,
+                            "udp",
+                            "dport",
+                            &peer_port,
+                            "counter",
+                            "accept",
+                            "comment",
+                            "vopono-recovery-endpoint",
+                        ],
+                    )?;
 
-            debug!("Opening firewall for Wireguard peer (in): {peer_ip_str} sport {peer_port}");
-            // Allow the server's INCOMING reply packet.
-            NetworkNamespace::exec(
-                &namespace.name,
-                &[
-                    "nft",
-                    "add",
-                    "rule",
-                    "inet",
-                    &namespace.name,
-                    "input",
-                    ip_family,
-                    "saddr",
-                    &peer_ip_str,
-                    "udp",
-                    "sport",
-                    &peer_port,
-                    "counter",
-                    "accept",
-                ],
-            )?;
+                    debug!(
+                        "Opening firewall for Wireguard peer (in): {peer_ip_str} sport {peer_port}"
+                    );
+                    // Allow the server's INCOMING reply packet.
+                    NetworkNamespace::exec(
+                        &namespace.name,
+                        &[
+                            "nft",
+                            "add",
+                            "rule",
+                            "inet",
+                            &namespace.name,
+                            "input",
+                            ip_family,
+                            "saddr",
+                            &peer_ip_str,
+                            "udp",
+                            "sport",
+                            &peer_port,
+                            "counter",
+                            "accept",
+                            "comment",
+                            "vopono-recovery-endpoint",
+                        ],
+                    )?;
+                }
+            }
+            Firewall::IpTables => {
+                if !(effective_disable_ipv6 && peer_endpoint_ip.is_ipv6()) {
+                    let ipcmd = if peer_endpoint_ip.is_ipv4() {
+                        "iptables"
+                    } else {
+                        "ip6tables"
+                    };
+                    NetworkNamespace::exec(
+                        &namespace.name,
+                        &[
+                            ipcmd,
+                            "-A",
+                            "OUTPUT",
+                            "-p",
+                            "udp",
+                            "-m",
+                            "udp",
+                            "-d",
+                            &peer_ip_str,
+                            "--dport",
+                            &peer_port,
+                            "-m",
+                            "mark",
+                            "--mark",
+                            WIREGUARD_FWMARK,
+                            "-j",
+                            "ACCEPT",
+                        ],
+                    )?;
+                    NetworkNamespace::exec(
+                        &namespace.name,
+                        &[
+                            ipcmd,
+                            "-A",
+                            "INPUT",
+                            "-p",
+                            "udp",
+                            "-m",
+                            "udp",
+                            "-s",
+                            &peer_ip_str,
+                            "--sport",
+                            &peer_port,
+                            "-j",
+                            "ACCEPT",
+                        ],
+                    )?;
+                }
+            }
         }
 
         let if_name = super::netns::veth_interface_base(&namespace.name)?;
@@ -242,13 +339,14 @@ impl Wireguard {
         )?;
 
         let wg_temp_path = wg_temp_file.path().to_string_lossy();
-        NetworkNamespace::exec(
+        let configured = NetworkNamespace::exec_with_output(
             &namespace.name,
             &[&executable_wg, "setconf", &if_name, &wg_temp_path],
         )
         .context(format!(
             "Failed to run {executable_wg} setconf - is wireguard-tools installed?"
         ))?;
+        ensure_setconf_succeeded(configured.status.success())?;
 
         if config.peer.keepalive.is_none() {
             info!(
@@ -275,6 +373,9 @@ impl Wireguard {
         for address in config.interface.address.iter() {
             match address {
                 IpNet::V6(address) => {
+                    if effective_disable_ipv6 {
+                        continue;
+                    }
                     interface_addresses.push(IpAddr::V6(address.addr()));
                     NetworkNamespace::exec(
                         &namespace.name,
@@ -406,7 +507,7 @@ impl Wireguard {
             firewall,
         )?;
 
-        if disable_ipv6 {
+        if effective_disable_ipv6 {
             crate::network::firewall::disable_ipv6(namespace, firewall)?;
         } else {
             add_routes(
@@ -442,17 +543,20 @@ impl Wireguard {
                 for address in config.interface.address.iter() {
                     match address {
                         IpNet::V6(address) => {
+                            if effective_disable_ipv6 {
+                                continue;
+                            }
                             nftcmd.push(format!(
-                "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
-                pf, nftable, if_name, "ip6", address
-            ));
+                                "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
+                                pf, nftable, if_name, "ip6", address.addr()
+                            ));
                         }
 
                         IpNet::V4(address) => {
                             nftcmd.push(format!(
-                "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
-                pf, nftable, if_name, "ip", address
-            ));
+                                "add rule {} {} preraw iifname != \"{}\" {} daddr {} fib saddr type != local drop",
+                                pf, nftable, if_name, "ip", address.addr()
+                            ));
                         }
                     }
                 }
@@ -461,13 +565,19 @@ impl Wireguard {
                     "add rule {} {} postmangle meta l4proto udp mark {} ct mark set mark",
                     pf, nftable, fwmark
                 ));
+                // Guard with `ct mark != 0` so premangle never overwrites the
+                // veth return-traffic mark set at equal priority (-150).
                 nftcmd.push(format!(
-                    "add rule {} {} premangle meta l4proto udp meta mark set ct mark",
+                    "add rule {} {} premangle meta l4proto udp ct mark != 0 meta mark set ct mark",
                     pf, nftable
                 ));
 
-                let mut nft_temp_file =
-                    NamedTempFile::new().context("Creating temporary nftables rules file")?;
+                let mut nft_temp_file = if nix::unistd::geteuid().is_root() {
+                    NamedTempFile::new_in("/run")
+                } else {
+                    NamedTempFile::new()
+                }
+                .context("Creating temporary nftables rules file")?;
                 write!(nft_temp_file, "{}", nftcmd.join("\n"))?;
                 let nft_temp_path = nft_temp_file.path().to_string_lossy();
                 NetworkNamespace::exec(&namespace.name, &["nft", "-f", &nft_temp_path])?;
@@ -476,6 +586,9 @@ impl Wireguard {
                 for address in config.interface.address.iter() {
                     match address {
                         IpNet::V6(address) => {
+                            if effective_disable_ipv6 {
+                                continue;
+                            }
                             NetworkNamespace::exec(
                                 &namespace.name,
                                 &[
@@ -488,7 +601,7 @@ impl Wireguard {
                                     "-i",
                                     &if_name,
                                     "-d",
-                                    &address.to_string(),
+                                    &address.addr().to_string(),
                                     "-m",
                                     "addrtype",
                                     "!",
@@ -513,7 +626,7 @@ impl Wireguard {
                                     "-i",
                                     &if_name,
                                     "-d",
-                                    &address.to_string(),
+                                    &address.addr().to_string(),
                                     "-m",
                                     "addrtype",
                                     "!",
@@ -527,7 +640,7 @@ impl Wireguard {
                     }
                 }
 
-                let ipcmds = if disable_ipv6 {
+                let ipcmds = if effective_disable_ipv6 {
                     vec!["iptables"]
                 } else {
                     vec!["iptables", "ip6tables"]
@@ -544,10 +657,13 @@ impl Wireguard {
                             "POSTROUTING",
                             "-p",
                             "udp",
-                            "-j",
-                            "MARK",
-                            "--set-mark",
+                            "-m",
+                            "mark",
+                            "--mark",
                             fwmark,
+                            "-j",
+                            "CONNMARK",
+                            "--save-mark",
                         ],
                     )?;
                     NetworkNamespace::exec(
@@ -560,9 +676,14 @@ impl Wireguard {
                             "PREROUTING",
                             "-p",
                             "udp",
+                            "-m",
+                            "connmark",
+                            "!",
+                            "--mark",
+                            "0",
                             "-j",
                             "CONNMARK",
-                            "--save-mark",
+                            "--restore-mark",
                         ],
                     )?;
                 }
@@ -580,12 +701,21 @@ impl Wireguard {
         }
 
         if use_killswitch && (has_ipv4_default || has_ipv6_default) {
-            killswitch(&if_name, fwmark, namespace, firewall, disable_ipv6)?;
+            killswitch(
+                &if_name,
+                fwmark,
+                namespace,
+                firewall,
+                effective_disable_ipv6,
+            )?;
         } else if use_killswitch {
             warn!(
                 "Wireguard config is split-tunnel (AllowedIPs has no default route); not enabling the full-tunnel killswitch"
             );
         }
+
+        let routed_ipv4 = Some(has_ipv4_default);
+        let routed_ipv6 = Some(!effective_disable_ipv6 && has_ipv6_default);
 
         Ok(Self {
             executable_wg,
@@ -596,8 +726,23 @@ impl Wireguard {
             firewall,
             if_name,
             interface_addresses,
+            routed_ipv4,
+            routed_ipv6,
+            recovery: Some(recovery),
         })
     }
+}
+
+fn ensure_setconf_succeeded(success: bool) -> anyhow::Result<()> {
+    if !success {
+        return Err(crate::diagnostics::Diagnostic::new(
+            crate::diagnostics::DiagnosticCode::TunnelHandshake,
+            crate::diagnostics::DiagnosticState::Fail,
+            "WireGuard setconf failed; the tunnel configuration was not applied",
+            Some("Run vopono doctor to check configuration and AppArmor evidence; inspect sudo journalctl -k --since '-15 min' for wg/awg DENIED records (issue #392). Configuration contents and raw tool output are omitted"),
+        ).into());
+    }
+    Ok(())
 }
 
 /// Whether `address` falls inside any of `allowed_ips`.
@@ -639,9 +784,10 @@ fn select_endpoint_ip(addresses: &[IpAddr], disable_ipv6: bool) -> anyhow::Resul
 /// drop it. A /32 (or /128) via the veth gateway keeps both directions on the
 /// veth regardless of rp_filter mode.
 fn endpoint_needs_bypass_route(endpoint: IpAddr, allowed_ips: &[IpNet]) -> bool {
-    allowed_ips
-        .iter()
-        .any(|network| network.contains(&endpoint))
+    !endpoint.is_loopback()
+        && allowed_ips
+            .iter()
+            .any(|network| network.contains(&endpoint))
 }
 
 fn add_endpoint_bypass_route(
@@ -772,7 +918,7 @@ fn add_routes(
 
 pub fn killswitch(
     ifname: &str,
-    fwmark: &str,
+    _fwmark: &str,
     netns: &NetworkNamespace,
     firewall: Firewall,
     disable_ipv6: bool,
@@ -780,108 +926,125 @@ pub fn killswitch(
     debug!("Setting Wireguard killswitch....");
     match firewall {
         Firewall::IpTables => {
-            NetworkNamespace::exec(
-                &netns.name,
-                &[
-                    "iptables",
-                    "-A",
-                    "OUTPUT",
-                    "!",
-                    "-o",
-                    ifname,
-                    "-m",
-                    "mark",
-                    "!",
-                    "--mark",
-                    fwmark,
-                    "-m",
-                    "addrtype",
-                    "!",
-                    "--dst-type",
-                    "LOCAL",
-                    "-j",
-                    "REJECT",
-                ],
-            )
-            .context("Executing iptables killswitch")?;
+            let ipcmds: &[&str] = if disable_ipv6 {
+                &["iptables"]
+            } else {
+                &["iptables", "ip6tables"]
+            };
+            let veth_ifname = if !disable_ipv6 {
+                Some(
+                    netns
+                        .veth_pair
+                        .as_ref()
+                        .context("Veth pair not set while configuring IPv6 killswitch")?
+                        .source
+                        .as_str(),
+                )
+            } else {
+                None
+            };
 
-            if !disable_ipv6 {
-                let veth_ifname = netns
-                    .veth_pair
-                    .as_ref()
-                    .context("Veth pair not set while configuring IPv6 killswitch")?
-                    .source
-                    .as_str();
-
-                // ICMPv6 sent through Wireguard is encrypted by the interface and is safe to
-                // allow. On the veth, only neighbour discovery is needed to reach the host
-                // gateway. In particular, do not accept all ICMPv6 here: that would let tools
-                // such as ping6 bypass the full-tunnel killswitch.
+            for ipcmd in ipcmds {
+                // Close INPUT and FORWARD by default; open_ports/forward_ports
+                // were inserted ahead of these rules, and the WireGuard peer
+                // UDP sport rule was added during WireGuard setup.
                 NetworkNamespace::exec(
                     &netns.name,
                     &[
-                        "ip6tables",
+                        ipcmd,
                         "-A",
-                        "OUTPUT",
-                        "-o",
-                        ifname,
-                        "-p",
-                        "icmpv6",
+                        "INPUT",
+                        "-m",
+                        "conntrack",
+                        "--ctstate",
+                        "RELATED,ESTABLISHED",
                         "-j",
                         "ACCEPT",
                     ],
-                )
-                .context("Allowing ICMPv6 through Wireguard")?;
-
-                for icmpv6_type in ["135", "136"] {
-                    NetworkNamespace::exec(
-                        &netns.name,
-                        &[
-                            "ip6tables",
-                            "-A",
-                            "OUTPUT",
-                            "-o",
-                            veth_ifname,
-                            "-p",
-                            "icmpv6",
-                            "-m",
-                            "icmp6",
-                            "--icmpv6-type",
-                            icmpv6_type,
-                            "-j",
-                            "ACCEPT",
-                        ],
-                    )
-                    .with_context(|| {
-                        format!(
-                            "Allowing IPv6 neighbour discovery type {icmpv6_type} on {veth_ifname}"
-                        )
-                    })?;
+                )?;
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[ipcmd, "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"],
+                )?;
+                if *ipcmd == "ip6tables"
+                    && let Some(veth) = veth_ifname
+                {
+                    for icmpv6_type in ["135", "136"] {
+                        NetworkNamespace::exec(
+                            &netns.name,
+                            &[
+                                "ip6tables",
+                                "-A",
+                                "INPUT",
+                                "-i",
+                                veth,
+                                "-p",
+                                "icmpv6",
+                                "-m",
+                                "icmp6",
+                                "--icmpv6-type",
+                                icmpv6_type,
+                                "-j",
+                                "ACCEPT",
+                            ],
+                        )?;
+                    }
                 }
+                NetworkNamespace::exec(&netns.name, &[ipcmd, "-P", "INPUT", "DROP"])?;
+                NetworkNamespace::exec(&netns.name, &[ipcmd, "-P", "FORWARD", "DROP"])?;
 
+                // Allow traffic through the WireGuard interface and local destinations;
+                // WireGuard's outer UDP endpoint is allowed only by its explicit
+                // per-endpoint (mark + dst IP + UDP port) rule added earlier.
+                NetworkNamespace::exec(
+                    &netns.name,
+                    &[ipcmd, "-A", "OUTPUT", "-o", ifname, "-j", "ACCEPT"],
+                )?;
                 NetworkNamespace::exec(
                     &netns.name,
                     &[
-                        "ip6tables",
+                        ipcmd,
                         "-A",
                         "OUTPUT",
-                        "!",
-                        "-o",
-                        ifname,
-                        "-m",
-                        "mark",
-                        "!",
-                        "--mark",
-                        fwmark,
                         "-m",
                         "addrtype",
-                        "!",
                         "--dst-type",
                         "LOCAL",
                         "-j",
-                        "REJECT",
+                        "ACCEPT",
                     ],
                 )?;
+                if *ipcmd == "ip6tables"
+                    && let Some(veth) = veth_ifname
+                {
+                    for icmpv6_type in ["135", "136"] {
+                        NetworkNamespace::exec(
+                            &netns.name,
+                            &[
+                                "ip6tables",
+                                "-A",
+                                "OUTPUT",
+                                "-o",
+                                veth,
+                                "-p",
+                                "icmpv6",
+                                "-m",
+                                "icmp6",
+                                "--icmpv6-type",
+                                icmpv6_type,
+                                "-j",
+                                "ACCEPT",
+                            ],
+                        )
+                        .with_context(|| {
+                            format!(
+                                "Allowing IPv6 neighbour discovery type {icmpv6_type} on {veth}"
+                            )
+                        })?;
+                    }
+                }
+                NetworkNamespace::exec(&netns.name, &[ipcmd, "-A", "OUTPUT", "-j", "REJECT"])
+                    .context("Executing iptables killswitch")?;
             }
         }
         Firewall::NfTables => {
@@ -893,26 +1056,24 @@ pub fn killswitch(
                     .source
                     .as_str();
 
-                NetworkNamespace::exec(
-                    &netns.name,
-                    &[
-                        "nft",
-                        "add",
-                        "rule",
-                        "inet",
-                        &netns.name,
-                        "output",
-                        "oifname",
-                        ifname,
-                        "meta",
-                        "l4proto",
-                        "icmpv6",
-                        "accept",
-                    ],
-                )
-                .context("Allowing ICMPv6 through Wireguard in nftables")?;
-
                 for icmpv6_type in ["nd-neighbor-solicit", "nd-neighbor-advert"] {
+                    NetworkNamespace::exec(
+                        &netns.name,
+                        &[
+                            "nft",
+                            "add",
+                            "rule",
+                            "inet",
+                            &netns.name,
+                            "input",
+                            "iifname",
+                            veth_ifname,
+                            "icmpv6",
+                            "type",
+                            icmpv6_type,
+                            "accept",
+                        ],
+                    )?;
                     NetworkNamespace::exec(
                         &netns.name,
                         &[
@@ -938,6 +1099,9 @@ pub fn killswitch(
                 }
             }
 
+            // Allow encrypted traffic through the WireGuard interface and local destinations.
+            // WireGuard's outer UDP endpoint is allowed only by the explicit per-endpoint
+            // (mark + dst IP + UDP port) rule; arbitrary marked packets are rejected.
             NetworkNamespace::exec(
                 &netns.name,
                 &[
@@ -948,16 +1112,63 @@ pub fn killswitch(
                     &netns.name,
                     "output",
                     "oifname",
-                    "!=",
                     ifname,
-                    "mark",
-                    "!=",
-                    fwmark,
+                    "counter",
+                    "accept",
+                ],
+            )?;
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "output",
                     "fib",
                     "daddr",
                     "type",
-                    "!=",
                     "local",
+                    "counter",
+                    "accept",
+                ],
+            )?;
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "input",
+                    "counter",
+                    "drop",
+                ],
+            )?;
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "forward",
+                    "counter",
+                    "drop",
+                ],
+            )?;
+            NetworkNamespace::exec(
+                &netns.name,
+                &[
+                    "nft",
+                    "add",
+                    "rule",
+                    "inet",
+                    &netns.name,
+                    "output",
                     "counter",
                     "reject",
                 ],
@@ -1004,6 +1215,17 @@ impl Drop for Wireguard {
                 Ok(_) => {}
                 Err(e) => warn!("Failed to delete nft table: {}: {:?}", self.ns_name, e),
             };
+            let _ = sudo_command(&[
+                "ip",
+                "netns",
+                "exec",
+                &self.ns_name,
+                "nft",
+                "delete",
+                "table",
+                "ip",
+                &self.ns_name,
+            ]);
         }
     }
 }
@@ -1017,6 +1239,18 @@ impl Wireguard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_setconf_stops_setup_and_provides_diagnostic_guidance() {
+        assert!(ensure_setconf_succeeded(true).is_ok());
+        let error = ensure_setconf_succeeded(false).unwrap_err();
+        let diagnostic = error
+            .downcast_ref::<crate::diagnostics::Diagnostic>()
+            .unwrap();
+        assert_eq!(diagnostic.state, crate::diagnostics::DiagnosticState::Fail);
+        assert!(diagnostic.message.contains("not applied"));
+        assert!(diagnostic.action.as_deref().unwrap().contains("AppArmor"));
+    }
 
     fn networks(values: &[&str]) -> Vec<IpNet> {
         values.iter().map(|value| value.parse().unwrap()).collect()

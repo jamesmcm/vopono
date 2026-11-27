@@ -32,6 +32,8 @@ pub struct NamespaceEntry {
     pub port_forwarding: Option<PortForwardingEntry>,
     pub open_ports: Vec<u16>,
     pub host_forwarded_ports: Vec<u16>,
+    pub health: Option<crate::health::Health>,
+    pub stopping: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -177,13 +179,21 @@ fn namespace_entry(
     let applications = locks
         .iter()
         // A PID can survive in a lockfile left by an interrupted session; do
-        // not render it as a running application.
-        .filter(|lock| vopono_core::status::lockfile_application_is_live(lock))
+        // not render it as a running application. Also omit empty-command
+        // metadata-only primary locks (e.g. --create-netns-only or restored idle namespaces).
+        .filter(|lock| {
+            vopono_core::status::lockfile_application_is_live(lock)
+                && !(lock.application_pid.is_none() && lock.command.trim().is_empty())
+        })
         .map(|lock| application_entry(lock, now_seconds))
         .collect::<Vec<_>>();
     let namespace = &metadata.ns;
 
     Ok(NamespaceEntry {
+        health: crate::health::read_health(id),
+        stopping: vopono_core::util::vopono_dir().is_ok_and(|base| {
+            vopono_core::status::namespace_is_stopping(&base.join("locks").join(id))
+        }),
         id: id.to_string(),
         provider: namespace.provider.id().to_string(),
         protocol: namespace.protocol.id().to_string(),
@@ -288,6 +298,9 @@ fn flatten_applications(namespaces: &[NamespaceEntry]) -> Vec<ApplicationListEnt
 fn print_human_status(status: &StatusDocument) {
     println!("{}", status.daemon.human_line());
     print_namespaces(&status.namespaces);
+    if !status.namespaces.is_empty() {
+        println!("\nRun vopono doctor to check connectivity and DNS in these namespaces.");
+    }
     if !status.errors.is_empty() {
         for error in &status.errors {
             eprintln!("status warning: {error}");
@@ -299,15 +312,20 @@ fn print_namespaces(namespaces: &[NamespaceEntry]) {
     if namespaces.is_empty() {
         return;
     }
-    println!("namespace\tprovider\tprotocol\tapplications\tuptime");
+    println!("namespace\tprovider\tprotocol\tapplications\tuptime\tstate");
     for namespace in namespaces {
         println!(
-            "{}\t{}\t{}\t{}\t{}",
+            "{}\t{}\t{}\t{}\t{}\t{}",
             namespace.id,
             namespace.provider,
             namespace.protocol,
             namespace.applications.len(),
             compound_duration::format_wdhms(namespace.uptime_seconds),
+            if namespace.stopping {
+                "stopping"
+            } else {
+                "active"
+            },
         );
         for application in &namespace.applications {
             println!(
@@ -402,5 +420,13 @@ mod tests {
         // namespace, so only the PID-less metadata entry remains visible.
         assert_eq!(entry.applications.len(), 1);
         assert_eq!(entry.applications[0].command, "firefox");
+    }
+
+    #[test]
+    fn empty_command_primary_lock_is_not_reported_as_an_application() {
+        let metadata_only = lock("vo_ar_at", "", 400);
+        let entry = namespace_entry("vo_ar_at", &[metadata_only], None, 1000)
+            .expect("namespace entry should build");
+        assert!(entry.applications.is_empty());
     }
 }

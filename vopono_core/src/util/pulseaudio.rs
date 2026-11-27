@@ -1,13 +1,38 @@
 use anyhow::anyhow;
 use log::debug;
 use regex::Regex;
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const PACTL_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub fn get_pulseaudio_server() -> anyhow::Result<String> {
-    let output = Command::new("pactl")
+    let mut child = Command::new("pactl")
         .args(["-f", "json", "info"])
-        .output()?
-        .stdout;
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let deadline = Instant::now() + PACTL_TIMEOUT;
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow!("Timed out querying pactl for PulseAudio server"));
+            }
+            None => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    if !status.success() {
+        return Err(anyhow!("pactl exited with {status}"));
+    }
+    let mut output = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        stdout.take(256 * 1024).read_to_end(&mut output)?;
+    }
     let re = Regex::new("\"server_string\":\"([^\"]+)\"").unwrap();
     let output = std::str::from_utf8(&output)?;
 

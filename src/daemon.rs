@@ -7,6 +7,7 @@ use interprocess::local_socket::prelude::*;
 use interprocess::local_socket::{ListenerOptions, ToFsName};
 use interprocess::os::unix::local_socket::FilesystemUdSocket;
 use log::{error, info, warn};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use nix::pty::openpty;
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use nix::unistd::isatty as nix_isatty;
@@ -20,10 +21,11 @@ use signal_hook::{
     consts::{SIGINT, SIGQUIT, SIGTERM},
     iterator::Signals,
 };
+use std::fs::{File, OpenOptions};
 use std::io::IoSliceMut;
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{
@@ -31,6 +33,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread;
+use std::time::{Duration, Instant};
 
 // Do not change user's terminal modes; rely on PTY + signal/control forwarding
 
@@ -46,13 +49,11 @@ impl Drop for ClientLockfileGuard {
         let Some(path) = self.0.take() else {
             return;
         };
-        match std::fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => log::warn!(
+        if let Err(error) = vopono_core::util::owner_write::remove_file_as_config_owner(&path) {
+            log::warn!(
                 "Failed to remove client lockfile {}: {error}",
                 path.display()
-            ),
+            );
         }
     }
 }
@@ -116,10 +117,14 @@ pub fn status() -> DaemonStatus {
     if set_socket_timeouts(&stream).is_err() {
         return snapshot;
     }
+    let Ok(credentials) = getsockopt(&socket.as_fd(), PeerCredentials) else {
+        return snapshot;
+    };
+    if credentials.uid() != 0 {
+        return snapshot;
+    }
     snapshot.available = true;
-    snapshot.pid = getsockopt(&socket.as_fd(), PeerCredentials)
-        .ok()
-        .map(|credentials| credentials.pid() as u32);
+    snapshot.pid = Some(credentials.pid() as u32);
 
     // Handshake so `compatible` compares the daemon's real version against
     // this client instead of unconditionally reporting success.
@@ -132,20 +137,26 @@ pub fn status() -> DaemonStatus {
     snapshot
 }
 
+fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
+    let core = version.split(['-', '+']).next()?;
+    let mut components = core.split('.');
+    let parsed = (
+        components.next()?.parse().ok()?,
+        components.next()?.parse().ok()?,
+        components.next()?.parse().ok()?,
+    );
+    components.next().is_none().then_some(parsed)
+}
+
+pub(crate) fn version_at_least(version: &str, minimum: (u64, u64, u64)) -> bool {
+    parse_version(version).is_some_and(|version| version.0 == minimum.0 && version >= minimum)
+}
+
 /// Compatible means an identical major version (breaking-change proxy).
 fn versions_compatible(daemon_version: &str, client_version: &str) -> bool {
-    fn major(version: &str) -> Option<u64> {
-        let core = version.split(['-', '+']).next()?;
-        let mut components = core.split('.');
-        let major = components.next()?.parse().ok()?;
-        components.next()?.parse::<u64>().ok()?;
-        components.next()?.parse::<u64>().ok()?;
-        components.next().is_none().then_some(major)
-    }
-
-    major(daemon_version)
-        .zip(major(client_version))
-        .is_some_and(|(daemon_major, client_major)| daemon_major == client_major)
+    parse_version(daemon_version)
+        .zip(parse_version(client_version))
+        .is_some_and(|(daemon, client)| daemon.0 == client.0)
 }
 
 /// Outcome of comparing a peer's version against ours.
@@ -169,49 +180,48 @@ fn classify_version_skew(peer: &str, own: &str) -> VersionSkew {
     }
 }
 
+fn sanitize_version_for_log(version: &str) -> String {
+    version
+        .chars()
+        .take(64)
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
 /// Daemon side: warn when a client's version differs from this daemon's.
 fn warn_on_client_version_mismatch(client_version: &str) {
     let own = env!("CARGO_PKG_VERSION");
+    let safe_client = sanitize_version_for_log(client_version);
     match classify_version_skew(client_version, own) {
         VersionSkew::Match => {}
         VersionSkew::MinorMismatch => warn!(
-            "Client vopono version {client_version} differs from daemon version {own}; consider restarting the daemon ('sudo systemctl restart vopono') to match."
+            "Client vopono version {safe_client} differs from daemon version {own}; consider restarting the daemon ('sudo systemctl restart vopono') to match."
         ),
         VersionSkew::MajorMismatch => error!(
-            "Client vopono version {client_version} is incompatible with daemon version {own}; requests may fail unexpectedly. Update vopono and restart the daemon."
+            "Client vopono version {safe_client} is incompatible with daemon version {own}; requests may fail unexpectedly. Update vopono and restart the daemon."
         ),
     }
 }
 
 /// Client side: announce our version and warn when the daemon's differs.
 ///
-/// Best-effort and time-bounded: a wedged daemon must not hang the client,
-/// and a daemon too old to understand `ClientVersion` simply drops the
-/// connection so the caller falls back to sudo; the local warning below
-/// still fires whenever the daemon's reported version can be read.
-pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) {
+/// Propagates handshake transport/timeout errors so callers never reuse a
+/// dropped or protocol-desynchronized socket.
+pub(crate) fn exchange_versions_with_daemon(
+    conn: &mut LocalSocketStream,
+) -> anyhow::Result<String> {
     let own = env!("CARGO_PKG_VERSION");
-    if set_socket_timeouts_for(conn, DAEMON_HANDSHAKE_TIMEOUT_SECONDS).is_err() {
-        return;
-    }
-    let sent = wincode::serialize(&DaemonRequest::ClientVersion(own.to_string()))
-        .ok()
-        .and_then(|bytes| write_framed(conn, &bytes).ok());
-    // The daemon answers the handshake with its own version directly.
-    let daemon_version = sent.and_then(|_| {
-        read_framed(conn, MAX_FRAME_LEN)
-            .ok()
-            .and_then(|response| wincode::deserialize::<DaemonResponse>(&response).ok())
-            .and_then(|parsed| match parsed {
-                DaemonResponse::Version(version) => Some(version),
-                _ => None,
-            })
-    });
+    set_socket_timeouts_for(conn, DAEMON_HANDSHAKE_TIMEOUT_SECONDS)?;
+    let daemon_version = client_handshake(conn);
     // Restore blocking mode for the long-lived session that follows.
     let _ = clear_socket_timeouts(conn);
-    let Some(daemon_version) = daemon_version else {
-        return;
-    };
+    let daemon_version = daemon_version?;
     match classify_version_skew(&daemon_version, own) {
         VersionSkew::Match => {}
         VersionSkew::MinorMismatch => log::warn!(
@@ -220,6 +230,21 @@ pub(crate) fn exchange_versions_with_daemon(conn: &mut LocalSocketStream) {
         VersionSkew::MajorMismatch => log::error!(
             "Daemon vopono version {daemon_version} is incompatible with client version {own}; update vopono and restart the daemon."
         ),
+    }
+    Ok(daemon_version)
+}
+
+/// Version handshake on an already authenticated connection.
+pub(crate) fn client_handshake(conn: &mut LocalSocketStream) -> anyhow::Result<String> {
+    write_framed(
+        conn,
+        &wincode::serialize(&DaemonRequest::ClientVersion(
+            env!("CARGO_PKG_VERSION").into(),
+        ))?,
+    )?;
+    match wincode::deserialize::<DaemonResponse>(&read_framed(conn, MAX_FRAME_LEN)?)? {
+        DaemonResponse::Version(version) => Ok(version),
+        _ => anyhow::bail!("Unexpected daemon version response"),
     }
 }
 
@@ -237,7 +262,9 @@ pub(crate) fn clear_socket_timeouts(stream: &LocalSocketStream) -> anyhow::Resul
 }
 
 pub(crate) const DAEMON_HANDSHAKE_TIMEOUT_SECONDS: i64 = 2;
-pub(crate) const DAEMON_STOP_TIMEOUT_SECONDS: i64 = 30;
+pub(crate) const DAEMON_STOP_TIMEOUT_SECONDS: i64 = 60;
+
+static DAEMON_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn set_socket_timeouts(stream: &LocalSocketStream) -> anyhow::Result<()> {
     // Bound the handshake so a wedged daemon cannot hang status/list polling.
@@ -278,6 +305,10 @@ const MAX_CONTROL_FRAME_LEN: usize = 64 * 1024;
 const MAX_CONCURRENT_CLIENTS: usize = 32;
 const MAX_CLIENTS_PER_UID: usize = 8;
 static CLIENT_ADMISSION: LazyLock<ClientAdmission> = LazyLock::new(ClientAdmission::default);
+// Long-running applications must not consume the slots needed to admit stop,
+// status and probe requests. Retained namespace controllers consume neither.
+static EXECUTION_ADMISSION: LazyLock<ClientAdmission> = LazyLock::new(ClientAdmission::default);
+static PROBE_ADMISSION: LazyLock<ClientAdmission> = LazyLock::new(ClientAdmission::default);
 
 #[derive(Default)]
 struct ClientAdmission {
@@ -297,10 +328,18 @@ struct ClientSlot<'a> {
 
 impl ClientAdmission {
     fn acquire(&self, uid: Uid) -> Option<ClientSlot<'_>> {
+        self.acquire_with_limits(uid, MAX_CLIENTS_PER_UID, MAX_CONCURRENT_CLIENTS)
+    }
+    fn acquire_with_limits(
+        &self,
+        uid: Uid,
+        per_uid: usize,
+        total: usize,
+    ) -> Option<ClientSlot<'_>> {
         let mut state = self.state.lock().expect("client admission lock poisoned");
         let uid = uid.as_raw();
         let uid_count = state.by_uid.get(&uid).copied().unwrap_or_default();
-        if state.total >= MAX_CONCURRENT_CLIENTS || uid_count >= MAX_CLIENTS_PER_UID {
+        if state.total >= total || uid_count >= per_uid {
             return None;
         }
         state.total += 1;
@@ -387,10 +426,25 @@ pub enum DaemonRequest {
     /// Probe connectivity of an existing network namespace (requires root).
     CheckNamespace(CheckNamespaceRequest),
     /// First frame sent by every client: its own crate version, so the
-    /// daemon can warn about client/daemon version skew. Must stay the
-    /// LAST variant - older clients never send it, and appended variants
-    /// preserve the wire indices of all earlier ones.
+    /// daemon can warn about client/daemon version skew. New variants must
+    /// be appended after this one to preserve all existing wire indices.
     ClientVersion(String),
+    /// Return sanitized, read-only host firewall/AppArmor evidence. No network probes.
+    HostDiagnostics {
+        skip_ipv6: bool,
+    },
+    NamespaceDiagnostics {
+        id: String,
+        offline: bool,
+        skip_ipv6: bool,
+        timeout_ms: u64,
+    },
+    /// MCP launches carry a deadline measured on the local monotonic clock.
+    McpExecute {
+        cmd: Vec<u8>,
+        env: std::collections::HashMap<String, String>,
+        deadline_ns: u64,
+    },
 }
 
 #[derive(Serialize, Deserialize, wincode::SchemaWrite, wincode::SchemaRead, Debug, Clone)]
@@ -435,29 +489,236 @@ pub enum DaemonResponse {
     Version(String),
     /// Serialized JSON document (e.g. a stop result or error document).
     Json(Vec<u8>),
+    LaunchCancelled {
+        timed_out: bool,
+    },
+}
+
+#[derive(Debug)]
+pub(crate) struct LaunchCancelled {
+    timed_out: bool,
+}
+
+impl std::fmt::Display for LaunchCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.timed_out {
+            "Job deadline expired before application launch"
+        } else {
+            "Job was cancelled before application launch"
+        })
+    }
+}
+
+impl std::error::Error for LaunchCancelled {}
+
+pub(crate) fn monotonic_ns() -> std::io::Result<u64> {
+    let mut value = nix::libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Both peers are local and use the same CLOCK_MONOTONIC epoch.
+    if unsafe { nix::libc::clock_gettime(nix::libc::CLOCK_MONOTONIC, &mut value) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(value.tv_sec as u64 * 1_000_000_000 + value.tv_nsec as u64)
+}
+
+pub(crate) struct LaunchCancellation<'a> {
+    conn: &'a LocalSocketStream,
+    deadline_ns: Option<u64>,
+    cancelled: Arc<AtomicBool>,
+    timed_out: Arc<AtomicBool>,
+    stop_watcher: Arc<AtomicBool>,
+    watcher: Option<thread::JoinHandle<()>>,
+}
+
+impl<'a> LaunchCancellation<'a> {
+    fn start(conn: &'a LocalSocketStream, deadline_ns: Option<u64>) -> Self {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let stop_watcher = Arc::new(AtomicBool::new(false));
+        vopono_core::util::set_launch_cancel_flag(Some(Arc::clone(&cancelled)));
+
+        let watcher = conn.try_clone().ok().map(|cloned_conn| {
+            let cancelled_w = Arc::clone(&cancelled);
+            let timed_out_w = Arc::clone(&timed_out);
+            let stop_w = Arc::clone(&stop_watcher);
+            thread::spawn(move || {
+                let LocalSocketStream::UdSocket(ref sock) = cloned_conn;
+                let raw_fd = sock.as_fd().as_raw_fd();
+                let mut pending = Vec::new();
+                let mut chunk = [0u8; 256];
+                while !stop_w.load(Ordering::Acquire) {
+                    if DAEMON_SHUTTING_DOWN.load(Ordering::Acquire) {
+                        cancelled_w.store(true, Ordering::Release);
+                        return;
+                    }
+                    if let Some(deadline) = deadline_ns
+                        && monotonic_ns().is_ok_and(|now| now >= deadline)
+                    {
+                        timed_out_w.store(true, Ordering::Release);
+                        cancelled_w.store(true, Ordering::Release);
+                        return;
+                    }
+                    let mut poll_fd = nix::libc::pollfd {
+                        fd: raw_fd,
+                        events: nix::libc::POLLIN | nix::libc::POLLRDHUP,
+                        revents: 0,
+                    };
+                    let rc = unsafe { nix::libc::poll(&mut poll_fd, 1, 50) };
+                    if rc <= 0 {
+                        continue;
+                    }
+                    if poll_fd.revents & (nix::libc::POLLRDHUP | nix::libc::POLLHUP) != 0 {
+                        cancelled_w.store(true, Ordering::Release);
+                        return;
+                    }
+                    if poll_fd.revents & nix::libc::POLLIN != 0 {
+                        match nix::sys::socket::recv(raw_fd, &mut chunk, MsgFlags::MSG_DONTWAIT) {
+                            Ok(0) => {
+                                cancelled_w.store(true, Ordering::Release);
+                                return;
+                            }
+                            Ok(n) => pending.extend_from_slice(&chunk[..n]),
+                            Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => continue,
+                            Err(_) => {
+                                cancelled_w.store(true, Ordering::Release);
+                                return;
+                            }
+                        }
+                        while pending.len() >= 4 {
+                            let len = u32::from_be_bytes([
+                                pending[0], pending[1], pending[2], pending[3],
+                            ]) as usize;
+                            if len > MAX_CONTROL_FRAME_LEN {
+                                cancelled_w.store(true, Ordering::Release);
+                                return;
+                            }
+                            if pending.len() < 4 + len {
+                                break;
+                            }
+                            let bytes: Vec<u8> = pending.drain(..4 + len).skip(4).collect();
+                            if let Ok(DaemonRequest::Control(DaemonControl::Signal(signal))) =
+                                wincode::deserialize::<DaemonRequest>(&bytes)
+                                && let Ok(sig) = nix::sys::signal::Signal::try_from(signal)
+                                && matches!(
+                                    sig,
+                                    nix::sys::signal::Signal::SIGINT
+                                        | nix::sys::signal::Signal::SIGTERM
+                                        | nix::sys::signal::Signal::SIGHUP
+                                        | nix::sys::signal::Signal::SIGQUIT
+                                )
+                            {
+                                cancelled_w.store(true, Ordering::Release);
+                                return;
+                            }
+                        }
+                    }
+                }
+            })
+        });
+
+        Self {
+            conn,
+            deadline_ns,
+            cancelled,
+            timed_out,
+            stop_watcher,
+            watcher,
+        }
+    }
+
+    pub(crate) fn check(&self) -> anyhow::Result<()> {
+        if self.timed_out.load(Ordering::Acquire) {
+            return Err(LaunchCancelled { timed_out: true }.into());
+        }
+        if self.cancelled.load(Ordering::Acquire) || DAEMON_SHUTTING_DOWN.load(Ordering::Acquire) {
+            return Err(LaunchCancelled { timed_out: false }.into());
+        }
+        if let Some(deadline_ns) = self.deadline_ns
+            && monotonic_ns()? >= deadline_ns
+        {
+            return Err(LaunchCancelled { timed_out: true }.into());
+        }
+        let LocalSocketStream::UdSocket(socket) = self.conn;
+        let mut poll_fd = nix::libc::pollfd {
+            fd: socket.as_fd().as_raw_fd(),
+            events: nix::libc::POLLRDHUP,
+            revents: 0,
+        };
+        loop {
+            // The socket's write-half closure means its job was cancelled
+            // or the client disconnected. Leave the read half open for the result.
+            if unsafe { nix::libc::poll(&mut poll_fd, 1, 0) } >= 0 {
+                break;
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error.into());
+            }
+        }
+        if poll_fd.revents & (nix::libc::POLLRDHUP | nix::libc::POLLHUP) != 0 {
+            return Err(LaunchCancelled { timed_out: false }.into());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for LaunchCancellation<'_> {
+    fn drop(&mut self) {
+        self.stop_watcher.store(true, Ordering::Release);
+        vopono_core::util::set_launch_cancel_flag(None);
+        if let Some(handle) = self.watcher.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 // Note: Output is bridged via passed file descriptors; no streaming over the socket.
 
 /// Starts the vopono daemon and listens for client connections.
 pub fn start() -> anyhow::Result<()> {
+    // A second daemon must never unlink the first daemon's live socket.
+    std::fs::create_dir_all("/run/vopono")?;
+    use std::os::unix::fs::OpenOptionsExt;
+    let daemon_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open("/run/vopono/daemon.lock")?;
+    anyhow::ensure!(
+        unsafe {
+            nix::libc::flock(
+                daemon_lock.as_raw_fd(),
+                nix::libc::LOCK_EX | nix::libc::LOCK_NB,
+            )
+        } == 0,
+        "Another vopono daemon is already running"
+    );
     // Clean up any stale socket file from a previous unclean shutdown.
     let _ = std::fs::remove_file(SOCKET_PATH);
 
-    // Set up a signal handler to clean up the socket file on exit.
+    // Set up a signal handler to quiesce in-flight transitions, clean up the socket, and exit.
     let mut signals = Signals::new([SIGTERM, SIGINT, SIGQUIT])?;
     let socket_path = SOCKET_PATH.to_string();
     std::thread::spawn(move || {
-        // Block until the first signal is received, then exit.
+        // Block until the first signal is received, wait briefly for active
+        // namespace setup/teardown transitions to finish, then clean up and exit.
         if let Some(signal) = signals.forever().next() {
             info!(
-                "Received signal {}, cleaning up socket and exiting.",
+                "Received signal {}, cancelling in-flight setups and waiting for active transitions before exiting.",
                 signal
             );
+            DAEMON_SHUTTING_DOWN.store(true, Ordering::Release);
             let _ = std::fs::remove_file(&socket_path);
+            crate::namespace_sessions::wait_for_idle_transitions(std::time::Duration::from_secs(5));
             std::process::exit(0);
         }
     });
+
+    crate::namespace_sessions::restore_all()?;
 
     let name = SOCKET_PATH.to_fs_name::<FilesystemUdSocket>()?;
 
@@ -467,9 +728,9 @@ pub fn start() -> anyhow::Result<()> {
         .with_context(|| format!("Failed to bind to socket at {}", SOCKET_PATH))?;
 
     let mut perms = std::fs::metadata(SOCKET_PATH)?.permissions();
-    // Set permissions to 777 to allow any user to connect to the daemon socket.
-    // The daemon itself will then check the user's credentials upon connection.
-    perms.set_mode(0o777);
+    // Set permissions to 666 to allow any local user to connect to the daemon socket
+    // (execute bits are unnecessary on Unix sockets). The daemon checks SO_PEERCRED.
+    perms.set_mode(0o666);
     std::fs::set_permissions(SOCKET_PATH, perms)?;
     info!("Daemon listening on {}", SOCKET_PATH);
 
@@ -491,9 +752,12 @@ pub fn start() -> anyhow::Result<()> {
             continue;
         };
         thread::spawn(move || {
-            let _client_slot = client_slot;
+            // Keep namespace resources on this thread, but outside the request
+            // handler's scope. Its admission slots and client descriptors must
+            // close before the controller waits for the namespace's last user.
+            let mut session = None;
             let mut error_conn = conn.try_clone().ok();
-            if let Err(e) = handle_client(conn) {
+            if let Err(e) = handle_client(conn, client_slot, &mut session) {
                 error!("Error handling client: {}", e);
                 if let Some(conn) = error_conn.as_mut() {
                     let response = DaemonResponse::Error(format!("{e:#}"));
@@ -503,6 +767,15 @@ pub fn start() -> anyhow::Result<()> {
                     }
                 }
             }
+            drop(error_conn);
+            if let Some(session) = session {
+                session.run_until_unused();
+            }
+            // Namespace cleanup still uses the creating client's config tree
+            // and dropped-privilege helpers after the request has finished.
+            vopono_core::util::set_config_dir_override(None);
+            vopono_core::util::set_config_owner_override(None);
+            vopono_core::util::set_helper_exe_override(None);
         });
     }
     Ok(())
@@ -528,8 +801,528 @@ fn get_peer_credentials(stream: &LocalSocketStream) -> anyhow::Result<(Uid, Gid)
     Ok((Uid::from_raw(creds.uid()), Gid::from_raw(creds.gid())))
 }
 
+struct PtyOutput {
+    file: File,
+    socket: bool,
+}
+
+impl PtyOutput {
+    fn new(file: File) -> std::io::Result<Self> {
+        let kind = file.metadata()?.file_type();
+        let flags = OFlag::from_bits_truncate(fcntl(&file, FcntlArg::F_GETFL)?);
+        let access = flags & OFlag::O_ACCMODE;
+        if flags.intersects(OFlag::O_PATH) || !matches!(access, OFlag::O_WRONLY | OFlag::O_RDWR) {
+            return Err(std::io::Error::from_raw_os_error(nix::libc::EBADF));
+        }
+        let file = if kind.is_fifo() || kind.is_char_device() {
+            // dup() shares status flags with the client. Open a separate file
+            // description so relay writes can never set its stdout nonblocking.
+            OpenOptions::new()
+                .write(true)
+                .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+                .open(format!("/proc/self/fd/{}", file.as_raw_fd()))?
+        } else {
+            // Keep the shared file offset and append semantics for regular files.
+            file
+        };
+        Ok(Self {
+            file,
+            socket: kind.is_socket(),
+        })
+    }
+
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.socket {
+            Ok(nix::sys::socket::send(
+                self.file.as_raw_fd(),
+                bytes,
+                MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL,
+            )?)
+        } else {
+            self.file.write(bytes)
+        }
+    }
+
+    fn write_all_bounded(&mut self, mut bytes: &[u8], timeout: Duration) -> std::io::Result<()> {
+        let deadline = Instant::now() + timeout;
+        while !bytes.is_empty() {
+            match self.write(bytes) {
+                Ok(0) => return Err(std::io::Error::from(std::io::ErrorKind::WriteZero)),
+                Ok(count) => bytes = &bytes[count..],
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
+                    };
+                    let wait_ms = remaining.as_millis().clamp(1, 25) as i32;
+                    fd_writable(self.file.as_raw_fd(), wait_ms);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
+fn write_client_notice(fd: OwnedFd, bytes: &[u8]) {
+    if let Ok(mut out) = PtyOutput::new(File::from(fd)) {
+        let _ = out.write_all_bounded(bytes, Duration::from_millis(250));
+    }
+}
+
+fn copy_pty_output(mut reader: File, mut output: PtyOutput, prefix: &[u8], done: &AtomicBool) {
+    let mut buffer = [0; 4096];
+    let mut prefix = prefix;
+    let mut pending = 0..0;
+    let mut deadline = None;
+    loop {
+        if done.load(Ordering::Acquire)
+            && Instant::now()
+                >= *deadline.get_or_insert_with(|| Instant::now() + Duration::from_millis(250))
+        {
+            return;
+        }
+        if prefix.is_empty() && pending.is_empty() {
+            if !fd_readable(reader.as_raw_fd(), 50) {
+                if deadline.is_some() {
+                    return;
+                }
+                continue;
+            }
+            match reader.read(&mut buffer) {
+                Ok(0) => return,
+                Ok(count) => pending = 0..count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => return,
+            }
+        }
+        let bytes = if prefix.is_empty() {
+            &buffer[pending.clone()]
+        } else {
+            prefix
+        };
+        match output.write(bytes) {
+            Ok(0) => return,
+            Ok(count) if !prefix.is_empty() => {
+                prefix = &prefix[count..];
+                if deadline.is_some() {
+                    deadline = Some(Instant::now() + Duration::from_millis(250));
+                }
+            }
+            Ok(count) => {
+                pending.start += count;
+                if deadline.is_some() {
+                    deadline = Some(Instant::now() + Duration::from_millis(250));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                fd_writable(output.file.as_raw_fd(), 25);
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+/// Relay a JSON launch notice followed by non-TTY child stdout to the client's
+/// stdout descriptor so `{"event":"launched",...}` is always line 1 without
+/// mid-line interleaving.
+fn copy_json_stdout(pipe_read: File, client_stdout: File, prefix: &[u8], done: &AtomicBool) {
+    if let Ok(output) = PtyOutput::new(client_stdout) {
+        copy_pty_output(pipe_read, output, prefix, done);
+    }
+}
+
+/// Open a non-blocking stdin handle when possible so `stdin_copier` can never
+/// block indefinitely if another reader consumes data after `poll()`.
+struct NonBlockingStdin {
+    file: File,
+    socket: bool,
+}
+
+impl NonBlockingStdin {
+    fn new(file: File) -> Self {
+        let Ok(meta) = file.metadata() else {
+            return Self {
+                file,
+                socket: false,
+            };
+        };
+        let kind = meta.file_type();
+        if kind.is_socket() {
+            return Self { file, socket: true };
+        }
+        if (kind.is_fifo() || kind.is_char_device())
+            && let Ok(nonblocking) = OpenOptions::new()
+                .read(true)
+                .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+                .open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        {
+            return Self {
+                file: nonblocking,
+                socket: false,
+            };
+        }
+        Self {
+            file,
+            socket: false,
+        }
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.socket {
+            nix::sys::socket::recv(
+                self.file.as_raw_fd(),
+                buf,
+                nix::sys::socket::MsgFlags::MSG_DONTWAIT,
+            )
+            .map_err(std::io::Error::from)
+        } else {
+            self.file.read(buf)
+        }
+    }
+}
+
+fn write_pty_input(terminal: &mut File, mut bytes: &[u8], done: &AtomicBool) -> bool {
+    while !bytes.is_empty() && !done.load(Ordering::Acquire) {
+        match terminal.write(bytes) {
+            Ok(0) => return false,
+            Ok(count) => bytes = &bytes[count..],
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                fd_writable(terminal.as_raw_fd(), 25);
+            }
+            Err(_) => return false,
+        }
+    }
+    bytes.is_empty()
+}
+
+/// Wait for an application, bridging terminal I/O only for interactive clients.
+fn wait_for_application(
+    child: &mut std::process::Child,
+    conn: &LocalSocketStream,
+    pty_master: Option<OwnedFd>,
+    client_fds: Option<&(OwnedFd, OwnedFd, OwnedFd)>,
+    launch_notice: Option<String>,
+    pty_output_fd: Option<&OwnedFd>,
+) -> anyhow::Result<std::process::ExitStatus> {
+    let Some(master_fd) = pty_master else {
+        // Non-TTY executions still receive client signals (Ctrl-C / SIGTERM)
+        // over the control socket; forward them to the child's process group.
+        let ctrl_conn = conn.try_clone()?;
+        let child_pgid = nix::unistd::Pid::from_raw(-(child.id() as i32));
+        let child_done = Arc::new(AtomicBool::new(false));
+        let child_done_for_ctrl = Arc::clone(&child_done);
+        let ctrl_thread = thread::spawn(move || {
+            forward_non_tty_signals(ctrl_conn, child_pgid, child_done_for_ctrl);
+        });
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(e) => {
+                    log::debug!("try_wait error: {e}");
+                    break None;
+                }
+            }
+        };
+        child_done.store(true, Ordering::Release);
+        let _ = ctrl_thread.join();
+        return match status {
+            Some(status) => Ok(status),
+            None => Ok(child.wait()?),
+        };
+    };
+    let mut exit_status = None;
+    // Duplicate client FDs so we don't close the originals when Files drop
+    let (client_stdin_fd, _, _) = client_fds.expect("PTY client fds retained");
+    let client_stdin_dup: OwnedFd = client_stdin_fd.as_fd().try_clone_to_owned()?;
+    let client_stdin = File::from(client_stdin_dup);
+    let pty_master_file_r = File::from(master_fd);
+    // The master belongs to the daemon, so its clones can share nonblocking mode.
+    let flags = OFlag::from_bits_truncate(fcntl(&pty_master_file_r, FcntlArg::F_GETFL)?);
+    fcntl(
+        &pty_master_file_r,
+        FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK),
+    )?;
+    let pty_master_file_w = pty_master_file_r.try_clone()?;
+
+    // Do not change user terminal modes; inject control bytes into PTY on signals
+
+    // Control listener: on SIGINT/SIGTSTP/SIGQUIT inject termios cc into PTY master; others killpg
+    let ctrl_conn = conn.try_clone()?;
+    let pty_writer_for_ctrl = pty_master_file_w.try_clone()?;
+    let child_pgid = nix::unistd::Pid::from_raw(-(child.id() as i32));
+    let child_done = Arc::new(AtomicBool::new(false));
+    let child_done_for_ctrl = Arc::clone(&child_done);
+    let ctrl_thread = thread::spawn(move || {
+        forward_terminal_signals(
+            ctrl_conn,
+            pty_writer_for_ctrl,
+            child_pgid,
+            child_done_for_ctrl,
+        )
+    });
+
+    // stdin copier: client stdin -> pty master
+    let mut stdin_reader = NonBlockingStdin::new(client_stdin);
+    let mut pty_writer = pty_master_file_w;
+    let child_pgid_for_stdin = child_pgid; // Pid is Copy; used for optional SIGHUP on EOF
+    let child_done_for_stdin = Arc::clone(&child_done);
+    let stdin_copier = thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while !child_done_for_stdin.load(Ordering::Acquire) {
+            if !fd_readable(stdin_reader.file.as_raw_fd(), 50) {
+                continue;
+            }
+            let n = match stdin_reader.read(&mut buf) {
+                Ok(n) => n,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(_) => {
+                    // On Linux, reading a hung-up client TTY slave returns EIO.
+                    // Deliver SIGHUP so interactive shells do not stay orphaned
+                    // after a terminal close or SSH disconnect.
+                    let _ = nix::sys::signal::kill(
+                        child_pgid_for_stdin,
+                        nix::sys::signal::Signal::SIGHUP,
+                    );
+                    break;
+                }
+            };
+            if n == 0 {
+                // Client reached EOF (Ctrl-D in cooked mode or client closed input).
+                // Inject EOT into the child's TTY so interactive shells exit cleanly.
+                if !write_pty_input(&mut pty_writer, &[0x04], &child_done_for_stdin) {
+                    break;
+                }
+                // Optional: also send SIGHUP to the child's process group
+                let _ =
+                    nix::sys::signal::kill(child_pgid_for_stdin, nix::sys::signal::Signal::SIGHUP);
+                break;
+            }
+            if !write_pty_input(&mut pty_writer, &buf[..n], &child_done_for_stdin) {
+                break;
+            }
+        }
+    });
+
+    // Send terminal output to the caller's terminal, preserving redirected streams.
+    let child_done_for_output = Arc::clone(&child_done);
+    let terminal_fd = pty_output_fd.or_else(|| {
+        // With both output streams redirected, /dev/tty still goes to the
+        // terminal when the caller supplied it as a read-write input FD.
+        let flags = OFlag::from_bits_truncate(fcntl(client_stdin_fd, FcntlArg::F_GETFL).ok()?);
+        (flags & OFlag::O_ACCMODE == OFlag::O_RDWR).then_some(client_stdin_fd)
+    });
+    let output_copier = if let Some(terminal) = terminal_fd {
+        let terminal = File::from(terminal.as_fd().try_clone_to_owned()?);
+        thread::spawn(move || match PtyOutput::new(terminal) {
+            Ok(output) => copy_pty_output(
+                pty_master_file_r,
+                output,
+                launch_notice.as_deref().unwrap_or_default().as_bytes(),
+                &child_done_for_output,
+            ),
+            Err(error) => log::debug!("Could not open client PTY output: {error}"),
+        })
+    } else {
+        thread::spawn(move || {
+            let mut pty_r = pty_master_file_r;
+            let mut buf = [0u8; 4096];
+            while !child_done_for_output.load(Ordering::Acquire) {
+                if !fd_readable(pty_r.as_raw_fd(), 50) {
+                    continue;
+                }
+                match pty_r.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => break,
+                }
+            }
+        })
+    };
+
+    // Wait for child to exit.
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                exit_status = Some(status);
+                break;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(e) => {
+                log::debug!("try_wait error: {e}");
+                break;
+            }
+        }
+    }
+    // Stop and join all PTY helper threads before replying to the client:
+    // - stdin_copier must stop so it cannot steal input from the caller's shell.
+    // - ctrl_thread must stop so a kept-open socket cannot send signals after
+    //   PID reuse or leak threads/FDs past admission limits.
+    // - output_copier must drain remaining PTY output so fast commands don't truncate.
+    child_done.store(true, Ordering::Release);
+    let _ = stdin_copier.join();
+    let _ = ctrl_thread.join();
+    let _ = output_copier.join();
+    match exit_status {
+        Some(status) => Ok(status),
+        None => Ok(child.wait()?),
+    }
+}
+
+/// Forward allowlisted signals from a non-TTY client to the child's process group.
+fn forward_non_tty_signals(
+    conn: LocalSocketStream,
+    group: nix::unistd::Pid,
+    done: Arc<AtomicBool>,
+) {
+    let LocalSocketStream::UdSocket(ref sock) = conn;
+    let raw_fd = sock.as_fd().as_raw_fd();
+    let mut pending = Vec::new();
+    let mut chunk = [0u8; 256];
+    while !done.load(Ordering::Acquire) {
+        if !fd_readable(raw_fd, 50) {
+            continue;
+        }
+        match nix::sys::socket::recv(raw_fd, &mut chunk, MsgFlags::MSG_DONTWAIT) {
+            Ok(0) => break,
+            Ok(n) => pending.extend_from_slice(&chunk[..n]),
+            Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => continue,
+            Err(_) => break,
+        }
+        while pending.len() >= 4 {
+            let len = u32::from_be_bytes([pending[0], pending[1], pending[2], pending[3]]) as usize;
+            if len > MAX_CONTROL_FRAME_LEN {
+                return;
+            }
+            if pending.len() < 4 + len {
+                break;
+            }
+            let bytes: Vec<u8> = pending.drain(..4 + len).skip(4).collect();
+            if done.load(Ordering::Acquire) {
+                return;
+            }
+            let Ok(DaemonRequest::Control(DaemonControl::Signal(signal))) =
+                wincode::deserialize::<DaemonRequest>(&bytes)
+            else {
+                continue;
+            };
+            let Ok(signal) = nix::sys::signal::Signal::try_from(signal) else {
+                continue;
+            };
+            if matches!(
+                signal,
+                nix::sys::signal::Signal::SIGINT
+                    | nix::sys::signal::Signal::SIGQUIT
+                    | nix::sys::signal::Signal::SIGTSTP
+                    | nix::sys::signal::Signal::SIGTERM
+                    | nix::sys::signal::Signal::SIGHUP
+                    | nix::sys::signal::Signal::SIGCONT
+                    | nix::sys::signal::Signal::SIGUSR1
+                    | nix::sys::signal::Signal::SIGUSR2
+            ) {
+                let _ = nix::sys::signal::kill(group, signal);
+            }
+        }
+    }
+}
+
+/// Preserve terminal-generated signals and forward allowlisted signals to the process group.
+fn forward_terminal_signals(
+    conn: LocalSocketStream,
+    mut terminal: std::fs::File,
+    group: nix::unistd::Pid,
+    done: Arc<AtomicBool>,
+) {
+    let LocalSocketStream::UdSocket(ref sock) = conn;
+    let raw_fd = sock.as_fd().as_raw_fd();
+    let mut pending = Vec::new();
+    let mut chunk = [0u8; 256];
+    while !done.load(Ordering::Acquire) {
+        if !fd_readable(raw_fd, 50) {
+            continue;
+        }
+        // Use non-blocking per-call recv so a stalled partial frame cannot block
+        // ctrl_thread.join() after the child exits, without mutating shared socket flags.
+        match nix::sys::socket::recv(raw_fd, &mut chunk, MsgFlags::MSG_DONTWAIT) {
+            Ok(0) => {
+                if !done.load(Ordering::Acquire) {
+                    // Client disconnected unexpectedly (e.g. terminal closed / killed);
+                    // deliver SIGHUP to the interactive child's process group.
+                    let _ = nix::sys::signal::kill(group, nix::sys::signal::Signal::SIGHUP);
+                }
+                break;
+            }
+            Ok(n) => pending.extend_from_slice(&chunk[..n]),
+            Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => continue,
+            Err(_) => break,
+        }
+        while pending.len() >= 4 {
+            let len = u32::from_be_bytes([pending[0], pending[1], pending[2], pending[3]]) as usize;
+            if len > MAX_CONTROL_FRAME_LEN {
+                return;
+            }
+            if pending.len() < 4 + len {
+                break;
+            }
+            let bytes: Vec<u8> = pending.drain(..4 + len).skip(4).collect();
+            if done.load(Ordering::Acquire) {
+                return;
+            }
+            let Ok(DaemonRequest::Control(DaemonControl::Signal(signal))) =
+                wincode::deserialize::<DaemonRequest>(&bytes)
+            else {
+                continue;
+            };
+            let Ok(signal) = nix::sys::signal::Signal::try_from(signal) else {
+                continue;
+            };
+            let control_byte = match signal {
+                nix::sys::signal::Signal::SIGINT => Some(0x03),
+                nix::sys::signal::Signal::SIGTSTP => Some(0x1A),
+                nix::sys::signal::Signal::SIGQUIT => Some(0x1C),
+                _ => None,
+            };
+            if let Some(byte) = control_byte {
+                let _ = write_pty_input(&mut terminal, &[byte], &done);
+            } else if matches!(
+                signal,
+                nix::sys::signal::Signal::SIGTERM
+                    | nix::sys::signal::Signal::SIGHUP
+                    | nix::sys::signal::Signal::SIGCONT
+                    | nix::sys::signal::Signal::SIGWINCH
+                    | nix::sys::signal::Signal::SIGUSR1
+                    | nix::sys::signal::Signal::SIGUSR2
+            ) {
+                let _ = nix::sys::signal::kill(group, signal);
+            }
+        }
+    }
+}
+
 /// Handles a single client connection.
-fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
+fn handle_client(
+    mut conn: LocalSocketStream,
+    client_slot: ClientSlot<'_>,
+    session: &mut Option<crate::namespace_sessions::Session>,
+) -> anyhow::Result<()> {
     // An unauthenticated local peer must not be able to occupy a daemon
     // worker indefinitely by connecting without sending a complete request.
     set_socket_timeouts(&conn)?;
@@ -544,14 +1337,25 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
     // Read a framed request (length-prefixed u32 then payload). Newer
     // clients announce their version first so skew can be flagged here.
     let mut request = read_request(&mut conn)?;
-    if let DaemonRequest::ClientVersion(client_version) = &request {
+    let mut client_version: Option<String> = None;
+    if let DaemonRequest::ClientVersion(version) = &request {
         // Handshake: flag skew on our side, tell the client ours, then read
         // the actual request frame.
-        warn_on_client_version_mismatch(client_version);
+        warn_on_client_version_mismatch(version);
+        client_version = Some(version.clone());
         let response = DaemonResponse::Version(env!("CARGO_PKG_VERSION").to_string());
         let _ = write_response(&mut conn, &response);
         request = read_request(&mut conn)?;
     }
+
+    let (request, deadline_ns) = match request {
+        DaemonRequest::McpExecute {
+            cmd,
+            env,
+            deadline_ns,
+        } => (DaemonRequest::Execute { cmd, env }, Some(deadline_ns)),
+        request => (request, None),
+    };
 
     // Only execute/stop requests access the client's config tree. Version
     // and connectivity requests must not create or require ~/.config.
@@ -561,7 +1365,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
     ) {
         // Writes use a dropped-privilege subprocess so the kernel, rather
         // than a post-hoc chown, enforces ownership.
-        vopono_core::util::set_helper_exe_override(std::env::current_exe().ok());
+        vopono_core::util::set_helper_exe_override(vopono_core::util::current_vopono_exe().ok());
         vopono_core::util::set_config_owner_override(Some((uid, gid)));
         let provided_config_home = request_client_config_home(&request);
         let config_base = adopt_client_config_base(provided_config_home, &user, uid)
@@ -578,272 +1382,361 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             let [client_stdin_fd, client_stdout_fd, client_stderr_fd] =
                 recv_fds_over_unix_socket(&conn)?;
             let mut client_fds = Some((client_stdin_fd, client_stdout_fd, client_stderr_fd));
-            // Execution sessions are intentionally long lived. The bounded
-            // timeout above is only for request and descriptor admission.
-            clear_socket_timeouts(&conn)?;
-
             // Decode the command payload from the JSON bytes carried by `DaemonRequest::Execute`.
             let mut exec_command: ExecCommand = serde_json::from_slice(&cmd)?;
             exec_command.user = Some(user.name);
             exec_command.group = Some(group.name);
-            let requested_application = exec_command.application.clone();
-            let silent = exec_command.silent;
-            let keep_alive = exec_command.keep_alive;
-            let client_report_out = if silent {
-                None
-            } else {
-                Some(nix::unistd::dup(
-                    client_fds.as_ref().expect("client fds present").1.as_fd(),
-                )?)
-            };
-
-            // `--create-netns-only`: bring up the namespace and leave it alive
-            // without spawning an application. The client learns the namespace
-            // name and exits; `vopono stop --namespace` tears it down later.
-            if exec_command.create_netns_only {
-                let ns = crate::exec::create_daemon_namespace_only(exec_command, uid)?;
-                // No child will consume the received SCM_RIGHTS descriptors in
-                // this branch, so take ownership and close all three locally.
-                let (_client_stdin, client_stdout, _client_stderr) =
-                    client_fds.take().expect("client fds present");
-                let mut out = std::fs::File::from(client_stdout);
-                let _ = writeln!(out, "Created namespace {}", ns.name);
-                let _ = out.flush();
-                drop(ns);
-                write_response(&mut conn, &DaemonResponse::Exit(0))?;
-                return Ok(());
-            }
-
-            // Take ownership of the NetworkNamespace object (`_ns`).
-            // It will now be dropped only when `handle_client` finishes,
-            // which happens after the child process has exited.
-            // If the client stdin is a TTY, run the child on a dedicated PTY and bridge I/O.
-            // This preserves job control and avoids stealing the user's controlling TTY.
-            let client_has_tty =
-                nix_isatty(client_fds.as_ref().expect("client fds present").0.as_fd())
-                    .unwrap_or(false);
-            let (application, ns, host_proxies): (
-                vopono_core::network::application_wrapper::ApplicationWrapper,
-                vopono_core::network::netns::NetworkNamespace,
-                Vec<crate::tcp_proxy::TcpProxy>,
-            );
-            let mut pty_master: Option<OwnedFd> = None;
-            if client_has_tty {
-                let p = openpty(None, None).map_err(|e| anyhow!("openpty failed: {e}"))?;
-                let slave_out = nix::unistd::dup(p.slave.as_fd())?;
-                let slave_err = nix::unistd::dup(p.slave.as_fd())?;
-                // Spawn child with PTY slave as stdio, and let it take controlling TTY in pre_exec
-                (application, ns, host_proxies) = execute_as_daemon_with_stdio(
-                    exec_command,
-                    false,
-                    Some((p.slave, slave_out, slave_err)),
-                    true,
-                    Some(forwarded_env.clone()),
+            let mut json = exec_command.json;
+            let execution = (|| -> anyhow::Result<()> {
+                // Read the execution request and its descriptors before refusing
+                // admission, so the client can receive the structured error.
+                let _execution_slot = EXECUTION_ADMISSION.acquire(uid).context(
+                    "Concurrent daemon execution limit reached; wait for a running command to exit",
                 )?;
-                pty_master = Some(p.master);
-            } else {
-                (application, ns, host_proxies) = execute_as_daemon_with_stdio(
-                    exec_command,
-                    false,
-                    client_fds.take(),
-                    false,
-                    Some(forwarded_env.clone()),
-                )?;
-            }
+                drop(client_slot);
+                // Execution may wait for an application for an arbitrary duration.
+                clear_socket_timeouts(&conn)?;
+                crate::profiles::prepare(&mut exec_command)?;
+                json = exec_command.json;
+                let requested_application = exec_command.application.clone();
+                let silent = exec_command.silent;
+                let keep_alive = exec_command.keep_alive;
+                let monitor = exec_command.monitor;
+                let recover = exec_command.recover;
+                let transition = crate::namespace_sessions::begin_setup();
+                let cancellation = LaunchCancellation::start(&conn, deadline_ns);
+                cancellation.check()?;
+                if deadline_ns.is_some() {
+                    anyhow::ensure!(
+                        !exec_command.create_netns_only,
+                        "MCP jobs require an application"
+                    );
+                }
 
-            // Keep port-forwarding alive for the lifetime of this handler
-            let port_forward_keepalive = application.port_forwarding;
-            // Inform the client about the forwarded port too (not only daemon logs);
-            // suppressed by --silent along with the rest of the app output.
-            if !silent
-                && let Some(ref fwd) = port_forward_keepalive
-                && let Some(dup_fd) = client_report_out
-            {
-                let mut out = std::fs::File::from(dup_fd);
-                let _ = writeln!(out, "Port Forwarding on port {}", fwd.forwarded_port());
-                let _ = out.flush();
-            }
-
-            let mut child = application.handle;
-
-            // Keep the namespace alive while the child runs
-            let mut _ns_guard = ns;
-
-            // Create a per-client RON lock file under ~/.config/vopono/locks/<ns>/client-<pid>
-            // so status readers can report daemon-launched applications and Drop can see
-            // other active clients before tearing down the namespace. The guard removes
-            // it on every exit path, including early errors and unwinds.
-            let _client_lock = ClientLockfileGuard(
-                match _ns_guard.write_client_lockfile(child.id(), &requested_application) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        log::warn!("Failed to write daemon client status lockfile: {error}");
-                        None
-                    }
-                },
-            );
-
-            // If using PTY, bridge between client FDs and PTY master
-            let mut exit_status: Option<std::process::ExitStatus> = None;
-            if let Some(master_fd) = pty_master {
-                use std::io::{Read as _, Write as _};
-                // Duplicate client FDs so we don't close the originals when Files drop
-                let (client_stdin_fd, client_stdout_fd, _) =
-                    client_fds.as_ref().expect("PTY client fds retained");
-                let client_stdin_dup: OwnedFd = nix::unistd::dup(client_stdin_fd.as_fd())?;
-                let client_stdout_dup: OwnedFd = nix::unistd::dup(client_stdout_fd.as_fd())?;
-                let client_stdin = std::fs::File::from(client_stdin_dup);
-                let client_stdout = std::fs::File::from(client_stdout_dup);
-                let pty_master_file_r = std::fs::File::from(master_fd);
-                let pty_master_file_w = pty_master_file_r.try_clone()?;
-
-                // Do not change user terminal modes; inject control bytes into PTY on signals
-
-                // Control listener: on SIGINT/SIGTSTP/SIGQUIT inject termios cc into PTY master; others killpg
-                let mut ctrl_conn = conn.try_clone()?;
-                let mut pty_writer_for_ctrl = pty_master_file_w.try_clone()?;
-                let child_pgid = nix::unistd::Pid::from_raw(-(child.id() as i32));
-                thread::spawn(move || {
-                    loop {
-                        let Ok(buf) = read_framed(&mut ctrl_conn, MAX_CONTROL_FRAME_LEN) else {
-                            break;
-                        };
-                        if let Ok(DaemonRequest::Control(ctrl)) =
-                            wincode::deserialize::<DaemonRequest>(&buf)
-                        {
-                            match ctrl {
-                                DaemonControl::Signal(sig) => {
-                                    if let Ok(sig_enum) = nix::sys::signal::Signal::try_from(sig) {
-                                        match sig_enum {
-                                            nix::sys::signal::Signal::SIGINT => {
-                                                let _ = pty_writer_for_ctrl.write_all(&[0x03]);
-                                                let _ = pty_writer_for_ctrl.flush();
-                                            }
-                                            nix::sys::signal::Signal::SIGTSTP => {
-                                                let _ = pty_writer_for_ctrl.write_all(&[0x1A]);
-                                                let _ = pty_writer_for_ctrl.flush();
-                                            }
-                                            nix::sys::signal::Signal::SIGQUIT => {
-                                                let _ = pty_writer_for_ctrl.write_all(&[0x1C]);
-                                                let _ = pty_writer_for_ctrl.flush();
-                                            }
-                                            _ => {
-                                                let _ =
-                                                    nix::sys::signal::kill(child_pgid, sig_enum);
-                                            }
-                                        }
-                                    }
+                // `--create-netns-only`: bring up the namespace and leave it alive
+                // without spawning an application. The client learns the namespace
+                // name and exits; `vopono stop namespace` tears it down later.
+                if exec_command.create_netns_only {
+                    let mut setup = crate::exec::setup_daemon_namespace_only(
+                        exec_command,
+                        Some(forwarded_env.clone()),
+                    )?;
+                    let existing_session = crate::namespace_sessions::contains(&setup.ns.name);
+                    let proxies = if !setup.parsed_command.no_proxy {
+                        match crate::exec::restore_host_proxies(
+                            &setup.ns,
+                            setup.parsed_command.forward.as_deref().unwrap_or_default(),
+                        ) {
+                            Ok(proxies) => proxies,
+                            Err(error) => {
+                                if existing_session {
+                                    setup.ns.detach();
                                 }
+                                return Err(error);
                             }
                         }
-                    }
-                });
-
-                // stdin copier: client stdin -> pty master
-                let mut stdin_reader = client_stdin;
-                let mut pty_writer = pty_master_file_w;
-                let child_pgid_for_stdin = child_pgid; // Pid is Copy; used for optional SIGHUP on EOF
-                let child_done = Arc::new(AtomicBool::new(false));
-                let child_done_for_stdin = Arc::clone(&child_done);
-                let stdin_copier = thread::spawn(move || {
-                    let mut buf = [0u8; 4096];
-                    while !child_done_for_stdin.load(Ordering::Acquire) {
-                        if !fd_readable(stdin_reader.as_raw_fd(), 50) {
-                            continue;
-                        }
-                        let Ok(n) = stdin_reader.read(&mut buf) else {
-                            break;
-                        };
-                        if n == 0 {
-                            // Client reached EOF (Ctrl-D in cooked mode or client closed input).
-                            // Inject EOT into the child's TTY so interactive shells exit cleanly.
-                            let _ = pty_writer.write_all(&[0x04]); // EOT
-                            let _ = pty_writer.flush();
-                            // Optional: also send SIGHUP to the child's process group
-                            let _ = nix::sys::signal::kill(
-                                child_pgid_for_stdin,
-                                nix::sys::signal::Signal::SIGHUP,
-                            );
-                            break;
-                        }
-                        if pty_writer.write_all(&buf[..n]).is_err() {
-                            break;
+                    } else {
+                        Vec::new()
+                    };
+                    if existing_session && !proxies.is_empty() {
+                        let new_ports: Vec<u16> = proxies.iter().map(|(port, _)| *port).collect();
+                        if let Err(error) =
+                            vopono_core::util::open_ports(&setup.ns, &new_ports, setup.ns.firewall)
+                        {
+                            setup.ns.detach();
+                            return Err(error);
                         }
                     }
-                });
-
-                // output copier: pty master -> client stdout (stderr merges on TTY)
-                let mut pty_reader = pty_master_file_r;
-                let mut stdout_writer = client_stdout;
-                thread::spawn(move || {
-                    let mut buf = [0u8; 4096];
-                    while let Ok(n) = pty_reader.read(&mut buf) {
-                        if n == 0 {
-                            break;
+                    crate::exec::include_host_relays(&mut setup.ns, &proxies);
+                    if let Err(error) =
+                        crate::namespace_ownership::mark_persistent(&setup.ns.name, uid)
+                    {
+                        if existing_session {
+                            setup.ns.detach();
                         }
-                        if stdout_writer.write_all(&buf[..n]).is_err() {
-                            break;
-                        }
-                        let _ = stdout_writer.flush();
+                        return Err(error);
                     }
-                });
-
-                // Wait for child to exit.
-                loop {
-                    match child.try_wait() {
-                        Ok(Some(status)) => {
-                            exit_status = Some(status);
-                            break;
+                    let registered = session.insert(crate::namespace_sessions::Session::register(
+                        setup.ns,
+                        uid,
+                        setup.forwarder,
+                        monitor,
+                        recover,
+                    ));
+                    registered.retain_proxies(proxies);
+                    if let Err(error) = registered.persist_options() {
+                        if let Some(aborted) = session.take() {
+                            aborted.abort_failed_launch();
                         }
-                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                        Err(e) => {
-                            log::debug!("try_wait error: {e}");
-                            break;
-                        }
+                        return Err(error);
                     }
+                    drop(transition);
+                    drop(cancellation);
+                    // No child will consume the received SCM_RIGHTS descriptors in
+                    // this branch, so take ownership and close all three locally.
+                    let (_client_stdin, client_stdout, _client_stderr) =
+                        client_fds.take().expect("client fds present");
+                    let registered = session.as_ref().expect("registered session");
+                    if json {
+                        let report = crate::exec::launch_report_for_daemon(
+                            &registered.ns,
+                            0,
+                            registered.forwarded_port(),
+                            setup.reused,
+                        );
+                        write_client_notice(client_stdout, format!("{report}\n").as_bytes());
+                    } else if !silent {
+                        let mut text = format!(
+                            "{}\n",
+                            crate::exec::human_launch_report(&registered.ns, setup.reused)
+                        );
+                        if let Some(port) = registered.forwarded_port() {
+                            text.push_str(&format!("Port Forwarding on port {port}\n"));
+                        }
+                        write_client_notice(client_stdout, text.as_bytes());
+                    }
+                    write_response(&mut conn, &DaemonResponse::Exit(0))?;
+                    return Ok(());
                 }
-                // Stop and join the terminal reader before replying to the client. Leaving this
-                // thread alive would let it steal terminal-query responses from the caller's
-                // shell after the command has completed.
-                child_done.store(true, Ordering::Release);
-                let _ = stdin_copier.join();
-            }
 
-            let status = match exit_status {
-                Some(s) => s,
-                None => child.wait()?,
-            };
-
-            // Ensure port forwarder is dropped before namespace teardown
-            drop(port_forward_keepalive);
-            // Stop the host-side --forward relays before the namespace is torn down.
-            drop(host_proxies);
-
-            if keep_alive {
-                info!(
-                    "Keep-alive flag active - leaving network namespace {} alive",
-                    _ns_guard.name
+                // The caller retains namespace resources after this handler
+                // closes its client descriptors and execution admission slot.
+                // Check stdin/stdout/stderr individually so redirected stdout or
+                // stderr streams are never routed through the PTY or merged.
+                let (stdin_is_tty, stdout_is_tty, stderr_is_tty) = {
+                    let fds = client_fds.as_ref().expect("client fds present");
+                    (
+                        nix_isatty(fds.0.as_fd()).unwrap_or(false),
+                        nix_isatty(fds.1.as_fd()).unwrap_or(false),
+                        nix_isatty(fds.2.as_fd()).unwrap_or(false),
+                    )
+                };
+                let client_has_tty = stdin_is_tty;
+                let pty_bridges_stdout = client_has_tty && stdout_is_tty;
+                let human_notice_fd = if !json && !silent {
+                    Some(
+                        client_fds
+                            .as_ref()
+                            .expect("client fds present")
+                            .2
+                            .as_fd()
+                            .try_clone_to_owned()?,
+                    )
+                } else {
+                    None
+                };
+                // In non-TTY JSON mode, buffer child stdout through a pipe so the
+                // launch report is always emitted as line 1 with no mid-line
+                // interleaving against fast applications.
+                let mut json_stdout_relay: Option<(OwnedFd, OwnedFd)> = None;
+                let (mut application, ns, host_proxies, reused): (
+                    vopono_core::network::application_wrapper::ApplicationWrapper,
+                    vopono_core::network::netns::NetworkNamespace,
+                    crate::exec::HostProxies,
+                    bool,
                 );
-                crate::namespace_ownership::mark_persistent(&_ns_guard.name, uid)?;
-            }
-            let persistent = match crate::namespace_ownership::is_persistent(&_ns_guard.name, uid) {
-                Ok(persistent) => persistent,
-                Err(error) => {
-                    warn!(
-                        "Could not read persistent state for namespace {}: {error}; preserving it to avoid destructive teardown",
-                        _ns_guard.name
+                let mut pty_master: Option<OwnedFd> = None;
+                if client_has_tty {
+                    let p = openpty(None, None).map_err(|e| anyhow!("openpty failed: {e}"))?;
+                    // Assign PTY slave ownership to the connecting user so apps
+                    // opening /dev/tty (ssh, gpg, less, getpass) succeed.
+                    let _ = nix::unistd::fchown(p.slave.as_fd(), Some(uid), Some(gid));
+                    let _ = nix::sys::stat::fchmod(
+                        p.slave.as_fd(),
+                        nix::sys::stat::Mode::from_bits_truncate(0o600),
                     );
-                    true
+                    let fds = client_fds.as_ref().expect("client fds present");
+                    let child_out = if stdout_is_tty {
+                        p.slave.as_fd().try_clone_to_owned()?
+                    } else if json {
+                        let (pipe_read, pipe_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC)?;
+                        json_stdout_relay = Some((pipe_read, fds.1.as_fd().try_clone_to_owned()?));
+                        pipe_write
+                    } else {
+                        fds.1.as_fd().try_clone_to_owned()?
+                    };
+                    let child_err = if stderr_is_tty {
+                        p.slave.as_fd().try_clone_to_owned()?
+                    } else {
+                        fds.2.as_fd().try_clone_to_owned()?
+                    };
+                    // Spawn child with PTY slave as stdin (and TTY outputs), letting it take controlling TTY in pre_exec
+                    (application, ns, host_proxies, reused) = execute_as_daemon_with_stdio(
+                        exec_command,
+                        false,
+                        Some((p.slave, child_out, child_err)),
+                        true,
+                        Some(forwarded_env.clone()),
+                        Some(&cancellation),
+                    )?;
+                    pty_master = Some(p.master);
+                } else {
+                    let (in_fd, out_fd, err_fd) = client_fds.take().expect("client fds present");
+                    let child_out = if json {
+                        let (pipe_read, pipe_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC)?;
+                        json_stdout_relay = Some((pipe_read, out_fd));
+                        pipe_write
+                    } else {
+                        out_fd
+                    };
+                    (application, ns, host_proxies, reused) = execute_as_daemon_with_stdio(
+                        exec_command,
+                        false,
+                        Some((in_fd, child_out, err_fd)),
+                        false,
+                        Some(forwarded_env.clone()),
+                        Some(&cancellation),
+                    )?;
                 }
-            };
-            if keep_alive || persistent {
-                // Detach the handle so its Drop does not tear the namespace down;
-                // it stays visible to `vopono list` / `vopono stop` until stopped.
-                _ns_guard.detach();
-            }
+                // Stop the launch-cancellation watcher before `wait_for_application`
+                // begins reading terminal/control frames from `conn`.
+                drop(cancellation);
 
-            let response_code = status.code().unwrap_or(1);
-            write_response(&mut conn, &DaemonResponse::Exit(response_code))?;
+                // Create a per-client RON lock file under ~/.config/vopono/locks/<ns>/client-<pid>
+                // so status readers can report daemon-launched applications and Drop can see
+                // other active clients before tearing down the namespace. The guard removes
+                // it on every exit path, including early errors and unwinds.
+                let _client_lock = ClientLockfileGuard(
+                    match ns.write_client_lockfile(application.handle.id(), &requested_application)
+                    {
+                        Ok(path) => path,
+                        Err(error) => {
+                            log::warn!("Failed to write daemon client status lockfile: {error}");
+                            None
+                        }
+                    },
+                );
+
+                let registered = session.insert(crate::namespace_sessions::Session::register(
+                    ns,
+                    uid,
+                    application.port_forwarding,
+                    monitor,
+                    recover,
+                ));
+                if keep_alive {
+                    info!(
+                        "Keep-alive flag active - marking network namespace {} persistent",
+                        registered.ns.name
+                    );
+                    if let Err(error) =
+                        crate::namespace_ownership::mark_persistent(&registered.ns.name, uid)
+                    {
+                        let _ = application.handle.kill();
+                        let _ = application.handle.wait();
+                        if let Some(aborted) = session.take() {
+                            aborted.abort_failed_launch();
+                        }
+                        return Err(error);
+                    }
+                }
+                registered.retain_proxies(host_proxies);
+                if let Err(error) = registered.persist_options() {
+                    let _ = application.handle.kill();
+                    let _ = application.handle.wait();
+                    if let Some(aborted) = session.take() {
+                        aborted.abort_failed_launch();
+                    }
+                    return Err(error);
+                }
+                let forwarded_port = registered.forwarded_port();
+                let mut launch_notice = if json {
+                    let report = crate::exec::launch_report_for_daemon(
+                        &registered.ns,
+                        application.handle.id(),
+                        forwarded_port,
+                        reused,
+                    );
+                    Some(format!("{report}\n"))
+                } else if !silent && pty_bridges_stdout {
+                    forwarded_port.map(|port| format!("Port Forwarding on port {port}\n"))
+                } else {
+                    None
+                };
+                let human_notice = (!json && !silent).then(|| {
+                    let mut text = format!(
+                        "{}\n",
+                        crate::exec::human_launch_report(&registered.ns, reused)
+                    );
+                    if !pty_bridges_stdout && let Some(port) = forwarded_port {
+                        text.push_str(&format!("Port Forwarding on port {port}\n"));
+                    }
+                    text
+                });
+                drop(transition);
+                if let Some(fd) = human_notice_fd
+                    && let Some(notice) = human_notice
+                {
+                    write_client_notice(fd, notice.as_bytes());
+                }
+                let json_relay_done = Arc::new(AtomicBool::new(false));
+                let json_relay_thread = if let Some((pipe_read, client_stdout)) = json_stdout_relay
+                {
+                    let prefix = launch_notice.take().unwrap_or_default().into_bytes();
+                    let done = Arc::clone(&json_relay_done);
+                    Some(thread::spawn(move || {
+                        copy_json_stdout(
+                            File::from(pipe_read),
+                            File::from(client_stdout),
+                            &prefix,
+                            &done,
+                        );
+                    }))
+                } else {
+                    None
+                };
+
+                let status = wait_for_application(
+                    &mut application.handle,
+                    &conn,
+                    pty_master,
+                    client_fds.as_ref(),
+                    launch_notice,
+                    client_fds.as_ref().and_then(|(_, stdout, stderr)| {
+                        if stdout_is_tty {
+                            Some(stdout)
+                        } else {
+                            stderr_is_tty.then_some(stderr)
+                        }
+                    }),
+                );
+                json_relay_done.store(true, Ordering::Release);
+                if let Some(relay) = json_relay_thread {
+                    let _ = relay.join();
+                }
+                let status = status?;
+
+                // Remove this application's status before the namespace controller
+                // waits for other clients, detached children or explicit persistence.
+                drop(_client_lock);
+
+                let response_code = status.code().unwrap_or(1);
+                write_response(&mut conn, &DaemonResponse::Exit(response_code))?;
+                Ok(())
+            })();
+            if let Err(error) = execution {
+                if let Some(cancelled) = error.downcast_ref::<LaunchCancelled>() {
+                    return write_response(
+                        &mut conn,
+                        &DaemonResponse::LaunchCancelled {
+                            timed_out: cancelled.timed_out,
+                        },
+                    );
+                }
+                let supports_json_error = client_version
+                    .as_deref()
+                    .is_some_and(|version| version_at_least(version, (1, 1, 0)));
+                if json && supports_json_error {
+                    write_response(
+                        &mut conn,
+                        &DaemonResponse::Json(serde_json::to_vec(
+                            &crate::errors::error_json_value(&error),
+                        )?),
+                    )?;
+                } else {
+                    return Err(error);
+                }
+            }
         }
         DaemonRequest::Version => {
             write_response(
@@ -859,7 +1752,7 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
                 DaemonStopTarget::Application(id) => {
                     crate::control::stop_application(&id, Some(uid))
                 }
-                DaemonStopTarget::Namespace(id) => crate::control::stop_namespace(&id, Some(uid)),
+                DaemonStopTarget::Namespace(id) => stop_daemon_namespace(&id, uid),
             };
             let payload = match outcome {
                 Ok(result) => serde_json::to_vec(&result)?,
@@ -868,9 +1761,34 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             write_response(&mut conn, &DaemonResponse::Json(payload))?;
         }
         DaemonRequest::CheckNamespace(request) => {
+            let _probe_slot = PROBE_ADMISSION
+                .acquire_with_limits(uid, 2, 8)
+                .context("Concurrent connectivity probe limit reached")?;
+            drop(client_slot);
+            anyhow::ensure!(
+                (1..=30000).contains(
+                    &request
+                        .timeout_ms
+                        .unwrap_or(crate::check::DEFAULT_TIMEOUT_MS)
+                ),
+                "Probe timeout must be between 1 and 30000 milliseconds"
+            );
+            anyhow::ensure!(request.port != Some(0), "Probe port must be nonzero");
+            for host in [&request.v4_host, &request.v6_host, &request.dns_host]
+                .into_iter()
+                .flatten()
+            {
+                anyhow::ensure!(
+                    !host.is_empty()
+                        && host.len() <= 253
+                        && !host.starts_with('-')
+                        && !host.chars().any(|c| c.is_control() || c.is_whitespace()),
+                    "Invalid probe host"
+                );
+            }
             // The probe needs root to enter the namespace, so it can only run
             // here (or in the sudo fallback path of the CLI).
-            crate::namespace_ownership::authorize(&request.id, uid)?;
+            crate::namespace_ownership::authorize_attach(&request.id, uid)?;
             let status = crate::check::probe_namespace(
                 &request.id,
                 request
@@ -896,6 +1814,43 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             let payload = serde_json::to_vec(&status)?;
             write_response(&mut conn, &DaemonResponse::Json(payload))?;
         }
+        DaemonRequest::HostDiagnostics { skip_ipv6 } => {
+            let _probe_slot = PROBE_ADMISSION
+                .acquire_with_limits(uid, 2, 8)
+                .context("Concurrent host inspection limit reached")?;
+            drop(client_slot);
+            let diagnostics = vopono_core::diagnostics::host::inspect(skip_ipv6);
+            write_response(
+                &mut conn,
+                &DaemonResponse::Json(serde_json::to_vec(&diagnostics)?),
+            )?;
+        }
+        DaemonRequest::NamespaceDiagnostics {
+            id,
+            offline,
+            skip_ipv6,
+            timeout_ms,
+        } => {
+            let _probe_slot = PROBE_ADMISSION
+                .acquire_with_limits(uid, 2, 8)
+                .context("Concurrent namespace inspection limit reached")?;
+            drop(client_slot);
+            anyhow::ensure!(
+                (1..=30000).contains(&timeout_ms),
+                "Invalid diagnostic timeout"
+            );
+            let snapshot = crate::namespace_ownership::diagnostic_snapshot(&id, uid)?;
+            let report = vopono_core::diagnostics::topology::namespace_network(
+                &snapshot, offline, skip_ipv6, timeout_ms,
+            )?;
+            write_response(
+                &mut conn,
+                &DaemonResponse::Json(serde_json::to_vec(&report)?),
+            )?;
+        }
+        DaemonRequest::McpExecute { .. } => {
+            unreachable!("MCP request is normalized before dispatch")
+        }
         DaemonRequest::Control(_) => {
             // Ignore unexpected control frame sent as the first message
         }
@@ -903,11 +1858,71 @@ fn handle_client(mut conn: LocalSocketStream) -> anyhow::Result<()> {
             // Handshake-only frame; a bare one carries no request payload.
         }
     }
-    // Clear any thread-local override before exiting the handler
-    vopono_core::util::set_config_dir_override(None);
-    vopono_core::util::set_config_owner_override(None);
-    vopono_core::util::set_helper_exe_override(None);
     Ok(())
+}
+
+fn stop_daemon_namespace(id: &str, uid: Uid) -> anyhow::Result<crate::control::StopResult> {
+    let transition = crate::namespace_sessions::lock_namespace(id);
+    let path = Path::new("/run/netns").join(id);
+    // Check existence before ownership authorization so stopping a non-existent
+    // namespace preserves the typed `namespace_not_found` error contract.
+    let status = vopono_core::status::read_lock_namespaces()?;
+    let exists_on_host = match std::fs::metadata(&path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if !status.namespaces.contains_key(id) && !exists_on_host {
+        return Err(crate::errors::CliError::NamespaceNotFound { id: id.to_owned() }.into());
+    }
+    crate::namespace_ownership::authorize(id, uid)?;
+    // Hold the original generation open while the forwarder releases its lease.
+    let original = match File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(crate::errors::CliError::NamespaceNotFound { id: id.to_owned() }.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let identity = original.metadata()?;
+    crate::control::mark_namespace_stopping(id, uid)?;
+    crate::namespace_sessions::stop_monitor(id)?;
+    let forwarder = crate::namespace_sessions::request_forwarder_release(id);
+    drop(transition);
+    if let Some(released) = forwarder {
+        crate::namespace_sessions::wait_forwarder_released(&released, Duration::from_secs(5));
+    }
+
+    let mut transition = Some(crate::namespace_sessions::lock_namespace(id));
+    let same_generation = match std::fs::metadata(&path) {
+        Ok(current) => current.dev() == identity.dev() && current.ino() == identity.ino(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if !same_generation {
+        return Ok(crate::control::StopResult {
+            version: crate::api::SCHEMA_VERSION,
+            target: crate::control::StopTargetKind::Namespace,
+            application_id: None,
+            namespace_id: id.to_owned(),
+            namespace_removed: true,
+        });
+    }
+
+    let result = crate::control::stop_namespace_with_wait_hook(id, Some(uid), || {
+        // Release the transition lock before polling so `Session::run_until_unused`
+        // can acquire it and finish tearing down the namespace without deadlocking.
+        drop(transition.take());
+    })?;
+    if transition.is_none() {
+        transition = Some(crate::namespace_sessions::lock_namespace(id));
+    }
+    let released = crate::namespace_sessions::invalidate(id);
+    drop(transition);
+    if let Some(released) = released {
+        crate::namespace_sessions::wait_released(&released)?;
+    }
+    Ok(result)
 }
 
 /// Extract the client-supplied config-home candidate from the request.
@@ -939,7 +1954,10 @@ fn adopt_client_config_base(
     uid: Uid,
 ) -> anyhow::Result<PathBuf> {
     let home_candidate = user.dir.join(".config");
-    let provided_candidate = provided.map(PathBuf::from);
+    // Per XDG Base Directory spec, empty or relative XDG_CONFIG_HOME is ignored.
+    let provided_candidate = provided
+        .filter(|path| !path.is_empty() && Path::new(path).is_absolute())
+        .map(PathBuf::from);
     let candidates = [provided_candidate.as_ref(), Some(&home_candidate)];
 
     for candidate in candidates.into_iter().flatten() {
@@ -954,13 +1972,31 @@ fn adopt_client_config_base(
     }
 
     // Missing (rather than invalid) candidates: try to create them as the
-    // client before giving up.
+    // client before giving up. Failure on an uncreatable XDG_CONFIG_HOME
+    // falls through to ~/.config rather than aborting immediately.
     for candidate in candidates.into_iter().flatten() {
-        if !candidate.exists()
-            && vopono_core::util::ensure_dir_as_config_owner(candidate, None)?
-            && let Ok(dir) = vopono_core::util::validated_user_owned_dir(candidate, uid)
-        {
-            return Ok(dir);
+        if !candidate.exists() {
+            match vopono_core::util::ensure_dir_as_config_owner(candidate, None) {
+                Ok(true) => {
+                    if let Ok(dir) = vopono_core::util::validated_user_owned_dir(candidate, uid) {
+                        return Ok(dir);
+                    }
+                }
+                Ok(false) => {
+                    if (!nix::unistd::geteuid().is_root() || uid.is_root())
+                        && std::fs::create_dir_all(candidate).is_ok()
+                        && let Ok(dir) = vopono_core::util::validated_user_owned_dir(candidate, uid)
+                    {
+                        return Ok(dir);
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        "Could not create client config dir {}: {error}",
+                        candidate.display()
+                    );
+                }
+            }
         }
     }
 
@@ -974,6 +2010,16 @@ fn fd_readable(fd: RawFd, timeout_ms: i32) -> bool {
     let mut poll_fd = nix::libc::pollfd {
         fd,
         events: nix::libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: poll_fd points to one initialized pollfd for the duration of this call.
+    unsafe { nix::libc::poll(&mut poll_fd, 1, timeout_ms) > 0 }
+}
+
+fn fd_writable(fd: RawFd, timeout_ms: i32) -> bool {
+    let mut poll_fd = nix::libc::pollfd {
+        fd,
+        events: nix::libc::POLLOUT,
         revents: 0,
     };
     // SAFETY: poll_fd points to one initialized pollfd for the duration of this call.
@@ -1028,6 +2074,30 @@ mod tests {
     use nix::unistd::Uid;
 
     #[test]
+    fn host_diagnostics_appends_to_the_wire_protocol_without_changing_old_indices() {
+        use super::DaemonRequest;
+        for (request, index) in [
+            (DaemonRequest::Version, 2u32),
+            (DaemonRequest::ClientVersion("1.0.3".into()), 5u32),
+            (DaemonRequest::HostDiagnostics { skip_ipv6: true }, 6u32),
+            (
+                DaemonRequest::NamespaceDiagnostics {
+                    id: "vo_test".into(),
+                    offline: true,
+                    skip_ipv6: false,
+                    timeout_ms: 3000,
+                },
+                7u32,
+            ),
+        ] {
+            let bytes = wincode::serialize(&request).unwrap();
+            assert_eq!(&bytes[..4], &index.to_le_bytes());
+            let decoded: DaemonRequest = wincode::deserialize(&bytes).unwrap();
+            assert_eq!(wincode::serialize(&decoded).unwrap(), bytes);
+        }
+    }
+
+    #[test]
     fn framed_messages_are_rejected_before_oversized_allocation() {
         assert_eq!(checked_frame_len(16u32.to_be_bytes(), 16).unwrap(), 16);
         let error = checked_frame_len(17u32.to_be_bytes(), 16)
@@ -1079,6 +2149,17 @@ mod tests {
     }
 
     use super::{VersionSkew, classify_version_skew};
+
+    #[test]
+    fn profile_and_monitor_launches_require_daemon_support() {
+        use super::version_at_least;
+        let minimum = (1, 1, 0);
+        assert!(!version_at_least("1.0.3", minimum));
+        assert!(!version_at_least("2.0.0", minimum));
+        assert!(!version_at_least("unknown", minimum));
+        assert!(version_at_least("1.1.0", minimum));
+        assert!(version_at_least("1.2.0+packaged", minimum));
+    }
 
     #[test]
     fn version_skew_classification() {
@@ -1236,6 +2317,132 @@ mod tests {
                 Some("/tmp/stop-xdg")
             );
             assert!(request_client_config_home(&DaemonRequest::Version).is_none());
+        }
+    }
+
+    #[test]
+    fn pty_child_exit_does_not_wait_for_a_full_stdout_pipe() {
+        use super::{File, OwnedFd, PtyOutput};
+        use nix::fcntl::{FcntlArg, OFlag, fcntl};
+        use std::os::unix::net::UnixStream;
+        use std::process::{Command, Stdio};
+        use std::time::Duration;
+
+        let (stdin, _stdin_writer) = nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+        let (stdout_reader, stdout) = nix::unistd::pipe2(OFlag::O_CLOEXEC).unwrap();
+        let stdout = File::from(stdout);
+        let mut filling_writer = PtyOutput::new(stdout.try_clone().unwrap()).unwrap();
+        let capacity = fcntl(&stdout, FcntlArg::F_GETPIPE_SZ).unwrap() as usize;
+        assert_eq!(
+            filling_writer.write(&vec![b'x'; capacity]).unwrap(),
+            capacity
+        );
+        assert!(
+            !OFlag::from_bits_truncate(fcntl(&stdout, FcntlArg::F_GETFL).unwrap())
+                .contains(OFlag::O_NONBLOCK)
+        );
+        drop(filling_writer);
+
+        let pty = nix::pty::openpty(None, None).unwrap();
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "printf output; sleep 0.2"])
+            .stdout(Stdio::from(pty.slave))
+            .spawn()
+            .unwrap();
+        let (server, _client) = UnixStream::pair().unwrap();
+        let server: OwnedFd = server.into();
+        let conn = super::LocalSocketStream::UdSocket(server.into());
+        let client_fds = (
+            stdin,
+            stdout.into(),
+            File::open("/dev/null").unwrap().into(),
+        );
+        let (finished, result) = std::sync::mpsc::channel();
+        let handler = std::thread::spawn(move || {
+            let result = super::wait_for_application(
+                &mut child,
+                &conn,
+                Some(pty.master),
+                Some(&client_fds),
+                Some("launch notice\n".into()),
+                Some(&client_fds.1),
+            );
+            let _ = finished.send(result);
+        });
+        let status = result.recv_timeout(Duration::from_secs(3));
+        // Release any blocked output write before joining even if the check fails.
+        drop(stdout_reader);
+        handler.join().unwrap();
+        assert!(
+            status
+                .expect("PTY handler blocked on stdout")
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[test]
+    fn partial_control_frame_does_not_block_terminal_signal_shutdown() {
+        use super::{
+            Arc, AtomicBool, LocalSocketStream, Ordering, OwnedFd, Write, forward_terminal_signals,
+            thread,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("ctrl.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+        let mut client = std::os::unix::net::UnixStream::connect(&socket_path).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let server_fd: OwnedFd = server.into();
+        let stream = LocalSocketStream::UdSocket(server_fd.into());
+        let terminal = std::fs::File::open("/dev/null").unwrap();
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = Arc::clone(&done);
+        let handle = thread::spawn(move || {
+            forward_terminal_signals(stream, terminal, nix::unistd::Pid::from_raw(-1), done_clone);
+        });
+        // Send only 2 bytes of a 4-byte length prefix and keep the socket open.
+        client.write_all(&[0x00, 0x00]).unwrap();
+        thread::sleep(std::time::Duration::from_millis(60));
+        done.store(true, Ordering::Release);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !handle.is_finished() && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            handle.is_finished(),
+            "forward_terminal_signals blocked on stalled partial frame"
+        );
+        handle.join().unwrap();
+        drop(client);
+    }
+
+    #[test]
+    fn pty_output_rejects_non_writable_and_accmode_fds() {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("target");
+        std::fs::write(&path, "ok").unwrap();
+
+        let readonly = std::fs::File::open(&path).unwrap();
+        assert_eq!(
+            super::PtyOutput::new(readonly)
+                .err()
+                .unwrap()
+                .raw_os_error(),
+            Some(nix::libc::EBADF)
+        );
+
+        // Linux mode 3 (O_ACCMODE = O_WRONLY | O_RDWR) opens an FD that is
+        // neither readable nor writable; PtyOutput must reject it.
+        if let Ok(mode3) = std::fs::OpenOptions::new()
+            .custom_flags(nix::libc::O_ACCMODE)
+            .open(&path)
+        {
+            assert_eq!(
+                super::PtyOutput::new(mode3).err().unwrap().raw_os_error(),
+                Some(nix::libc::EBADF)
+            );
         }
     }
 }

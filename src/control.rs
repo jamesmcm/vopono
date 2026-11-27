@@ -51,6 +51,16 @@ pub fn stop_application(
         .into());
     };
 
+    vopono_core::network::netns::validate_netns_name(&namespace_id)?;
+
+    if let Some(uid) = requester_uid {
+        crate::namespace_ownership::authorize(&namespace_id, uid)?;
+    }
+
+    // Open a pidfd before verifying identity so both SIGTERM and SIGKILL target
+    // this exact process instance and cannot hit an unrelated recycled PID.
+    let pidfd = open_pidfd(pid);
+
     // Lockfiles live in a user-writable directory and PIDs can be recycled:
     // in daemon mode the request may come from any local user, so only
     // signal processes owned by the authenticated requester.
@@ -85,9 +95,24 @@ pub fn stop_application(
         }
     }
 
-    send_signal(pid, Signal::SIGTERM)?;
-    wait_for_process(pid)?;
-    let namespace_removed = wait_for_namespace_removal(&namespace_id)?;
+    send_signal_verified(pid, pidfd.as_ref(), Signal::SIGTERM)?;
+    wait_for_process_verified(pid, pidfd.as_ref())?;
+    // Do not stall 10 seconds waiting for teardown if the namespace is explicitly
+    // persistent or still hosts other live applications.
+    let kept_alive = requester_uid.is_some_and(|uid| {
+        crate::namespace_ownership::is_persistent(&namespace_id, uid).unwrap_or(false)
+    }) || status.namespaces.get(&namespace_id).is_some_and(|locks| {
+        locks.iter().any(|lock| {
+            lock.application_pid.is_some_and(|other| {
+                other != pid && vopono_core::status::lockfile_application_is_live(lock)
+            })
+        })
+    });
+    let namespace_removed = if kept_alive {
+        !namespace_exists(&namespace_id)?
+    } else {
+        wait_for_namespace_removal(&namespace_id)?
+    };
 
     Ok(StopResult {
         version: SCHEMA_VERSION,
@@ -98,9 +123,28 @@ pub fn stop_application(
     })
 }
 
+pub(crate) fn mark_namespace_stopping(namespace_id: &str, uid: nix::unistd::Uid) -> Result<()> {
+    crate::namespace_ownership::mark_stopping(namespace_id, uid)?;
+    let lock_dir = vopono_core::util::vopono_dir()?
+        .join("locks")
+        .join(namespace_id);
+    if let Err(error) = vopono_core::status::record_namespace_stopping(&lock_dir) {
+        log::debug!("Could not publish stopping status for {namespace_id}: {error:#}");
+    }
+    Ok(())
+}
+
 pub fn stop_namespace(
     namespace_id: &str,
     requester_uid: Option<nix::unistd::Uid>,
+) -> Result<StopResult> {
+    stop_namespace_with_wait_hook(namespace_id, requester_uid, || {})
+}
+
+pub(crate) fn stop_namespace_with_wait_hook(
+    namespace_id: &str,
+    requester_uid: Option<nix::unistd::Uid>,
+    before_wait: impl FnOnce(),
 ) -> Result<StopResult> {
     let status = read_lock_namespaces()?;
     // Lockfiles can be missing (for example after a manual cleanup) while the
@@ -121,16 +165,14 @@ pub fn stop_namespace(
         // Make an explicit stop authoritative over a previous keep-alive or
         // create-only request. A live handler will observe this after its child
         // exits and perform normal teardown; an idle namespace is handled below.
-        allow_completed_teardown(
-            crate::namespace_ownership::mark_stopping(namespace_id, uid),
-            || namespace_exists(namespace_id),
-        )?;
+        allow_completed_teardown(mark_namespace_stopping(namespace_id, uid), || {
+            namespace_exists(namespace_id)
+        })?;
         allow_completed_teardown(
             terminate_namespace_user_processes(namespace_id, uid),
             || namespace_exists(namespace_id),
         )?;
-        let lock_dir = vopono_core::util::config_dir()?
-            .join("vopono")
+        let lock_dir = vopono_core::util::vopono_dir()?
             .join("locks")
             .join(namespace_id);
         // The applications terminated above leave client lockfiles whose PIDs
@@ -147,6 +189,12 @@ pub fn stop_namespace(
             )? {
                 allow_completed_teardown(namespace.teardown(), || namespace_exists(namespace_id))?;
             }
+        }
+        // Release any caller-held namespace transition lock before polling so a
+        // live session controller (`Session::run_until_unused`) can acquire the
+        // lock and complete teardown without deadlocking.
+        if namespace_exists(namespace_id)? {
+            before_wait();
         }
         let namespace_removed = wait_for_namespace_removal(namespace_id)?;
         if !namespace_removed {
@@ -241,13 +289,83 @@ fn process_real_uid(pid: u32) -> Option<u32> {
         .and_then(|real_uid| real_uid.parse::<u32>().ok())
 }
 
-fn wait_for_process(pid: u32) -> Result<(), CliError> {
-    if wait_until(|| !check_process_running(pid)) {
+fn open_pidfd(pid: u32) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+    let fd =
+        unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid as nix::libc::pid_t, 0u32) };
+    if fd >= 0 {
+        Some(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as nix::libc::c_int) })
+    } else {
+        None
+    }
+}
+
+fn send_signal_verified(
+    pid: u32,
+    pidfd: Option<&std::os::fd::OwnedFd>,
+    signal: Signal,
+) -> Result<(), CliError> {
+    use std::os::fd::AsRawFd;
+    if let Some(fd) = pidfd {
+        let rc = unsafe {
+            nix::libc::syscall(
+                nix::libc::SYS_pidfd_send_signal,
+                fd.as_raw_fd(),
+                signal as nix::libc::c_int,
+                std::ptr::null::<nix::libc::siginfo_t>(),
+                0u32,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(nix::libc::ESRCH) {
+            return Ok(());
+        }
+        return Err(CliError::ProcessSignal {
+            pid,
+            source: err.into(),
+        });
+    }
+    send_signal(pid, signal)
+}
+
+fn process_is_zombie(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    stat.rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().next())
+        .is_some_and(|state| state == "Z")
+}
+
+fn process_is_live(pid: u32, pidfd: Option<&std::os::fd::OwnedFd>) -> bool {
+    use std::os::fd::AsRawFd;
+    if let Some(fd) = pidfd {
+        let mut pfd = nix::libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: nix::libc::POLLIN,
+            revents: 0,
+        };
+        let rc = unsafe { nix::libc::poll(&mut pfd, 1, 0) };
+        if rc > 0 && (pfd.revents & nix::libc::POLLIN) != 0 {
+            return false;
+        }
+    }
+    check_process_running(pid) && !process_is_zombie(pid)
+}
+
+fn wait_for_process_verified(
+    pid: u32,
+    pidfd: Option<&std::os::fd::OwnedFd>,
+) -> Result<(), CliError> {
+    if wait_until(|| !process_is_live(pid, pidfd)) {
         return Ok(());
     }
-    if check_process_running(pid) {
-        send_signal(pid, Signal::SIGKILL)?;
-        if wait_until(|| !check_process_running(pid)) {
+    if process_is_live(pid, pidfd) {
+        send_signal_verified(pid, pidfd, Signal::SIGKILL)?;
+        if wait_until(|| !process_is_live(pid, pidfd)) {
             return Ok(());
         }
         return Err(CliError::ProcessStillRunning { pid });
@@ -262,7 +380,7 @@ fn namespace_processes(namespace_id: &str) -> anyhow::Result<Vec<i32>> {
         .collect())
 }
 
-fn terminate_namespace_processes(namespace_id: &str) -> anyhow::Result<()> {
+pub(crate) fn terminate_namespace_processes(namespace_id: &str) -> anyhow::Result<()> {
     for pid in namespace_processes(namespace_id)? {
         send_signal(pid as u32, Signal::SIGTERM)?;
     }

@@ -67,9 +67,11 @@ impl OpenVpnProvider for IVPN {
             let file_contents = file_contents
                 .split('\n')
                 .filter(|&x| {
-                    !(x.starts_with("up ")
-                        || x.starts_with("down ")
-                        || x.starts_with("auth-user-pass"))
+                    let trimmed = x.trim_start();
+                    !(trimmed.starts_with("up ")
+                        || trimmed.starts_with("down ")
+                        || trimmed.starts_with("script-security ")
+                        || trimmed.starts_with("auth-user-pass"))
                 })
                 .collect::<Vec<&str>>()
                 .join("\n");

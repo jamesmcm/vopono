@@ -7,10 +7,11 @@ use super::sync::synch;
 use crate::tcp_proxy::TcpProxy;
 use anyhow::{Context, anyhow, bail};
 use log::{debug, error, info, warn};
+use sha2::{Digest, Sha256};
 use signal_hook::iterator::SignalsInfo;
 use signal_hook::{consts::SIGINT, iterator::Signals};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::{
     fs::create_dir_all,
@@ -35,45 +36,21 @@ use vopono_core::util::{
 };
 use vopono_core::util::{parse_command_str, vopono_dir};
 
+// Daemon setup runs concurrently for different namespaces. Hold this only
+// while selecting a free subnet and publishing its addresses on the host;
+// protocol setup and handshakes must not block unrelated namespace creation.
+static SUBNET_ALLOCATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Configuration struct for namespace setup results
 pub struct NamespaceConfig {
     pub ns: NetworkNamespace,
+    pub reused: bool,
     pub parsed_command: ArgsConfig,
     pub forwarder: Option<Box<dyn Forwarder>>,
     pub host_env_vars: std::collections::HashMap<String, String>,
 }
 
-/// Special entry point for the daemon. It sets up the namespace and returns the
-/// child process handle and the namespace object itself to keep it alive.
-pub fn execute_as_daemon(
-    command: ExecCommand,
-) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace)> {
-    let uiclient = CliClient {};
-    let NamespaceConfig {
-        ns,
-        parsed_command,
-        forwarder,
-        host_env_vars,
-    } = setup_namespace(command, &uiclient, true, false)?; // daemon: do not auto-sync
-
-    let ns = ns.write_lockfile(&parsed_command.application)?;
-
-    let application = ApplicationWrapper::new(
-        &ns,
-        &parsed_command.application,
-        parsed_command.user.clone(),
-        parsed_command.group.clone(),
-        parsed_command.working_directory.clone().map(PathBuf::from),
-        forwarder,
-        true, // Always silent on daemon side
-        &host_env_vars,
-        true, // Pipe IO for legacy daemon path
-        None,
-        false,
-    )?;
-    ns.update_lockfile_application_pid(application.handle.id())?;
-    Ok((application, ns))
-}
+pub(crate) type HostProxies = Vec<(u16, TcpProxy)>;
 
 /// Daemon entry that allows selecting pipe mode and passing explicit stdio FDs.
 pub fn execute_as_daemon_with_stdio(
@@ -82,15 +59,26 @@ pub fn execute_as_daemon_with_stdio(
     stdio_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
     take_controlling_tty: bool,
     forwarded_env: Option<std::collections::HashMap<String, String>>,
-) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace, Vec<TcpProxy>)> {
+    cancellation: Option<&crate::daemon::LaunchCancellation<'_>>,
+) -> anyhow::Result<(ApplicationWrapper, NetworkNamespace, HostProxies, bool)> {
     let uiclient = CliClient {};
     let silent = command.silent;
+    // Bind `ns` before `forwarder` so `forwarder` always drops first while the
+    // namespace still exists (allowing port-forwarding teardown to succeed).
     let NamespaceConfig {
-        ns,
+        mut ns,
+        reused,
         parsed_command,
         forwarder,
         host_env_vars,
-    } = setup_namespace(command, &uiclient, true, false)?; // daemon: do not auto-sync
+    } = setup_namespace_with_env(
+        command,
+        &uiclient,
+        true,
+        false,
+        forwarded_env.as_ref(),
+        cancellation,
+    )?;
 
     // Do not pass through an audio endpoint discovered in the daemon's root
     // session. The client forwards its effective PULSE_SERVER when pactl can
@@ -109,37 +97,77 @@ pub fn execute_as_daemon_with_stdio(
             .or_insert_with(|| format!("/run/user/{}", user.uid.as_raw()));
     }
 
-    // Merge all client-forwarded environment variables into the child setup.
+    // Merge client-forwarded environment variables into the child setup without
+    // overriding SSH SOCKS5 proxy variables injected by setup_namespace.
+    let preserve_ssh_proxy = parsed_command.protocol == Protocol::Ssh;
     if let Some(fwd) = forwarded_env.as_ref() {
         for (k, v) in fwd {
+            if preserve_ssh_proxy && matches!(k.as_str(), "ALL_PROXY" | "all_proxy") {
+                continue;
+            }
             host_env_vars.insert(k.clone(), v.clone());
         }
     }
 
-    // Machine-readable launch summary for frontend integrations, written to
-    // the client's stdout before any application output. Duplicate the
-    // descriptor up-front because ApplicationWrapper transfers the original
-    // descriptor to the spawned child.
-    let report_out: Option<OwnedFd> = if parsed_command.json {
-        stdio_fds
-            .as_ref()
-            .map(|(_, stdout_fd, _)| nix::unistd::dup(stdout_fd.as_fd()))
-            .transpose()?
-    } else {
-        None
-    };
-
+    let existing_session = crate::namespace_sessions::contains(&ns.name);
+    let detach_on_error = existing_session || reused;
+    let cleanup_new_ns_on_error =
+        |mut ns: NetworkNamespace, forwarder: Option<Box<dyn Forwarder>>| {
+            drop(forwarder);
+            if detach_on_error {
+                ns.detach();
+            }
+            let name = ns.name.clone();
+            drop(ns);
+            if !reused && !std::path::Path::new("/run/netns").join(&name).exists() {
+                crate::namespace_ownership::remove(&name);
+            }
+        };
     // Bind the host-side --forward relays before spawning the application so a
     // bind failure aborts the request instead of orphaning a running process.
-    let host_proxies = host_forward_proxies(
+    let host_proxies = match host_forward_proxies(
         &ns,
         parsed_command.forward.as_deref(),
         parsed_command.no_proxy,
         false,
-    )?;
+    ) {
+        Ok(proxies) => proxies,
+        Err(error) => {
+            cleanup_new_ns_on_error(ns, forwarder);
+            return Err(error);
+        }
+    };
+    // When attaching to an existing namespace with new --forward ports,
+    // open them in the namespace firewall so the new host relays can connect.
+    if (existing_session || reused) && !host_proxies.is_empty() {
+        let new_ports: Vec<u16> = host_proxies.iter().map(|(port, _)| *port).collect();
+        if let Err(error) = vopono_core::util::open_ports(&ns, &new_ports, ns.firewall) {
+            cleanup_new_ns_on_error(ns, forwarder);
+            return Err(error);
+        }
+    }
 
-    let ns = ns.write_lockfile(&parsed_command.application)?;
-    let application = ApplicationWrapper::new(
+    include_host_relays(&mut ns, &host_proxies);
+
+    if !existing_session {
+        ns = match ns.write_lockfile(&parsed_command.application) {
+            Ok(ns) => ns,
+            Err(error) => {
+                drop(forwarder);
+                if !reused {
+                    // Best-effort ownership cleanup if namespace no longer exists.
+                    let name = parsed_command.custom_netns_name.as_deref();
+                    if let Some(name) = name
+                        && !std::path::Path::new("/run/netns").join(name).exists()
+                    {
+                        crate::namespace_ownership::remove(name);
+                    }
+                }
+                return Err(error);
+            }
+        };
+    }
+    let mut application = match ApplicationWrapper::new_with_launch_check(
         &ns,
         &parsed_command.application,
         parsed_command.user.clone(),
@@ -151,72 +179,123 @@ pub fn execute_as_daemon_with_stdio(
         pipe_io,
         stdio_fds,
         take_controlling_tty,
-    )?;
-    let pid = application.handle.id();
-    ns.update_lockfile_application_pid(pid)?;
-
-    if let Some(report_out) = report_out {
-        let report = launch_report(&ns, pid, application.port_forwarding.as_deref());
-        let mut out = std::fs::File::from(report_out);
-        let _ = writeln!(out, "{report}");
-        let _ = out.flush();
+        || cancellation.map_or(Ok(()), |guard| guard.check()),
+    ) {
+        Ok(app) => app,
+        Err(error) => {
+            cleanup_new_ns_on_error(ns, None);
+            return Err(error);
+        }
+    };
+    if !existing_session {
+        let pid = application.handle.id();
+        if let Err(error) = ns.update_lockfile_application_pid(pid) {
+            let _ = application.handle.kill();
+            let _ = application.handle.wait();
+            let forwarder = application.port_forwarding.take();
+            cleanup_new_ns_on_error(ns, forwarder);
+            return Err(error);
+        }
     }
-
-    Ok((application, ns, host_proxies))
+    Ok((application, ns, host_proxies, reused))
 }
 
-/// Daemon entry for `--create-netns-only`: bring up the namespace and leave it
-/// alive without spawning an application. The returned handle is detached from
-/// teardown (marked unmanaged) so the namespace survives the request handler;
-/// it stays visible to `vopono list` / `vopono stop` until stopped explicitly.
-pub fn create_daemon_namespace_only(
-    command: ExecCommand,
-    uid: nix::unistd::Uid,
-) -> anyhow::Result<NetworkNamespace> {
-    let uiclient = CliClient {};
-    let NamespaceConfig {
-        ns,
-        parsed_command,
-        forwarder,
-        host_env_vars: _,
-    } = setup_namespace(command, &uiclient, true, false)?; // daemon: do not auto-sync
-    let ns = ns.write_lockfile(&parsed_command.application)?;
-    // No application runs in this session, so the provider forwarder has nothing
-    // to serve and is torn down immediately (mirroring the CLI path).
-    drop(forwarder);
-    let mut ns = ns;
-    crate::namespace_ownership::mark_persistent(&ns.name, uid)?;
-    ns.detach();
-    Ok(ns)
+pub(crate) fn include_host_relays(ns: &mut NetworkNamespace, new_proxies: &HostProxies) {
+    let ports = &mut ns.state.host_forwarded_ports;
+    ports.extend(crate::namespace_sessions::relay_ports(&ns.name));
+    ports.extend(new_proxies.iter().map(|(port, _)| *port));
+    ports.sort_unstable();
+    ports.dedup();
 }
 
-/// Single-line machine-readable launch summary for `exec --json`.
-fn launch_report(ns: &NetworkNamespace, pid: u32, forwarder: Option<&dyn Forwarder>) -> String {
-    launch_report_value(
-        &ns.name,
-        pid,
-        &ns.state.open_ports,
-        &ns.state.host_forwarded_ports,
-        forwarder.map(|f| f.forwarded_port()),
-    )
-    .to_string()
-}
-
-/// Value builder for the `exec --json` launch summary, kept separate from
-/// `launch_report` so the port fields can be tested without a live namespace.
-fn launch_report_value(
-    namespace: &str,
+pub(crate) fn launch_report_for_daemon(
+    ns: &NetworkNamespace,
     pid: u32,
-    open_ports: &[u16],
+    forwarded_port: Option<u16>,
+    reused: bool,
+) -> String {
+    let mut host_forwarded_ports = ns.state.host_forwarded_ports.clone();
+    for port in crate::namespace_sessions::relay_ports(&ns.name) {
+        if !host_forwarded_ports.contains(&port) {
+            host_forwarded_ports.push(port);
+        }
+    }
+    host_forwarded_ports.sort_unstable();
+    launch_report_value(ns, pid, &host_forwarded_ports, forwarded_port, reused).to_string()
+}
+
+/// Setup without spawning an application; the caller retains all namespace resources.
+pub fn setup_daemon_namespace_only(
+    command: ExecCommand,
+    forwarded_env: Option<std::collections::HashMap<String, String>>,
+) -> anyhow::Result<NamespaceConfig> {
+    let uiclient = CliClient {};
+    let mut setup = setup_namespace_with_env(
+        command,
+        &uiclient,
+        true,
+        false,
+        forwarded_env.as_ref(),
+        None,
+    )?;
+    if !crate::namespace_sessions::contains(&setup.ns.name) {
+        setup.ns = setup.ns.write_lockfile(&setup.parsed_command.application)?;
+    }
+    Ok(setup)
+}
+
+fn effective_server(ns: &NetworkNamespace) -> Option<std::borrow::Cow<'_, str>> {
+    use std::borrow::Cow;
+    let selector = ns
+        .state
+        .server
+        .as_deref()
+        .filter(|server| !server.is_empty())
+        .map(Cow::Borrowed);
+    let config_name = ns
+        .config_file
+        .as_deref()
+        .and_then(|path| path.file_stem())
+        .and_then(|name| name.to_str())
+        .map(Cow::Borrowed);
+    match ns.provider {
+        VpnProvider::None => None,
+        VpnProvider::Custom if ns.protocol == Protocol::Ssh => selector,
+        VpnProvider::Custom => ns.vpn_endpoint().or(config_name).or(selector),
+        _ => config_name.or_else(|| ns.vpn_endpoint()).or(selector),
+    }
+}
+
+pub(crate) fn human_launch_report(ns: &NetworkNamespace, reused: bool) -> String {
+    let action = if reused { "Reused" } else { "Created" };
+    let provider = ns.provider.display_name();
+    let protocol = &ns.protocol;
+    match effective_server(ns) {
+        Some(server) => format!(
+            "{action} namespace {} · {provider} / {protocol} / {server}",
+            ns.name
+        ),
+        None => format!("{action} namespace {} · {provider} / {protocol}", ns.name),
+    }
+}
+
+fn launch_report_value(
+    ns: &NetworkNamespace,
+    pid: u32,
     host_forwarded_ports: &[u16],
     forwarded_port: Option<u16>,
+    reused: bool,
 ) -> serde_json::Value {
     serde_json::json!({
         "version": crate::api::SCHEMA_VERSION,
         "event": "launched",
-        "namespace": namespace,
+        "namespace": ns.name,
         "pid": pid,
-        "open_ports": open_ports,
+        "provider": ns.provider.id(),
+        "protocol": ns.protocol.id(),
+        "server": effective_server(ns),
+        "reused": reused,
+        "open_ports": ns.state.open_ports,
         "host_forwarded_ports": host_forwarded_ports,
         "forwarded_port": forwarded_port,
     })
@@ -232,6 +311,7 @@ pub fn exec(
     let signals = Signals::new([SIGINT])?;
     let NamespaceConfig {
         ns,
+        reused,
         parsed_command,
         forwarder,
         host_env_vars,
@@ -244,6 +324,7 @@ pub fn exec(
         signals,
         silent,
         &host_env_vars,
+        reused,
     )
 }
 
@@ -254,6 +335,43 @@ fn setup_namespace(
     verbose: bool,
     auto_sync_if_missing: bool,
 ) -> anyhow::Result<NamespaceConfig> {
+    setup_namespace_with_env(command, uiclient, verbose, auto_sync_if_missing, None, None)
+}
+
+fn setup_namespace_with_env(
+    command: ExecCommand,
+    uiclient: &dyn UiClient,
+    verbose: bool,
+    auto_sync_if_missing: bool,
+    client_env: Option<&std::collections::HashMap<String, String>>,
+    cancellation: Option<&crate::daemon::LaunchCancellation<'_>>,
+) -> anyhow::Result<NamespaceConfig> {
+    let diagnostic_command = command.clone();
+    setup_namespace_inner(
+        command,
+        uiclient,
+        verbose,
+        auto_sync_if_missing,
+        client_env,
+        cancellation,
+    )
+    .map_err(|error| {
+        if error.is::<crate::daemon::LaunchCancelled>() {
+            return error;
+        }
+        crate::launch_diagnostics::command_failure_with_env(&diagnostic_command, error, client_env)
+    })
+}
+
+fn setup_namespace_inner(
+    command: ExecCommand,
+    uiclient: &dyn UiClient,
+    verbose: bool,
+    auto_sync_if_missing: bool,
+    client_env: Option<&std::collections::HashMap<String, String>>,
+    cancellation: Option<&crate::daemon::LaunchCancellation<'_>>,
+) -> anyhow::Result<NamespaceConfig> {
+    let check_cancellation = || cancellation.map_or(Ok(()), |guard| guard.check());
     // In daemon mode this runs as root: create the client config dir via the
     // dropped-privilege helper so it stays user-owned. A plain
     // create_dir_all() here would leave a root-owned dir that the
@@ -261,7 +379,10 @@ fn setup_namespace(
     {
         let dir = vopono_dir()?;
         if !vopono_core::util::ensure_dir_as_config_owner(&dir, Some(0o700))? {
-            if vopono_core::util::is_daemon_mode() {
+            let is_root_owner = vopono_core::util::resolve_config_owner()?
+                .0
+                .is_some_and(|uid| uid.is_root());
+            if vopono_core::util::is_daemon_mode() && !is_root_owner {
                 anyhow::bail!("daemon config owner unavailable");
             }
             create_dir_all(&dir)?;
@@ -274,6 +395,7 @@ fn setup_namespace(
     // server) cannot trigger config sync or server requirements for a
     // namespace that already exists. Provider None also satisfies the
     // provider/protocol pairing validation without bringing up any service.
+    let monitor_requested = command.monitor;
     let mut command = command;
     let explicit_existing = command.existing_netns.is_some();
     let mut foreign_attach = false;
@@ -286,6 +408,7 @@ fn setup_namespace(
             .contains_key(&netns);
         info!("Attaching to existing network namespace: {netns}");
         command.custom_netns_name = Some(netns);
+        command.custom = None;
         command.provider = Some(WrappedArg::new(VpnProvider::None));
         command.protocol = Some(WrappedArg::new(Protocol::None));
     }
@@ -293,7 +416,11 @@ fn setup_namespace(
     let vopono_config_settings = ArgsConfig::get_config_file(&command)?;
     let mut host_env_vars = vopono_core::util::env_vars::get_host_env_vars();
 
-    let mut parsed_command = ArgsConfig::get_cli_or_config_args(command, vopono_config_settings)?;
+    let mut parsed_command =
+        ArgsConfig::get_cli_or_config_args_with_env(command, vopono_config_settings, client_env)?;
+    if let Some(path) = &mut parsed_command.custom {
+        *path = std::path::absolute(&*path)?;
+    }
     if parsed_command.protocol == Protocol::Ssh {
         let proxy = format!("socks5h://127.0.0.1:{}", parsed_command.ssh_proxy_port);
         host_env_vars.insert("ALL_PROXY".to_owned(), proxy.clone());
@@ -313,7 +440,11 @@ fn setup_namespace(
                 .provider
                 .get_dyn_wireguard_provider()?
                 .wireguard_dir(),
-            _ => unreachable!(),
+            _ => Err(vopono_core::diagnostics::SetupError::ProtocolNotSupported {
+                provider: parsed_command.provider.clone(),
+                protocol: parsed_command.protocol.clone(),
+            }
+            .into()),
         }?;
         let missing_configs = !cdir.exists() || cdir.read_dir()?.next().is_none();
         if missing_configs {
@@ -328,13 +459,12 @@ fn setup_namespace(
                     uiclient,
                 )?;
             } else {
-                // In daemon mode, avoid interactive sync and return a clear error.
-                anyhow::bail!(
-                    "Missing configuration for {} {}. Run 'vopono sync --provider {} --protocol {}' as your user to initialize.",
-                    parsed_command.provider,
-                    parsed_command.protocol,
-                    parsed_command.provider,
-                    parsed_command.protocol
+                return Err(
+                    vopono_core::diagnostics::SetupError::ProviderNotConfigured {
+                        provider: parsed_command.provider.clone(),
+                        protocol: parsed_command.protocol.clone(),
+                    }
+                    .into(),
                 );
             }
         }
@@ -348,6 +478,10 @@ fn setup_namespace(
 
     let base_ns_name = if let Some(c_ns_name) = parsed_command.custom_netns_name.clone() {
         c_ns_name
+    } else if let Some(path) = &parsed_command.custom {
+        let digest = Sha256::digest(path.as_os_str().as_encoded_bytes());
+        let suffix = u64::from_be_bytes(digest[..8].try_into().expect("eight digest bytes"));
+        format!("vo_{alias}_{suffix:016x}")
     } else {
         let short_name = if parsed_command.server.len() > 7 {
             bs58::encode(&parsed_command.server).into_string()[0..7].to_string()
@@ -377,13 +511,37 @@ fn setup_namespace(
         base_ns_name
     };
 
+    if let Some(uid) = daemon_uid {
+        if explicit_existing {
+            crate::namespace_ownership::authorize_attach(&ns_name, uid)?;
+        }
+        crate::namespace_sessions::reserve(&ns_name, uid, monitor_requested)?;
+    }
+    check_cancellation()?;
+
+    struct EarlyOwnershipGuard {
+        name: Option<String>,
+    }
+    impl Drop for EarlyOwnershipGuard {
+        fn drop(&mut self) {
+            if let Some(name) = self.name.take()
+                && !std::path::Path::new("/run/netns").join(&name).exists()
+            {
+                crate::namespace_ownership::remove(&name);
+            }
+        }
+    }
+    // Declared before `ns` so on error `ns` drops first (removing `/run/netns/<name>`)
+    // and then this guard cleans up any early ownership tag.
+    let mut early_ownership_guard = EarlyOwnershipGuard { name: None };
     let mut ns;
     let _sysctl;
     let forwarder;
 
-    if get_existing_namespaces()?.contains(&ns_name) {
+    let reused = get_existing_namespaces()?.contains(&ns_name);
+    if reused {
         if let Some(uid) = daemon_uid {
-            ns = crate::namespace_ownership::load(&ns_name, uid)?;
+            ns = crate::namespace_ownership::load_ready(&ns_name, uid)?;
             info!("Using root-owned state for existing namespace: {}", ns_name);
             forwarder = None;
         } else if foreign_attach {
@@ -395,6 +553,7 @@ fn setup_namespace(
             forwarder = None;
             return Ok(NamespaceConfig {
                 ns,
+                reused,
                 parsed_command,
                 forwarder,
                 host_env_vars,
@@ -407,6 +566,25 @@ fn setup_namespace(
             ns = NetworkNamespace::from_existing(ns_name)?;
             forwarder = None;
         }
+        if !explicit_existing {
+            let fingerprint = launch_fingerprint(
+                &parsed_command,
+                ns.config_file.as_deref(),
+                parsed_command.open_hosts.as_deref(),
+            );
+            let matches_existing = fingerprint
+                .as_ref()
+                .is_ok_and(|value| ns.launch_fingerprint() == Some(value.as_str()));
+            if !matches_existing {
+                let existing_provider = ns.provider.clone();
+                let existing_protocol = ns.protocol.clone();
+                let existing_name = ns.name.clone();
+                ns.detach();
+                anyhow::bail!(
+                    "Namespace '{existing_name}' is already active with {existing_provider:?} / {existing_protocol:?} and different or unverified connection settings. Choose another --custom-netns-name, stop it with `vopono stop namespace {existing_name}`, or attach explicitly with `--existing-netns {existing_name}`."
+                );
+            }
+        }
         if parsed_command.port_forwarding || parsed_command.custom_port_forwarding.is_some() {
             warn!(
                 "Re-using existing network namespace {} - will not run port forwarder, should be run when netns first created",
@@ -414,6 +592,12 @@ fn setup_namespace(
             );
         }
     } else {
+        if explicit_existing {
+            return Err(anyhow!("Network namespace '{ns_name}' no longer exists"));
+        }
+        if daemon_uid.is_some() {
+            parsed_command.interface.verify_exists_on_host()?;
+        }
         ns = NetworkNamespace::new(
             ns_name.clone(),
             parsed_command.provider.clone(),
@@ -423,15 +607,26 @@ fn setup_namespace(
             parsed_command.user.clone(),
             parsed_command.group.clone(),
         )?;
+        // Record as `Initializing` immediately after netns creation so a daemon
+        // crash during VPN setup never leaves an untagged orphan AND never allows
+        // any client to attach before the tunnel + killswitch are installed.
+        if let Some(uid) = daemon_uid {
+            crate::namespace_ownership::tag_initializing(&ns, uid)?;
+            early_ownership_guard.name = Some(ns.name.clone());
+        }
         ns.set_server(Some(parsed_command.server.clone()));
         ns.set_port_configuration(
             parsed_command.open_ports.as_deref(),
             parsed_command.forward.as_deref(),
         );
-        let target_subnet = get_target_subnet()?;
+        ns.state.allow_host_access = Some(parsed_command.allow_host_access);
         ns.add_loopback()?;
         ns.add_veth_pair()?;
+        if let Some(uid) = daemon_uid {
+            crate::namespace_ownership::update_initializing_snapshot(&ns, uid)?;
+        }
 
+        let original_open_hosts = parsed_command.open_hosts.clone();
         if parsed_command.trojan_host.is_some() || parsed_command.trojan_config.is_some() {
             let mut c = TrojanConfig::new(parsed_command.trojan_config.as_deref())?;
             if let Some(trojan_host) = parsed_command.trojan_host.as_ref() {
@@ -446,8 +641,36 @@ fn setup_namespace(
             }
         }
 
-        ns.add_routing(
-            target_subnet,
+        if vopono_core::util::is_daemon_mode() {
+            const MAX_DAEMON_OPEN_HOSTS: usize = 128;
+            const MAX_DAEMON_OPEN_PORTS: usize = 64;
+            if let Some(hosts) = parsed_command.open_hosts.as_ref() {
+                anyhow::ensure!(
+                    hosts.len() <= MAX_DAEMON_OPEN_HOSTS,
+                    "Too many --open-hosts entries for daemon mode (maximum {MAX_DAEMON_OPEN_HOSTS})"
+                );
+            }
+            if let Some(ports) = parsed_command.open_ports.as_ref() {
+                anyhow::ensure!(
+                    ports.len() <= MAX_DAEMON_OPEN_PORTS,
+                    "Too many --open-ports entries for daemon mode (maximum {MAX_DAEMON_OPEN_PORTS})"
+                );
+            }
+            if let Some(forwards) = parsed_command.forward.as_ref() {
+                anyhow::ensure!(
+                    forwards.len() <= MAX_DAEMON_OPEN_PORTS,
+                    "Too many --forward entries for daemon mode (maximum {MAX_DAEMON_OPEN_PORTS})"
+                );
+            }
+        }
+
+        let target_subnet = {
+            let _allocation = SUBNET_ALLOCATION.lock().unwrap_or_else(|p| p.into_inner());
+            let target_subnet = get_target_subnet()?;
+            ns.add_veth_routing(target_subnet, parsed_command.disable_ipv6)?;
+            target_subnet
+        };
+        ns.add_host_routes(
             parsed_command.open_hosts.as_ref(),
             parsed_command.allow_host_access,
             parsed_command.disable_ipv6,
@@ -491,12 +714,18 @@ fn setup_namespace(
             parsed_command.interface.clone(),
             parsed_command.firewall,
         )?;
+        if let Some(uid) = daemon_uid {
+            crate::namespace_ownership::update_initializing_snapshot(&ns, uid)?;
+        }
         ns.add_firewall_exception(
             parsed_command.interface.clone(),
             NetworkInterface::new(ns.veth_pair.as_ref().unwrap().dest.clone())?,
             parsed_command.firewall,
             parsed_command.disable_ipv6,
         )?;
+        if let Some(uid) = daemon_uid {
+            crate::namespace_ownership::update_initializing_snapshot(&ns, uid)?;
+        }
         // IPv6 forwarding is enabled only for protocols with a family-aware
         // killswitch. Protocols without one remain fail-closed on the host
         // veth even when IPv6 is enabled in the namespace.
@@ -507,8 +736,37 @@ fn setup_namespace(
             );
         _sysctl = SysCtl::enable_forwarding(enable_ipv6_forwarding)?;
 
-        let config_file = run_protocol_in_netns(&parsed_command, &mut ns, uiclient, verbose)?;
-        ns.set_config_file(config_file);
+        let setup_protocol = (|| -> anyhow::Result<()> {
+            ns.set_config_file(select_protocol_config(&parsed_command)?);
+            run_protocol_in_netns(&parsed_command, &mut ns, uiclient, verbose)?;
+            // Compute the fingerprint *after* protocol setup so providers that
+            // legitimately populate or rotate their config during preup (e.g. PIA
+            // WireGuard `/addKey`) record the settled configuration instead of failing.
+            match launch_fingerprint(
+                &parsed_command,
+                ns.config_file.as_deref(),
+                original_open_hosts.as_deref(),
+            ) {
+                Ok(fingerprint) => ns.set_launch_fingerprint(fingerprint),
+                Err(error) => {
+                    warn!(
+                        "Could not compute launch fingerprint for {}: {error:#}",
+                        ns.name
+                    );
+                }
+            }
+            Ok(())
+        })();
+        setup_protocol.map_err(|error| {
+            crate::launch_diagnostics::collect(
+                error,
+                ns.config_file
+                    .as_deref()
+                    .or(parsed_command.custom.as_deref()),
+                Some(&parsed_command.protocol),
+                parsed_command.auth_user_pass.as_deref(),
+            )
+        })?;
 
         if let Some(ref hosts) = parsed_command.open_hosts {
             let effective_hosts: Vec<IpAddr> = hosts
@@ -526,53 +784,115 @@ fn setup_namespace(
             vopono_core::util::open_hosts(&ns.name, &effective_hosts, parsed_command.firewall)?;
         }
 
+        check_cancellation()?;
+
         // Single source for forwarder creation and its lockfile-visible
         // status, so provider selection logic cannot drift between them.
         let setup = provider_port_forwarding(&parsed_command, &ns)?;
         ns.set_port_forwarding(setup.status);
         forwarder = setup.forwarder;
 
+        check_cancellation()?;
         if let Some(pucmd) = parsed_command.postup.clone() {
-            let mut sudo_args = Vec::new();
-            if let Some(ref user) = parsed_command.user {
-                sudo_args.push("--user");
-                sudo_args.push(user);
-            }
-            if let Some(ref group) = parsed_command.group {
-                sudo_args.push("--group");
-                sudo_args.push(group);
-            }
-
             let parsed_pucmd = parse_command_str(&pucmd)?;
-            let parsed_pucmd_ptrs: Vec<&str> = parsed_pucmd.iter().map(|s| s.as_str()).collect();
-
-            let mut cmd = if !sudo_args.is_empty() {
-                let mut args = vec!["sudo", "--preserve-env"];
-                args.append(&mut sudo_args);
-                args.extend(parsed_pucmd_ptrs);
-                let mut cmd = std::process::Command::new(args[0]);
-                cmd.args(&args[1..]);
-                cmd
-            } else {
-                let mut cmd = std::process::Command::new(parsed_pucmd_ptrs[0]);
-                cmd.args(&parsed_pucmd_ptrs[1..]);
-                cmd
-            };
-            set_env_vars(&ns, forwarder.as_deref(), &mut cmd, &host_env_vars);
-            cmd.spawn()?;
+            if !parsed_pucmd.is_empty() {
+                let parsed_pucmd_ptrs: Vec<&str> =
+                    parsed_pucmd.iter().map(|s| s.as_str()).collect();
+                let mut cmd = vopono_core::network::netns::build_hook_command(
+                    &parsed_pucmd_ptrs,
+                    parsed_command.user.as_deref(),
+                    parsed_command.group.as_deref(),
+                )?;
+                set_env_vars(&ns, forwarder.as_deref(), &mut cmd, &host_env_vars);
+                let mut child = cmd.spawn()?;
+                if vopono_core::util::is_daemon_mode() {
+                    // Bound daemon hook waiting so long-lived postup commands do not
+                    // accumulate OS threads indefinitely.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    std::thread::spawn(move || {
+                        while std::time::Instant::now() < deadline {
+                            match child.try_wait() {
+                                Ok(Some(_)) | Err(_) => return,
+                                Ok(None) => {
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                }
+                            }
+                        }
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    });
+                } else {
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                }
+            }
         }
     }
 
-    if let Some(uid) = daemon_uid {
+    if let Some(uid) = daemon_uid
+        && !reused
+    {
+        check_cancellation()?;
         crate::namespace_ownership::tag(&ns, uid)?;
     }
+    early_ownership_guard.name = None;
 
     Ok(NamespaceConfig {
         ns,
+        reused,
         parsed_command,
         forwarder,
         host_env_vars,
     })
+}
+
+fn launch_fingerprint(
+    command: &ArgsConfig,
+    selected_config: Option<&std::path::Path>,
+    open_hosts: Option<&[IpAddr]>,
+) -> anyhow::Result<String> {
+    let settings = serde_json::json!({
+        "provider": command.provider.id(),
+        "protocol": command.protocol.id(),
+        "server": command.server,
+        "custom": command.custom,
+        "interface": command.interface.name,
+        "firewall": command.firewall,
+        "disable_ipv6": command.disable_ipv6,
+        "no_killswitch": command.no_killswitch,
+        "allow_host_access": command.allow_host_access,
+        "dns": command.dns,
+        "hosts": command.hosts,
+        "open_hosts": open_hosts,
+        "open_ports": command.open_ports,
+        "port_forwarding": command.port_forwarding,
+        "custom_port_forwarding": command.custom_port_forwarding,
+        "trojan_host": command.trojan_host,
+        "trojan_no_verify": command.trojan_no_verify,
+        "trojan_password": command.trojan_password,
+        "ssh_port": command.ssh_port,
+        "ssh_user": command.ssh_user,
+        "ssh_proxy_port": command.ssh_proxy_port,
+    });
+    let mut digest = Sha256::new();
+    digest.update(serde_json::to_vec(&settings)?);
+    for path in [
+        selected_config,
+        command.auth_user_pass.as_deref(),
+        command.trojan_config.as_deref(),
+    ] {
+        digest.update(serde_json::to_vec(&path)?);
+        if let Some(path) = path {
+            let content = vopono_core::util::owner_write::read_file_as_config_owner(path)?;
+            digest.update(Sha256::digest(content));
+        }
+    }
+    Ok(digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 /// Bound the number of listeners a single invocation may create.
@@ -586,17 +906,27 @@ fn host_forward_proxies(
     forward: Option<&[u16]>,
     no_proxy: bool,
     allow_privileged_ports: bool,
-) -> anyhow::Result<Vec<TcpProxy>> {
+) -> anyhow::Result<HostProxies> {
     if no_proxy {
         return Ok(Vec::new());
     }
-    let Some(f) = forward.filter(|f| !f.is_empty()) else {
+    let Some(forward) = forward.filter(|ports| !ports.is_empty()) else {
         return Ok(Vec::new());
     };
+    let retained = crate::namespace_sessions::relay_ports(&ns.name);
+    let mut ports = forward.to_vec();
+    ports.sort_unstable();
+    ports.dedup();
+    ports.retain(|port| !retained.contains(port));
+    let desired = crate::namespace_sessions::desired_relay_ports(&ns.name);
     anyhow::ensure!(
-        f.len() <= MAX_HOST_FORWARD_PORTS,
-        "At most {MAX_HOST_FORWARD_PORTS} host-forwarded ports may be requested"
+        desired.len() + ports.iter().filter(|port| !desired.contains(port)).count()
+            <= MAX_HOST_FORWARD_PORTS,
+        "At most {MAX_HOST_FORWARD_PORTS} host-forwarded ports may be active per namespace"
     );
+    if ports.is_empty() {
+        return Ok(Vec::new());
+    }
     let namespace_ip = ns
         .veth_pair_ips
         .as_ref()
@@ -605,13 +935,34 @@ fn host_forward_proxies(
         .as_ref()
         .context("No IPv4 veth pair IP available for --forward")?
         .namespace_ip;
+    let owner_uid = if vopono_core::util::is_daemon_mode() {
+        vopono_core::util::resolve_config_owner()
+            .ok()
+            .and_then(|(uid, _)| uid.map(|u| u.as_raw()))
+    } else {
+        None
+    };
     let mut proxies = Vec::new();
-    for p in f {
-        validate_host_forward_port(*p, allow_privileged_ports)?;
-        debug!("Forwarding port: {}, {}", p, namespace_ip);
-        proxies.push(TcpProxy::new(*p, SocketAddr::new(namespace_ip, *p), false)?);
+    for port in ports {
+        validate_host_forward_port(port, allow_privileged_ports)?;
+        let target = SocketAddr::new(namespace_ip, port);
+        debug!("Forwarding port: {port}, {target}");
+        let proxy = TcpProxy::new_for_uid(port, target, false, owner_uid).with_context(|| {
+            format!(
+                "Could not bind host TCP port {port} for namespace {}",
+                ns.name
+            )
+        })?;
+        proxies.push((port, proxy));
     }
     Ok(proxies)
+}
+
+pub(crate) fn restore_host_proxies(
+    ns: &NetworkNamespace,
+    ports: &[u16],
+) -> anyhow::Result<HostProxies> {
+    host_forward_proxies(ns, Some(ports), false, false)
 }
 
 fn validate_host_forward_port(port: u16, allow_privileged_ports: bool) -> anyhow::Result<()> {
@@ -630,6 +981,7 @@ fn run_application_and_wait(
     signals: SignalsInfo,
     silent: bool,
     host_env_vars: &std::collections::HashMap<String, String>,
+    reused: bool,
 ) -> anyhow::Result<i32> {
     // Kept alive for the lifetime of the application so forwarded ports stay
     // reachable from the host; dropped (stopping the relays) at function exit.
@@ -639,8 +991,20 @@ fn run_application_and_wait(
         parsed_command.no_proxy,
         true,
     )?;
+    // When attaching to an existing namespace with new --forward ports in direct
+    // sudo mode, open them in the namespace firewall so host relays can connect.
+    if reused && !_proxy.is_empty() {
+        let new_ports: Vec<u16> = _proxy.iter().map(|(port, _)| *port).collect();
+        vopono_core::util::open_ports(ns, &new_ports, ns.firewall)?;
+    }
 
     if !parsed_command.create_netns_only {
+        // Print the human launch notice before spawning so it never interleaves
+        // with fast application stdout/stderr.
+        if !parsed_command.json && !silent {
+            eprintln!("{}", human_launch_report(ns, reused));
+        }
+
         let application = ApplicationWrapper::new(
             ns,
             &parsed_command.application,
@@ -663,11 +1027,14 @@ fn run_application_and_wait(
         );
 
         if parsed_command.json {
-            println!(
-                "{}",
-                launch_report(ns, pid, application.port_forwarding.as_deref())
-            );
-            io::stdout().flush()?;
+            print_launch_summary(
+                parsed_command,
+                ns,
+                pid,
+                application.port_forwarding.as_deref(),
+                silent,
+                reused,
+            )?;
         }
 
         if let Some(fwd) = application.port_forwarding.as_ref() {
@@ -694,6 +1061,7 @@ fn run_application_and_wait(
             Ok(output.status.code().unwrap_or(1))
         }
     } else {
+        print_launch_summary(parsed_command, ns, 0, forwarder.as_deref(), silent, reused)?;
         info!(
             "Created netns {} - will leave network namespace alive until ctrl+C received",
             ns.name
@@ -701,6 +1069,32 @@ fn run_application_and_wait(
         stay_alive(None, signals);
         Ok(0)
     }
+}
+
+fn print_launch_summary(
+    command: &ArgsConfig,
+    ns: &NetworkNamespace,
+    pid: u32,
+    forwarder: Option<&dyn Forwarder>,
+    silent: bool,
+    reused: bool,
+) -> anyhow::Result<()> {
+    if command.json {
+        println!(
+            "{}",
+            launch_report_value(
+                ns,
+                pid,
+                &ns.state.host_forwarded_ports,
+                forwarder.map(|f| f.forwarded_port()),
+                reused,
+            )
+        );
+        io::stdout().flush()?;
+    } else if !silent {
+        eprintln!("{}", human_launch_report(ns, reused));
+    }
+    Ok(())
 }
 
 // Block waiting for SIGINT
@@ -741,29 +1135,10 @@ fn ensure_namespace_exists(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_protocol_in_netns(
-    parsed_command: &ArgsConfig,
-    ns: &mut NetworkNamespace,
-    uiclient: &dyn UiClient,
-    verbose: bool,
-) -> anyhow::Result<Option<PathBuf>> {
-    if parsed_command.provider == VpnProvider::None {
-        log::warn!(
-            "Provider set to None, will not run any VPN protocol inside the network namespace"
-        );
-        if let Some(dns) = &parsed_command.dns {
-            ns.dns_config(
-                dns,
-                &[],
-                parsed_command.hosts.as_ref(),
-                parsed_command.allow_host_access,
-            )?;
-        }
-        return Ok(None);
-    }
-
-    let config_file = if matches!(parsed_command.protocol, Protocol::Warp | Protocol::Ssh)
-        && parsed_command.custom.is_none()
+fn select_protocol_config(parsed_command: &ArgsConfig) -> anyhow::Result<Option<PathBuf>> {
+    let config_file = if parsed_command.provider == VpnProvider::None
+        || (matches!(parsed_command.protocol, Protocol::Warp | Protocol::Ssh)
+            && parsed_command.custom.is_none())
     {
         None
     } else if parsed_command.provider != VpnProvider::Custom {
@@ -795,6 +1170,31 @@ fn run_protocol_in_netns(
         )
     };
 
+    Ok(config_file)
+}
+
+fn run_protocol_in_netns(
+    parsed_command: &ArgsConfig,
+    ns: &mut NetworkNamespace,
+    uiclient: &dyn UiClient,
+    verbose: bool,
+) -> anyhow::Result<()> {
+    if parsed_command.provider == VpnProvider::None {
+        log::warn!(
+            "Provider set to None, will not run any VPN protocol inside the network namespace"
+        );
+        if let Some(dns) = &parsed_command.dns {
+            ns.dns_config(
+                dns,
+                &[],
+                parsed_command.hosts.as_ref(),
+                parsed_command.allow_host_access,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let config_file = ns.config_file.clone();
     match parsed_command.protocol {
         Protocol::None => unreachable!(),
         Protocol::Warp => {
@@ -837,11 +1237,15 @@ fn run_protocol_in_netns(
                 })
                 .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
 
-            ns.dns_config(
+            // Bootstrap DNS is needed before the VPN's routes exist. Do not
+            // install a lasting, unrestricted DNS destination exception:
+            // applications start only after the tunnel policy is installed.
+            ns.dns_config_with_interface(
                 &dns,
                 &[],
                 parsed_command.hosts.as_ref(),
                 parsed_command.allow_host_access,
+                (!parsed_command.no_killswitch).then_some("lo"),
             )?;
             let config_path = config_file
                 .as_ref()
@@ -888,12 +1292,24 @@ fn run_protocol_in_netns(
                         &dns
                     };
                 ns.preserve_dns_files_for_reconfiguration();
+                let dns_interface = if parsed_command.no_killswitch {
+                    None
+                } else {
+                    Some(
+                        vopono_core::network::firewall::wait_for_tunnel_interface(
+                            &ns.name,
+                            &["tun"],
+                            1,
+                        )?
+                        .context("Could not identify the OpenVPN DNS egress interface")?,
+                    )
+                };
                 ns.dns_config_with_interface(
                     effective_dns,
                     &[],
                     parsed_command.hosts.as_ref(),
                     parsed_command.allow_host_access,
-                    (!parsed_command.no_killswitch).then_some("tun+"),
+                    dns_interface.as_deref(),
                 )?;
             }
         }
@@ -942,11 +1358,12 @@ fn run_protocol_in_netns(
                 .dns
                 .clone()
                 .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
-            ns.dns_config(
+            ns.dns_config_with_interface(
                 &dns,
                 &[],
                 parsed_command.hosts.as_ref(),
                 parsed_command.allow_host_access,
+                (!parsed_command.no_killswitch).then_some("lo"),
             )?;
             ns.run_openconnect(
                 config_file
@@ -995,11 +1412,12 @@ fn run_protocol_in_netns(
                 .dns
                 .clone()
                 .unwrap_or_else(|| vec![IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))]);
-            ns.dns_config(
+            ns.dns_config_with_interface(
                 &dns,
                 &[],
                 parsed_command.hosts.as_ref(),
                 parsed_command.allow_host_access,
+                (!parsed_command.no_killswitch).then_some("lo"),
             )?;
             ns.run_ssh_proxy(
                 &parsed_command.server,
@@ -1014,7 +1432,7 @@ fn run_protocol_in_netns(
             )?;
         }
     }
-    Ok(config_file)
+    Ok(())
 }
 
 fn config_alias_hint(parsed_command: &ArgsConfig) -> anyhow::Result<Option<String>> {
@@ -1091,17 +1509,10 @@ fn provider_port_forwarding(
                     parsed_command.port_forwarding_callback.as_ref(),
                 )?))
             }
-            Some(VpnProvider::ProtonVPN) => {
-                vopono_core::util::open_hosts(
-                    &ns.name,
-                    &[vopono_core::config::providers::protonvpn::PROTONVPN_GATEWAY],
-                    parsed_command.firewall,
-                )?;
-                Some(Box::new(Natpmpc::new(
-                    ns,
-                    parsed_command.port_forwarding_callback.as_ref(),
-                )?))
-            }
+            Some(VpnProvider::ProtonVPN) => Some(Box::new(Natpmpc::new(
+                ns,
+                parsed_command.port_forwarding_callback.as_ref(),
+            )?)),
             Some(VpnProvider::AzireVPN) => {
                 let azirevpn = vopono_core::config::providers::azirevpn::AzireVPN {};
                 let access_token = azirevpn.read_access_token()?;
@@ -1176,7 +1587,13 @@ mod tests {
 
     #[test]
     fn launch_report_includes_open_and_host_forwarded_ports() {
-        let report = launch_report_value("vo_test_abc", 42, &[8080, 8443], &[9000], Some(51820));
+        let mut namespace =
+            super::NetworkNamespace::attach_unmanaged("vo_test_abc".into()).unwrap();
+        namespace.state.open_ports = vec![8080, 8443];
+        namespace.provider = super::VpnProvider::Custom;
+        namespace.protocol = super::Protocol::Wireguard;
+        namespace.config_file = Some("/tmp/fixture.conf".into());
+        let report = launch_report_value(&namespace, 42, &[9000], Some(51820), true);
         assert_eq!(
             report["version"],
             serde_json::json!(crate::api::SCHEMA_VERSION)
@@ -1184,6 +1601,10 @@ mod tests {
         assert_eq!(report["event"], "launched");
         assert_eq!(report["namespace"], "vo_test_abc");
         assert_eq!(report["pid"], 42);
+        assert_eq!(report["provider"], "custom");
+        assert_eq!(report["protocol"], "wireguard");
+        assert_eq!(report["server"], "fixture");
+        assert_eq!(report["reused"], true);
         assert_eq!(report["open_ports"], serde_json::json!([8080, 8443]));
         assert_eq!(report["host_forwarded_ports"], serde_json::json!([9000]));
         assert_eq!(report["forwarded_port"], 51820);
@@ -1191,7 +1612,10 @@ mod tests {
 
     #[test]
     fn launch_report_reports_absent_forwarding_as_null() {
-        let report = launch_report_value("vo_test_abc", 42, &[8080], &[], None);
+        let mut namespace =
+            super::NetworkNamespace::attach_unmanaged("vo_test_abc".into()).unwrap();
+        namespace.state.open_ports = vec![8080];
+        let report = launch_report_value(&namespace, 42, &[], None, false);
         assert_eq!(report["open_ports"], serde_json::json!([8080]));
         assert_eq!(report["host_forwarded_ports"], serde_json::json!([]));
         assert!(report["forwarded_port"].is_null());

@@ -26,6 +26,10 @@ pub struct SshProxy {
     pub(crate) ssh_pid: u32,
     pub(crate) redsocks_pid: u32,
     pub listen_port: u16,
+    #[serde(default)]
+    ns_name: Option<String>,
+    #[serde(default)]
+    runtime_dir: Option<PathBuf>,
     #[serde(skip)]
     cleanup_enabled: bool,
 }
@@ -71,7 +75,11 @@ impl SshProxy {
             ssh_port,
         )?;
         info!("Launching SSH dynamic proxy on socks5h://127.0.0.1:{listen_port}");
-        let mut ssh = command_in_namespace(netns, &ssh_command, user, group);
+        let mut ssh = command_in_namespace(netns, &ssh_command, user, group)?;
+        if crate::util::is_daemon_mode() {
+            ssh.stdin(Stdio::null());
+            ssh.stdout(Stdio::null());
+        }
         ssh.stderr(Stdio::piped());
         let mut ssh = ssh.spawn().context("Failed to launch SSH dynamic proxy")?;
         let ssh_pid = ssh.id();
@@ -81,22 +89,30 @@ impl SshProxy {
             return Err(e);
         }
 
-        let mut config = tempfile::NamedTempFile::new()
-            .context("Failed to create temporary redsocks configuration")?;
-        write!(
-            config,
-            "{}",
-            redsocks_config(listen_port, REDSOCKS_PORT, DNSTC_PORT)
-        )?;
-        config.flush()?;
+        let runtime_dir = super::etc_overlay::trusted_runtime_dir("redsocks-")
+            .context("Failed to create runtime directory for redsocks configuration")?;
+        let config_path = runtime_dir.path().join("redsocks.conf");
+        {
+            let mut config = crate::util::create_private_file(&config_path)
+                .context("Failed to create temporary redsocks configuration")?;
+            write!(
+                config,
+                "{}",
+                redsocks_config(listen_port, REDSOCKS_PORT, DNSTC_PORT)
+            )?;
+            config.flush()?;
+        }
 
         let redsocks_command = vec![
             "redsocks".to_owned(),
             "-c".to_owned(),
-            config.path().to_string_lossy().into_owned(),
+            config_path.to_string_lossy().into_owned(),
         ];
         info!("Launching redsocks transparent TCP proxy");
-        let mut redsocks = command_in_namespace(netns, &redsocks_command, None, None);
+        let mut redsocks = command_in_namespace(netns, &redsocks_command, None, None)?;
+        if crate::util::is_daemon_mode() {
+            redsocks.stdin(Stdio::null());
+        }
         redsocks.stdout(Stdio::null());
         let mut redsocks = match redsocks.spawn() {
             Ok(child) => child,
@@ -132,6 +148,8 @@ impl SshProxy {
             ssh_pid,
             redsocks_pid,
             listen_port,
+            ns_name: Some(netns.name.clone()),
+            runtime_dir: Some(runtime_dir.keep()),
             cleanup_enabled: true,
         })
     }
@@ -142,21 +160,79 @@ fn command_in_namespace(
     command: &[String],
     user: Option<String>,
     group: Option<String>,
-) -> Command {
+) -> anyhow::Result<Command> {
+    let is_root = nix::unistd::geteuid().is_root();
+    if is_root && (user.is_some() || group.is_some()) {
+        let (program, args) = command
+            .split_first()
+            .context("SSH namespace command cannot be empty")?;
+        let target_user = if let Some(user_name) = user.as_deref() {
+            Some(
+                User::from_name(user_name)?
+                    .with_context(|| format!("Unknown SSH user '{user_name}'"))?,
+            )
+        } else {
+            None
+        };
+        let target_gid = match (group.as_deref(), target_user.as_ref()) {
+            (Some(group_name), _) => Some(
+                nix::unistd::Group::from_name(group_name)?
+                    .with_context(|| format!("Unknown SSH group '{group_name}'"))?
+                    .gid,
+            ),
+            (None, Some(u)) => Some(u.gid),
+            (None, None) => None,
+        };
+        let user_details = match (target_user.as_ref(), target_gid) {
+            (Some(u), Some(gid)) => {
+                let groups = crate::util::owner_write::supplementary_groups(&u.name, gid)?;
+                Some((u.uid, gid, groups, u.dir.clone(), u.name.clone()))
+            }
+            _ => None,
+        };
+        let netns_path = std::ffi::CString::new(format!("/var/run/netns/{}", netns.name))?;
+        let mut handle = Command::new(program);
+        handle.args(args);
+        if crate::util::is_daemon_mode() {
+            handle.env_clear();
+            handle.env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            );
+        }
+        if let Some((_, _, _, ref dir, ref name)) = user_details {
+            handle.env("HOME", dir);
+            handle.env("USER", name);
+            handle.env("LOGNAME", name);
+        }
+        handle.process_group(0);
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            handle.pre_exec(move || {
+                let ns_fd = nix::fcntl::open(
+                    netns_path.as_c_str(),
+                    nix::fcntl::OFlag::O_RDONLY,
+                    nix::sys::stat::Mode::empty(),
+                )?;
+                nix::sched::setns(&ns_fd, nix::sched::CloneFlags::CLONE_NEWNET)?;
+                let _ = nix::unistd::close(ns_fd);
+                if let Some((uid, gid, ref groups, _, _)) = user_details {
+                    nix::unistd::setgroups(groups)?;
+                    nix::unistd::setgid(gid)?;
+                    nix::unistd::setuid(uid)?;
+                }
+                nix::sys::prctl::set_no_new_privs()?;
+                Ok(())
+            });
+        }
+        return Ok(handle);
+    }
+
     let mut handle = Command::new("ip");
     handle.args(["netns", "exec", &netns.name]);
-    if user.is_some() || group.is_some() {
-        handle.args(["sudo", "--preserve-env"]);
-        if let Some(user) = user {
-            handle.args(["--set-home", "--user", &user]);
-        }
-        if let Some(group) = group {
-            handle.args(["--group", &group]);
-        }
-    }
     handle.args(command);
     handle.process_group(0);
-    handle
+    Ok(handle)
 }
 
 fn ssh_command(
@@ -195,6 +271,7 @@ fn ssh_command(
     }
     add_remote_options(&mut command, ssh_user, ssh_port);
     add_config_file(&mut command, config_file)?;
+    command.push("--".to_owned());
     command.push(server.to_owned());
     Ok(command)
 }
@@ -216,20 +293,51 @@ fn ssh_endpoint(
     let mut args = vec!["ssh".to_owned(), "-G".to_owned(), "-4".to_owned()];
     add_remote_options(&mut args, ssh_user, ssh_port);
     add_config_file(&mut args, config_file)?;
+    args.push("--".to_owned());
     args.push(server.to_owned());
 
-    let mut command = if let Some(user) = user {
+    let mut command = if nix::unistd::geteuid().is_root()
+        && let Some(user_name) = user
+    {
+        let target_user = User::from_name(user_name)?
+            .with_context(|| format!("Unknown SSH user '{user_name}'"))?;
+        let groups =
+            crate::util::owner_write::supplementary_groups(&target_user.name, target_user.gid)?;
+        let uid = target_user.uid;
+        let gid = target_user.gid;
+        let mut command = Command::new(&args[0]);
+        command.args(&args[1..]);
+        if crate::util::is_daemon_mode() {
+            command.env_clear();
+            command.env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            );
+        }
+        command.env("HOME", &target_user.dir);
+        command.env("USER", &target_user.name);
+        command.env("LOGNAME", &target_user.name);
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(move || {
+                nix::unistd::setgroups(&groups)?;
+                nix::unistd::setgid(gid)?;
+                nix::unistd::setuid(uid)?;
+                nix::sys::prctl::set_no_new_privs()?;
+                Ok(())
+            });
+        }
+        command
+    } else if let Some(user) = user {
         let mut command = Command::new("sudo");
-        command.args(["--preserve-env", "--set-home", "--user", user]);
+        command.args(["--set-home", "--user", user, "--"]);
+        command.args(&args);
         command
     } else {
-        Command::new(&args[0])
-    };
-    if user.is_some() {
-        command.args(&args);
-    } else {
+        let mut command = Command::new(&args[0]);
         command.args(&args[1..]);
-    }
+        command
+    };
     let output = command
         .output()
         .context("Failed to read the effective OpenSSH configuration with `ssh -G`")?;
@@ -454,6 +562,21 @@ fn setup_iptables(
     }
     if use_killswitch {
         for command in [
+            vec!["iptables", "-P", "INPUT", "DROP"],
+            vec!["iptables", "-P", "FORWARD", "DROP"],
+            vec!["iptables", "-P", "OUTPUT", "DROP"],
+            vec![
+                "iptables",
+                "-A",
+                "INPUT",
+                "-m",
+                "conntrack",
+                "--ctstate",
+                "RELATED,ESTABLISHED",
+                "-j",
+                "ACCEPT",
+            ],
+            vec!["iptables", "-A", "INPUT", "-i", "lo", "-j", "ACCEPT"],
             vec!["iptables", "-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"],
             vec![
                 "iptables", "-A", "OUTPUT", "-d", &endpoint, "-p", "tcp", "--dport", &port, "-j",
@@ -524,6 +647,8 @@ fn setup_nftables(
             "meta",
             "nfproto",
             "ipv4",
+            "meta",
+            "l4proto",
             "tcp",
             "redirect",
             "to",
@@ -550,61 +675,129 @@ fn setup_nftables(
         NetworkNamespace::exec(&netns.name, &command)?;
     }
     if use_killswitch {
-        NetworkNamespace::exec(
-            &netns.name,
-            &[
-                "nft",
-                "add",
-                "chain",
-                "inet",
-                "vopono_ssh",
-                "output_filter",
-                "{ type filter hook output priority filter; policy drop; }",
-            ],
-        )?;
-        NetworkNamespace::exec(
-            &netns.name,
-            &[
+        // Place filter rules in the namespace's standard `inet <netns>` table so
+        // `--open-hosts`, `--allow-host-access`, and `--open-ports` rules inserted
+        // into that table are honored rather than dropped by a separate base chain.
+        for command in [
+            vec![
                 "nft",
                 "add",
                 "rule",
                 "inet",
-                "vopono_ssh",
-                "output_filter",
-                "oifname",
-                "lo",
+                &netns.name,
+                "input",
+                "ct",
+                "state",
+                "related,established",
+                "counter",
                 "accept",
             ],
-        )?;
-        NetworkNamespace::exec(
-            &netns.name,
-            &[
+            vec![
                 "nft",
                 "add",
                 "rule",
                 "inet",
-                "vopono_ssh",
-                "output_filter",
+                &netns.name,
+                "input",
+                "iifname",
+                "lo",
+                "counter",
+                "accept",
+            ],
+            vec![
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "input",
+                "counter",
+                "drop",
+            ],
+            vec![
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "forward",
+                "counter",
+                "drop",
+            ],
+            vec![
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "output",
+                "oifname",
+                "lo",
+                "counter",
+                "accept",
+            ],
+            vec![
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "output",
                 "ip",
                 "daddr",
                 &endpoint,
                 "tcp",
                 "dport",
                 &port,
+                "counter",
                 "accept",
             ],
-        )?;
+            vec![
+                "nft",
+                "add",
+                "rule",
+                "inet",
+                &netns.name,
+                "output",
+                "counter",
+                "reject",
+                "with",
+                "icmpx",
+                "type",
+                "admin-prohibited",
+            ],
+        ] {
+            NetworkNamespace::exec(&netns.name, &command)?;
+        }
     }
     Ok(())
 }
 
 fn kill_process_group(pid: u32, name: &str) {
-    match nix::sys::signal::killpg(
-        nix::unistd::Pid::from_raw(pid as i32),
-        nix::sys::signal::Signal::SIGKILL,
-    ) {
+    let raw = nix::unistd::Pid::from_raw(pid as i32);
+    match nix::sys::signal::killpg(raw, nix::sys::signal::Signal::SIGKILL) {
         Ok(_) => debug!("Killed {name} (process group: {pid})"),
+        Err(nix::errno::Errno::ESRCH) => {}
         Err(e) => error!("Failed to kill {name} (process group: {pid}): {e:?}"),
+    }
+    while matches!(
+        nix::sys::wait::waitpid(raw, None),
+        Err(nix::errno::Errno::EINTR)
+    ) {}
+}
+
+fn kill_process_group_in_ns(pid: u32, ns_name: Option<&str>, name: &str) {
+    let pid_matches = ns_name
+        .is_none_or(|ns| crate::util::process_is_in_network_namespace(pid, ns).unwrap_or(false));
+    if pid_matches {
+        kill_process_group(pid, name);
+    } else {
+        debug!("Skipping {name} kill for pid {pid}: no longer in target namespace");
+        let raw = nix::unistd::Pid::from_raw(pid as i32);
+        while matches!(
+            nix::sys::wait::waitpid(raw, None),
+            Err(nix::errno::Errno::EINTR)
+        ) {}
     }
 }
 
@@ -613,8 +806,11 @@ impl Drop for SshProxy {
         if !self.cleanup_enabled {
             return;
         }
-        kill_process_group(self.redsocks_pid, "redsocks");
-        kill_process_group(self.ssh_pid, "SSH proxy");
+        kill_process_group_in_ns(self.redsocks_pid, self.ns_name.as_deref(), "redsocks");
+        kill_process_group_in_ns(self.ssh_pid, self.ns_name.as_deref(), "SSH proxy");
+        if let Some(runtime) = &self.runtime_dir {
+            let _ = std::fs::remove_dir_all(runtime);
+        }
     }
 }
 
@@ -643,6 +839,7 @@ mod tests {
                 "BatchMode=yes",
                 "-D",
                 "127.0.0.1:1080",
+                "--",
                 "proxy.example.com",
             ]
         );
@@ -660,7 +857,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(&args[9..], ["-F", "/tmp/ssh_config", "work-proxy"]);
+        assert_eq!(&args[9..], ["-F", "/tmp/ssh_config", "--", "work-proxy"]);
     }
 
     #[test]
@@ -684,6 +881,7 @@ mod tests {
                 "gopostal",
                 "-p",
                 "2222",
+                "--",
                 "proxy.example.com"
             ]
         );

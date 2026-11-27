@@ -30,7 +30,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
 use std::net::IpAddr;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -66,6 +67,7 @@ pub struct ManagedNamespaceGuard {
     pub trojan: Option<Trojan>,
     /// Runtime state shared with the status/lockfile projections.
     pub state: NamespaceState,
+    launch_fingerprint: Option<String>,
     disposition: GuardDisposition,
 }
 
@@ -110,6 +112,8 @@ pub struct NamespaceSnapshot {
     pub trojan: Option<Trojan>,
     #[serde(default)]
     pub state: NamespaceState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launch_fingerprint: Option<String>,
     // Read legacy snapshots without carrying their lifecycle decision into the
     // new guard. Ownership records are authoritative for persistence.
     #[serde(default, rename = "unmanaged", skip_serializing)]
@@ -140,6 +144,8 @@ struct NamespaceSnapshotRef<'a> {
     config_file: &'a Option<PathBuf>,
     trojan: &'a Option<Trojan>,
     state: &'a NamespaceState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    launch_fingerprint: Option<&'a str>,
 }
 
 /// Server/port metadata mirrored into the lockfiles so read-only commands can
@@ -165,6 +171,10 @@ pub struct NamespaceState {
     /// Host ports proxied into the namespace by --forward.
     #[serde(default, alias = "forwarded_ports")]
     pub host_forwarded_ports: Vec<u16>,
+    /// Whether --allow-host-access was enabled for this namespace.
+    /// None for snapshots written before this setting was recorded.
+    #[serde(default)]
+    pub allow_host_access: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -194,17 +204,14 @@ pub struct VethPairIPs {
 pub fn validate_netns_name(name: &str) -> anyhow::Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 64
-        && name
-            .chars()
-            .next()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         && !name.ends_with('.');
     anyhow::ensure!(
         valid,
-        "Invalid network namespace name '{name}': must be 1-64 ASCII alphanumeric characters, dots, underscores or hyphens, starting alphanumerically"
+        "Invalid network namespace name '{name}': must be 1-64 ASCII alphanumeric characters, dots, underscores or hyphens, starting with an ASCII letter"
     );
     Ok(())
 }
@@ -249,6 +256,102 @@ fn has_unaccounted_processes(
     })
 }
 
+/// Build a host-side hook command (`postup` / `predown`) safely de-escalated
+/// to the authenticated session user, never vulnerable to `sudo` flag injection.
+pub fn build_hook_command(
+    argv: &[&str],
+    user: Option<&str>,
+    group: Option<&str>,
+) -> anyhow::Result<Command> {
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| anyhow!("Hook command is empty"))?;
+    let is_root = nix::unistd::geteuid().is_root();
+    if is_root && let Some(user_name) = user {
+        let target_user = unistd::User::from_name(user_name)?
+            .with_context(|| format!("Unknown hook user '{user_name}'"))?;
+        let target_gid = match group {
+            Some(group_name) => {
+                unistd::Group::from_name(group_name)?
+                    .with_context(|| format!("Unknown hook group '{group_name}'"))?
+                    .gid
+            }
+            None => target_user.gid,
+        };
+        let groups = crate::util::owner_write::supplementary_groups(&target_user.name, target_gid)?;
+        let uid = target_user.uid;
+        let daemon_mode = crate::util::is_daemon_mode();
+        let home_cstr = if daemon_mode {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::CString::new(target_user.dir.as_os_str().as_bytes()).ok()
+        } else {
+            None
+        };
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        if daemon_mode {
+            cmd.stdin(Stdio::null());
+            cmd.stdout(Stdio::null());
+            cmd.stderr(Stdio::null());
+            cmd.env_clear();
+            cmd.env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            );
+            cmd.env("HOME", &target_user.dir);
+            cmd.env("USER", &target_user.name);
+            cmd.env("LOGNAME", &target_user.name);
+        }
+        unsafe {
+            cmd.pre_exec(move || {
+                unistd::setgroups(&groups)?;
+                unistd::setgid(target_gid)?;
+                unistd::setuid(uid)?;
+                if let Some(dir) = &home_cstr {
+                    let _ = libc::chdir(dir.as_ptr());
+                }
+                nix::sys::prctl::set_no_new_privs()?;
+                Ok(())
+            });
+        }
+        return Ok(cmd);
+    }
+
+    let mut sudo_args = Vec::new();
+    if let Some(user) = user {
+        sudo_args.push("--user");
+        sudo_args.push(user);
+    }
+    if let Some(group) = group {
+        sudo_args.push("--group");
+        sudo_args.push(group);
+    }
+    if !sudo_args.is_empty() {
+        let mut full = vec!["--preserve-env"];
+        full.append(&mut sudo_args);
+        full.push("--");
+        full.push(program);
+        full.extend_from_slice(args);
+        let mut cmd = Command::new("sudo");
+        cmd.args(full);
+        // Only apply PR_SET_NO_NEW_PRIVS when already root; setting it as a
+        // non-root caller disables sudo's setuid bit and makes sudo fail.
+        if is_root {
+            unsafe {
+                cmd.pre_exec(|| {
+                    nix::sys::prctl::set_no_new_privs()?;
+                    Ok(())
+                });
+            }
+        }
+        Ok(cmd)
+    } else {
+        let mut cmd = Command::new(program);
+        cmd.args(args);
+        Ok(cmd)
+    }
+}
+
 /// Atomically write a namespace lockfile with the ownership and modes used by
 /// both daemon and sudo/CLI sessions.
 fn write_lockfile_data(path: &Path, contents: &str) -> anyhow::Result<()> {
@@ -266,23 +369,26 @@ fn write_lockfile_data(path: &Path, contents: &str) -> anyhow::Result<()> {
     std::fs::create_dir_all(parent)?;
     std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
     chown_to_config_owner(parent)?;
-    let temporary_path = path.with_extension(format!("tmp-{}", unistd::getpid()));
-    {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&temporary_path)?;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        write!(file, "{contents}")?;
-    }
-    std::fs::rename(&temporary_path, path)?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(".lock-")
+        .tempfile_in(parent)?;
+    tmp.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    write!(tmp, "{contents}")?;
+    tmp.persist(path).map_err(|e| e.error)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     chown_to_config_owner(path)
 }
 
 impl NamespaceSnapshot {
+    /// Copy persisted metadata while resetting every resource cleanup flag.
+    /// Never implement Clone on the live resource owners: that could duplicate
+    /// authority to kill helpers or remove networking. Serde is the existing
+    /// audited boundary between owning guards and inert descriptions.
+    pub fn inert_copy(&self) -> anyhow::Result<Self> {
+        Ok(serde_json::from_value(serde_json::to_value(self)?)?)
+    }
+
     pub fn into_managed_guard(self) -> ManagedNamespaceGuard {
         let mut guard = ManagedNamespaceGuard {
             name: self.name,
@@ -307,6 +413,7 @@ impl NamespaceSnapshot {
             config_file: self.config_file,
             trojan: self.trojan,
             state: self.state,
+            launch_fingerprint: self.launch_fingerprint,
             disposition: GuardDisposition::Managed,
         };
         guard.set_resource_cleanup(true);
@@ -339,6 +446,7 @@ impl ManagedNamespaceGuard {
             config_file: &self.config_file,
             trojan: &self.trojan,
             state: &self.state,
+            launch_fingerprint: self.launch_fingerprint.as_deref(),
         }
     }
 
@@ -393,6 +501,27 @@ impl ManagedNamespaceGuard {
     pub fn detach(&mut self) {
         self.set_resource_cleanup(false);
         self.disposition = GuardDisposition::Detached;
+    }
+
+    /// Fingerprint of the connection and isolation settings used at launch.
+    pub fn launch_fingerprint(&self) -> Option<&str> {
+        self.launch_fingerprint.as_deref()
+    }
+
+    pub fn set_launch_fingerprint(&mut self, fingerprint: String) {
+        self.launch_fingerprint = Some(fingerprint);
+    }
+
+    /// The VPN transport address or configured hostname when the protocol records it.
+    pub fn vpn_endpoint(&self) -> Option<std::borrow::Cow<'_, str>> {
+        use std::borrow::Cow;
+        if let Some(peer) = self.wireguard.as_ref().and_then(|wg| wg.recovery.as_ref()) {
+            return Some(Cow::Borrowed(&peer.host));
+        }
+        let vpn = self.openvpn.as_ref()?;
+        vpn.recovery_address
+            .map(|ip| Cow::Owned(ip.to_string()))
+            .or_else(|| vpn.recovery_host.as_deref().map(Cow::Borrowed))
     }
 
     /// Replace the DNS resource without deleting its on-disk files between
@@ -499,6 +628,7 @@ impl ManagedNamespaceGuard {
             config_file: None,
             trojan: None,
             state: NamespaceState::default(),
+            launch_fingerprint: None,
             disposition: GuardDisposition::Detached,
         })
     }
@@ -540,6 +670,7 @@ impl ManagedNamespaceGuard {
             config_file: None,
             trojan: None,
             state: NamespaceState::default(),
+            launch_fingerprint: None,
             disposition: GuardDisposition::Managed,
         })
     }
@@ -566,16 +697,16 @@ impl ManagedNamespaceGuard {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn exec_no_block(
+    pub(crate) fn build_exec_command(
         netns_name: &str,
         command: &[&str],
-        user: Option<String>,
-        group: Option<String>,
+        user: Option<&str>,
+        group: Option<&str>,
         silent: bool,
         capture_output: bool,
         capture_input: bool,
-        set_dir: Option<PathBuf>,
-    ) -> anyhow::Result<std::process::Child> {
+        set_dir: Option<&Path>,
+    ) -> Command {
         let mut handle = Command::new("ip");
         handle.args(["netns", "exec", netns_name]);
         if let Some(cdir) = set_dir {
@@ -583,18 +714,42 @@ impl ManagedNamespaceGuard {
         }
 
         let mut sudo_args = Vec::new();
-        if let Some(ref user) = user {
+        if let Some(user) = user {
             sudo_args.push("--user");
             sudo_args.push(user);
         }
-        if let Some(ref group) = group {
+        if let Some(group) = group {
             sudo_args.push("--group");
             sudo_args.push(group);
         }
 
+        let daemon_mode = crate::util::is_daemon_mode();
+        if daemon_mode && user.is_some() {
+            handle.env_clear();
+            handle.env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            );
+            if let Some(username) = user
+                && let Ok(Some(target_user)) = nix::unistd::User::from_name(username)
+            {
+                handle.env("HOME", &target_user.dir);
+                handle.env("USER", &target_user.name);
+                handle.env("LOGNAME", &target_user.name);
+            }
+            if !capture_input {
+                handle.stdin(Stdio::null());
+            }
+        }
+
         let sudo_string = if !sudo_args.is_empty() {
-            let mut args = vec!["sudo", "--preserve-env"];
+            let mut args = if daemon_mode {
+                vec!["sudo"]
+            } else {
+                vec!["sudo", "--preserve-env"]
+            };
             args.append(&mut sudo_args);
+            args.push("--");
             handle.args(args.clone());
             Some(format!(" {}", args.join(" ")))
         } else {
@@ -619,12 +774,50 @@ impl ManagedNamespaceGuard {
             sudo_string.unwrap_or_else(|| String::from("")),
             command.join(" ")
         );
-        let handle = handle.args(command).spawn()?;
+        if user.is_some() {
+            // Provider callbacks run as the authenticated user, with the
+            // same privilege-gain restriction as namespace applications.
+            unsafe {
+                handle.pre_exec(|| {
+                    nix::sys::prctl::set_no_new_privs()?;
+                    Ok(())
+                });
+            }
+        }
+        handle.args(command);
+        handle
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn exec_no_block(
+        netns_name: &str,
+        command: &[&str],
+        user: Option<String>,
+        group: Option<String>,
+        silent: bool,
+        capture_output: bool,
+        capture_input: bool,
+        set_dir: Option<PathBuf>,
+    ) -> anyhow::Result<std::process::Child> {
+        let mut handle = Self::build_exec_command(
+            netns_name,
+            command,
+            user.as_deref(),
+            group.as_deref(),
+            silent,
+            capture_output,
+            capture_input,
+            set_dir.as_deref(),
+        );
+        let handle = handle.spawn()?;
         Ok(handle)
     }
 
     pub fn exec(netns_name: &str, command: &[&str]) -> anyhow::Result<()> {
-        Self::exec_no_block(netns_name, command, None, None, false, false, false, None)?.wait()?;
+        let status =
+            Self::exec_no_block(netns_name, command, None, None, false, false, false, None)?
+                .wait()?;
+        anyhow::ensure!(status.success(), "Namespace command failed ({status})");
         Ok(())
     }
 
@@ -745,6 +938,7 @@ impl ManagedNamespaceGuard {
             log::debug!("Enabling IPv6 for {veth_dest}");
             sudo_command(&[
                 "sysctl",
+                "-q",
                 "-w",
                 &format!("net.ipv6.conf.{veth_dest}.disable_ipv6=0"),
             ])?;
@@ -753,6 +947,16 @@ impl ManagedNamespaceGuard {
                 .with_context(|| {
                     format!("Failed to assign IPv6 to veth destination: {veth_dest}")
                 })?;
+
+            Self::exec(
+                &self.name,
+                &[
+                    "sysctl",
+                    "-q",
+                    "-w",
+                    &format!("net.ipv6.conf.{veth_source}.disable_ipv6=0"),
+                ],
+            )?;
 
             Self::exec(
                 &self.name,
@@ -784,6 +988,39 @@ impl ManagedNamespaceGuard {
                 namespace_ip: ipv6_ns_ip_str.parse()?,
             });
         }
+
+        // Strict reverse-path filtering on the host would silently drop VPN
+        // return traffic entering via the veth, so relax it in the namespace.
+        SysCtl::relax_strict_rp_filter(&self.name)?;
+
+        // Store the IPs
+        self.veth_pair_ips = Some(veth_ips);
+        self.add_host_routes(hosts, allow_host_access, disable_ipv6)?;
+        Ok(())
+    }
+
+    pub fn add_veth_routing(
+        &mut self,
+        target_subnet: u8,
+        disable_ipv6: bool,
+    ) -> anyhow::Result<()> {
+        self.add_routing(target_subnet, None, false, disable_ipv6)
+    }
+
+    pub fn add_host_routes(
+        &self,
+        hosts: Option<&Vec<IpAddr>>,
+        allow_host_access: bool,
+        disable_ipv6: bool,
+    ) -> anyhow::Result<()> {
+        let veth_source = &self.veth_pair.as_ref().context("No veth pair")?.source;
+        let veth_ips = self.veth_pair_ips.as_ref().context("Veth IPs not set")?;
+        let ipv4_host_ip_str = veth_ips
+            .ipv4
+            .as_ref()
+            .context("IPv4 veth pair IP not set")?
+            .host_ip
+            .to_string();
 
         if let Some(my_hosts) = hosts {
             for host in my_hosts {
@@ -855,12 +1092,6 @@ impl ManagedNamespaceGuard {
             }
         }
 
-        // Strict reverse-path filtering on the host would silently drop VPN
-        // return traffic entering via the veth, so relax it in the namespace.
-        SysCtl::relax_strict_rp_filter(&self.name)?;
-
-        // Store the IPs
-        self.veth_pair_ips = Some(veth_ips);
         Ok(())
     }
 
@@ -1144,10 +1375,10 @@ impl ManagedNamespaceGuard {
         }
     }
 
-    pub fn write_lockfile(self, command: &str) -> anyhow::Result<Self> {
+    pub fn write_lockfile_in_place(&self, command: &str) -> anyhow::Result<()> {
         if self.disposition != GuardDisposition::Managed {
             // Unmanaged namespaces are not vopono's to track or clean up.
-            return Ok(self);
+            return Ok(());
         }
         let mut lock_dir = config_dir()?;
         lock_dir.push(format!("vopono/locks/{}", self.name));
@@ -1175,6 +1406,11 @@ impl ManagedNamespaceGuard {
         lockfile_path.push(format!("{}", unistd::getpid()));
         write_lockfile_data(&lockfile_path, &lock_string)?;
         debug!("Lockfile written: {}", lockfile_path.display());
+        Ok(())
+    }
+
+    pub fn write_lockfile(self, command: &str) -> anyhow::Result<Self> {
+        self.write_lockfile_in_place(command)?;
         Ok(self)
     }
 
@@ -1214,7 +1450,8 @@ impl ManagedNamespaceGuard {
             application_pid: Option<u32>,
             application_started_at: Option<u64>,
         }
-        let meta: LockfileMeta = ron::de::from_reader(File::open(&lockfile_path)?)?;
+        let raw_lock = crate::util::owner_write::read_file_as_config_owner(&lockfile_path)?;
+        let meta: LockfileMeta = ron::de::from_bytes(&raw_lock)?;
         let view = LockfileUpdateView {
             ns: self.snapshot_ref(),
             start: meta.start,
@@ -1286,17 +1523,22 @@ impl ManagedNamespaceGuard {
         add rule inet {ns_name} input iifname \"lo\" accept
         add rule inet {ns_name} output oifname \"lo\" accept
 
-        # Allow return traffic for established connections
+        # Input replies are safe to accept. Output must still traverse the
+        # protocol kill switch: established app flows can otherwise escape
+        # over the veth when a tunnel route disappears during recovery.
         add rule inet {ns_name} input ct state related,established accept
-        add rule inet {ns_name} output ct state related,established accept
         ",
             ns_name = self.name
         );
 
         // Use an atomically created private file: namespace names are public,
         // so a predictable /tmp path would permit symlink replacement.
-        let mut rules_file = tempfile::NamedTempFile::new()
-            .context("Failed to create temporary nftables rules file")?;
+        let mut rules_file = if nix::unistd::geteuid().is_root() {
+            tempfile::NamedTempFile::new_in("/run")
+        } else {
+            tempfile::NamedTempFile::new()
+        }
+        .context("Failed to create temporary nftables rules file")?;
         use std::io::Write as _;
         rules_file.write_all(ruleset.as_bytes())?;
         let temp_path = rules_file.path();
@@ -1316,64 +1558,17 @@ impl ManagedNamespaceGuard {
     }
 }
 
+pub(crate) fn namespace_has_any_process(name: &str) -> anyhow::Result<bool> {
+    if !Path::new("/var/run/netns").join(name).exists() {
+        return Ok(false);
+    }
+    Ok(!get_pids_in_namespace(name)?.is_empty())
+}
+
 impl ManagedNamespaceGuard {
-    fn perform_teardown(&mut self) -> anyhow::Result<()> {
-        if self.disposition != GuardDisposition::Managed {
-            debug!(
-                "Namespace {} is not managed by vopono - leaving it untouched",
-                self.name
-            );
-            return Ok(());
-        }
-        let mut lock_dir = config_dir()?;
-        lock_dir.push(format!("vopono/locks/{}", self.name));
-        let mut lockfile_path = lock_dir.clone();
-        // Each instance responsible for deleting their own lockfile
-        lockfile_path.push(format!("{}", unistd::getpid()));
-        // A lock left by a previous session must not pin this namespace open.
-        // Prune client locks whose PID has exited or no longer belongs to this
-        // namespace before deciding whether another live session exists.
-        if let Err(error) = crate::status::prune_stale_client_lockfiles(&lock_dir) {
-            warn!(
-                "Could not prune stale client lockfiles in {}: {error:#}",
-                lock_dir.display()
-            );
-        }
-        if crate::util::is_daemon_mode() && crate::status::has_client_lockfiles(&lock_dir) {
-            debug!(
-                "Preserving daemon namespace lock while client locks remain: {}",
-                lockfile_path.display()
-            );
-        } else if lockfile_path.exists() {
-            match std::fs::remove_file(&lockfile_path) {
-                Ok(_) => {}
-                Err(e) => {
-                    warn!(
-                        "Failed to remove lockfile: {}, {:?}",
-                        lockfile_path.display(),
-                        e
-                    );
-                }
-            };
-        }
-
-        let lockfile_path = lock_dir;
-
-        // Tear down only if the lock directory is gone or empty (no other
-        // vopono instance uses this namespace) AND no unaccounted processes
-        // remain inside it. The lockfiles only track vopono-spawned sessions;
-        // detached or externally-started processes would lose connectivity if
-        // we deleted the namespace while they were still running.
-        let lock_dir_is_empty = match crate::status::lock_dir_has_no_session_state(&lockfile_path) {
-            Ok(no_session_state) => no_session_state,
-            Err(e) => {
-                warn!(
-                    "Could not inspect locks directory {}: {e:?}; preserving namespace",
-                    lockfile_path.display()
-                );
-                false
-            }
-        };
+    /// Inspect detached applications as well as registered sessions. VPN helper
+    /// processes and their children do not pin an otherwise unused namespace.
+    pub fn has_application_processes(&self) -> anyhow::Result<bool> {
         let managed_helper_pids = [
             self.openvpn.as_ref().map(|helper| helper.pid),
             self.warp.as_ref().map(|helper| helper.pid),
@@ -1388,80 +1583,233 @@ impl ManagedNamespaceGuard {
         .flatten()
         .map(|pid| pid as i32)
         .collect::<Vec<_>>();
-        let has_unaccounted_processes = match get_pids_in_namespace(&self.name) {
-            Ok(pids) => {
-                let processes = System::new_all();
-                let process_parents = pids
-                    .iter()
-                    .filter_map(|pid| {
-                        processes
-                            .process(sysinfo::Pid::from_u32(*pid as u32))
-                            .and_then(|process| process.parent())
-                            .map(|parent| (*pid, parent.as_u32() as i32))
-                    })
-                    .collect::<HashMap<_, _>>();
-                has_unaccounted_processes(&pids, &managed_helper_pids, &process_parents)
+        let pids = get_pids_in_namespace(&self.name)?;
+        let processes = System::new_all().context("Failed to initialize process information")?;
+        let parents = pids
+            .iter()
+            .filter_map(|pid| {
+                processes
+                    .process(sysinfo::Pid::from_u32(*pid as u32))
+                    .and_then(|process| process.parent())
+                    .map(|parent| (*pid, parent.as_u32() as i32))
+            })
+            .collect::<HashMap<_, _>>();
+        Ok(has_unaccounted_processes(
+            &pids,
+            &managed_helper_pids,
+            &parents,
+        ))
+    }
+
+    /// Explicitly tear down this namespace in-place when it is still owned
+    /// inside a struct with a custom `Drop` implementation.
+    pub fn teardown_in_place(&mut self) -> anyhow::Result<()> {
+        self.perform_teardown_inner(false)
+    }
+
+    /// Unconditionally tear down an unfinished (`Initializing`) namespace
+    /// without consulting user-writable lock directories or running `predown`.
+    pub fn force_teardown(mut self) -> anyhow::Result<()> {
+        self.perform_teardown_inner(true)
+    }
+
+    fn perform_teardown(&mut self) -> anyhow::Result<()> {
+        self.perform_teardown_inner(false)
+    }
+
+    fn perform_teardown_inner(&mut self, force: bool) -> anyhow::Result<()> {
+        if self.disposition != GuardDisposition::Managed {
+            debug!(
+                "Namespace {} is not managed by vopono - leaving it untouched",
+                self.name
+            );
+            return Ok(());
+        }
+        if force {
+            self.disposition = GuardDisposition::TornDown;
+            let had_veth = self.veth_pair.is_some();
+            let ipv4_mask = self.veth_pair_ips.as_ref().and_then(|ips| {
+                ips.ipv4.as_ref().map(|pair| match pair.host_ip {
+                    IpAddr::V4(v4) => {
+                        let [a, b, c, _] = v4.octets();
+                        format!("{a}.{b}.{c}.0/24")
+                    }
+                    IpAddr::V6(_) => String::new(),
+                })
+            });
+            let ipv4_mask = ipv4_mask.filter(|s| !s.is_empty());
+            self.trojan = None;
+            self.shadowsocks = None;
+            self.openvpn = None;
+            self.veth_pair = None;
+            self.dns_config = None;
+            self.warp = None;
+            self.wireguard = None;
+            self.host_masquerade = None;
+            self.firewall_exception = None;
+            self.openconnect = None;
+            self.openfortivpn = None;
+            self.ssh = None;
+            // Also sweep any host veth / shared nftables rules that were created
+            // right before SIGKILL, before the `Initializing` snapshot updated.
+            if let Ok(base) = veth_interface_base(&self.name) {
+                let veth_dest = format!("{base}_d");
+                if !had_veth {
+                    let _ = sudo_command(&["ip", "link", "delete", &veth_dest]);
+                }
+                if self.firewall == Firewall::NfTables {
+                    super::host_masquerade::cleanup_orphaned_nft_rules(
+                        &veth_dest,
+                        ipv4_mask.as_deref(),
+                    );
+                }
             }
-            Err(e) => {
-                warn!(
-                    "Could not inspect processes in namespace {}: {e:?}; preserving namespace",
-                    self.name
-                );
-                true
+            super::etc_overlay::cleanup_namespace_overlays(&self.name);
+            if Path::new("/run/netns").join(&self.name).exists() {
+                sudo_command(&["ip", "netns", "delete", &self.name]).with_context(|| {
+                    format!(
+                        "Failed to delete unfinished network namespace {}",
+                        self.name
+                    )
+                })?;
             }
-        };
+            return Ok(());
+        }
+        let mut lock_dir = config_dir()?;
+        lock_dir.push(format!("vopono/locks/{}", self.name));
+        let own_lock_name = format!("{}", unistd::getpid());
+        let mut lockfile_path = lock_dir.clone();
+        // Each instance responsible for deleting their own lockfile
+        lockfile_path.push(&own_lock_name);
+        // A lock left by a previous session must not pin this namespace open.
+        // Prune client locks whose PID has exited or no longer belongs to this
+        // namespace before deciding whether another live session exists.
+        if let Err(error) = crate::status::prune_stale_client_lockfiles(&lock_dir) {
+            warn!(
+                "Could not prune stale client lockfiles in {}: {error:#}",
+                lock_dir.display()
+            );
+        }
+        let daemon_mode = crate::util::is_daemon_mode();
+        let lockfile_path_dir = lock_dir;
+
+        // Tear down only if no other vopono instance uses this namespace AND no
+        // unaccounted processes remain inside it. Preserve our own lockfile
+        // until we know whether another session owns the namespace or teardown
+        // is actually proceeding, so detached background processes never orphan
+        // an untracked namespace that `from_existing()` could prematurely delete.
+        let lock_dir_is_empty =
+            crate::status::lock_dir_has_no_other_session_state(&lockfile_path_dir, &own_lock_name)
+                .unwrap_or_else(|e| {
+                    warn!(
+                        "Could not inspect locks directory {}: {e:?}; preserving namespace",
+                        lockfile_path_dir.display()
+                    );
+                    false
+                });
+        let has_unaccounted_processes = self.has_application_processes().unwrap_or_else(|error| {
+            warn!("Could not inspect namespace processes: {error}; preserving namespace");
+            true
+        });
+
+        if !daemon_mode
+            && !lock_dir_is_empty
+            && lockfile_path.exists()
+            && let Err(e) = crate::util::owner_write::remove_file_as_config_owner(&lockfile_path)
+        {
+            warn!(
+                "Failed to remove lockfile: {}, {:?}",
+                lockfile_path.display(),
+                e
+            );
+        }
 
         if lock_dir_is_empty && !has_unaccounted_processes {
             // Commit to teardown before dropping any resource. A later error
             // is returned to explicit callers and must not trigger a second,
             // implicit teardown from Drop.
             self.disposition = GuardDisposition::TornDown;
-            // Only try to delete if exists
-            if lockfile_path.exists() {
-                // The sidecar is not session state; drop it so the now-empty
-                // lock directory can be removed.
-                crate::status::remove_forwarded_port_sidecar(&lockfile_path);
-                std::fs::remove_dir(&lockfile_path).with_context(|| {
-                    format!(
-                        "Could not remove locks directory {}",
-                        lockfile_path.display()
-                    )
-                })?;
+            if lockfile_path.exists()
+                && let Err(e) =
+                    crate::util::owner_write::remove_file_as_config_owner(&lockfile_path)
+            {
+                warn!(
+                    "Failed to remove lockfile: {}, {:?}",
+                    lockfile_path.display(),
+                    e
+                );
+            }
+            // Only try to delete if exists; never abort `ip netns delete` if
+            // removing the user-owned lock directory fails.
+            if lockfile_path_dir.exists() {
+                crate::status::remove_forwarded_port_sidecar(&lockfile_path_dir);
+                match crate::util::owner_write::remove_dir_as_config_owner_if_needed(
+                    &lockfile_path_dir,
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        if let Err(error) = std::fs::remove_dir(&lockfile_path_dir)
+                            && error.kind() != std::io::ErrorKind::NotFound
+                        {
+                            warn!(
+                                "Could not remove locks directory {}: {error}",
+                                lockfile_path_dir.display()
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        warn!(
+                            "Could not remove locks directory {}: {error:#}",
+                            lockfile_path_dir.display()
+                        );
+                    }
+                }
             }
             info!("Shutting down vopono namespace - as there are no processes left running inside");
-            // Run PreDown script (if any)
+            // Run PreDown script (if any) and wait with a bounded timeout so it
+            // completes before the namespace is destroyed and never leaks a zombie.
             if let Some(pdcmd) = self.predown.as_ref() {
                 // Extra check so we don't panic on bad predown command
                 match parse_command_str(pdcmd) {
-                    Ok(parsed_pdcmd) => {
+                    Ok(parsed_pdcmd) if !parsed_pdcmd.is_empty() => {
                         let parsed_pdcmd_ptrs: Vec<&str> =
                             parsed_pdcmd.iter().map(|s| s.as_str()).collect();
 
-                        let mut sudo_args = Vec::new();
-                        if let Some(ref predown_user) = self.predown_user {
-                            sudo_args.push("--user");
-                            sudo_args.push(predown_user);
-                        }
-                        if let Some(ref predown_group) = self.predown_group {
-                            sudo_args.push("--group");
-                            sudo_args.push(predown_group);
-                        }
-
-                        if !sudo_args.is_empty() {
-                            let mut args = vec!["--preserve-env"];
-                            args.append(&mut sudo_args);
-                            args.extend(parsed_pdcmd_ptrs);
-
-                            let mut cmd = std::process::Command::new("sudo");
-                            cmd.args(args);
+                        let cmd = build_hook_command(
+                            &parsed_pdcmd_ptrs,
+                            self.predown_user.as_deref(),
+                            self.predown_group.as_deref(),
+                        );
+                        if let Ok(mut cmd) = cmd {
                             self.add_env_vars_to_cmd(&mut cmd);
-                            cmd.spawn().ok();
-                        } else {
-                            let mut cmd = std::process::Command::new(parsed_pdcmd_ptrs[0]);
-                            cmd.args(parsed_pdcmd_ptrs[1..].iter());
-                            self.add_env_vars_to_cmd(&mut cmd);
-                            cmd.spawn().ok();
+                            if let Ok(mut child) = cmd.spawn() {
+                                let deadline =
+                                    std::time::Instant::now() + std::time::Duration::from_secs(5);
+                                loop {
+                                    match child.try_wait() {
+                                        Ok(Some(_)) => break,
+                                        Ok(None) if std::time::Instant::now() < deadline => {
+                                            std::thread::sleep(std::time::Duration::from_millis(
+                                                25,
+                                            ));
+                                        }
+                                        _ => {
+                                            let _ = child.kill();
+                                            let _ = child.wait();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        } else if let Err(e) = cmd {
+                            log::error!(
+                                "Failed to prepare predown command '{}' in shutdown state: {e:#}",
+                                pdcmd
+                            );
                         }
+                    }
+                    Ok(_) => {
+                        log::warn!("Skipping empty predown command in shutdown state");
                     }
                     Err(e) => {
                         log::error!(
@@ -1485,7 +1833,7 @@ impl ManagedNamespaceGuard {
             self.openconnect = None;
             self.openfortivpn = None;
             self.ssh = None;
-            self.trojan = None;
+            super::etc_overlay::cleanup_namespace_overlays(&self.name);
             // A concurrent teardown (e.g. `vopono stop` racing the session
             // that owns this namespace) may have removed the handle already;
             // that is success, not an error worth retrying for 4 seconds.
@@ -1644,6 +1992,30 @@ mod tests {
     }
 
     #[test]
+    fn inert_copy_never_inherits_cleanup_authority() {
+        let runtime = tempfile::tempdir().unwrap();
+        let log = runtime.path().join("openvpn.log");
+        std::fs::write(&log, "keep").unwrap();
+        let ns = super::NetworkNamespace::attach_unmanaged("inert_copy_test".into()).unwrap();
+        let mut snapshot = ns.snapshot().unwrap();
+        let mut vpn: super::OpenVpn = serde_json::from_value(serde_json::json!({
+            "pid": std::process::id(), "openvpn_dns_servers": [], "logfile": log,
+            "runtime_dir": runtime.path(), "supervised": true,
+        }))
+        .unwrap();
+        vpn.set_cleanup_enabled(true);
+        snapshot.openvpn = Some(vpn);
+        let copy = snapshot.inert_copy().unwrap();
+        snapshot
+            .openvpn
+            .as_mut()
+            .unwrap()
+            .set_cleanup_enabled(false);
+        drop(copy);
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "keep");
+    }
+
+    #[test]
     fn legacy_forwarded_ports_key_reads_into_host_forwarded_ports() {
         let raw = r#"(
             name: "vo_test_abc",
@@ -1675,5 +2047,28 @@ mod tests {
         let ns: NamespaceSnapshot = ron::from_str(raw).expect("legacy lockfile should parse");
         assert_eq!(ns.state.open_ports, vec![8080]);
         assert_eq!(ns.state.host_forwarded_ports, vec![9000]);
+    }
+
+    #[test]
+    fn build_hook_command_rejects_empty_and_separates_sudo_args() {
+        assert!(super::build_hook_command(&[], Some("alice"), None).is_err());
+
+        if !nix::unistd::Uid::effective().is_root() {
+            let cmd =
+                super::build_hook_command(&["-u", "root", "/bin/id"], Some("alice"), Some("staff"))
+                    .expect("hook command should build");
+            let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
+            let sep = args
+                .iter()
+                .position(|arg| *arg == "--")
+                .expect("sudo invocation must include -- separator");
+            assert_eq!(args[sep + 1], "-u");
+            assert_eq!(args[sep + 2], "root");
+            assert_eq!(args[sep + 3], "/bin/id");
+        } else {
+            let cmd = super::build_hook_command(&["/bin/id"], Some("root"), None)
+                .expect("root hook command should build");
+            assert_eq!(cmd.get_program(), "/bin/id");
+        }
     }
 }

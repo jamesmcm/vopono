@@ -24,6 +24,10 @@ pub struct LaunchConfig {
     #[serde(default)]
     pub port_forwarding: bool,
     #[serde(default)]
+    pub monitor: bool,
+    #[serde(default)]
+    pub recover: bool,
+    #[serde(default)]
     pub open_ports: Vec<u16>,
 }
 
@@ -32,6 +36,8 @@ impl Default for LaunchConfig {
         Self {
             gamepad_enabled: true,
             port_forwarding: false,
+            monitor: false,
+            recover: false,
             open_ports: Vec::new(),
         }
     }
@@ -113,13 +119,50 @@ pub fn load_gui_config(path: &Path) -> anyhow::Result<GuiConfig> {
         .with_context(|| format!("Failed to parse GUI config from {}", path.display()))
 }
 
-pub fn save_gui_config(path: &Path, config: &GuiConfig) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
+fn write_file_atomic(path: &Path, contents: &str, mode: u32) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent).with_context(|| format!("Failed to create {}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config");
+    let pid = std::process::id();
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_path = parent.join(format!(".{file_name}.tmp-{pid}-{nonce}"));
+    let write_res = (|| -> anyhow::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(&tmp_path)?;
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+        file.write_all(contents.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = write_res {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error);
     }
+    if let Err(error) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+pub fn save_gui_config(path: &Path, config: &GuiConfig) -> anyhow::Result<()> {
     let raw = toml_edit::ser::to_string_pretty(config)?;
-    fs::write(path, raw)
+    write_file_atomic(path, &raw, 0o600)
         .with_context(|| format!("Failed to write GUI config to {}", path.display()))?;
     Ok(())
 }
@@ -134,11 +177,7 @@ pub fn load_vopono_config_text(path: &Path) -> anyhow::Result<String> {
 
 pub fn save_vopono_config_text(path: &Path, text: &str) -> anyhow::Result<()> {
     let _: toml_edit::DocumentMut = text.parse().context("Config is not valid TOML")?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-    }
-    fs::write(path, text)
+    write_file_atomic(path, text, 0o600)
         .with_context(|| format!("Failed to write vopono config to {}", path.display()))?;
     Ok(())
 }
@@ -158,10 +197,6 @@ impl ProviderForwardedPort {
 pub fn ensure_port_forwarding_callback() -> anyhow::Result<PathBuf> {
     let callback_path = port_forwarding_callback_path()?;
     let status_path = forwarded_port_status_path()?;
-    if let Some(parent) = callback_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-    }
 
     let status_path_text = status_path.to_string_lossy();
     let status_path = shell_words::quote(status_path_text.as_ref());
@@ -180,11 +215,8 @@ tmp="${{status_file}}.$$"
 mv "$tmp" "$status_file"
 "#
     );
-    fs::write(&callback_path, script)
+    write_file_atomic(&callback_path, &script, 0o700)
         .with_context(|| format!("Failed to write {}", callback_path.display()))?;
-
-    fs::set_permissions(&callback_path, fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("Failed to make {} executable", callback_path.display()))?;
 
     Ok(callback_path)
 }

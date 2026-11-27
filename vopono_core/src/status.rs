@@ -1,22 +1,135 @@
+use crate::network::health::{HEALTH_FILE, is_health_sidecar};
 use crate::network::netns::LockfileStatus;
+use crate::util::owner_write;
 use crate::util::{
-    check_process_running, chown_to_config_owner, config_dir, create_private_file,
-    ensure_dir_as_config_owner, write_file_as_config_owner,
+    check_process_running, chown_to_config_owner, config_dir, ensure_dir_as_config_owner,
+    write_file_as_config_owner,
 };
 use anyhow::Context;
 use log::debug;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use walkdir::WalkDir;
 
 /// Sidecar file next to a namespace's lockfiles holding the latest
 /// provider-assigned forwarded port, refreshed by the forwarder thread.
 pub(crate) const FORWARDED_PORT_SIDECAR: &str = "port-forwarding.json";
+pub(crate) const FORWARDED_PORT_TEMP_PREFIX: &str = "port-forwarding.tmp-";
+const FORWARDED_PORT_LEGACY_TEMP_PREFIX: &str = ".port-forwarding-";
+pub(crate) const HOST_RELAY_SIDECAR: &str = "host-relays.json";
+pub(crate) const HOST_RELAY_TEMP_PREFIX: &str = "host-relays.tmp-";
+const MAX_LOCK_WALK_ENTRIES: usize = 4096;
+pub(crate) const STOPPING_SIDECAR: &str = "stopping";
+
+pub fn record_namespace_stopping(lock_dir: &Path) -> anyhow::Result<()> {
+    if lock_dir.is_dir() {
+        let path = lock_dir.join(STOPPING_SIDECAR);
+        if write_file_as_config_owner(&path, "stopping\n", Some(0o600))? {
+            return Ok(());
+        }
+        // Direct root sessions (uid == 0) do not spawn the unprivileged write helper.
+        if crate::util::resolve_config_owner()?
+            .0
+            .is_some_and(|uid| uid.is_root())
+        {
+            let mut file = crate::util::create_private_file(&path)?;
+            file.write_all(b"stopping\n")?;
+            return Ok(());
+        }
+        anyhow::bail!("Config-owner writer unexpectedly unavailable");
+    }
+    Ok(())
+}
+
+pub fn namespace_is_stopping(lock_dir: &Path) -> bool {
+    let Ok(dir) = open_dir_nofollow(lock_dir) else {
+        return false;
+    };
+    read_regular_file_at_nofollow(&dir, STOPPING_SIDECAR, 32)
+        .is_ok_and(|value| value == b"stopping\n")
+}
+
+fn open_dir_nofollow(path: &Path) -> nix::Result<nix::dir::Dir> {
+    use nix::fcntl::OFlag;
+    use nix::sys::stat::Mode;
+    nix::dir::Dir::open(
+        path,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    )
+}
+
+fn open_dir_at_nofollow(
+    parent: &nix::dir::Dir,
+    name: &std::ffi::CStr,
+) -> nix::Result<nix::dir::Dir> {
+    use nix::fcntl::OFlag;
+    use nix::sys::stat::Mode;
+    nix::dir::Dir::openat(
+        parent,
+        name,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
+        Mode::empty(),
+    )
+}
+
+fn read_regular_file_at_nofollow(
+    parent: &nix::dir::Dir,
+    name: &str,
+    max_bytes: usize,
+) -> std::io::Result<Vec<u8>> {
+    use nix::fcntl::OFlag;
+    use nix::sys::stat::Mode;
+    use std::io::Read;
+    let fd = nix::fcntl::openat(
+        parent,
+        name,
+        OFlag::O_RDONLY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    let file = std::fs::File::from(fd);
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut reader = file.take((max_bytes as u64).saturating_add(1));
+    reader.read_to_end(&mut bytes)?;
+    if bytes.len() > max_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file exceeds maximum allowed size",
+        ));
+    }
+    Ok(bytes)
+}
+
+pub(crate) fn is_forwarded_port_sidecar(name: &str) -> bool {
+    let valid_suffix = |suffix: &str| {
+        !suffix.is_empty()
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    };
+    name == HOST_RELAY_SIDECAR
+        || name
+            .strip_prefix(HOST_RELAY_TEMP_PREFIX)
+            .is_some_and(valid_suffix)
+        || name == FORWARDED_PORT_SIDECAR
+        || name
+            .strip_prefix(FORWARDED_PORT_TEMP_PREFIX)
+            .is_some_and(valid_suffix)
+        || name
+            .strip_prefix(FORWARDED_PORT_LEGACY_TEMP_PREFIX)
+            .is_some_and(valid_suffix)
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ForwardedPortSidecar {
@@ -33,10 +146,28 @@ struct ForwardedPortSidecar {
 pub fn record_forwarded_port(locks_dir: &Path, ns_name: &str, port: u16) -> anyhow::Result<()> {
     let updated = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let sidecar = ForwardedPortSidecar { port, updated };
-    let dir = locks_dir.join(ns_name);
-    let path = dir.join(FORWARDED_PORT_SIDECAR);
-    let contents = serde_json::to_string(&sidecar)?;
-    if ensure_dir_as_config_owner(&dir, Some(0o700))? {
+    write_port_sidecar(
+        &locks_dir.join(ns_name),
+        FORWARDED_PORT_SIDECAR,
+        FORWARDED_PORT_TEMP_PREFIX,
+        &sidecar,
+    )
+}
+
+/// Publish the shared host relays alongside the creator's lockfile.
+pub fn record_host_relays(lock_dir: &Path, ports: &[u16]) -> anyhow::Result<()> {
+    write_port_sidecar(lock_dir, HOST_RELAY_SIDECAR, HOST_RELAY_TEMP_PREFIX, ports)
+}
+
+fn write_port_sidecar(
+    dir: &Path,
+    filename: &str,
+    temp_prefix: &str,
+    value: &(impl Serialize + ?Sized),
+) -> anyhow::Result<()> {
+    let path = dir.join(filename);
+    let contents = serde_json::to_string(value)?;
+    if ensure_dir_as_config_owner(dir, Some(0o700))? {
         anyhow::ensure!(
             write_file_as_config_owner(&path, &contents, Some(0o600))?,
             "Config-owner writer unexpectedly unavailable"
@@ -44,23 +175,42 @@ pub fn record_forwarded_port(locks_dir: &Path, ns_name: &str, port: u16) -> anyh
         return Ok(());
     }
 
-    std::fs::create_dir_all(&dir)?;
-    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
-    chown_to_config_owner(&dir)?;
-    let tmp = dir.join(format!("{FORWARDED_PORT_SIDECAR}.tmp"));
-    let mut file = create_private_file(&tmp)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    file.write_all(contents.as_bytes())?;
-    drop(file);
-    std::fs::rename(&tmp, &path)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::create_dir_all(dir)?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    chown_to_config_owner(dir)?;
+    let mut tmp = tempfile::Builder::new()
+        .prefix(temp_prefix)
+        .tempfile_in(dir)?;
+    tmp.as_file()
+        .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    tmp.write_all(contents.as_bytes())?;
+    tmp.persist(&path).map_err(|e| e.error)?;
     chown_to_config_owner(&path)
 }
 
 /// Replace the reported forwarded port with the sidecar value when present.
 /// Provider and automatic flag still come from the embedded lockfile state.
-fn overlay_forwarded_port(locks_root: &Path, ns_name: &str, locks: &mut [LockfileStatus]) {
-    let Ok(raw) = std::fs::read(locks_root.join(ns_name).join(FORWARDED_PORT_SIDECAR)) else {
+fn overlay_port_sidecars(locks_dir: &nix::dir::Dir, ns_name: &str, locks: &mut [LockfileStatus]) {
+    if crate::network::netns::validate_netns_name(ns_name).is_err() {
+        return;
+    }
+    let Ok(ns_cstr) = std::ffi::CString::new(ns_name) else {
+        return;
+    };
+    let Ok(ns_dir) = open_dir_at_nofollow(locks_dir, &ns_cstr) else {
+        return;
+    };
+    if let Ok(raw) = read_regular_file_at_nofollow(&ns_dir, HOST_RELAY_SIDECAR, 4096)
+        && let Ok(ports) = serde_json::from_slice::<Vec<u16>>(&raw)
+    {
+        for lock in locks.iter_mut() {
+            let reported = &mut lock.ns.state.host_forwarded_ports;
+            reported.extend(ports.iter().copied());
+            reported.sort_unstable();
+            reported.dedup();
+        }
+    }
+    let Ok(raw) = read_regular_file_at_nofollow(&ns_dir, FORWARDED_PORT_SIDECAR, 64 * 1024) else {
         return;
     };
     let Ok(sidecar) = serde_json::from_slice::<ForwardedPortSidecar>(&raw) else {
@@ -112,73 +262,166 @@ impl LockNamespacesStatus {
 }
 
 pub fn read_lock_namespaces() -> anyhow::Result<LockNamespacesStatus> {
-    let mut dir = config_dir()?;
-    dir.push("vopono");
-    dir.push("locks");
-    read_lock_namespaces_from_dir(dir)
+    use nix::errno::Errno;
+    use nix::fcntl::OFlag;
+    use nix::sys::stat::Mode;
+    let base = config_dir()?;
+    // Config base itself may be a symlink (e.g. ~/.config); pin it, then reject
+    // symlinks at every directory level below it via openat + O_NOFOLLOW.
+    let config_fd = match nix::dir::Dir::open(
+        &base,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(dir) => dir,
+        Err(Errno::ENOENT | Errno::ENOTDIR) => return Ok(LockNamespacesStatus::default()),
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    };
+    let vopono_fd = match open_dir_at_nofollow(&config_fd, c"vopono") {
+        Ok(dir) => dir,
+        Err(Errno::ENOENT | Errno::ENOTDIR | Errno::ELOOP) => {
+            return Ok(LockNamespacesStatus::default());
+        }
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    };
+    let locks_fd = match open_dir_at_nofollow(&vopono_fd, c"locks") {
+        Ok(dir) => dir,
+        Err(Errno::ENOENT | Errno::ENOTDIR | Errno::ELOOP) => {
+            return Ok(LockNamespacesStatus::default());
+        }
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    };
+    read_lock_namespaces_from_open_dir(locks_fd, &base.join("vopono").join("locks"))
 }
 
 pub fn read_lock_namespaces_from_dir(
     dir: impl Into<PathBuf>,
 ) -> anyhow::Result<LockNamespacesStatus> {
+    use nix::errno::Errno;
     let dir = dir.into();
+    let locks_fd = match open_dir_nofollow(&dir) {
+        Ok(fd) => fd,
+        Err(Errno::ENOENT | Errno::ENOTDIR | Errno::ELOOP) => {
+            return Ok(LockNamespacesStatus::default());
+        }
+        Err(error) => return Err(std::io::Error::from(error).into()),
+    };
+    read_lock_namespaces_from_open_dir(locks_fd, &dir)
+}
+
+fn read_lock_namespaces_from_open_dir(
+    mut locks_dir: nix::dir::Dir,
+    display_dir: &Path,
+) -> anyhow::Result<LockNamespacesStatus> {
+    use nix::errno::Errno;
     let mut grouped_locks: HashMap<String, LockGroup> = HashMap::new();
     let mut errors = Vec::new();
-    if !dir.exists() {
-        return Ok(LockNamespacesStatus::default());
-    }
+    let mut seen = 0usize;
+    let ns_entries: Vec<std::ffi::CString> = locks_dir
+        .iter()
+        .filter_map(Result::ok)
+        .filter(|entry| !matches!(entry.file_name().to_bytes(), b"." | b".."))
+        .map(|entry| entry.file_name().to_owned())
+        .collect();
 
-    for entry in WalkDir::new(&dir) {
-        let entry = match entry {
-            Ok(entry) => entry,
+    for ns_cstr in ns_entries {
+        seen += 1;
+        if seen > MAX_LOCK_WALK_ENTRIES {
+            errors.push(format!(
+                "{}: lock directory entry limit exceeded",
+                display_dir.display()
+            ));
+            break;
+        }
+        let Ok(ns_dir_name) = ns_cstr.to_str() else {
+            continue;
+        };
+        let mut ns_dir = match open_dir_at_nofollow(&locks_dir, &ns_cstr) {
+            Ok(dir) => dir,
+            Err(Errno::ENOENT | Errno::ENOTDIR | Errno::ELOOP) => continue,
             Err(error) => {
-                errors.push(error.to_string());
+                errors.push(format!(
+                    "{}: {}",
+                    display_dir.join(ns_dir_name).display(),
+                    std::io::Error::from(error)
+                ));
                 continue;
             }
         };
-        if !entry.path().is_file() {
-            continue;
-        }
-        let Some(lockfile_kind) = LockfileKind::from_path(entry.path()) else {
-            continue;
-        };
+        let file_entries: Vec<std::ffi::CString> = ns_dir
+            .iter()
+            .filter_map(Result::ok)
+            .filter(|entry| !matches!(entry.file_name().to_bytes(), b"." | b".."))
+            .map(|entry| entry.file_name().to_owned())
+            .collect();
+        for file_cstr in file_entries {
+            seen += 1;
+            if seen > MAX_LOCK_WALK_ENTRIES {
+                errors.push(format!(
+                    "{}: lock directory entry limit exceeded",
+                    display_dir.display()
+                ));
+                break;
+            }
+            let Ok(filename) = file_cstr.to_str() else {
+                continue;
+            };
+            let entry_path = display_dir.join(ns_dir_name).join(filename);
+            let Some(lockfile_kind) = LockfileKind::from_path(Path::new(filename)) else {
+                continue;
+            };
 
-        match File::open(entry.path()) {
-            Ok(lockfile) => match ron::de::from_reader::<_, LockfileStatus>(lockfile) {
-                Ok(lock) => {
-                    let lock = if lock.application_pid.is_none()
-                        && lockfile_kind == LockfileKind::Client
-                    {
-                        let filename = entry.path().file_name().and_then(|name| name.to_str());
-                        match filename.and_then(client_pid_from_lockfile_name) {
-                            Some(pid) => LockfileStatus {
-                                application_pid: Some(pid),
-                                ..lock
-                            },
-                            None => lock,
+            match read_regular_file_at_nofollow(&ns_dir, filename, 1024 * 1024) {
+                Ok(bytes) => match ron::de::from_bytes::<LockfileStatus>(&bytes) {
+                    Ok(lock) => {
+                        if crate::network::netns::validate_netns_name(&lock.ns.name).is_err() {
+                            errors.push(format!(
+                                "{}: invalid namespace name in lockfile",
+                                entry_path.display()
+                            ));
+                            continue;
                         }
-                    } else {
-                        lock
-                    };
-                    let locks = grouped_locks.entry(lock.ns.name.clone()).or_default();
-                    match lockfile_kind {
-                        LockfileKind::Primary => locks.primary.push(lock),
-                        LockfileKind::Client => locks.client.push(lock),
+                        let lock = if lock.application_pid.is_none()
+                            && lockfile_kind == LockfileKind::Client
+                        {
+                            match client_pid_from_lockfile_name(filename) {
+                                Some(pid) => LockfileStatus {
+                                    application_pid: Some(pid),
+                                    ..lock
+                                },
+                                None => lock,
+                            }
+                        } else {
+                            lock
+                        };
+                        let locks = grouped_locks.entry(lock.ns.name.clone()).or_default();
+                        match lockfile_kind {
+                            LockfileKind::Primary => locks.primary.push(lock),
+                            LockfileKind::Client => locks.client.push(lock),
+                        }
                     }
+                    Err(error) => {
+                        if lockfile_kind == LockfileKind::Client {
+                            debug!(
+                                "Skipping unreadable client lockfile {}: {error}",
+                                entry_path.display()
+                            );
+                            continue;
+                        }
+                        errors.push(format!("{}: {error}", entry_path.display()));
+                    }
+                },
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ELOOP)
+                        || error.kind() == std::io::ErrorKind::InvalidInput
+                        || error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    // Ignore symlinks, non-regular files, and files removed concurrently.
+                    continue;
                 }
                 Err(error) => {
-                    if lockfile_kind == LockfileKind::Client {
-                        debug!(
-                            "Skipping unreadable client lockfile {}: {error}",
-                            entry.path().display()
-                        );
-                        continue;
-                    }
-                    errors.push(format!("{}: {error}", entry.path().display()));
+                    errors.push(format!("{}: {error}", entry_path.display()));
                 }
-            },
-            Err(error) => {
-                errors.push(format!("{}: {error}", entry.path().display()));
             }
         }
     }
@@ -186,8 +429,8 @@ pub fn read_lock_namespaces_from_dir(
     // Forwarder renewals update the sidecar, not the RON lockfiles, so
     // reflect the latest forwarded port in every derived view.
     for (namespace, locks) in grouped_locks.iter_mut() {
-        overlay_forwarded_port(&dir, namespace, &mut locks.primary);
-        overlay_forwarded_port(&dir, namespace, &mut locks.client);
+        overlay_port_sidecars(&locks_dir, namespace, &mut locks.primary);
+        overlay_port_sidecars(&locks_dir, namespace, &mut locks.client);
     }
 
     Ok(LockNamespacesStatus {
@@ -241,12 +484,9 @@ fn client_pid_from_lockfile_name(filename: &str) -> Option<u32> {
 impl LockfileKind {
     pub fn from_path(path: &Path) -> Option<Self> {
         let filename = path.file_name()?.to_str()?;
-        if filename.chars().all(|c| c.is_ascii_digit()) {
+        if !filename.is_empty() && filename.chars().all(|c| c.is_ascii_digit()) {
             Some(Self::Primary)
-        } else if filename
-            .strip_prefix("client-")
-            .is_some_and(|pid| pid.chars().all(|c| c.is_ascii_digit()))
-        {
+        } else if client_pid_from_lockfile_name(filename).is_some() {
             Some(Self::Client)
         } else {
             None
@@ -274,6 +514,19 @@ pub fn has_client_lockfiles(dir: &Path) -> bool {
 /// session. Any other file (including a temporary file left by an interrupted
 /// writer) is treated as state that must be preserved.
 pub fn lock_dir_has_no_session_state(dir: &Path) -> anyhow::Result<bool> {
+    lock_dir_has_only_ignored(dir, None)
+}
+
+/// Whether a lock directory contains no session state other than `own_lock_name`
+/// (typically the calling daemon's PID lockfile) and metadata sidecars.
+pub fn lock_dir_has_no_other_session_state(
+    dir: &Path,
+    own_lock_name: &str,
+) -> anyhow::Result<bool> {
+    lock_dir_has_only_ignored(dir, Some(own_lock_name))
+}
+
+fn lock_dir_has_only_ignored(dir: &Path, own_lock_name: Option<&str>) -> anyhow::Result<bool> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
@@ -281,7 +534,14 @@ pub fn lock_dir_has_no_session_state(dir: &Path) -> anyhow::Result<bool> {
     };
     for entry in entries {
         let entry = entry?;
-        if entry.file_name().to_str() != Some(FORWARDED_PORT_SIDECAR) {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            return Ok(false);
+        };
+        if !is_forwarded_port_sidecar(&name)
+            && !is_health_sidecar(&name)
+            && name != STOPPING_SIDECAR
+            && own_lock_name != Some(name.as_str())
+        {
             return Ok(false);
         }
     }
@@ -345,10 +605,18 @@ fn prune_stale_client_lockfiles_with(
         }
         if is_stale(&path, namespace) {
             debug!("Removing stale client lockfile: {}", path.display());
-            match std::fs::remove_file(&path) {
-                Ok(()) => removed += 1,
-                // The client guard or another cleanup may have removed it.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            match owner_write::remove_file_as_config_owner_if_needed(&path) {
+                Ok(true) => removed += 1,
+                Ok(false) => match std::fs::remove_file(&path) {
+                    Ok(()) => removed += 1,
+                    // The client guard or another cleanup may have removed it.
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("Could not remove stale client lockfile {}", path.display())
+                        });
+                    }
+                },
                 Err(error) => {
                     return Err(error).with_context(|| {
                         format!("Could not remove stale client lockfile {}", path.display())
@@ -365,16 +633,44 @@ fn prune_stale_client_lockfiles_with(
 /// The sidecar is not session state, but it would otherwise keep the
 /// directory non-empty and block namespace teardown.
 pub(crate) fn remove_forwarded_port_sidecar(dir: &Path) {
-    let _ = std::fs::remove_file(dir.join(FORWARDED_PORT_SIDECAR));
+    let remove = |path: &Path| {
+        if matches!(
+            owner_write::remove_file_as_config_owner_if_needed(path),
+            Ok(false)
+        ) {
+            let _ = std::fs::remove_file(path);
+        }
+    };
+    remove(&dir.join(FORWARDED_PORT_SIDECAR));
+    remove(&dir.join(HOST_RELAY_SIDECAR));
+    remove(&dir.join(HEALTH_FILE));
+    remove(&dir.join(STOPPING_SIDECAR));
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| is_health_sidecar(name) || is_forwarded_port_sidecar(name))
+            {
+                remove(&entry.path());
+            }
+        }
+    }
 }
 
 fn application_pid_is_stale(pid: u32, namespace: &str) -> bool {
+    if crate::network::netns::validate_netns_name(namespace).is_err() {
+        return true;
+    }
     if !check_process_running(pid) || process_is_zombie(pid) {
         return true;
     }
     // Lockfiles cannot outlive their namespace: when the netns handle is gone
-    // no recorded process can still be attached to it.
-    if !Path::new("/var/run/netns").join(namespace).exists() {
+    // no recorded process can still be attached to it. Permission errors do
+    // not establish absence, so only `NotFound` marks the PID stale.
+    if std::fs::metadata(Path::new("/var/run/netns").join(namespace))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
         return true;
     }
     matches!(process_namespace_matches(pid, namespace), Some(false))
@@ -774,8 +1070,40 @@ mod tests {
         let dir = unique_temp_dir("client-detect");
         fs::write(dir.join("100"), status_lock("vo_m_se", "daemon-app", 1)).unwrap();
         assert!(!has_client_lockfiles(&dir));
+        // Bare "client-" without digits must never be treated as a live client lockfile.
+        assert_eq!(LockfileKind::from_path(Path::new("client-")), None);
+        assert_eq!(LockfileKind::from_path(Path::new("")), None);
+        assert!(is_forwarded_port_sidecar("port-forwarding.tmp-aB12"));
         fs::write(dir.join("client-200"), status_lock("vo_m_se", "firefox", 2)).unwrap();
         assert!(has_client_lockfiles(&dir));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lock_readers_reject_invalid_namespace_names_inside_lockfiles() {
+        let dir = unique_temp_dir("invalid-ns-lock");
+        let ns_dir = dir.join("vo_ok");
+        fs::create_dir_all(&ns_dir).unwrap();
+        fs::write(ns_dir.join("100"), status_lock("../etc", "app", 1)).unwrap();
+        let status = read_lock_namespaces_from_dir(&dir).unwrap();
+        assert!(status.namespaces.is_empty());
+        assert!(!status.errors.is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn lock_readers_ignore_symlinked_lockfiles_and_sidecars() {
+        let dir = unique_temp_dir("symlink-lock");
+        let ns_dir = dir.join("vo_sym");
+        fs::create_dir_all(&ns_dir).unwrap();
+        let outside = dir.join("outside.ron");
+        fs::write(&outside, status_lock("vo_sym", "secret", 1)).unwrap();
+        std::os::unix::fs::symlink(&outside, ns_dir.join("100")).unwrap();
+
+        let status = read_lock_namespaces_from_dir(&dir).unwrap();
+        assert!(status.namespaces.is_empty());
+        assert!(status.metadata_for("vo_sym").is_none());
+
         let _ = fs::remove_dir_all(dir);
     }
 }

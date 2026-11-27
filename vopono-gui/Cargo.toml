@@ -1,12 +1,11 @@
 [package]
 name = "vopono-gui"
 description = "Graphical frontend for vopono"
-version = "1.0.1"
+version = "1.1.0"
 edition = "2024"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/jamesmcm/vopono"
-homepage = "https://github.com/jamesmcm/vopono"
 keywords = ["vopono", "vpn", "wireguard", "netns", "gui"]
 
 [workspace]
@@ -29,6 +28,7 @@ log = "0.4"
 pretty_env_logger = "0.5"
 ron = "0.12"
 serde = { version = "1", features = ["derive", "std"] }
+serde_json = "1"
 shell-words = "1.1"
 strum = "0.28"
 toml_edit = { version = "0.25", features = ["serde"] }

@@ -1,5 +1,5 @@
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -8,21 +8,83 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 const MAX_PROXY_CONNECTIONS: usize = 64;
+const MAX_PER_UID_PROXY_CONNECTIONS: usize = 64;
+const MAX_GLOBAL_PROXY_CONNECTIONS: usize = 256;
+static GLOBAL_PROXY_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+static PER_UID_PROXY_CONNECTIONS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<u32, usize>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+fn try_acquire_uid_proxy_slot(owner_uid: Option<u32>) -> bool {
+    let Some(uid) = owner_uid else {
+        return true;
+    };
+    let mut map = PER_UID_PROXY_CONNECTIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let count = map.entry(uid).or_insert(0);
+    if *count >= MAX_PER_UID_PROXY_CONNECTIONS {
+        return false;
+    }
+    *count += 1;
+    true
+}
+
+fn release_uid_proxy_slot(owner_uid: Option<u32>) {
+    let Some(uid) = owner_uid else {
+        return;
+    };
+    let mut map = PER_UID_PROXY_CONNECTIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(count) = map.get_mut(&uid) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            map.remove(&uid);
+        }
+    }
+}
 
 /// Host-side TCP forwarder with bounded connection concurrency.
 ///
 /// Dropping the proxy stops its accept loop and all active relays.
 pub struct TcpProxy {
     stop: Arc<AtomicBool>,
+    alive: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     workers: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
-struct ConnectionSlot(Arc<AtomicUsize>);
+struct AliveGuard(Arc<AtomicBool>);
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+struct ConnectionSlot {
+    proxy: Arc<AtomicUsize>,
+    owner_uid: Option<u32>,
+}
 
 impl Drop for ConnectionSlot {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        self.proxy.fetch_sub(1, Ordering::AcqRel);
+        GLOBAL_PROXY_CONNECTIONS.fetch_sub(1, Ordering::AcqRel);
+        release_uid_proxy_slot(self.owner_uid);
+    }
+}
+
+fn try_increment_bounded(counter: &AtomicUsize, limit: usize) -> bool {
+    let mut count = counter.load(Ordering::Acquire);
+    loop {
+        if count >= limit {
+            return false;
+        }
+        match counter.compare_exchange_weak(count, count + 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(current) => count = current,
+        }
     }
 }
 
@@ -79,19 +141,122 @@ fn relay_stream(
 
 impl TcpProxy {
     pub fn new(listen_port: u16, proxy_to: SocketAddr, local_only: bool) -> anyhow::Result<Self> {
-        let ip = if local_only {
-            Ipv6Addr::LOCALHOST
-        } else {
-            Ipv6Addr::UNSPECIFIED
+        Self::new_for_uid(listen_port, proxy_to, local_only, None)
+    }
+
+    pub fn new_for_uid(
+        listen_port: u16,
+        proxy_to: SocketAddr,
+        local_only: bool,
+        owner_uid: Option<u32>,
+    ) -> anyhow::Result<Self> {
+        use nix::sys::socket::{
+            AddressFamily, Backlog, SockFlag, SockType, SockaddrIn, SockaddrIn6, bind, listen,
+            setsockopt, socket, sockopt,
         };
-        let listener = std::net::TcpListener::bind(SocketAddr::new(IpAddr::V6(ip), listen_port))?;
+        use std::os::fd::AsRawFd;
+
+        let bind_ipv4 = || -> anyhow::Result<std::net::TcpListener> {
+            let sock = socket(
+                AddressFamily::Inet,
+                SockType::Stream,
+                SockFlag::SOCK_CLOEXEC,
+                None,
+            )?;
+            setsockopt(&sock, sockopt::ReuseAddr, &true)?;
+            let ip = if local_only {
+                Ipv4Addr::LOCALHOST
+            } else {
+                Ipv4Addr::UNSPECIFIED
+            };
+            bind(
+                sock.as_raw_fd(),
+                &SockaddrIn::from(std::net::SocketAddrV4::new(ip, listen_port)),
+            )?;
+            listen(&sock, Backlog::new(128)?)?;
+            Ok(std::net::TcpListener::from(sock))
+        };
+
+        // Binding `::1` with IPV6_V6ONLY=0 cannot accept IPv4 `127.0.0.1` traffic on Linux;
+        // use IPv4 loopback when `local_only` is requested, and dual-stack `::` otherwise
+        // with fallback to IPv4 if IPv6 is disabled via boot parameter or sysctl.
+        let listener = if local_only {
+            bind_ipv4()?
+        } else {
+            match socket(
+                AddressFamily::Inet6,
+                SockType::Stream,
+                SockFlag::SOCK_CLOEXEC,
+                None,
+            ) {
+                Ok(sock) => {
+                    // Reclaim the relay after stop/restart even when accepted connections
+                    // are still in TIME_WAIT. This does not permit two live listeners.
+                    setsockopt(&sock, sockopt::ReuseAddr, &true)?;
+                    // Explicitly enable dual-stack so IPv4 forwarding still works when
+                    // net.ipv6.bindv6only=1 on the host.
+                    if let Err(err) = setsockopt(&sock, sockopt::Ipv6V6Only, &false) {
+                        log::warn!(
+                            "Could not disable IPV6_V6ONLY on TCP relay port {listen_port}: {err}"
+                        );
+                    }
+                    match bind(
+                        sock.as_raw_fd(),
+                        &SockaddrIn6::from(std::net::SocketAddrV6::new(
+                            Ipv6Addr::UNSPECIFIED,
+                            listen_port,
+                            0,
+                            0,
+                        )),
+                    ) {
+                        Ok(()) => {
+                            listen(&sock, Backlog::new(128)?)?;
+                            std::net::TcpListener::from(sock)
+                        }
+                        Err(nix::errno::Errno::EADDRNOTAVAIL) => {
+                            // IPv6 disabled via sysctl (net.ipv6.conf.all.disable_ipv6=1).
+                            bind_ipv4()?
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
+                }
+                Err(nix::errno::Errno::EAFNOSUPPORT | nix::errno::Errno::EPROTONOSUPPORT) => {
+                    // Kernel booted with ipv6.disable=1: fall back to IPv4 listener.
+                    bind_ipv4()?
+                }
+                Err(err) => return Err(err.into()),
+            }
+        };
+        Self::from_listener_with_uid(listener, proxy_to, owner_uid)
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.alive.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn from_listener(
+        listener: std::net::TcpListener,
+        proxy_to: SocketAddr,
+    ) -> anyhow::Result<Self> {
+        Self::from_listener_with_uid(listener, proxy_to, None)
+    }
+
+    fn from_listener_with_uid(
+        listener: std::net::TcpListener,
+        proxy_to: SocketAddr,
+        owner_uid: Option<u32>,
+    ) -> anyhow::Result<Self> {
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
+        let alive = Arc::new(AtomicBool::new(true));
+        let thread_alive = Arc::clone(&alive);
         let active = Arc::new(AtomicUsize::new(0));
         let workers = Arc::new(Mutex::new(Vec::<JoinHandle<()>>::new()));
         let thread_workers = Arc::clone(&workers);
         let thread = std::thread::spawn(move || {
+            let _alive_guard = AliveGuard(thread_alive);
             while !thread_stop.load(Ordering::Acquire) {
                 let client = match listener.accept() {
                     Ok((client, _)) => client,
@@ -99,68 +264,116 @@ impl TcpProxy {
                         std::thread::sleep(Duration::from_millis(25));
                         continue;
                     }
-                    Err(_) => break,
-                };
-                let mut count = active.load(Ordering::Acquire);
-                let admitted = loop {
-                    if count >= MAX_PROXY_CONNECTIONS {
-                        break false;
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::Interrupted
+                                | io::ErrorKind::ConnectionAborted
+                                | io::ErrorKind::ConnectionReset
+                        ) =>
+                    {
+                        continue;
                     }
-                    match active.compare_exchange_weak(
-                        count,
-                        count + 1,
-                        Ordering::AcqRel,
-                        Ordering::Acquire,
-                    ) {
-                        Ok(_) => break true,
-                        Err(current) => count = current,
+                    Err(error)
+                        if matches!(
+                            error.raw_os_error(),
+                            Some(
+                                nix::libc::EMFILE
+                                    | nix::libc::ENFILE
+                                    | nix::libc::ENOBUFS
+                                    | nix::libc::ENOMEM
+                            )
+                        ) =>
+                    {
+                        log::warn!("Transient TCP proxy accept error: {error}; backing off");
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                    Err(error) => {
+                        log::warn!("TCP proxy accept loop exiting on fatal error: {error}");
+                        break;
                     }
                 };
-                if !admitted {
+                if !try_increment_bounded(&active, MAX_PROXY_CONNECTIONS) {
                     log::warn!(
                         "Rejecting forwarded connection: limit of {MAX_PROXY_CONNECTIONS} reached"
                     );
                     continue;
                 }
-                let slot = ConnectionSlot(Arc::clone(&active));
-                let Ok(upstream) =
-                    std::net::TcpStream::connect_timeout(&proxy_to, Duration::from_secs(1))
-                else {
+                if !try_acquire_uid_proxy_slot(owner_uid) {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    log::warn!(
+                        "Rejecting forwarded connection: per-user limit of {MAX_PER_UID_PROXY_CONNECTIONS} reached"
+                    );
                     continue;
-                };
-                let client_to_upstream = match client.try_clone() {
-                    Ok(client) => client,
-                    Err(_) => continue,
-                };
-                let upstream_to_upstream = match upstream.try_clone() {
-                    Ok(upstream) => upstream,
-                    Err(_) => continue,
-                };
-                let upstream_to_client = match upstream.try_clone() {
-                    Ok(upstream) => upstream,
-                    Err(_) => continue,
-                };
-                let client_to_client = match client.try_clone() {
-                    Ok(client) => client,
-                    Err(_) => continue,
-                };
-                for stream in [&client, &upstream] {
-                    let timeout = Some(Duration::from_millis(250));
-                    let _ = stream.set_read_timeout(timeout);
-                    let _ = stream.set_write_timeout(timeout);
                 }
+                if !try_increment_bounded(&GLOBAL_PROXY_CONNECTIONS, MAX_GLOBAL_PROXY_CONNECTIONS) {
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    release_uid_proxy_slot(owner_uid);
+                    log::warn!(
+                        "Rejecting forwarded connection: global limit of {MAX_GLOBAL_PROXY_CONNECTIONS} reached"
+                    );
+                    continue;
+                }
+                let slot = ConnectionSlot {
+                    proxy: Arc::clone(&active),
+                    owner_uid,
+                };
                 let connection_stop = Arc::clone(&thread_stop);
-                let worker = std::thread::spawn(move || {
+                // Perform connect_timeout inside the worker so a stalled upstream
+                // SYN cannot head-of-line block the accept loop.
+                let worker = match std::thread::Builder::new().spawn(move || {
+                    let _slot = slot;
+                    let Ok(upstream) =
+                        std::net::TcpStream::connect_timeout(&proxy_to, Duration::from_secs(1))
+                    else {
+                        let _ = client.shutdown(std::net::Shutdown::Both);
+                        return;
+                    };
+                    let (
+                        Ok(client_to_upstream),
+                        Ok(upstream_to_upstream),
+                        Ok(upstream_to_client),
+                        Ok(client_to_client),
+                    ) = (
+                        client.try_clone(),
+                        upstream.try_clone(),
+                        upstream.try_clone(),
+                        client.try_clone(),
+                    )
+                    else {
+                        let _ = client.shutdown(std::net::Shutdown::Both);
+                        let _ = upstream.shutdown(std::net::Shutdown::Both);
+                        return;
+                    };
+                    for stream in [&client, &upstream] {
+                        let timeout = Some(Duration::from_millis(250));
+                        let _ = stream.set_read_timeout(timeout);
+                        let _ = stream.set_write_timeout(timeout);
+                    }
                     let reverse_stop = Arc::clone(&connection_stop);
-                    let reverse = std::thread::spawn(move || {
+                    let reverse = match std::thread::Builder::new().spawn(move || {
                         relay_stream(upstream_to_client, client_to_client, &reverse_stop);
-                    });
+                    }) {
+                        Ok(handle) => handle,
+                        Err(err) => {
+                            log::warn!("Could not spawn reverse TCP relay worker: {err}");
+                            let _ = client.shutdown(std::net::Shutdown::Both);
+                            let _ = upstream.shutdown(std::net::Shutdown::Both);
+                            return;
+                        }
+                    };
                     relay_stream(client_to_upstream, upstream_to_upstream, &connection_stop);
                     let _ = reverse.join();
                     let _ = client.shutdown(std::net::Shutdown::Both);
                     let _ = upstream.shutdown(std::net::Shutdown::Both);
-                    drop(slot);
-                });
+                }) {
+                    Ok(handle) => handle,
+                    Err(err) => {
+                        log::warn!("Could not spawn TCP relay worker: {err}");
+                        continue;
+                    }
+                };
                 let mut handles = thread_workers.lock().expect("proxy worker lock poisoned");
                 let mut index = 0;
                 while index < handles.len() {
@@ -176,6 +389,7 @@ impl TcpProxy {
         });
         Ok(Self {
             stop,
+            alive,
             thread: Some(thread),
             workers,
         })
@@ -212,10 +426,7 @@ mod tests {
             // has been disabled entirely.
             return;
         };
-        let port = reservation.local_addr().unwrap().port();
-        drop(reservation);
-
-        let proxy = TcpProxy::new(port, "[::1]:9".parse().unwrap(), true).unwrap();
+        let proxy = TcpProxy::from_listener(reservation, "[::1]:9".parse().unwrap()).unwrap();
         let started = std::time::Instant::now();
         drop(proxy);
         assert!(started.elapsed() < Duration::from_secs(2));
@@ -242,8 +453,7 @@ mod tests {
 
         let reservation = std::net::TcpListener::bind("[::1]:0").unwrap();
         let proxy_port = reservation.local_addr().unwrap().port();
-        drop(reservation);
-        let proxy = TcpProxy::new(proxy_port, upstream_addr, true).unwrap();
+        let proxy = TcpProxy::from_listener(reservation, upstream_addr).unwrap();
 
         let mut client = std::net::TcpStream::connect(("::1", proxy_port)).unwrap();
         client

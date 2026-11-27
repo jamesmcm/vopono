@@ -16,14 +16,23 @@ static MAPPED_PORT_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Used to provide port forwarding for ProtonVPN
 pub struct Natpmpc {
     pub local_port: u16,
+    current_port: std::sync::Arc<std::sync::atomic::AtomicU16>,
     loop_thread_handle: Option<JoinHandle<()>>,
     send_channel: Sender<bool>,
+    params: ThreadParamsImpl,
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ThreadParamsImpl {
     pub netns_name: String,
     pub locks_dir: std::path::PathBuf,
     pub callback: Option<CallbackCommand>,
+    #[serde(default)]
+    pub firewall: Option<crate::network::firewall::Firewall>,
+    #[serde(default)]
+    pub ipv6_enabled: bool,
+    #[serde(skip)]
+    pub current_port: Option<std::sync::Arc<std::sync::atomic::AtomicU16>>,
 }
 
 impl ThreadParameters for ThreadParamsImpl {
@@ -38,6 +47,19 @@ impl ThreadParameters for ThreadParamsImpl {
     }
     fn get_locks_dir(&self) -> std::path::PathBuf {
         self.locks_dir.clone()
+    }
+    fn get_firewall(&self) -> Option<(crate::network::firewall::Firewall, bool)> {
+        self.firewall.map(|fw| (fw, self.ipv6_enabled))
+    }
+    fn initial_opened_port(&self) -> Option<u16> {
+        self.current_port
+            .as_ref()
+            .map(|current| current.load(std::sync::atomic::Ordering::Acquire))
+    }
+    fn on_port_refreshed(&self, port: u16) {
+        if let Some(current) = &self.current_port {
+            current.store(port, std::sync::atomic::Ordering::Release);
+        }
     }
 }
 
@@ -56,14 +78,31 @@ impl Natpmpc {
         }
 
         log::debug!("Opening firewall for NAT-PMP gateway: {gateway_str}");
+        let tunnel_iface = ns
+            .wireguard
+            .as_ref()
+            .map(|wg| wg.if_name.clone())
+            .or_else(|| {
+                crate::network::firewall::wait_for_tunnel_interface(
+                    &ns.name,
+                    &["tun", "tap", "utun"],
+                    3,
+                )
+                .ok()
+                .flatten()
+            })
+            .context("Could not determine tunnel interface for NAT-PMP gateway rule")?;
         match ns.firewall {
             crate::network::firewall::Firewall::IpTables => {
                 NetworkNamespace::exec(
                     &ns.name,
                     &[
                         "iptables",
-                        "-A",
+                        "-I",
                         "OUTPUT",
+                        "1",
+                        "-o",
+                        &tunnel_iface,
                         "-p",
                         "udp",
                         "-d",
@@ -76,15 +115,18 @@ impl Natpmpc {
                 )?;
             }
             crate::network::firewall::Firewall::NfTables => {
+                let quoted_iface = format!("\"{tunnel_iface}\"");
                 NetworkNamespace::exec(
                     &ns.name,
                     &[
                         "nft",
-                        "add",
+                        "insert",
                         "rule",
                         "inet",
                         &ns.name,
                         "output",
+                        "oifname",
+                        &quoted_iface,
                         "ip",
                         "daddr",
                         &gateway_str,
@@ -104,6 +146,11 @@ impl Natpmpc {
         let output =
             NetworkNamespace::exec_with_output(&ns.name, &["natpmpc", "-g", &gateway_str])?;
         if !output.status.success() {
+            log::debug!(
+                "NAT-PMP gateway probe failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
             log::error!(
                 "natpmpc failed - likely that this server does not support port forwarding, please choose another server"
             );
@@ -112,6 +159,11 @@ impl Natpmpc {
             )
         }
 
+        let ipv6_enabled = ns
+            .veth_pair_ips
+            .as_ref()
+            .and_then(|ips| ips.ipv6.as_ref())
+            .is_some();
         let params = ThreadParamsImpl {
             netns_name: ns.name.clone(),
             locks_dir: crate::util::config_dir()?.join("vopono").join("locks"),
@@ -120,14 +172,24 @@ impl Natpmpc {
                 ns.predown_user.clone(),
                 ns.predown_group.clone(),
             ),
+            firewall: Some(ns.firewall),
+            ipv6_enabled,
+            current_port: None,
         };
 
+        Self::resume(params)
+    }
+
+    pub fn resume(mut params: ThreadParamsImpl) -> anyhow::Result<Self> {
         let port = Self::refresh_port(&params)?;
+        let current_port = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(port));
+        params.current_port = Some(current_port.clone());
         Self::callback_command(&params, port);
 
         let (send, recv) = mpsc::channel::<bool>();
 
         let owner_write_context = crate::util::capture_owner_write_context()?;
+        let retained = params.clone();
         let handle = std::thread::spawn(move || {
             crate::util::install_owner_write_context(&owner_write_context);
             Self::thread_loop(params, recv);
@@ -136,8 +198,10 @@ impl Natpmpc {
         log::info!("ProtonVPN forwarded local port: {port}");
         Ok(Self {
             local_port: port,
+            current_port,
             loop_thread_handle: Some(handle),
             send_channel: send,
+            params: retained,
         })
     }
 }
@@ -153,6 +217,11 @@ impl ThreadLoopForwarder for Natpmpc {
             &params.netns_name,
             &["natpmpc", "-a", "1", "0", "udp", "60", "-g", &gateway_str],
         )?;
+        anyhow::ensure!(
+            udp_output.status.success(),
+            "natpmpc UDP port renewal failed ({})",
+            udp_output.status
+        );
         let udp_port: u16 = re
             .captures(String::from_utf8_lossy(&udp_output.stdout).as_ref())
             .context("Failed to read port from natpmpc output - no captures")?
@@ -165,6 +234,11 @@ impl ThreadLoopForwarder for Natpmpc {
             &params.netns_name,
             &["natpmpc", "-a", "1", "0", "tcp", "60", "-g", &gateway_str],
         )?;
+        anyhow::ensure!(
+            tcp_output.status.success(),
+            "natpmpc TCP port renewal failed ({})",
+            tcp_output.status
+        );
         let tcp_port: u16 = re
             .captures(String::from_utf8_lossy(&tcp_output.stdout).as_ref())
             .context("Failed to read port from natpmpc output - no captures")?
@@ -194,6 +268,12 @@ impl Drop for Natpmpc {
 
 impl Forwarder for Natpmpc {
     fn forwarded_port(&self) -> u16 {
-        self.local_port
+        self.current_port.load(std::sync::atomic::Ordering::Acquire)
+    }
+    fn snapshot(&self) -> Option<super::ForwarderSnapshot> {
+        Some(super::ForwarderSnapshot::Natpmp(self.params.clone()))
+    }
+    fn stop_handle(&self) -> Option<std::sync::mpsc::Sender<bool>> {
+        Some(self.send_channel.clone())
     }
 }

@@ -1,9 +1,10 @@
-use crate::status::{self, FORWARDED_PORT_SIDECAR, LockfileKind};
+use crate::network::health::is_health_sidecar;
+use crate::status::{self, LockfileKind, STOPPING_SIDECAR, is_forwarded_port_sidecar};
 use anyhow::Context;
 use nix::dir::{Dir, Entry, Type};
 use nix::errno::Errno;
-use nix::fcntl::OFlag;
-use nix::sys::stat::Mode;
+use nix::fcntl::{AtFlags, OFlag};
+use nix::sys::stat::{Mode, fstatat};
 use nix::unistd::{UnlinkatFlags, unlinkat};
 use std::ffi::CStr;
 use std::path::Path;
@@ -57,8 +58,23 @@ pub(super) fn clean_dead_locks(config_base: &Path) -> anyhow::Result<()> {
         // Permission or inspection failures do not establish absence.
         let namespace_missing = std::fs::metadata(Path::new("/var/run/netns").join(namespace))
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-        for file in entries(&mut dir)? {
-            if file.file_type() != Some(Type::File) {
+        let dir_entries = entries(&mut dir)?;
+        // Count how many primary lockfiles remain; if the namespace still
+        // exists on the host, keep the last primary lockfile even if its
+        // launcher PID exited (e.g. a detached background process kept the
+        // namespace alive) so `vopono list` and `vopono stop namespace` can
+        // still see and cleanly tear down its host resources.
+        let mut remaining_primaries = dir_entries
+            .iter()
+            .filter(|file| {
+                entry_is_regular_file(&dir, file)
+                    && file.file_name().to_str().is_ok_and(|name| {
+                        LockfileKind::from_path(Path::new(name)) == Some(LockfileKind::Primary)
+                    })
+            })
+            .count();
+        for file in dir_entries {
+            if !entry_is_regular_file(&dir, &file) {
                 continue;
             }
             let Ok(filename) = file.file_name().to_str() else {
@@ -66,9 +82,22 @@ pub(super) fn clean_dead_locks(config_base: &Path) -> anyhow::Result<()> {
             };
             let path = Path::new(filename);
             let stale = match LockfileKind::from_path(path) {
-                Some(LockfileKind::Primary) => filename
-                    .parse::<u32>()
-                    .is_ok_and(|pid| namespace_missing || !running_processes.contains(&pid)),
+                Some(LockfileKind::Primary) => filename.parse::<u32>().is_ok_and(|pid| {
+                    if namespace_missing {
+                        true
+                    } else if !running_processes.contains(&pid)
+                        && !super::check_process_running(pid)
+                    {
+                        if remaining_primaries > 1 {
+                            remaining_primaries -= 1;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }),
                 Some(LockfileKind::Client) => {
                     namespace_missing || status::client_lockfile_is_stale(path, namespace)
                 }
@@ -82,8 +111,11 @@ pub(super) fn clean_dead_locks(config_base: &Path) -> anyhow::Result<()> {
 
         let remaining = entries(&mut dir)?;
         if remaining.iter().all(|file| {
-            file.file_name().to_bytes() == FORWARDED_PORT_SIDECAR.as_bytes()
-                && file.file_type() == Some(Type::File)
+            let Ok(name) = file.file_name().to_str() else {
+                return false;
+            };
+            (is_forwarded_port_sidecar(name) || is_health_sidecar(name) || name == STOPPING_SIDECAR)
+                && entry_is_regular_file(&dir, file)
         }) {
             for file in remaining {
                 remove_file(&dir, file.file_name())?;
@@ -96,6 +128,15 @@ pub(super) fn clean_dead_locks(config_base: &Path) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn entry_is_regular_file(dir: &Dir, entry: &Entry) -> bool {
+    match entry.file_type() {
+        Some(Type::File) => true,
+        Some(_) => false,
+        None => fstatat(dir, entry.file_name(), AtFlags::AT_SYMLINK_NOFOLLOW)
+            .is_ok_and(|stat| (stat.st_mode & libc::S_IFMT) == libc::S_IFREG),
+    }
 }
 
 fn optional_directory(result: nix::Result<Dir>) -> anyhow::Result<Option<Dir>> {
@@ -127,6 +168,7 @@ fn remove_file(dir: &Dir, filename: &CStr) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::status::FORWARDED_PORT_SIDECAR;
     use std::fs;
     use std::os::unix::fs::symlink;
 
@@ -176,6 +218,26 @@ mod tests {
 
         assert!(!dir.exists());
         assert!(config_link.is_dir());
+    }
+
+    #[test]
+    fn health_sidecars_are_not_session_state_and_are_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let namespace = "vo_cleanup_health";
+        assert!(!Path::new("/var/run/netns").join(namespace).exists());
+        let dir = temp.path().join("vopono/locks").join(namespace);
+        fs::create_dir_all(&dir).unwrap();
+        for name in [
+            crate::network::health::HEALTH_FILE,
+            "health.tmp-4242",
+            FORWARDED_PORT_SIDECAR,
+        ] {
+            fs::write(dir.join(name), "state").unwrap();
+        }
+
+        clean_dead_locks(temp.path()).unwrap();
+
+        assert!(!dir.exists(), "health-only lock directory was not removed");
     }
 
     #[test]

@@ -41,6 +41,20 @@ thread_local! {
     static CONFIG_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     static CONFIG_OWNER_OVERRIDE: std::cell::RefCell<Option<(Uid, Gid)>> =
         const {std::cell::RefCell::new(None) };
+    static LAUNCH_CANCEL_FLAG: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub fn set_launch_cancel_flag(flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+    LAUNCH_CANCEL_FLAG.with(|slot| *slot.borrow_mut() = flag);
+}
+
+pub fn is_launch_cancelled() -> bool {
+    LAUNCH_CANCEL_FLAG.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+    })
 }
 
 static DAEMON_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -58,6 +72,10 @@ pub fn is_daemon_mode() -> bool {
 /// Use `None` to clear. This is safe for the daemon where each client runs on its own thread.
 pub fn set_config_dir_override(path: Option<PathBuf>) {
     CONFIG_DIR_OVERRIDE.with(|ov| *ov.borrow_mut() = path);
+}
+
+pub fn config_dir_override() -> Option<PathBuf> {
+    CONFIG_DIR_OVERRIDE.with(|ov| ov.borrow().clone())
 }
 
 pub fn set_config_owner_override(owner: Option<(Uid, Gid)>) {
@@ -158,7 +176,7 @@ pub fn resolve_config_owner() -> anyhow::Result<(Option<Uid>, Option<Gid>)> {
 /// explicit override; the sudo path derives the invoking account from NSS.
 pub(crate) fn config_write_owner() -> anyhow::Result<Option<(Uid, Gid)>> {
     if let Some(owner) = config_owner_override() {
-        return Ok(Some(owner));
+        return Ok((!owner.0.is_root()).then_some(owner));
     }
     if nix::unistd::geteuid().is_root() {
         let user = effective_user()?;
@@ -308,11 +326,50 @@ pub fn get_pids_in_namespace(ns_name: &str) -> anyhow::Result<Vec<i32>> {
     Ok(pids)
 }
 
+/// Resolve the path to the current vopono executable for internal helpers,
+/// surviving in-place binary upgrades where `/proc/self/exe` gains a
+/// ` (deleted)` suffix.
+pub fn current_vopono_exe() -> anyhow::Result<PathBuf> {
+    static STARTUP_EXE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    let cached = STARTUP_EXE.get_or_init(|| {
+        std::env::current_exe()
+            .map(strip_deleted_exe_suffix)
+            .unwrap_or_else(|_| PathBuf::from("/proc/self/exe"))
+    });
+    if cached.exists() {
+        return Ok(cached.clone());
+    }
+    let current = std::env::current_exe()?;
+    let stripped = strip_deleted_exe_suffix(current);
+    if stripped.exists() {
+        return Ok(stripped);
+    }
+    Ok(PathBuf::from("/proc/self/exe"))
+}
+
+fn strip_deleted_exe_suffix(path: PathBuf) -> PathBuf {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    let bytes = path.as_os_str().as_bytes();
+    const SUFFIX: &[u8] = b" (deleted)";
+    if let Some(trimmed) = bytes.strip_suffix(SUFFIX)
+        && !trimmed.is_empty()
+    {
+        return PathBuf::from(std::ffi::OsString::from_vec(trimmed.to_vec()));
+    }
+    path
+}
+
 pub fn check_process_running(pid: u32) -> bool {
-    let s = System::new_with_specifics(
-        RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
-    );
-    s.process(sysinfo::Pid::from_u32(pid)).is_some()
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The process comm name in /proc/<pid>/stat is enclosed in parentheses and
+    // may contain spaces/parentheses, so parse starting after the last ')'.
+    let Some(rest) = stat.rsplit_once(')').map(|(_, rest)| rest.trim_start()) else {
+        return false;
+    };
+    let state = rest.as_bytes().first().copied();
+    !matches!(state, Some(b'Z' | b'X' | b'x'))
 }
 
 /// Return the PIDs of processes whose comm name matches `process_name`.
@@ -324,7 +381,8 @@ pub fn check_process_running(pid: u32) -> bool {
 pub fn get_running_process_pids(process_name: &str) -> Vec<u32> {
     let s = System::new_with_specifics(
         RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
-    );
+    )
+    .expect("Failed to initialize process information");
     s.processes()
         .iter()
         .filter(|(_, process)| process.name().to_string_lossy() == process_name)
@@ -340,6 +398,7 @@ pub fn get_running_process_pids(process_name: &str) -> Vec<u32> {
 /// `readlink(2)` on `/run/netns/<name>` bind mounts returns `EINVAL` on
 /// several kernels.
 pub fn process_is_in_network_namespace(pid: u32, ns_name: &str) -> anyhow::Result<bool> {
+    crate::network::netns::validate_netns_name(ns_name)?;
     let process_namespace = fs::metadata(format!("/proc/{pid}/ns/net"))
         .with_context(|| format!("Could not inspect network namespace for PID {pid}"))?;
     let target_namespace = fs::metadata(format!("/var/run/netns/{ns_name}"))
@@ -353,14 +412,16 @@ pub fn process_is_in_network_namespace(pid: u32, ns_name: &str) -> anyhow::Resul
 pub fn get_all_running_pids() -> Vec<u32> {
     let s = System::new_with_specifics(
         RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
-    );
+    )
+    .expect("Failed to initialize process information");
     s.processes().keys().map(|x| x.as_u32()).collect()
 }
 
 pub fn get_all_running_process_names() -> Vec<String> {
     let s = System::new_with_specifics(
         RefreshKind::everything().with_processes(ProcessRefreshKind::everything()),
-    );
+    )
+    .expect("Failed to initialize process information");
     s.processes()
         .values()
         .map(|x| x.name().to_string_lossy().to_string())
@@ -420,20 +481,75 @@ pub fn clean_dead_locks() -> anyhow::Result<()> {
 /// Owns the `vopono/locks` layout so callers (e.g. the lifecycle control
 /// commands) do not need to know where lockfiles live on disk.
 pub fn remove_lock_files(namespace: &str) -> anyhow::Result<()> {
-    let mut lock_dir = config_dir()?;
-    lock_dir.push(format!("vopono/locks/{namespace}"));
-    if !lock_dir.exists() {
+    use nix::dir::Dir;
+    use nix::fcntl::OFlag;
+    use nix::sys::stat::Mode;
+
+    crate::network::netns::validate_netns_name(namespace)?;
+    let base = config_dir()?;
+    let dir_flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let Ok(base_dir) = Dir::open(
+        &base,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    ) else {
         return Ok(());
+    };
+    let Ok(vopono_dir) = Dir::openat(&base_dir, "vopono", dir_flags, Mode::empty()) else {
+        return Ok(());
+    };
+    let Ok(locks_dir) = Dir::openat(&vopono_dir, "locks", dir_flags, Mode::empty()) else {
+        return Ok(());
+    };
+    let Ok(mut ns_dir) = Dir::openat(&locks_dir, namespace, dir_flags, Mode::empty()) else {
+        return Ok(());
+    };
+
+    let lock_dir = base.join("vopono").join("locks").join(namespace);
+    let mut dir_entries = Vec::new();
+    for entry in ns_dir.iter() {
+        dir_entries.push(entry?);
     }
-    for entry in std::fs::read_dir(&lock_dir)? {
-        let entry = entry?;
-        if entry.path().is_file() {
-            debug!("Removing lockfile: {}", entry.path().display());
-            std::fs::remove_file(entry.path())?;
+    let mut to_remove = Vec::new();
+    for entry in dir_entries {
+        let Ok(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if name == "." || name == ".." {
+            continue;
+        }
+        let is_known = status::LockfileKind::from_path(Path::new(name)).is_some()
+            || status::is_forwarded_port_sidecar(name)
+            || name == status::STOPPING_SIDECAR
+            || crate::network::health::is_health_sidecar(name);
+        if !is_known {
+            continue;
+        }
+        let is_regular = match entry.file_type() {
+            Some(nix::dir::Type::File) => true,
+            Some(_) => false,
+            None => nix::sys::stat::fstatat(
+                &ns_dir,
+                entry.file_name(),
+                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+            )
+            .is_ok_and(|stat| (stat.st_mode & libc::S_IFMT) == libc::S_IFREG),
+        };
+        if is_regular {
+            to_remove.push(lock_dir.join(name));
         }
     }
+    for path in to_remove {
+        debug!("Removing lockfile: {}", path.display());
+        owner_write::remove_file_as_config_owner(&path)?;
+    }
     // Best-effort: only succeeds when the directory is now empty.
-    std::fs::remove_dir(&lock_dir).ok();
+    if matches!(
+        owner_write::remove_dir_as_config_owner_if_needed(&lock_dir),
+        Ok(false)
+    ) {
+        std::fs::remove_dir(&lock_dir).ok();
+    }
     Ok(())
 }
 
@@ -444,6 +560,18 @@ pub fn clean_dead_namespaces() -> anyhow::Result<()> {
     existing_namespaces
         .into_iter()
         .filter(|namespace| {
+            if crate::network::netns::validate_netns_name(namespace).is_err() {
+                return false;
+            }
+            if !namespace.starts_with("vo_") && !namespace.starts_with("mcp-") {
+                return false;
+            }
+            if Path::new("/run/vopono/namespace-owners")
+                .join(namespace)
+                .exists()
+            {
+                return false;
+            }
             if lock_namespaces.contains_key(namespace) {
                 return false;
             }
@@ -581,7 +709,9 @@ pub fn get_configs_from_alias(list_path: &Path, alias: &str) -> Vec<PathBuf> {
 pub fn get_config_from_alias(list_path: &Path, alias: &str) -> anyhow::Result<PathBuf> {
     let paths = get_configs_from_alias(list_path, alias);
     if paths.is_empty() {
-        Err(anyhow!("Could not find config file for alias {}", alias))
+        Err(anyhow!(
+            "Could not find config matching server prefix {alias:?}"
+        ))
     } else {
         let config = paths
             .choose(&mut rand::rng())
@@ -593,7 +723,14 @@ pub fn get_config_from_alias(list_path: &Path, alias: &str) -> anyhow::Result<Pa
 }
 
 pub fn get_config_file_protocol(config_file: &Path) -> anyhow::Result<Protocol> {
-    let content = fs::read_to_string(config_file).map_err(|e| {
+    let bytes = owner_write::read_file_as_config_owner(config_file).map_err(|e| {
+        anyhow!(
+            "Failed to read VPN config file: {}, err: {}",
+            config_file.to_string_lossy(),
+            e
+        )
+    })?;
+    let content = String::from_utf8(bytes).map_err(|e| {
         anyhow!(
             "Failed to read VPN config file: {}, err: {}",
             config_file.to_string_lossy(),
@@ -656,17 +793,15 @@ pub fn get_lock_namespaces() -> anyhow::Result<LockNamespaces> {
 }
 
 pub fn parse_command_str(command_str: &str) -> anyhow::Result<Vec<String>> {
-    shellwords::split(command_str).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to parse command string: {}, error: {:?}",
-            command_str,
-            e
-        )
-    })
+    shellwords::split(command_str)
+        .map_err(|e| anyhow::anyhow!("Failed to parse command string: {e:?}"))
 }
 
 pub fn hostname_to_ip(hostname: &str) -> anyhow::Result<Vec<IpAddr>> {
-    let socket_addrs = format!("{hostname}:80").to_socket_addrs()?;
+    if let Ok(ip) = hostname.parse::<IpAddr>() {
+        return Ok(vec![ip]);
+    }
+    let socket_addrs = (hostname, 80).to_socket_addrs()?;
     let ip_addrs = socket_addrs.map(|addr| addr.ip()).collect();
 
     Ok(ip_addrs)
@@ -733,5 +868,17 @@ mod tests {
             .collect::<Vec<_>>();
         ross.sort();
         assert_eq!(ross, ["ca-ross.conf", "canada-ca-ross.conf"]);
+    }
+
+    #[test]
+    fn hostname_to_ip_accepts_ipv6_literals_and_parse_command_redacts_input() {
+        assert_eq!(
+            hostname_to_ip("2001:db8::1").unwrap(),
+            vec![IpAddr::V6("2001:db8::1".parse().unwrap())]
+        );
+        let err = parse_command_str("curl --header 'Authorization: SECRET_TOKEN")
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("SECRET_TOKEN"));
     }
 }

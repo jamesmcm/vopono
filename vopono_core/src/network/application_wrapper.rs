@@ -1,7 +1,7 @@
 use std::{
     ffi::CString,
     io::Write,
-    os::fd::{AsFd, OwnedFd},
+    os::fd::{AsFd, AsRawFd, OwnedFd},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -69,10 +69,42 @@ impl ApplicationWrapper {
         stdio_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
         take_controlling_tty: bool,
     ) -> anyhow::Result<Self> {
+        Self::new_with_launch_check(
+            netns,
+            application,
+            user,
+            group,
+            working_directory,
+            port_forwarding,
+            silent,
+            host_env_vars,
+            pipe_io,
+            stdio_fds,
+            take_controlling_tty,
+            || Ok(()),
+        )
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_launch_check(
+        netns: &NetworkNamespace,
+        application: &str,
+        user: Option<String>,
+        group: Option<String>,
+        working_directory: Option<PathBuf>,
+        port_forwarding: Option<Box<dyn Forwarder>>,
+        silent: bool,
+        host_env_vars: &std::collections::HashMap<String, String>,
+        pipe_io: bool,
+        stdio_fds: Option<(OwnedFd, OwnedFd, OwnedFd)>,
+        take_controlling_tty: bool,
+        before_launch: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<Self> {
         let app_vec = parse_command_str(application)?;
         let warning_stderr = stdio_fds
             .as_ref()
-            .map(|(_, _, stderr)| nix::unistd::dup(stderr.as_fd()))
+            .map(|(_, _, stderr)| stderr.as_fd().try_clone_to_owned())
             .transpose()?;
 
         let shared_process_name = app_vec.first().and_then(|program| {
@@ -129,30 +161,48 @@ impl ApplicationWrapper {
             working_directory,
             port_forwarding.as_deref(),
             host_env_vars,
+            before_launch,
         )?;
 
         let pid = handle.id();
         if check_process_running(pid) {
-            match process_is_in_network_namespace(pid, &netns.name) {
-                Ok(true) => {
-                    debug!(
-                        "Verified application PID {pid} is in network namespace '{}'",
-                        netns.name
-                    );
+            let mut in_ns = process_is_in_network_namespace(pid, &netns.name);
+            // On the non-direct `ip netns exec` path, `ip` enters the namespace
+            // asynchronously after spawn; briefly poll before declaring mismatch.
+            if matches!(in_ns, Ok(false)) {
+                for _ in 0..20 {
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                    if !check_process_running(pid) {
+                        break;
+                    }
+                    in_ns = process_is_in_network_namespace(pid, &netns.name);
+                    if !matches!(in_ns, Ok(false)) {
+                        break;
+                    }
                 }
-                Ok(false) => {
-                    let _ = handle.kill();
-                    let _ = handle.wait();
-                    bail!(
-                        "Refusing to launch application: PID {pid} is not in network namespace '{}'",
-                        netns.name
-                    );
-                }
-                Err(error) => {
-                    log::warn!(
-                        "Could not verify that application PID {pid} is in network namespace '{}': {error}",
-                        netns.name
-                    );
+            }
+            if check_process_running(pid) {
+                match in_ns {
+                    Ok(true) => {
+                        debug!(
+                            "Verified application PID {pid} is in network namespace '{}'",
+                            netns.name
+                        );
+                    }
+                    Ok(false) => {
+                        let _ = handle.kill();
+                        let _ = handle.wait();
+                        bail!(
+                            "Refusing to launch application: PID {pid} is not in network namespace '{}'",
+                            netns.name
+                        );
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "Could not verify that application PID {pid} is in network namespace '{}': {error}",
+                            netns.name
+                        );
+                    }
                 }
             }
         } else if !shared_process_pids.is_empty() {
@@ -191,6 +241,7 @@ impl ApplicationWrapper {
         set_dir: Option<PathBuf>,
         forwarder: Option<&dyn Forwarder>,
         host_env_vars: &std::collections::HashMap<String, String>,
+        before_launch: impl FnOnce() -> anyhow::Result<()>,
     ) -> anyhow::Result<(Child, Option<EtcOverlay>)> {
         let (prog, args) = command.split_first().context("Command cannot be empty")?;
         let mut handle: Command;
@@ -204,7 +255,22 @@ impl ApplicationWrapper {
         if use_direct_setns {
             handle = Command::new(prog);
             handle.args(args);
-            // Prepare all data outside the closure
+            let daemon_mode = crate::util::is_daemon_mode();
+            if daemon_mode {
+                // Never leak root/admin daemon environment variables (such as
+                // SSH_AUTH_SOCK, cloud tokens, or PULSE_*) to unprivileged clients.
+                handle.env_clear();
+                if !host_env_vars.contains_key("PATH") {
+                    handle.env(
+                        "PATH",
+                        "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                    );
+                }
+            }
+            // Prepare all data outside the closure. Working directory changes are
+            // performed inside pre_exec AFTER dropping privileges so a root chdir
+            // can never traverse 0700 parent directories on behalf of a client.
+            let mut target_dir: Option<PathBuf> = set_dir;
             let user_details = if let Some(user_name) = user {
                 debug!(
                     "(daemon) Preparing to run '{}' in netns '{}' as user '{}'",
@@ -236,32 +302,35 @@ impl ApplicationWrapper {
                     );
                 }
 
-                //  Set environment and working directory on the Command builder itself.
-                // This is the safe and correct way to prepare the child's environment.
+                // Set trusted user identity variables before applying client overrides.
                 handle.env("HOME", &target_user.dir);
                 handle.env("USER", &target_user.name);
                 handle.env("LOGNAME", &target_user.name);
 
-                if let Some(dir) = set_dir {
-                    handle.current_dir(dir);
-                } else {
-                    handle.current_dir(&target_user.dir);
+                if target_dir.is_none() {
+                    target_dir = Some(target_user.dir.clone());
                 }
 
-                Some((
-                    target_user.uid,
+                let groups = crate::util::owner_write::supplementary_groups(
+                    &target_user.name,
                     target_group.gid,
-                    CString::new(target_user.name)?,
-                ))
+                )?;
+                Some((target_user.uid, target_group.gid, groups))
             } else {
-                if let Some(dir) = set_dir {
-                    handle.current_dir(dir);
-                }
                 None
             };
 
+            let target_dir_cstr = target_dir
+                .as_deref()
+                .map(|dir| {
+                    use std::os::unix::ffi::OsStrExt;
+                    CString::new(dir.as_os_str().as_bytes())
+                        .context("Working directory contains an interior NUL byte")
+                })
+                .transpose()?;
             let netns_path_cstr = CString::new(format!("/var/run/netns/{}", netns.name))?;
             let want_controlling_tty = take_controlling_tty;
+            let isolate_process_group = daemon_mode && !want_controlling_tty;
             let root_c = CString::new("/").unwrap();
             let overlay = EtcOverlay::prepare(&netns.name)?;
             let overlay_options = overlay.options.clone();
@@ -275,10 +344,7 @@ impl ApplicationWrapper {
                 handle.pre_exec(move || {
                     // The closure now ONLY contains async-signal-safe syscall wrappers.
                     let ns_fd = open(netns_path_cstr.as_c_str(), OFlag::O_RDONLY, Mode::empty())?;
-                    setns(
-                        ns_fd.try_clone().expect("Clone failed"),
-                        CloneFlags::CLONE_NEWNET,
-                    )?;
+                    setns(&ns_fd, CloneFlags::CLONE_NEWNET)?;
                     close(ns_fd)?;
 
                     // Create a private mount namespace for the child to safely overlay /etc files
@@ -337,12 +403,22 @@ impl ApplicationWrapper {
                                 let _ = libc::tcsetpgrp(fd0, pgrp);
                             }
                         }
+                    } else if isolate_process_group {
+                        // Non-TTY daemon launches use their own process group so
+                        // forwarded client signals can be delivered cleanly via killpg.
+                        let _ = libc::setpgid(0, 0);
                     }
 
-                    if let Some((uid, gid, user_name_cstr)) = &user_details {
-                        nix::unistd::initgroups(user_name_cstr, *gid)?;
+                    if let Some((uid, gid, groups)) = &user_details {
+                        nix::unistd::setgroups(groups)?;
                         nix::unistd::setgid(*gid)?;
                         nix::unistd::setuid(*uid)?;
+                    }
+
+                    if let Some(dir_cstr) = &target_dir_cstr
+                        && libc::chdir(dir_cstr.as_ptr()) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
                     }
 
                     Ok(())
@@ -401,6 +477,7 @@ impl ApplicationWrapper {
                 sudo_args.push("--group".to_string());
                 sudo_args.push(group_str.clone());
             }
+            sudo_args.push("--".to_string());
 
             debug!(
                 "ip netns exec {} {} {}",
@@ -464,6 +541,16 @@ impl ApplicationWrapper {
             _ => {}
         }
 
+        // A setuid/file-capability helper must not give an application
+        // CAP_NET_ADMIN or CAP_NET_RAW inside this namespace. Either can
+        // defeat the firewall (including forging transport socket marks).
+        unsafe {
+            handle.pre_exec(|| {
+                nix::sys::prctl::set_no_new_privs()?;
+                Ok(())
+            });
+        }
+        before_launch()?;
         let child = handle.spawn()?;
         Ok((child, etc_overlay))
     }
@@ -474,14 +561,40 @@ fn report_warning(message: String, silent: bool, stderr_fd: Option<&OwnedFd>) {
         // --silent suppresses warnings as well as application output.
         return;
     }
-    if let Some(stderr_fd) = stderr_fd
-        && let Ok(dup_fd) = nix::unistd::dup(stderr_fd.as_fd())
-    {
-        // Daemon path: the application runs in the daemon, so route warnings
-        // back to the client's stderr instead of the daemon's journal.
-        let mut stderr = std::fs::File::from(dup_fd);
-        let _ = writeln!(stderr, "warning: {message}");
-        let _ = stderr.flush();
+    if let Some(stderr_fd) = stderr_fd {
+        // Daemon path: route warnings back to the client's stderr without ever
+        // blocking the daemon or holding namespace transition locks on a full
+        // client pipe/socket.
+        let text = format!("warning: {message}\n");
+        let bytes = text.as_bytes();
+        let Ok(dup_fd) = stderr_fd.as_fd().try_clone_to_owned() else {
+            return;
+        };
+        let file = std::fs::File::from(dup_fd);
+        let Ok(meta) = file.metadata() else {
+            return;
+        };
+        let kind = meta.file_type();
+        use std::os::unix::fs::FileTypeExt;
+        if kind.is_socket() {
+            let _ = nix::sys::socket::send(
+                file.as_raw_fd(),
+                bytes,
+                nix::sys::socket::MsgFlags::MSG_DONTWAIT | nix::sys::socket::MsgFlags::MSG_NOSIGNAL,
+            );
+        } else if kind.is_fifo() || kind.is_char_device() {
+            use std::os::unix::fs::OpenOptionsExt;
+            if let Ok(mut nonblocking) = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY)
+                .open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            {
+                let _ = nonblocking.write(bytes);
+            }
+        } else {
+            let mut file = file;
+            let _ = file.write_all(bytes);
+        }
     } else {
         log::warn!("{message}");
     }

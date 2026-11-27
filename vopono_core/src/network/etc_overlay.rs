@@ -53,7 +53,8 @@ fn secure_root_directory(path: &Path) -> anyhow::Result<()> {
 
 /// Prepared, inert overlay inputs retained for the lifetime of the child.
 pub(crate) struct EtcOverlay {
-    _directory: tempfile::TempDir,
+    namespace: String,
+    directory: Option<tempfile::TempDir>,
     pub(crate) source: CString,
     pub(crate) filesystem_type: CString,
     pub(crate) target: CString,
@@ -62,26 +63,32 @@ pub(crate) struct EtcOverlay {
 
 impl EtcOverlay {
     pub(crate) fn prepare(namespace: &str) -> anyhow::Result<Self> {
-        let directory = trusted_runtime_dir("etc-")?;
+        let prefix = format!("etc-{namespace}-");
+        let directory = trusted_runtime_dir(&prefix)?;
         let upper = directory.path().join("upper");
         let work = directory.path().join("work");
         std::fs::create_dir(&upper)?;
         std::fs::create_dir(&work)?;
-
+        // Overlayfs inherits the upperdir mode onto the mounted /etc root;
+        // enforce 0755 so a restrictive daemon UMask never blocks unprivileged apps.
+        std::fs::set_permissions(&upper, std::fs::Permissions::from_mode(0o755))?;
         let namespace_etc = PathBuf::from("/etc/netns").join(namespace);
         for name in ["resolv.conf", "hosts", "nsswitch.conf"] {
             let source = namespace_etc.join(name);
             if source.is_file() {
-                std::fs::copy(&source, upper.join(name)).with_context(|| {
+                let target = upper.join(name);
+                std::fs::copy(&source, &target).with_context(|| {
                     format!(
                         "Failed to stage {} for namespace {namespace}",
                         source.display()
                     )
                 })?;
+                let _ = std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644));
             }
         }
 
         Ok(Self {
+            namespace: namespace.to_owned(),
             options: CString::new(format!(
                 "lowerdir=/etc,upperdir={},workdir={}",
                 upper.display(),
@@ -90,7 +97,42 @@ impl EtcOverlay {
             source: CString::new("vopono-etc")?,
             filesystem_type: CString::new("overlay")?,
             target: CString::new("/etc")?,
-            _directory: directory,
+            directory: Some(directory),
         })
+    }
+}
+
+impl Drop for EtcOverlay {
+    fn drop(&mut self) {
+        let Some(directory) = self.directory.take() else {
+            return;
+        };
+        // If detached/forked processes are still running inside the namespace,
+        // keep the overlay upperdir/workdir alive so their mounted /etc view
+        // does not hit ESTALE/ENOENT. Namespace teardown cleans them up.
+        let ns_still_has_processes =
+            super::netns::namespace_has_any_process(&self.namespace).unwrap_or(false);
+        if ns_still_has_processes {
+            let _ = directory.keep();
+        }
+    }
+}
+
+/// Remove any retained overlay backing directories for `namespace` once the
+/// namespace itself is torn down.
+pub(crate) fn cleanup_namespace_overlays(namespace: &str) {
+    let root = Path::new(TRUSTED_RUNTIME_ROOT);
+    let prefix = format!("etc-{namespace}-");
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(&prefix))
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
     }
 }

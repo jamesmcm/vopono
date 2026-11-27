@@ -16,7 +16,6 @@ use log::{debug, error};
 use rand::prelude::IndexedRandom;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::fs::read_to_string;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::Path;
 use std::str::FromStr;
@@ -24,6 +23,12 @@ use std::str::FromStr;
 #[derive(Serialize, Deserialize, Debug)]
 pub struct Shadowsocks {
     pub(crate) pid: u32,
+    #[serde(default)]
+    pub(crate) ns_name: Option<String>,
+    #[serde(default)]
+    pub(crate) server_ip: Option<IpAddr>,
+    #[serde(default)]
+    pub(crate) server_port: Option<u16>,
     #[serde(skip)]
     cleanup_enabled: bool,
 }
@@ -81,6 +86,9 @@ impl Shadowsocks {
 
         Ok(Self {
             pid: handle.id(),
+            ns_name: Some(netns.name.clone()),
+            server_ip: Some(*route),
+            server_port: Some(port),
             cleanup_enabled: true,
         })
     }
@@ -88,7 +96,9 @@ impl Shadowsocks {
 
 pub fn uses_shadowsocks(openvpn_config: &Path) -> anyhow::Result<Option<(IpAddr, u16)>> {
     // TODO: We assume all socks-proxy are Shadowsocks
-    let config_str = read_to_string(openvpn_config)
+    let bytes = crate::util::owner_write::read_file_as_config_owner(openvpn_config)
+        .context(format!("Reading OpenVPN config file: {openvpn_config:?}"))?;
+    let config_str = String::from_utf8(bytes)
         .context(format!("Reading OpenVPN config file: {openvpn_config:?}"))?;
 
     let re = Regex::new(r"socks-proxy ([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+) ([0-9]+)")?;
@@ -107,8 +117,10 @@ pub fn uses_shadowsocks(openvpn_config: &Path) -> anyhow::Result<Option<(IpAddr,
 }
 
 pub fn get_routes_from_config(path: &Path) -> anyhow::Result<Vec<IpAddr>> {
+    let bytes = crate::util::owner_write::read_file_as_config_owner(path)
+        .context(format!("Reading OpenVPN config file: {path:?}"))?;
     let file_string =
-        std::fs::read_to_string(path).context(format!("Reading OpenVPN config file: {path:?}"))?;
+        String::from_utf8(bytes).context(format!("Reading OpenVPN config file: {path:?}"))?;
     let mut output_vec = Vec::new();
     // Regex extract
     let re = Regex::new(
@@ -136,13 +148,25 @@ impl Drop for Shadowsocks {
         if !self.cleanup_enabled {
             return;
         }
-        match nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(self.pid as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        ) {
-            Ok(_) => debug!("Killed Shadowsocks (pid: {})", self.pid),
-            Err(e) => error!("Failed to kill Shadowsocks (pid: {}): {:?}", self.pid, e),
+        let pid = nix::unistd::Pid::from_raw(self.pid as i32);
+        let pid_matches = self.ns_name.as_deref().is_none_or(|ns| {
+            crate::util::process_is_in_network_namespace(self.pid, ns).unwrap_or(false)
+        });
+        if pid_matches {
+            match nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL) {
+                Ok(_) => debug!("Killed Shadowsocks (pid: {})", self.pid),
+                Err(e) => error!("Failed to kill Shadowsocks (pid: {}): {:?}", self.pid, e),
+            }
+        } else {
+            debug!(
+                "Skipping Shadowsocks kill for pid {}: no longer in target namespace",
+                self.pid
+            );
         }
+        while matches!(
+            nix::sys::wait::waitpid(pid, None),
+            Err(nix::errno::Errno::EINTR)
+        ) {}
     }
 }
 

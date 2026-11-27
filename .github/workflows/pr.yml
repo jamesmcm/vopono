@@ -4,30 +4,50 @@ on:
   pull_request:
     branches: [ master ]
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
-jobs: 
+jobs:
   quickcheck:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       version: ${{ steps.rustversion.outputs.rustversion }}
     steps:
-    - uses: actions/checkout@v2
-    - run: cargo check
+    - uses: actions/checkout@v4
+    - run: cargo check --locked
     - run: cargo pkgid
     - run: 'echo "$(cargo pkgid | cut -d# -f2)"'
     - id: rustversion
-      run: 'echo "::set-output name=rustversion::$(cargo pkgid | cut -d# -f2)"'
+      run: 'echo "rustversion=$(cargo pkgid | cut -d# -f2)" >> "$GITHUB_OUTPUT"'
   clippy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
     - name: Install Clippy
       run: rustup component add clippy rustfmt
     - name: Clippy
-      run: cargo clippy -- -D warnings
+      run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
     - name: Rustfmt
       run: cargo fmt --all -- --check
     - name: Test
-      run: cargo test --workspace
+      run: cargo test --workspace --locked
+  gui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install GUI dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev libudev-dev libxdo-dev
+    - name: Rustfmt
+      run: cargo fmt --manifest-path vopono-gui/Cargo.toml -- --check
+    - name: Clippy
+      run: cargo clippy --manifest-path vopono-gui/Cargo.toml --all-features --all-targets --locked -- -D warnings
+    - name: Test
+      run: cargo test --manifest-path vopono-gui/Cargo.toml --locked

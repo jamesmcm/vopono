@@ -16,8 +16,8 @@ pub enum Firewall {
 ///
 /// Once the VPN client is running and its tunnel interface is up, all
 /// input/output in the namespace is dropped except loopback, the tunnel
-/// interface, return traffic and the resolved VPN server endpoints (the
-/// client needs those to keep its session alive). Without this policy the
+/// interface, input replies and privileged VPN control traffic to the resolved
+/// server endpoints. Without this policy the
 /// namespace keeps a working default route through the host veth/NAT path,
 /// so any tunnel failure silently bypasses the VPN.
 ///
@@ -29,6 +29,24 @@ pub fn tunnel_only_killswitch_rules(
     tunnel_iface: Option<&str>,
     endpoints: &[IpAddr],
     disable_ipv6: bool,
+) -> Vec<Vec<String>> {
+    tunnel_only_killswitch_rules_with_uid_filter(
+        ns_name,
+        firewall,
+        tunnel_iface,
+        endpoints,
+        disable_ipv6,
+        true,
+    )
+}
+
+pub fn tunnel_only_killswitch_rules_with_uid_filter(
+    ns_name: &str,
+    firewall: Firewall,
+    tunnel_iface: Option<&str>,
+    endpoints: &[IpAddr],
+    disable_ipv6: bool,
+    restrict_endpoint_to_root: bool,
 ) -> Vec<Vec<String>> {
     let mut rules: Vec<Vec<String>> = Vec::new();
     match firewall {
@@ -85,27 +103,56 @@ pub fn tunnel_only_killswitch_rules(
                     if endpoint.is_ipv6() != is_v6 {
                         continue;
                     }
-                    rules.push(vec![
+                    let mut rule = vec![
                         ipcmd.into(),
                         "-A".into(),
                         "OUTPUT".into(),
                         "-d".into(),
                         endpoint.to_string(),
-                        "-j".into(),
-                        "ACCEPT".into(),
-                    ]);
+                    ];
+                    if restrict_endpoint_to_root {
+                        rule.extend([
+                            "-m".into(),
+                            "owner".into(),
+                            "--uid-owner".into(),
+                            "0".into(),
+                        ]);
+                    }
+                    rule.extend(["-j".into(), "ACCEPT".into()]);
+                    rules.push(rule);
                 }
-                rules.push(vec![
-                    ipcmd.into(),
-                    "-A".into(),
-                    "OUTPUT".into(),
-                    "-m".into(),
-                    "conntrack".into(),
-                    "--ctstate".into(),
-                    "RELATED,ESTABLISHED".into(),
-                    "-j".into(),
-                    "ACCEPT".into(),
-                ]);
+                if is_v6 {
+                    // Allow IPv6 Neighbor Discovery so outer IPv6 VPN endpoints
+                    // remain reachable after NDP neighbor entries expire.
+                    for icmpv6_type in ["135", "136"] {
+                        rules.push(vec![
+                            ipcmd.into(),
+                            "-A".into(),
+                            "INPUT".into(),
+                            "-p".into(),
+                            "icmpv6".into(),
+                            "-m".into(),
+                            "icmp6".into(),
+                            "--icmpv6-type".into(),
+                            icmpv6_type.into(),
+                            "-j".into(),
+                            "ACCEPT".into(),
+                        ]);
+                        rules.push(vec![
+                            ipcmd.into(),
+                            "-A".into(),
+                            "OUTPUT".into(),
+                            "-p".into(),
+                            "icmpv6".into(),
+                            "-m".into(),
+                            "icmp6".into(),
+                            "--icmpv6-type".into(),
+                            icmpv6_type.into(),
+                            "-j".into(),
+                            "ACCEPT".into(),
+                        ]);
+                    }
+                }
                 if let Some(iface) = tunnel_iface {
                     rules.push(vec![
                         ipcmd.into(),
@@ -165,19 +212,53 @@ pub fn tunnel_only_killswitch_rules(
                     continue;
                 }
                 let family = if endpoint.is_ipv4() { "ip" } else { "ip6" };
-                rules.push(vec![
+                let mut rule = vec![
                     "nft".into(),
                     "add".into(),
                     "rule".into(),
                     "inet".into(),
                     ns_name.into(),
                     "output".into(),
+                ];
+                if restrict_endpoint_to_root {
+                    rule.extend(["meta".into(), "skuid".into(), "0".into()]);
+                }
+                rule.extend([
                     family.into(),
                     "daddr".into(),
                     endpoint.to_string(),
                     "counter".into(),
                     "accept".into(),
                 ]);
+                rules.push(rule);
+            }
+            if !disable_ipv6 {
+                for icmpv6_type in ["nd-neighbor-solicit", "nd-neighbor-advert"] {
+                    rules.push(vec![
+                        "nft".into(),
+                        "add".into(),
+                        "rule".into(),
+                        "inet".into(),
+                        ns_name.into(),
+                        "input".into(),
+                        "icmpv6".into(),
+                        "type".into(),
+                        icmpv6_type.into(),
+                        "accept".into(),
+                    ]);
+                    rules.push(vec![
+                        "nft".into(),
+                        "add".into(),
+                        "rule".into(),
+                        "inet".into(),
+                        ns_name.into(),
+                        "output".into(),
+                        "icmpv6".into(),
+                        "type".into(),
+                        icmpv6_type.into(),
+                        "accept".into(),
+                    ]);
+                }
             }
             rules.push(vec![
                 "nft".into(),
@@ -226,6 +307,24 @@ pub fn apply_tunnel_only_killswitch(
     firewall: Firewall,
     disable_ipv6: bool,
 ) -> anyhow::Result<()> {
+    apply_tunnel_only_killswitch_with_uid_filter(
+        netns,
+        tunnel_iface,
+        endpoints,
+        firewall,
+        disable_ipv6,
+        true,
+    )
+}
+
+pub fn apply_tunnel_only_killswitch_with_uid_filter(
+    netns: &NetworkNamespace,
+    tunnel_iface: Option<&str>,
+    endpoints: &[IpAddr],
+    firewall: Firewall,
+    disable_ipv6: bool,
+    restrict_endpoint_to_root: bool,
+) -> anyhow::Result<()> {
     info!(
         "Applying tunnel-only killswitch in {} (interface: {}, endpoints: {}, IPv6 disabled: {})",
         netns.name,
@@ -233,9 +332,14 @@ pub fn apply_tunnel_only_killswitch(
         endpoints.len(),
         disable_ipv6
     );
-    for rule in
-        tunnel_only_killswitch_rules(&netns.name, firewall, tunnel_iface, endpoints, disable_ipv6)
-    {
+    for rule in tunnel_only_killswitch_rules_with_uid_filter(
+        &netns.name,
+        firewall,
+        tunnel_iface,
+        endpoints,
+        disable_ipv6,
+        restrict_endpoint_to_root,
+    ) {
         debug!("killswitch: {}", rule.join(" "));
         let argv: Vec<&str> = rule.iter().map(String::as_str).collect();
         NetworkNamespace::exec(&netns.name, &argv)
@@ -260,21 +364,43 @@ pub fn apply_tunnel_only_killswitch_for_server(
     server: &str,
     tunnel_interface_prefixes: &[&str],
 ) -> anyhow::Result<()> {
+    apply_tunnel_only_killswitch_for_server_with_uid_filter(
+        netns,
+        firewall,
+        disable_ipv6,
+        server,
+        tunnel_interface_prefixes,
+        true,
+    )
+}
+
+pub fn apply_tunnel_only_killswitch_for_server_with_uid_filter(
+    netns: &NetworkNamespace,
+    firewall: Firewall,
+    disable_ipv6: bool,
+    server: &str,
+    tunnel_interface_prefixes: &[&str],
+    restrict_endpoint_to_root: bool,
+) -> anyhow::Result<()> {
     let Some(host) = host_from_server_arg(server) else {
         bail!("Could not derive a VPN server host from '{server}' for the killswitch");
     };
-    let endpoints = crate::util::hostname_to_ip(&host)
-        .map_err(|e| anyhow!("Cannot resolve VPN server {host} for killswitch: {e}"))?;
+    let endpoints: Vec<IpAddr> = crate::util::hostname_to_ip(&host)
+        .map_err(|e| anyhow!("Cannot resolve VPN server {host} for killswitch: {e}"))?
+        .into_iter()
+        .filter(|ip| !disable_ipv6 || ip.is_ipv4())
+        .collect();
     if endpoints.is_empty() {
-        bail!("VPN server {host} resolved to no addresses for killswitch");
+        bail!("VPN server {host} resolved to no usable addresses for killswitch");
     }
     let tunnel_iface = wait_for_tunnel_interface(&netns.name, tunnel_interface_prefixes, 20)?;
-    apply_tunnel_only_killswitch(
+    apply_tunnel_only_killswitch_with_uid_filter(
         netns,
         tunnel_iface.as_deref(),
         &endpoints,
         firewall,
         disable_ipv6,
+        restrict_endpoint_to_root,
     )
 }
 
@@ -349,12 +475,13 @@ pub fn wait_for_tunnel_interface(
 ) -> anyhow::Result<Option<String>> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     while std::time::Instant::now() < deadline {
-        let output = NetworkNamespace::exec_with_output(netns_name, &["ip", "-o", "link"])?;
+        let output =
+            NetworkNamespace::exec_with_output(netns_name, &["ip", "-j", "-d", "link", "show"])?;
         if output.status.success()
-            && let Some(iface) = parse_tunnel_interface_from_ip_link(
+            && let Some(iface) = parse_tunnel_interface_from_json(
                 &String::from_utf8_lossy(&output.stdout),
                 expected_prefixes,
-            )
+            )?
         {
             info!("Detected tunnel interface {iface} in {netns_name}");
             return Ok(Some(iface));
@@ -367,7 +494,40 @@ pub fn wait_for_tunnel_interface(
     Ok(None)
 }
 
+fn parse_tunnel_interface_from_json(
+    output: &str,
+    expected_prefixes: &[&str],
+) -> anyhow::Result<Option<String>> {
+    let links: serde_json::Value = serde_json::from_str(output)?;
+    let links = links.as_array().context("Invalid interface listing")?;
+    Ok(links.iter().find_map(|link| {
+        let name = link.get("ifname")?.as_str()?;
+        // A custom namespace named "tunnel" produces a veth beginning
+        // "tun". A prefix alone must never make that underlay a VPN device.
+        if name == "lo"
+            || link.pointer("/linkinfo/info_kind").and_then(|s| s.as_str()) == Some("veth")
+            || name.len() >= libc::IFNAMSIZ
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+        {
+            return None;
+        }
+        expected_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            .then(|| name.to_owned())
+    }))
+}
+
 pub fn disable_ipv6(netns: &NetworkNamespace, firewall: Firewall) -> anyhow::Result<()> {
+    let kernel_ipv6_disabled = std::fs::read_to_string("/sys/module/ipv6/parameters/disable")
+        .map(|value| value.trim() == "1")
+        .unwrap_or(false);
+    if kernel_ipv6_disabled {
+        debug!("Kernel IPv6 is disabled; skipping IPv6 firewall drop rules");
+        return Ok(());
+    }
     match firewall {
         Firewall::IpTables => {
             NetworkNamespace::exec(&netns.name, &["ip6tables", "-P", "INPUT", "DROP"])?;
@@ -516,12 +676,12 @@ mod tests {
         assert!(
             joined
                 .iter()
-                .any(|r| r == "iptables -A OUTPUT -d 198.51.100.7 -j ACCEPT")
+                .any(|r| r == "iptables -A OUTPUT -d 198.51.100.7 -m owner --uid-owner 0 -j ACCEPT")
         );
         assert!(
-            joined
-                .iter()
-                .any(|r| r == "ip6tables -A OUTPUT -d 2001:db8::53 -j ACCEPT")
+            joined.iter().any(
+                |r| r == "ip6tables -A OUTPUT -d 2001:db8::53 -m owner --uid-owner 0 -j ACCEPT"
+            )
         );
         assert!(
             joined
@@ -534,6 +694,7 @@ mod tests {
                 .any(|r| r.starts_with("iptables -A OUTPUT -j REJECT")),
             "final output rule must reject"
         );
+        assert!(joined.iter().all(|r| !r.contains("OUTPUT -m conntrack")));
     }
 
     #[test]
@@ -560,11 +721,8 @@ mod tests {
                 .iter()
                 .any(|r| r == "nft add rule inet vo_t input iifname \"ppp0\" accept")
         );
-        assert!(
-            joined
-                .iter()
-                .any(|r| r == "nft add rule inet vo_t output ip daddr 198.51.100.7 counter accept")
-        );
+        assert!(joined.iter().any(|r| r
+            == "nft add rule inet vo_t output meta skuid 0 ip daddr 198.51.100.7 counter accept"));
         let last_input = joined
             .iter()
             .rev()
@@ -599,6 +757,21 @@ mod tests {
         );
         assert_eq!(parse_tunnel_interface_from_ip_link(sample, &["ppp"]), None);
         assert_eq!(parse_tunnel_interface_from_ip_link("", &["tun"]), None);
+    }
+
+    #[test]
+    fn tunnel_detection_rejects_custom_veth_names_that_match_tun_prefix() {
+        let links = r#"[{"ifname":"lo"},{"ifname":"tun-u1000_s","linkinfo":{"info_kind":"veth"}},{"ifname":"tun0","linkinfo":{"info_kind":"ovpn"}}]"#;
+        assert_eq!(
+            parse_tunnel_interface_from_json(links, &["tun"]).unwrap(),
+            Some("tun0".into())
+        );
+        let links = r#"[{"ifname":"tun-u1000_s","linkinfo":{"info_kind":"veth"}}]"#;
+        assert!(
+            parse_tunnel_interface_from_json(links, &["tun"])
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

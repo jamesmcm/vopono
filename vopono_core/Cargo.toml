@@ -1,12 +1,11 @@
 [package]
 name = "vopono_core"
 description = "Library code for running VPN connections in network namespaces"
-version = "1.0.3"
+version = "1.1.0"
 edition = "2024"
 authors = ["James McMurray <jamesmcm03@gmail.com>"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/jamesmcm/vopono"
-homepage = "https://github.com/jamesmcm/vopono"
 readme = "README.md"
 keywords = ["vopono", "vpn", "wireguard", "openvpn", "netns"]
 
@@ -23,6 +22,7 @@ nix = { version = "0.31", features = [
     "process",
     "sched",
     "mount",
+    "socket",
 ] }
 serde = { version = "1", features = ["derive", "std"] }
 csv = "1"
@@ -41,7 +41,7 @@ reqwest = { default-features = false, version = "0.13", features = [
     "query",
     "rustls",
 ] } # TODO: Can we remove Tokio dependency?
-sysinfo = "0.39"
+sysinfo = "0.40"
 base64 = "0.23"
 x25519-dalek = { version = "3.0.0-rc.0", features = ["static_secrets"] }
 strum = "0.28"
