@@ -45,6 +45,8 @@ impl VethPair {
             std::process::Command::new("nmcli")
                 .arg("general")
                 .arg("status")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status()
                 .map(|x| x.success())
                 .unwrap_or(false)
@@ -99,26 +101,6 @@ impl VethPair {
             debug!("firewalld not detected running");
         }
 
-        let mut firewalld_added = false;
-        if firewalld_running {
-            debug!("Detected firewalld running, adding {dest} veth device to trusted zone");
-            // Permit new interface
-            match std::process::Command::new("firewall-cmd")
-                .arg("--zone=trusted")
-                .arg(format!("--add-interface={dest}").as_str())
-                .status()
-                .map(|x| x.success())
-            {
-                Err(e) => {
-                    warn!("Failed to add veth device {dest} to firewalld trusted zone, error: {e}")
-                }
-                Ok(false) => warn!(
-                    "Possibly failed to add veth device {dest} to firewalld trusted zone (non-zero exit code)"
-                ),
-                Ok(true) => firewalld_added = true,
-            }
-        }
-
         sudo_command(&[
             "ip",
             "link",
@@ -132,13 +114,32 @@ impl VethPair {
         ])
         .with_context(|| format!("Failed to create veth pair {}, {}", source, dest))?;
 
-        let pair = Self {
+        let mut pair = Self {
             source: source.clone(),
             dest: dest.clone(),
             nm_unmanaged,
-            firewalld_added,
+            firewalld_added: false,
             cleanup_enabled: true,
         };
+
+        if firewalld_running {
+            debug!("Detected firewalld running, adding {dest} veth device to trusted zone");
+            // Permit new interface only after the veth exists and `pair`'s Drop guard is active.
+            match std::process::Command::new("firewall-cmd")
+                .arg("--zone=trusted")
+                .arg(format!("--add-interface={dest}").as_str())
+                .status()
+                .map(|x| x.success())
+            {
+                Err(e) => {
+                    warn!("Failed to add veth device {dest} to firewalld trusted zone, error: {e}")
+                }
+                Ok(false) => warn!(
+                    "Possibly failed to add veth device {dest} to firewalld trusted zone (non-zero exit code)"
+                ),
+                Ok(true) => pair.firewalld_added = true,
+            }
+        }
 
         sudo_command(&["ip", "link", "set", dest.as_str(), "up"])
             .with_context(|| format!("Failed to bring up destination veth: {}", dest))?;

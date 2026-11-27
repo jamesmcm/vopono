@@ -15,12 +15,52 @@ pub struct Peer {
     pub disable_ipv6: bool,
     #[serde(default)]
     pub persistent_keepalive: Option<String>,
+    #[serde(default)]
+    pub allowed_ips: Vec<ipnet::IpNet>,
+}
+
+fn select_recovery_destination(
+    candidates: &[IpAddr],
+    current: Option<IpAddr>,
+    ipv6_disabled: bool,
+    mut is_routable: impl FnMut(IpAddr) -> bool,
+) -> Option<IpAddr> {
+    let routable: Vec<IpAddr> = candidates
+        .iter()
+        .copied()
+        .filter(|ip| !ip.is_ipv6() || !ipv6_disabled)
+        .filter(|ip| is_routable(*ip))
+        .collect();
+    if let Some(current) = current
+        && routable.contains(&current)
+    {
+        return Some(current);
+    }
+    routable
+        .iter()
+        .copied()
+        .find(IpAddr::is_ipv4)
+        .or_else(|| routable.first().copied())
+}
+
+fn peer_needs_bypass_route(address: IpAddr, allowed_ips: &[ipnet::IpNet]) -> bool {
+    if address.is_loopback() {
+        return false;
+    }
+    if allowed_ips.is_empty() {
+        return true;
+    }
+    allowed_ips.iter().any(|net| net.contains(&address))
 }
 
 fn destination(state: &NamespaceSnapshot) -> anyhow::Result<IpAddr> {
     if let Some(address) = state.openvpn.as_ref().and_then(|vpn| vpn.recovery_address) {
         return Ok(address);
     }
+    let current = state
+        .wireguard
+        .as_ref()
+        .and_then(|wg| wg.recovery.as_ref().map(|p| p.address));
     let host = state
         .wireguard
         .as_ref()
@@ -41,11 +81,11 @@ fn destination(state: &NamespaceSnapshot) -> anyhow::Result<IpAddr> {
             .veth_pair_ips
             .as_ref()
             .is_some_and(|ips| ips.ipv6.is_none());
-    crate::diagnostics::resolve_bounded(host, Duration::from_secs(1))?
-        .into_iter()
-        .filter(|ip| !ip.is_ipv6() || !ipv6_disabled)
-        .find(|ip| super::route::lookup(*ip).is_ok())
-        .context("No host route to a VPN endpoint")
+    let resolved = crate::diagnostics::resolve_bounded(host, Duration::from_secs(1))?;
+    select_recovery_destination(&resolved, current, ipv6_disabled, |ip| {
+        super::route::lookup(ip).is_ok()
+    })
+    .context("No host route to a VPN endpoint")
 }
 
 pub fn signature(state: &NamespaceSnapshot) -> Option<(IpAddr, Vec<u8>)> {
@@ -142,33 +182,35 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
             }
         }
         if address != peer.address {
-            let family = if address.is_ipv4() { "-4" } else { "-6" };
-            let gateway = if address.is_ipv4() {
-                state
-                    .veth_pair_ips
-                    .as_ref()
-                    .and_then(|ips| ips.ipv4.as_ref())
-            } else {
-                state
-                    .veth_pair_ips
-                    .as_ref()
-                    .and_then(|ips| ips.ipv6.as_ref())
+            if peer_needs_bypass_route(address, &peer.allowed_ips) {
+                let family = if address.is_ipv4() { "-4" } else { "-6" };
+                let gateway = if address.is_ipv4() {
+                    state
+                        .veth_pair_ips
+                        .as_ref()
+                        .and_then(|ips| ips.ipv4.as_ref())
+                } else {
+                    state
+                        .veth_pair_ips
+                        .as_ref()
+                        .and_then(|ips| ips.ipv6.as_ref())
+                }
+                .context("Endpoint address family has no veth route")?;
+                checked(
+                    &state.name,
+                    &[
+                        "ip",
+                        family,
+                        "route",
+                        "replace",
+                        &address.to_string(),
+                        "via",
+                        &gateway.host_ip.to_string(),
+                        "dev",
+                        &veth.source,
+                    ],
+                )?;
             }
-            .context("Endpoint address family has no veth route")?;
-            checked(
-                &state.name,
-                &[
-                    "ip",
-                    family,
-                    "route",
-                    "replace",
-                    &address.to_string(),
-                    "via",
-                    &gateway.host_ip.to_string(),
-                    "dev",
-                    &veth.source,
-                ],
-            )?;
             match state.firewall {
                 super::firewall::Firewall::NfTables => {
                     endpoint_rule(&state.name, address, peer.port)?;
@@ -185,19 +227,21 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
             }
             // Remove the previous endpoint bypass route once the new route and
             // firewall rules are active so DNS rotation does not accumulate routes.
-            let old_family = if peer.address.is_ipv4() { "-4" } else { "-6" };
-            let _ = NetworkNamespace::exec_with_output(
-                &state.name,
-                &[
-                    "ip",
-                    old_family,
-                    "route",
-                    "del",
-                    &peer.address.to_string(),
-                    "dev",
-                    &veth.source,
-                ],
-            );
+            if peer_needs_bypass_route(peer.address, &peer.allowed_ips) {
+                let old_family = if peer.address.is_ipv4() { "-4" } else { "-6" };
+                let _ = NetworkNamespace::exec_with_output(
+                    &state.name,
+                    &[
+                        "ip",
+                        old_family,
+                        "route",
+                        "del",
+                        &peer.address.to_string(),
+                        "dev",
+                        &veth.source,
+                    ],
+                );
+            }
         }
         // Reinstall even an unchanged destination: WireGuard must discard the
         // cached source address/route after the host underlay has changed.
@@ -241,23 +285,16 @@ pub fn repair(state: &mut NamespaceSnapshot) -> anyhow::Result<()> {
             };
             if let Some(ns_ip) = ns_ip {
                 let remote = SocketAddr::new(address, port);
-                if let Ok(output) = NetworkNamespace::exec_with_output(&state.name, &["ss", "-Hnu"])
+                if let Ok(output) =
+                    NetworkNamespace::exec_with_output(&state.name, &["ss", "-Hanup"])
                     && output.status.success()
                 {
                     let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        let fields: Vec<&str> = line.split_whitespace().collect();
-                        if let (Some(local), Some(peer)) = (fields.get(3), fields.get(4))
-                            && peer.parse::<SocketAddr>().ok() == Some(remote)
-                            && let Some(local_port) = local
-                                .rsplit_once(':')
-                                .and_then(|(_, p)| p.parse::<u16>().ok())
-                        {
-                            let _ = super::conntrack::delete_udp(
-                                SocketAddr::new(ns_ip, local_port),
-                                remote,
-                            );
-                        }
+                    for local_port in parse_openvpn_udp_local_ports(&stdout, remote) {
+                        let _ = super::conntrack::delete_udp(
+                            SocketAddr::new(ns_ip, local_port),
+                            remote,
+                        );
                     }
                 }
             }
@@ -424,10 +461,97 @@ fn endpoint_rule(name: &str, ip: IpAddr, port: u16) -> anyhow::Result<()> {
     )
 }
 
+/// Extract local UDP ports from `ss -Hanup` output that either connect directly
+/// to `remote` or are unconnected OpenVPN sockets (`UNCONN` with peer `*:*`).
+fn parse_openvpn_udp_local_ports(stdout: &str, remote: SocketAddr) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        // `ss -Hanup` columns: State, Recv-Q, Send-Q, Local, Peer, [Process...]
+        let (Some(state), Some(local), Some(peer)) = (fields.first(), fields.get(3), fields.get(4))
+        else {
+            continue;
+        };
+        let connected_match = peer.parse::<SocketAddr>().ok() == Some(remote);
+        let unconnected_openvpn = *state == "UNCONN"
+            && (*peer == "*:*" || *peer == "0.0.0.0:*" || *peer == "[::]:*" || *peer == ":::*")
+            && fields[5..]
+                .iter()
+                .any(|field| field.contains("\"openvpn\""));
+        if (connected_match || unconnected_openvpn)
+            && let Some(local_port) = local
+                .rsplit_once(':')
+                .and_then(|(_, p)| p.parse::<u16>().ok())
+            && !ports.contains(&local_port)
+        {
+            ports.push(local_port);
+        }
+    }
+    ports
+}
+
 #[cfg(test)]
 mod tests {
-    use super::iptables_endpoint_rule_args;
-    use std::net::IpAddr;
+    use super::{
+        iptables_endpoint_rule_args, parse_openvpn_udp_local_ports, peer_needs_bypass_route,
+        select_recovery_destination,
+    };
+    use std::net::{IpAddr, SocketAddr};
+
+    #[test]
+    fn recovery_prefers_current_address_then_ipv4_over_ipv6() {
+        let v4_a: IpAddr = "198.51.100.1".parse().unwrap();
+        let v4_b: IpAddr = "198.51.100.2".parse().unwrap();
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+
+        // RFC 6724 order puts IPv6 first; keep current IPv4 when still routable.
+        assert_eq!(
+            select_recovery_destination(&[v6, v4_b, v4_a], Some(v4_a), false, |_| true),
+            Some(v4_a)
+        );
+        // When current is gone, still prefer IPv4 over IPv6.
+        assert_eq!(
+            select_recovery_destination(&[v6, v4_b], Some(v4_a), false, |_| true),
+            Some(v4_b)
+        );
+        // Fall back to IPv6 when no IPv4 is routable and IPv6 is enabled.
+        assert_eq!(
+            select_recovery_destination(&[v6], Some(v4_a), false, |_| true),
+            Some(v6)
+        );
+        assert_eq!(
+            select_recovery_destination(&[v6], Some(v4_a), true, |_| true),
+            None
+        );
+    }
+
+    #[test]
+    fn bypass_route_skips_loopback_and_unmatched_split_tunnel() {
+        let split: Vec<ipnet::IpNet> = vec!["10.0.0.0/8".parse().unwrap()];
+        assert!(!peer_needs_bypass_route("127.0.0.1".parse().unwrap(), &[]));
+        assert!(!peer_needs_bypass_route(
+            "198.51.100.7".parse().unwrap(),
+            &split
+        ));
+        assert!(peer_needs_bypass_route("10.1.2.3".parse().unwrap(), &split));
+        assert!(peer_needs_bypass_route(
+            "198.51.100.7".parse().unwrap(),
+            &[]
+        ));
+    }
+
+    #[test]
+    fn parses_connected_and_unconnected_openvpn_udp_ports() {
+        let remote: SocketAddr = "198.51.100.7:1194".parse().unwrap();
+        let sample = "\
+UNCONN 0 0 0.0.0.0:45123 0.0.0.0:* users:((\"openvpn\",pid=123,fd=5))\n\
+ESTAB  0 0 10.200.1.2:45124 198.51.100.7:1194 users:((\"openvpn\",pid=124,fd=6))\n\
+UNCONN 0 0 0.0.0.0:5353 0.0.0.0:* users:((\"other\",pid=125,fd=7))\n";
+        assert_eq!(
+            parse_openvpn_udp_local_ports(sample, remote),
+            vec![45123, 45124]
+        );
+    }
 
     #[test]
     fn iptables_endpoint_rules_insert_before_reject_and_delete_by_family() {

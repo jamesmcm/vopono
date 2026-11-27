@@ -139,8 +139,10 @@ impl ConnectionSettings {
         client_env: Option<&std::collections::HashMap<String, String>>,
     ) -> anyhow::Result<Self> {
         let cli_provider = command.provider.as_ref().map(|p| p.to_variant());
+        let cli_protocol = command.protocol.as_ref().map(|p| p.to_variant());
         // Only inherit `custom` from config when CLI did not explicitly choose a
-        // non-Custom provider (e.g., `--provider mullvad` or `--existing-netns`).
+        // non-Custom provider (e.g., `--provider mullvad`, `--existing-netns`) or
+        // a protocol that does not take a WireGuard/OpenVPN custom config (`ssh`, `warp`).
         let custom: Option<PathBuf> = if command.existing_netns.is_some() {
             None
         } else if command.custom.is_some() {
@@ -148,6 +150,7 @@ impl ConnectionSettings {
         } else if cli_provider
             .as_ref()
             .is_some_and(|provider| *provider != VpnProvider::Custom)
+            || matches!(cli_protocol, Some(Protocol::Ssh | Protocol::Warp))
         {
             None
         } else {
@@ -158,6 +161,10 @@ impl ConnectionSettings {
         };
         let custom = custom
             .map(|path| {
+                // Avoid double-expanding paths already expanded and resolved by the client.
+                if command.literal_application && path.is_absolute() {
+                    return Ok(path);
+                }
                 expand_user_str(&path.to_string_lossy(), command.user.as_deref(), client_env)
                     .map(PathBuf::from)
                     .map_err(|_| {
@@ -167,11 +174,7 @@ impl ConnectionSettings {
                     })
             })
             .transpose()?;
-        let protocol = command
-            .protocol
-            .as_ref()
-            .map(|p| p.to_variant())
-            .or_else(|| config_variant(config, "protocol"));
+        let protocol = cli_protocol.or_else(|| config_variant(config, "protocol"));
         let provider = if custom.is_some() {
             Some(VpnProvider::Custom)
         } else {
@@ -197,10 +200,20 @@ impl ConnectionSettings {
             return Ok(protocol.clone());
         }
         if let Some(path) = &self.custom {
-            return get_config_file_protocol(path).map_err(|_| {
-                vopono_core::diagnostics::SetupError::Configuration(
-                    "Could not detect the custom VPN protocol; check the file or specify --protocol"
-                ).into()
+            return get_config_file_protocol(path).map_err(|err| {
+                // Preserve underlying file read / permission errors instead of
+                // masking them behind a generic protocol-detection message.
+                let msg = err.to_string();
+                if msg.starts_with("Failed to read VPN config file") {
+                    err.context(format!(
+                        "Could not open custom VPN config {}; check the path and file permissions (or specify --protocol)",
+                        path.display()
+                    ))
+                } else {
+                    anyhow::Error::from(vopono_core::diagnostics::SetupError::Configuration(
+                        "Could not detect the custom VPN protocol; check the file or specify --protocol",
+                    ))
+                }
             });
         }
         match self.provider.as_ref() {
@@ -340,6 +353,9 @@ impl ArgsConfig {
         let custom = connection.custom.clone();
         let auth_user_pass =
             command_else_config_option!(auth_user_pass, command, config).map(|p| {
+                if command.literal_application && p.is_absolute() {
+                    return p;
+                }
                 let raw = p.to_string_lossy();
                 expand_user_str(&raw, user_for_expand.as_deref(), client_env)
                     .map(PathBuf::from)
@@ -373,19 +389,40 @@ impl ArgsConfig {
         let hosts = command_else_config_option!(hosts, command, config);
         let open_ports = command_else_config_option!(open_ports, command, config);
         let forward = command_else_config_option!(forward, command, config);
-        let postup = command_else_config_option!(postup, command, config)
-            .map(|p| expand_user_str(&p, user_for_expand.as_deref(), client_env).unwrap_or(p));
-        let predown = command_else_config_option!(predown, command, config)
-            .map(|p| expand_user_str(&p, user_for_expand.as_deref(), client_env).unwrap_or(p));
+        let postup = command_else_config_option!(postup, command, config).map(|p| {
+            if command.literal_application {
+                p
+            } else {
+                expand_user_str(&p, user_for_expand.as_deref(), client_env).unwrap_or(p)
+            }
+        });
+        let predown = command_else_config_option!(predown, command, config).map(|p| {
+            if command.literal_application {
+                p
+            } else {
+                expand_user_str(&p, user_for_expand.as_deref(), client_env).unwrap_or(p)
+            }
+        });
         let group = command_else_config_option!(group, command, config);
         let working_directory = command_else_config_option!(working_directory, command, config)
-            .map(|p| expand_user_str(&p, user_for_expand.as_deref(), client_env).unwrap_or(p));
+            .map(|p| {
+                if command.literal_application && std::path::Path::new(&p).is_absolute() {
+                    p
+                } else {
+                    expand_user_str(&p, user_for_expand.as_deref(), client_env).unwrap_or(p)
+                }
+            });
         let dns = command_else_config_option!(dns, command, config);
         let user = command_else_config_option!(user, command, config)
             .or_else(|| std::env::var("SUDO_USER").ok());
         let port_forwarding_callback =
-            command_else_config_option!(port_forwarding_callback, command, config)
-                .map(|p| expand_user_str(&p, user_for_expand.as_deref(), client_env).unwrap_or(p));
+            command_else_config_option!(port_forwarding_callback, command, config).map(|p| {
+                if command.literal_application {
+                    p
+                } else {
+                    expand_user_str(&p, user_for_expand.as_deref(), client_env).unwrap_or(p)
+                }
+            });
 
         let no_proxy = command_else_config_bool!(no_proxy, command, config);
         let keep_alive = command_else_config_bool!(keep_alive, command, config);
@@ -460,6 +497,9 @@ impl ArgsConfig {
         let trojan_password = command_else_config_option!(trojan_password, command, config);
         let trojan_no_verify = command_else_config_bool!(trojan_no_verify, command, config);
         let trojan_config = command_else_config_option!(trojan_config, command, config).map(|p| {
+            if command.literal_application && p.is_absolute() {
+                return p;
+            }
             let raw = p.to_string_lossy();
             expand_user_str(&raw, user_for_expand.as_deref(), client_env)
                 .map(PathBuf::from)

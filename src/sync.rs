@@ -55,7 +55,7 @@ pub fn synch(
         let user = nix::unistd::User::from_uid(uid)?
             .ok_or_else(|| anyhow::anyhow!("Unknown config owner"))?;
         let groups = vopono_core::util::owner_write::supplementary_groups(&user.name, gid)?;
-        let mut child = std::process::Command::new(std::env::current_exe()?);
+        let mut child = std::process::Command::new(vopono_core::util::current_vopono_exe()?);
         if log::log_enabled!(log::Level::Debug) {
             child.arg("--verbose");
         } else if !log::log_enabled!(log::Level::Error) {

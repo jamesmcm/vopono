@@ -236,7 +236,8 @@ fn namespace_environment(
         }
         anyhow::ensure!(daemon_available, "Daemon unavailable");
         let mut conn = crate::daemon_client::connect(crate::daemon_client::Compatibility::Warn)?;
-        crate::daemon::set_socket_timeouts_for(&conn, 7)?;
+        let socket_timeout_secs = ((command.timeout_ms as i64).clamp(1_000, 30_000) / 1_000) + 5;
+        crate::daemon::set_socket_timeouts_for(&conn, socket_timeout_secs)?;
         let request = crate::daemon::DaemonRequest::NamespaceDiagnostics {
             id: id.into(),
             offline: command.offline,

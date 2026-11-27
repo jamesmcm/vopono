@@ -58,7 +58,22 @@ pub(super) fn clean_dead_locks(config_base: &Path) -> anyhow::Result<()> {
         // Permission or inspection failures do not establish absence.
         let namespace_missing = std::fs::metadata(Path::new("/var/run/netns").join(namespace))
             .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
-        for file in entries(&mut dir)? {
+        let dir_entries = entries(&mut dir)?;
+        // Count how many primary lockfiles remain; if the namespace still
+        // exists on the host, keep the last primary lockfile even if its
+        // launcher PID exited (e.g. a detached background process kept the
+        // namespace alive) so `vopono list` and `vopono stop namespace` can
+        // still see and cleanly tear down its host resources.
+        let mut remaining_primaries = dir_entries
+            .iter()
+            .filter(|file| {
+                entry_is_regular_file(&dir, file)
+                    && file.file_name().to_str().is_ok_and(|name| {
+                        LockfileKind::from_path(Path::new(name)) == Some(LockfileKind::Primary)
+                    })
+            })
+            .count();
+        for file in dir_entries {
             if !entry_is_regular_file(&dir, &file) {
                 continue;
             }
@@ -68,8 +83,20 @@ pub(super) fn clean_dead_locks(config_base: &Path) -> anyhow::Result<()> {
             let path = Path::new(filename);
             let stale = match LockfileKind::from_path(path) {
                 Some(LockfileKind::Primary) => filename.parse::<u32>().is_ok_and(|pid| {
-                    namespace_missing
-                        || (!running_processes.contains(&pid) && !super::check_process_running(pid))
+                    if namespace_missing {
+                        true
+                    } else if !running_processes.contains(&pid)
+                        && !super::check_process_running(pid)
+                    {
+                        if remaining_primaries > 1 {
+                            remaining_primaries -= 1;
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
                 }),
                 Some(LockfileKind::Client) => {
                     namespace_missing || status::client_lockfile_is_stale(path, namespace)

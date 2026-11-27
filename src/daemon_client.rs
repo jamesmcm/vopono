@@ -66,18 +66,38 @@ pub(crate) fn connect_with_version(
     Ok((conn, version))
 }
 
+pub(crate) fn collect_client_env() -> std::collections::HashMap<String, String> {
+    let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    if !env.contains_key("PULSE_SERVER")
+        && let Ok(server) = vopono_core::util::pulseaudio::get_pulseaudio_server()
+    {
+        env.insert("PULSE_SERVER".into(), server);
+    }
+    env
+}
+
 #[cfg(test)]
 pub(crate) fn prepare_execute(command: ExecCommand, silent: bool) -> anyhow::Result<DaemonRequest> {
     prepare_execute_for_daemon(command, silent, true)
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_execute_for_daemon(
     command: ExecCommand,
     silent: bool,
     daemon_supports_literal_app: bool,
 ) -> anyhow::Result<DaemonRequest> {
-    let env: std::collections::HashMap<String, String> = std::env::vars().collect();
-    prepare_execute_with_env_options(command, silent, env, daemon_supports_literal_app)
+    let env = collect_client_env();
+    prepare_execute_with_precollected_env(command, silent, env, daemon_supports_literal_app)
+}
+
+pub(crate) fn prepare_execute_with_precollected_env(
+    command: ExecCommand,
+    silent: bool,
+    env: std::collections::HashMap<String, String>,
+    daemon_supports_literal_app: bool,
+) -> anyhow::Result<DaemonRequest> {
+    prepare_execute_with_env_options(command, silent, env, daemon_supports_literal_app, false)
 }
 
 pub(crate) fn prepare_execute_with_env(
@@ -85,7 +105,7 @@ pub(crate) fn prepare_execute_with_env(
     silent: bool,
     env: std::collections::HashMap<String, String>,
 ) -> anyhow::Result<DaemonRequest> {
-    prepare_execute_with_env_options(command, silent, env, true)
+    prepare_execute_with_env_options(command, silent, env, true, true)
 }
 
 fn prepare_execute_with_env_options(
@@ -93,6 +113,7 @@ fn prepare_execute_with_env_options(
     silent: bool,
     mut env: std::collections::HashMap<String, String>,
     daemon_supports_literal_app: bool,
+    detect_pulseaudio: bool,
 ) -> anyhow::Result<DaemonRequest> {
     let working_dir = std::env::current_dir()?;
     crate::resolve_custom_path_for_daemon(&mut command, &working_dir, &env);
@@ -117,7 +138,8 @@ fn prepare_execute_with_env_options(
         .into_owned();
         command.literal_application = true;
     }
-    if !env.contains_key("PULSE_SERVER")
+    if detect_pulseaudio
+        && !env.contains_key("PULSE_SERVER")
         && let Ok(server) = vopono_core::util::pulseaudio::get_pulseaudio_server()
     {
         env.insert("PULSE_SERVER".into(), server);

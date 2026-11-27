@@ -60,7 +60,14 @@ pub(crate) fn prepare(argv: &[&str], runtime: &Path) -> anyhow::Result<Vec<Strin
         }
     }
     ensure!(
-        device.starts_with("tun") && device[3..].bytes().all(|b| b.is_ascii_digit()),
+        !device.is_empty()
+            && device.len() < libc::IFNAMSIZ
+            && !device.contains('/')
+            && device != "."
+            && device != ".."
+            && device
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')),
         "Invalid frozen TUN device"
     );
     let mut command: Vec<String> = argv.iter().map(|s| (*s).to_owned()).collect();
@@ -101,13 +108,24 @@ fn spawn(plan: &Plan, runtime: &Path, recovery: bool) -> anyhow::Result<Child> {
         .stderr(Stdio::null())
         .status()?;
     if exists.success() {
-        ensure!(
-            Command::new("ip")
-                .args(["link", "delete", "dev", &plan.device])
-                .status()?
-                .success(),
-            "Could not remove obsolete OpenVPN device"
-        );
+        let deleted = Command::new("ip")
+            .args(["link", "delete", "dev", &plan.device])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !deleted.success() {
+            // The previous OpenVPN process may have finished tearing down the
+            // TUN device asynchronously between `show` and `delete`.
+            let still_exists = Command::new("ip")
+                .args(["link", "show", "dev", &plan.device])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()?;
+            ensure!(
+                !still_exists.success(),
+                "Could not remove obsolete OpenVPN device"
+            );
+        }
     }
     let mut args = plan.argv[1..].to_vec();
     if recovery {
@@ -120,6 +138,18 @@ fn spawn(plan: &Plan, runtime: &Path, recovery: bool) -> anyhow::Result<Child> {
             .to_str()
             .context("Invalid OpenVPN recovery config path")?
             .to_owned();
+        // Allow OpenVPN to retry while a newly switched host underlay stabilizes.
+        let mut i = 0;
+        while i < args.len() {
+            if args[i] == "--connect-retry-max" {
+                args.remove(i);
+                if i < args.len() {
+                    args.remove(i);
+                }
+            } else {
+                i += 1;
+            }
+        }
     }
     let mut command = Command::new(&plan.argv[0]);
     command

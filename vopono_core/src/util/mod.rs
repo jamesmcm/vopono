@@ -41,6 +41,20 @@ thread_local! {
     static CONFIG_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
     static CONFIG_OWNER_OVERRIDE: std::cell::RefCell<Option<(Uid, Gid)>> =
         const {std::cell::RefCell::new(None) };
+    static LAUNCH_CANCEL_FLAG: std::cell::RefCell<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub fn set_launch_cancel_flag(flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
+    LAUNCH_CANCEL_FLAG.with(|slot| *slot.borrow_mut() = flag);
+}
+
+pub fn is_launch_cancelled() -> bool {
+    LAUNCH_CANCEL_FLAG.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+    })
 }
 
 static DAEMON_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -506,6 +520,7 @@ pub fn remove_lock_files(namespace: &str) -> anyhow::Result<()> {
         }
         let is_known = status::LockfileKind::from_path(Path::new(name)).is_some()
             || status::is_forwarded_port_sidecar(name)
+            || name == status::STOPPING_SIDECAR
             || crate::network::health::is_health_sidecar(name);
         if !is_known {
             continue;

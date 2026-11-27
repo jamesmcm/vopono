@@ -24,16 +24,26 @@ pub fn lookup(destination: IpAddr) -> anyhow::Result<Route> {
     )?;
     setsockopt(&fd, sockopt::ReceiveTimeout, &TimeVal::milliseconds(1000))?;
     let request = route_request(destination);
-    sendto(
-        fd.as_raw_fd(),
-        &request,
-        &NetlinkAddr::new(0, 0),
-        MsgFlags::empty(),
-    )
-    .context("Sending route lookup")?;
+    loop {
+        match sendto(
+            fd.as_raw_fd(),
+            &request,
+            &NetlinkAddr::new(0, 0),
+            MsgFlags::empty(),
+        ) {
+            Ok(_) => break,
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => return Err(error).context("Sending route lookup"),
+        }
+    }
     let mut response = [0u8; 8192];
-    let length =
-        recv(fd.as_raw_fd(), &mut response, MsgFlags::empty()).context("Receiving route lookup")?;
+    let length = loop {
+        match recv(fd.as_raw_fd(), &mut response, MsgFlags::empty()) {
+            Ok(len) => break len,
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(error) => return Err(error).context("Receiving route lookup"),
+        }
+    };
     parse_response(&response[..length])
 }
 

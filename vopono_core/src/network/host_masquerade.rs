@@ -451,11 +451,57 @@ impl Drop for FirewallException {
     }
 }
 
-fn host_nft_lock() -> std::sync::MutexGuard<'static, ()> {
+struct HostNftLockGuard {
+    _mutex: std::sync::MutexGuard<'static, ()>,
+    _flock_file: Option<std::fs::File>,
+}
+
+impl Drop for HostNftLockGuard {
+    fn drop(&mut self) {
+        if let Some(ref file) = self._flock_file {
+            use std::os::fd::AsRawFd;
+            unsafe {
+                libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
+    }
+}
+
+fn host_nft_lock() -> HostNftLockGuard {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    let mutex = LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let flock_file = acquire_cross_process_nft_flock();
+    HostNftLockGuard {
+        _mutex: mutex,
+        _flock_file: flock_file,
+    }
+}
+
+fn acquire_cross_process_nft_flock() -> Option<std::fs::File> {
+    use std::os::fd::AsRawFd;
+    let dir = std::path::Path::new("/run/vopono");
+    if std::fs::create_dir_all(dir).is_err() {
+        return None;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join("host-nft.lock"))
+        .ok()?;
+    loop {
+        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if rc == 0 {
+            return Some(file);
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return None;
+        }
+    }
 }
 
 fn nft_table_has_no_rules(table: &str) -> bool {

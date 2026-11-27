@@ -159,6 +159,14 @@ fn allowed(option: &str) -> bool {
             | "auth-gen-token"
             | "compat-mode"
             | "ignore-unknown-option"
+            | "block-ipv6"
+            | "peer-fingerprint"
+            | "dns"
+            | "setenv-safe"
+            | "ifconfig-nowarn"
+            | "mlock"
+            | "providers"
+            | "tls-crypt-v2-min-len"
     )
 }
 fn input_file(option: &str) -> bool {
@@ -180,7 +188,7 @@ fn input_file(option: &str) -> bool {
 /// Shared by sanitization and endpoint parsing so accepted credential blocks
 /// stay opaque throughout preflight and launch.
 pub(crate) fn inline_file(tag: &str) -> bool {
-    input_file(tag) || tag == "http-proxy-user-pass"
+    input_file(tag) || matches!(tag, "http-proxy-user-pass" | "peer-fingerprint")
 }
 
 pub(crate) fn snapshot(
@@ -196,7 +204,12 @@ pub(crate) fn snapshot(
     let mut referenced_bytes = 0usize;
     let safe = sanitize_with_auth(content, auth.is_some(), |reference, index| {
         let bytes = crate::util::owner_write::read_file_as_config_owner(&parent.join(reference))
-            .context("Could not load a file referenced by the OpenVPN profile")?;
+            .with_context(|| {
+                format!(
+                    "Could not load OpenVPN referenced file {reference:?} (relative to {})",
+                    parent.display()
+                )
+            })?;
         account_reference(&bytes, &mut referenced_files, &mut referenced_bytes)?;
         let path = runtime.join(format!("input-{index}"));
         crate::util::create_private_file(&path)?.write_all(&bytes)?;
@@ -207,8 +220,13 @@ pub(crate) fn snapshot(
     let auth = auth
         .map(|auth| -> anyhow::Result<_> {
             let path = runtime.join("auth.txt");
-            let bytes = crate::util::owner_write::read_file_as_config_owner(auth)
-                .context("Could not load the selected OpenVPN auth file")?;
+            let bytes =
+                crate::util::owner_write::read_file_as_config_owner(auth).with_context(|| {
+                    format!(
+                        "Could not load the selected OpenVPN auth file {}",
+                        auth.display()
+                    )
+                })?;
             crate::util::create_private_file(&path)?.write_all(&bytes)?;
             Ok(path)
         })
@@ -222,14 +240,18 @@ pub(crate) fn validate(content: &str, config: &Path, auth: Option<&Path>) -> any
     sanitize_with_auth(content, auth.is_some(), |reference, _| {
         let path = config.parent().unwrap_or(Path::new(".")).join(reference);
         let bytes = crate::util::owner_write::read_file_as_config_owner(&path).map_err(|_| {
-            anyhow::anyhow!("Referenced OpenVPN input file is missing or unreadable")
+            anyhow::anyhow!("Referenced OpenVPN input file {reference:?} is missing or unreadable")
         })?;
         account_reference(&bytes, &mut referenced_files, &mut referenced_bytes)?;
         Ok(path)
     })?;
     if let Some(auth) = auth {
-        crate::util::owner_write::read_file_as_config_owner(auth)
-            .map_err(|_| anyhow::anyhow!("Selected OpenVPN auth file is missing or unreadable"))?;
+        crate::util::owner_write::read_file_as_config_owner(auth).map_err(|_| {
+            anyhow::anyhow!(
+                "Selected OpenVPN auth file {} is missing or unreadable",
+                auth.display()
+            )
+        })?;
     }
     Ok(())
 }
@@ -297,8 +319,15 @@ fn parse_lines(content: &str, trusted: bool) -> anyhow::Result<Vec<ConfigLine<'_
             if line.contains(&closing) {
                 ensure!(line == closing, "Ambiguous OpenVPN inline closing tag");
                 inline = None;
+                output.push(ConfigLine::Inline { raw: line, tag });
+            } else {
+                // Preserve leading/trailing whitespace inside inline blocks
+                // (e.g. passwords in `<auth-user-pass>` / `<http-proxy-user-pass>`).
+                output.push(ConfigLine::Inline {
+                    raw: raw.trim_end_matches('\r'),
+                    tag,
+                });
             }
-            output.push(ConfigLine::Inline { raw: line, tag });
             continue;
         }
         if line.is_empty() || line.starts_with(['#', ';']) {
@@ -374,25 +403,61 @@ pub(crate) fn freeze_recovery_remotes(
 
     let mut output = String::new();
     let mut next_group = 0;
+    let mut frozen_remotes = 0usize;
+    let mut last_unresolved_remote: Option<String> = None;
+    let mut in_connection = false;
+    let mut connection_buf = String::new();
+    let mut connection_had_remote = false;
+    let mut connection_froze_remote = false;
     for line in &lines {
         match line {
             ConfigLine::ConnectionStart => {
                 next_group += 1;
                 group = next_group;
-                output.push_str("<connection>\n");
+                in_connection = true;
+                connection_buf.clear();
+                connection_buf.push_str("<connection>\n");
+                connection_had_remote = false;
+                connection_froze_remote = false;
             }
             ConfigLine::ConnectionEnd => {
                 group = 0;
-                output.push_str("</connection>\n");
+                in_connection = false;
+                if !connection_had_remote || connection_froze_remote {
+                    connection_buf.push_str("</connection>\n");
+                    output.push_str(&connection_buf);
+                }
+                connection_buf.clear();
             }
             ConfigLine::Directive { raw, fields, .. } => {
+                let target = if in_connection {
+                    &mut connection_buf
+                } else {
+                    &mut output
+                };
                 let option = fields[0].trim_start_matches("--");
                 if option == "remote-random-hostname" {
                     continue;
                 }
-                if option != "remote" || fields[1].parse::<std::net::IpAddr>().is_ok() {
-                    output.push_str(raw);
-                    output.push('\n');
+                if option != "remote" {
+                    target.push_str(raw);
+                    target.push('\n');
+                    continue;
+                }
+                if in_connection {
+                    connection_had_remote = true;
+                }
+                if let Ok(literal_ip) = fields[1].parse::<std::net::IpAddr>() {
+                    if disable_ipv6 && literal_ip.is_ipv6() {
+                        last_unresolved_remote = Some(fields[1].clone());
+                        continue;
+                    }
+                    frozen_remotes += 1;
+                    if in_connection {
+                        connection_froze_remote = true;
+                    }
+                    target.push_str(raw);
+                    target.push('\n');
                     continue;
                 }
                 let protocol = fields
@@ -408,26 +473,43 @@ pub(crate) fn freeze_recovery_remotes(
                     }
                 };
                 let addresses = resolve(&fields[1]);
-                let ip = negotiated_peer
+                let Some(ip) = negotiated_peer
                     .filter(|ip| remote_count == 1 || addresses.contains(ip))
                     .filter(supports)
                     .or_else(|| addresses.into_iter().find(supports))
-                    .with_context(|| {
-                        format!("Could not pin OpenVPN recovery endpoint {}", fields[1])
-                    })?;
-                output.push_str(&format!("remote {ip}"));
-                for field in &fields[2..] {
-                    output.push(' ');
-                    output.push_str(field);
+                else {
+                    // Do not abort the entire recovery profile when one secondary
+                    // remote fails DNS or is filtered by IPv6 settings.
+                    last_unresolved_remote = Some(fields[1].clone());
+                    continue;
+                };
+                frozen_remotes += 1;
+                if in_connection {
+                    connection_froze_remote = true;
                 }
-                output.push('\n');
+                target.push_str(&format!("remote {ip}"));
+                for field in &fields[2..] {
+                    target.push(' ');
+                    target.push_str(field);
+                }
+                target.push('\n');
             }
             ConfigLine::Inline { raw, .. } => {
-                output.push_str(raw);
-                output.push('\n');
+                let target = if in_connection {
+                    &mut connection_buf
+                } else {
+                    &mut output
+                };
+                target.push_str(raw);
+                target.push('\n');
             }
         }
     }
+    ensure!(
+        frozen_remotes > 0,
+        "Could not pin any OpenVPN recovery endpoint (last tried: {})",
+        last_unresolved_remote.as_deref().unwrap_or("none")
+    );
     Ok(output)
 }
 
@@ -553,7 +635,16 @@ fn sanitize_with_auth(
 ) -> anyhow::Result<String> {
     let mut output = String::new();
     let mut file_index = 0;
-    for entry in parse_lines(content, false)? {
+    let parsed = parse_lines(content, false)?;
+    let has_dev_type_tun = parsed.iter().any(|entry| {
+        matches!(
+            entry,
+            ConfigLine::Directive { fields, .. }
+                if fields[0].strip_prefix("--").unwrap_or(&fields[0]) == "dev-type"
+                    && fields.get(1).is_some_and(|v| v == "tun")
+        )
+    });
+    for entry in parsed {
         let (line, fields, number) = match entry {
             ConfigLine::Inline { raw, tag } => {
                 if !override_auth || tag != "auth-user-pass" {
@@ -581,10 +672,12 @@ fn sanitize_with_auth(
             continue;
         }
         // Commercial provider bundles (e.g. ProtonVPN, IVPN) commonly include
-        // `script-security 2` even after `up`/`down` hooks are removed. Since
-        // daemon mode rejects all script hooks and passes `--script-security 1`
-        // after `--config`, omit this directive from the frozen snapshot.
-        if option == "script-security" {
+        // `script-security 2` even after `up`/`down` hooks are removed, and
+        // Debian/Ubuntu/PiVPN profiles commonly include `user nobody`/`group nogroup`
+        // which would prevent OpenVPN from re-reading root-owned 0600 snapshot files
+        // on reconnect. Omit these directives from the frozen snapshot.
+        if matches!(option, "script-security" | "user" | "group") {
+            log::debug!("Omitting OpenVPN directive {option:?} from daemon snapshot");
             continue;
         }
         if option == "dns-updown" {
@@ -598,12 +691,22 @@ fn sanitize_with_auth(
         // Never permit --dev /dev/... to open an arbitrary host file or reuse
         // a host interface through --dev-node or --iproute.
         if option == "dev" {
+            let valid_dev = fields.len() == 2
+                && fields.get(1).is_some_and(|v| {
+                    let safe_ifname = !v.is_empty()
+                        && v.len() < libc::IFNAMSIZ
+                        && !v.contains('/')
+                        && v != "."
+                        && v != ".."
+                        && v.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'));
+                    let is_tun = v == "tun"
+                        || (v.starts_with("tun") && v[3..].bytes().all(|b| b.is_ascii_digit()));
+                    safe_ifname && (is_tun || (has_dev_type_tun && !v.starts_with("tap")))
+                });
             ensure!(
-                fields.len() == 2
-                    && fields.get(1).is_some_and(|v| v.len() < libc::IFNAMSIZ
-                        && (v == "tun"
-                            || v.starts_with("tun") && v[3..].bytes().all(|b| b.is_ascii_digit()))),
-                "Daemon OpenVPN requires a tun device"
+                valid_dev,
+                "Daemon OpenVPN requires a tun device (or a valid interface name paired with `dev-type tun`)"
             );
         }
         if option == "dev-type" {
@@ -640,7 +743,9 @@ fn sanitize_with_auth(
                     output.push('\n');
                     continue;
                 }
-                if file != "[inline]" {
+                if !file.eq_ignore_ascii_case("[inline]")
+                    && !file.eq_ignore_ascii_case("[[inline]]")
+                {
                     ensure!(
                         fields.len() <= 3 && !(option == "crl-verify" && fields.get(2).is_some()),
                         "Unsupported OpenVPN file directive arguments"
@@ -679,7 +784,7 @@ fn sanitize_with_auth(
                     "Invalid OpenVPN directive name on line {number}"
                 );
                 anyhow::bail!(
-                    "OpenVPN directive {option:?} on line {number} is not supported by the daemon"
+                    "OpenVPN directive {option:?} on line {number} is not supported in daemon mode; remove it from the profile or run vopono directly with sudo"
                 );
             }
         }
@@ -909,5 +1014,68 @@ mod tests {
         assert_eq!(remotes.len(), 64);
         assert_eq!(remotes[0].host, "198.51.100.1");
         assert_eq!(remotes[63].host, "198.51.100.64");
+    }
+
+    #[test]
+    fn accepts_common_directives_inline_markers_custom_tun_and_preserves_password_whitespace() {
+        let config = "\
+client
+dev vpn0
+dev-type tun
+user nobody
+group nogroup
+block-ipv6
+dns server 1 address 10.8.0.1
+setenv-safe foo bar
+ifconfig-nowarn
+mlock
+ca [[INLINE]]
+remote 198.51.100.5 1194
+<peer-fingerprint>
+AA:BB:CC
+</peer-fingerprint>
+<auth-user-pass>
+myuser
+  pass with spaces  
+</auth-user-pass>
+";
+        let safe = sanitize(config, |_, _| unreachable!()).unwrap();
+        assert!(!safe.contains("user nobody"));
+        assert!(!safe.contains("group nogroup"));
+        assert!(safe.contains("dev vpn0"));
+        assert!(safe.contains("block-ipv6"));
+        assert!(safe.contains("ca [[INLINE]]"));
+        assert!(safe.contains("<peer-fingerprint>\nAA:BB:CC\n</peer-fingerprint>"));
+        assert!(safe.contains("<auth-user-pass>\nmyuser\n  pass with spaces  \n</auth-user-pass>"));
+    }
+
+    #[test]
+    fn freeze_recovery_skips_unresolvable_secondary_remotes() {
+        let config = "\
+client
+<connection>
+proto udp6
+remote v6only.test 1194
+</connection>
+<connection>
+proto udp4
+remote working.test 443
+</connection>
+";
+        let frozen = freeze_recovery_remotes(
+            config,
+            |host| {
+                if host == "working.test" {
+                    vec!["198.51.100.9".parse().unwrap()]
+                } else {
+                    vec!["2001:db8::9".parse().unwrap()]
+                }
+            },
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(!frozen.contains("v6only.test"));
+        assert!(frozen.contains("remote 198.51.100.9 443"));
     }
 }

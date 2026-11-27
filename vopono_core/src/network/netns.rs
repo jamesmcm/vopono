@@ -280,13 +280,16 @@ pub fn build_hook_command(
         };
         let groups = crate::util::owner_write::supplementary_groups(&target_user.name, target_gid)?;
         let uid = target_user.uid;
-        let home_cstr = {
+        let daemon_mode = crate::util::is_daemon_mode();
+        let home_cstr = if daemon_mode {
             use std::os::unix::ffi::OsStrExt;
             std::ffi::CString::new(target_user.dir.as_os_str().as_bytes()).ok()
+        } else {
+            None
         };
         let mut cmd = Command::new(program);
         cmd.args(args);
-        if crate::util::is_daemon_mode() {
+        if daemon_mode {
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::null());
             cmd.stderr(Stdio::null());
@@ -935,6 +938,7 @@ impl ManagedNamespaceGuard {
             log::debug!("Enabling IPv6 for {veth_dest}");
             sudo_command(&[
                 "sysctl",
+                "-q",
                 "-w",
                 &format!("net.ipv6.conf.{veth_dest}.disable_ipv6=0"),
             ])?;
@@ -948,6 +952,7 @@ impl ManagedNamespaceGuard {
                 &self.name,
                 &[
                     "sysctl",
+                    "-q",
                     "-w",
                     &format!("net.ipv6.conf.{veth_source}.disable_ipv6=0"),
                 ],
@@ -1553,6 +1558,13 @@ impl ManagedNamespaceGuard {
     }
 }
 
+pub(crate) fn namespace_has_any_process(name: &str) -> anyhow::Result<bool> {
+    if !Path::new("/var/run/netns").join(name).exists() {
+        return Ok(false);
+    }
+    Ok(!get_pids_in_namespace(name)?.is_empty())
+}
+
 impl ManagedNamespaceGuard {
     /// Inspect detached applications as well as registered sessions. VPN helper
     /// processes and their children do not pin an otherwise unused namespace.
@@ -1589,6 +1601,12 @@ impl ManagedNamespaceGuard {
         ))
     }
 
+    /// Explicitly tear down this namespace in-place when it is still owned
+    /// inside a struct with a custom `Drop` implementation.
+    pub fn teardown_in_place(&mut self) -> anyhow::Result<()> {
+        self.perform_teardown()
+    }
+
     fn perform_teardown(&mut self) -> anyhow::Result<()> {
         if self.disposition != GuardDisposition::Managed {
             debug!(
@@ -1613,7 +1631,29 @@ impl ManagedNamespaceGuard {
             );
         }
         let daemon_mode = crate::util::is_daemon_mode();
+        let lockfile_path_dir = lock_dir;
+
+        // Tear down only if no other vopono instance uses this namespace AND no
+        // unaccounted processes remain inside it. Preserve our own lockfile
+        // until we know whether another session owns the namespace or teardown
+        // is actually proceeding, so detached background processes never orphan
+        // an untracked namespace that `from_existing()` could prematurely delete.
+        let lock_dir_is_empty =
+            crate::status::lock_dir_has_no_other_session_state(&lockfile_path_dir, &own_lock_name)
+                .unwrap_or_else(|e| {
+                    warn!(
+                        "Could not inspect locks directory {}: {e:?}; preserving namespace",
+                        lockfile_path_dir.display()
+                    );
+                    false
+                });
+        let has_unaccounted_processes = self.has_application_processes().unwrap_or_else(|error| {
+            warn!("Could not inspect namespace processes: {error}; preserving namespace");
+            true
+        });
+
         if !daemon_mode
+            && !lock_dir_is_empty
             && lockfile_path.exists()
             && let Err(e) = crate::util::owner_write::remove_file_as_config_owner(&lockfile_path)
         {
@@ -1624,41 +1664,17 @@ impl ManagedNamespaceGuard {
             );
         }
 
-        let lockfile_path_dir = lock_dir;
-
-        // Tear down only if no other vopono instance uses this namespace AND no
-        // unaccounted processes remain inside it. In daemon mode, preserve the
-        // primary `<daemon_pid>` lockfile until teardown is confirmed so the
-        // namespace remains visible to `vopono status` if teardown is skipped.
-        let lock_dir_is_empty = if daemon_mode {
-            crate::status::lock_dir_has_no_other_session_state(&lockfile_path_dir, &own_lock_name)
-        } else {
-            crate::status::lock_dir_has_no_session_state(&lockfile_path_dir)
-        }
-        .unwrap_or_else(|e| {
-            warn!(
-                "Could not inspect locks directory {}: {e:?}; preserving namespace",
-                lockfile_path_dir.display()
-            );
-            false
-        });
-        let has_unaccounted_processes = self.has_application_processes().unwrap_or_else(|error| {
-            warn!("Could not inspect namespace processes: {error}; preserving namespace");
-            true
-        });
-
         if lock_dir_is_empty && !has_unaccounted_processes {
             // Commit to teardown before dropping any resource. A later error
             // is returned to explicit callers and must not trigger a second,
             // implicit teardown from Drop.
             self.disposition = GuardDisposition::TornDown;
-            if daemon_mode
-                && lockfile_path.exists()
+            if lockfile_path.exists()
                 && let Err(e) =
                     crate::util::owner_write::remove_file_as_config_owner(&lockfile_path)
             {
                 warn!(
-                    "Failed to remove daemon lockfile: {}, {:?}",
+                    "Failed to remove lockfile: {}, {:?}",
                     lockfile_path.display(),
                     e
                 );
@@ -1757,6 +1773,7 @@ impl ManagedNamespaceGuard {
             self.openconnect = None;
             self.openfortivpn = None;
             self.ssh = None;
+            super::etc_overlay::cleanup_namespace_overlays(&self.name);
             // A concurrent teardown (e.g. `vopono stop` racing the session
             // that owns this namespace) may have removed the handle already;
             // that is success, not an error worth retrying for 4 seconds.

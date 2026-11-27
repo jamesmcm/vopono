@@ -262,7 +262,9 @@ pub(crate) fn clear_socket_timeouts(stream: &LocalSocketStream) -> anyhow::Resul
 }
 
 pub(crate) const DAEMON_HANDSHAKE_TIMEOUT_SECONDS: i64 = 2;
-pub(crate) const DAEMON_STOP_TIMEOUT_SECONDS: i64 = 30;
+pub(crate) const DAEMON_STOP_TIMEOUT_SECONDS: i64 = 60;
+
+static DAEMON_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn set_socket_timeouts(stream: &LocalSocketStream) -> anyhow::Result<()> {
     // Bound the handshake so a wedged daemon cannot hang status/list polling.
@@ -523,12 +525,119 @@ pub(crate) fn monotonic_ns() -> std::io::Result<u64> {
 
 pub(crate) struct LaunchCancellation<'a> {
     conn: &'a LocalSocketStream,
-    deadline_ns: u64,
+    deadline_ns: Option<u64>,
+    cancelled: Arc<AtomicBool>,
+    timed_out: Arc<AtomicBool>,
+    stop_watcher: Arc<AtomicBool>,
+    watcher: Option<thread::JoinHandle<()>>,
 }
 
-impl LaunchCancellation<'_> {
+impl<'a> LaunchCancellation<'a> {
+    fn start(conn: &'a LocalSocketStream, deadline_ns: Option<u64>) -> Self {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let timed_out = Arc::new(AtomicBool::new(false));
+        let stop_watcher = Arc::new(AtomicBool::new(false));
+        vopono_core::util::set_launch_cancel_flag(Some(Arc::clone(&cancelled)));
+
+        let watcher = conn.try_clone().ok().map(|cloned_conn| {
+            let cancelled_w = Arc::clone(&cancelled);
+            let timed_out_w = Arc::clone(&timed_out);
+            let stop_w = Arc::clone(&stop_watcher);
+            thread::spawn(move || {
+                let LocalSocketStream::UdSocket(ref sock) = cloned_conn;
+                let raw_fd = sock.as_fd().as_raw_fd();
+                let mut pending = Vec::new();
+                let mut chunk = [0u8; 256];
+                while !stop_w.load(Ordering::Acquire) {
+                    if DAEMON_SHUTTING_DOWN.load(Ordering::Acquire) {
+                        cancelled_w.store(true, Ordering::Release);
+                        return;
+                    }
+                    if let Some(deadline) = deadline_ns
+                        && monotonic_ns().is_ok_and(|now| now >= deadline)
+                    {
+                        timed_out_w.store(true, Ordering::Release);
+                        cancelled_w.store(true, Ordering::Release);
+                        return;
+                    }
+                    let mut poll_fd = nix::libc::pollfd {
+                        fd: raw_fd,
+                        events: nix::libc::POLLIN | nix::libc::POLLRDHUP,
+                        revents: 0,
+                    };
+                    let rc = unsafe { nix::libc::poll(&mut poll_fd, 1, 50) };
+                    if rc <= 0 {
+                        continue;
+                    }
+                    if poll_fd.revents & (nix::libc::POLLRDHUP | nix::libc::POLLHUP) != 0 {
+                        cancelled_w.store(true, Ordering::Release);
+                        return;
+                    }
+                    if poll_fd.revents & nix::libc::POLLIN != 0 {
+                        match nix::sys::socket::recv(raw_fd, &mut chunk, MsgFlags::MSG_DONTWAIT) {
+                            Ok(0) => {
+                                cancelled_w.store(true, Ordering::Release);
+                                return;
+                            }
+                            Ok(n) => pending.extend_from_slice(&chunk[..n]),
+                            Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => continue,
+                            Err(_) => {
+                                cancelled_w.store(true, Ordering::Release);
+                                return;
+                            }
+                        }
+                        while pending.len() >= 4 {
+                            let len = u32::from_be_bytes([
+                                pending[0], pending[1], pending[2], pending[3],
+                            ]) as usize;
+                            if len > MAX_CONTROL_FRAME_LEN {
+                                cancelled_w.store(true, Ordering::Release);
+                                return;
+                            }
+                            if pending.len() < 4 + len {
+                                break;
+                            }
+                            let bytes: Vec<u8> = pending.drain(..4 + len).skip(4).collect();
+                            if let Ok(DaemonRequest::Control(DaemonControl::Signal(signal))) =
+                                wincode::deserialize::<DaemonRequest>(&bytes)
+                                && let Ok(sig) = nix::sys::signal::Signal::try_from(signal)
+                                && matches!(
+                                    sig,
+                                    nix::sys::signal::Signal::SIGINT
+                                        | nix::sys::signal::Signal::SIGTERM
+                                        | nix::sys::signal::Signal::SIGHUP
+                                        | nix::sys::signal::Signal::SIGQUIT
+                                )
+                            {
+                                cancelled_w.store(true, Ordering::Release);
+                                return;
+                            }
+                        }
+                    }
+                }
+            })
+        });
+
+        Self {
+            conn,
+            deadline_ns,
+            cancelled,
+            timed_out,
+            stop_watcher,
+            watcher,
+        }
+    }
+
     pub(crate) fn check(&self) -> anyhow::Result<()> {
-        if monotonic_ns()? >= self.deadline_ns {
+        if self.timed_out.load(Ordering::Acquire) {
+            return Err(LaunchCancelled { timed_out: true }.into());
+        }
+        if self.cancelled.load(Ordering::Acquire) || DAEMON_SHUTTING_DOWN.load(Ordering::Acquire) {
+            return Err(LaunchCancelled { timed_out: false }.into());
+        }
+        if let Some(deadline_ns) = self.deadline_ns
+            && monotonic_ns()? >= deadline_ns
+        {
             return Err(LaunchCancelled { timed_out: true }.into());
         }
         let LocalSocketStream::UdSocket(socket) = self.conn;
@@ -538,7 +647,7 @@ impl LaunchCancellation<'_> {
             revents: 0,
         };
         loop {
-            // The socket's write-half closure means its MCP job was cancelled
+            // The socket's write-half closure means its job was cancelled
             // or the client disconnected. Leave the read half open for the result.
             if unsafe { nix::libc::poll(&mut poll_fd, 1, 0) } >= 0 {
                 break;
@@ -552,6 +661,16 @@ impl LaunchCancellation<'_> {
             return Err(LaunchCancelled { timed_out: false }.into());
         }
         Ok(())
+    }
+}
+
+impl Drop for LaunchCancellation<'_> {
+    fn drop(&mut self) {
+        self.stop_watcher.store(true, Ordering::Release);
+        vopono_core::util::set_launch_cancel_flag(None);
+        if let Some(handle) = self.watcher.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -589,11 +708,12 @@ pub fn start() -> anyhow::Result<()> {
         // namespace setup/teardown transitions to finish, then clean up and exit.
         if let Some(signal) = signals.forever().next() {
             info!(
-                "Received signal {}, waiting for active transitions before exiting.",
+                "Received signal {}, cancelling in-flight setups and waiting for active transitions before exiting.",
                 signal
             );
+            DAEMON_SHUTTING_DOWN.store(true, Ordering::Release);
             let _ = std::fs::remove_file(&socket_path);
-            crate::namespace_sessions::wait_for_idle_transitions(std::time::Duration::from_secs(3));
+            crate::namespace_sessions::wait_for_idle_transitions(std::time::Duration::from_secs(5));
             std::process::exit(0);
         }
     });
@@ -790,8 +910,18 @@ fn copy_pty_output(mut reader: File, mut output: PtyOutput, prefix: &[u8], done:
         };
         match output.write(bytes) {
             Ok(0) => return,
-            Ok(count) if !prefix.is_empty() => prefix = &prefix[count..],
-            Ok(count) => pending.start += count,
+            Ok(count) if !prefix.is_empty() => {
+                prefix = &prefix[count..];
+                if deadline.is_some() {
+                    deadline = Some(Instant::now() + Duration::from_millis(250));
+                }
+            }
+            Ok(count) => {
+                pending.start += count;
+                if deadline.is_some() {
+                    deadline = Some(Instant::now() + Duration::from_millis(250));
+                }
+            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 fd_writable(output.file.as_raw_fd(), 25);
@@ -963,7 +1093,16 @@ fn wait_for_application(
                 {
                     continue;
                 }
-                Err(_) => break,
+                Err(_) => {
+                    // On Linux, reading a hung-up client TTY slave returns EIO.
+                    // Deliver SIGHUP so interactive shells do not stay orphaned
+                    // after a terminal close or SSH disconnect.
+                    let _ = nix::sys::signal::kill(
+                        child_pgid_for_stdin,
+                        nix::sys::signal::Signal::SIGHUP,
+                    );
+                    break;
+                }
             };
             if n == 0 {
                 // Client reached EOF (Ctrl-D in cooked mode or client closed input).
@@ -1123,7 +1262,14 @@ fn forward_terminal_signals(
         // Use non-blocking per-call recv so a stalled partial frame cannot block
         // ctrl_thread.join() after the child exits, without mutating shared socket flags.
         match nix::sys::socket::recv(raw_fd, &mut chunk, MsgFlags::MSG_DONTWAIT) {
-            Ok(0) => break,
+            Ok(0) => {
+                if !done.load(Ordering::Acquire) {
+                    // Client disconnected unexpectedly (e.g. terminal closed / killed);
+                    // deliver SIGHUP to the interactive child's process group.
+                    let _ = nix::sys::signal::kill(group, nix::sys::signal::Signal::SIGHUP);
+                }
+                break;
+            }
             Ok(n) => pending.extend_from_slice(&chunk[..n]),
             Err(nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR) => continue,
             Err(_) => break,
@@ -1258,12 +1404,9 @@ fn handle_client(
                 let monitor = exec_command.monitor;
                 let recover = exec_command.recover;
                 let transition = crate::namespace_sessions::begin_setup();
-                let cancellation = deadline_ns.map(|deadline_ns| LaunchCancellation {
-                    conn: &conn,
-                    deadline_ns,
-                });
-                if let Some(cancellation) = &cancellation {
-                    cancellation.check()?;
+                let cancellation = LaunchCancellation::start(&conn, deadline_ns);
+                cancellation.check()?;
+                if deadline_ns.is_some() {
                     anyhow::ensure!(
                         !exec_command.create_netns_only,
                         "MCP jobs require an application"
@@ -1328,9 +1471,10 @@ fn handle_client(
                         return Err(error);
                     }
                     drop(transition);
+                    drop(cancellation);
                     // No child will consume the received SCM_RIGHTS descriptors in
                     // this branch, so take ownership and close all three locally.
-                    let (_client_stdin, client_stdout, _client_stderr) =
+                    let (_client_stdin, client_stdout, client_stderr) =
                         client_fds.take().expect("client fds present");
                     let registered = session.as_ref().expect("registered session");
                     if json {
@@ -1342,14 +1486,14 @@ fn handle_client(
                         );
                         write_client_notice(client_stdout, format!("{report}\n").as_bytes());
                     } else if !silent {
-                        write_client_notice(
-                            client_stdout,
-                            format!(
-                                "{}\n",
-                                crate::exec::human_launch_report(&registered.ns, setup.reused)
-                            )
-                            .as_bytes(),
+                        let mut text = format!(
+                            "{}\n",
+                            crate::exec::human_launch_report(&registered.ns, setup.reused)
                         );
+                        if let Some(port) = registered.forwarded_port() {
+                            text.push_str(&format!("Port Forwarding on port {port}\n"));
+                        }
+                        write_client_notice(client_stderr, text.as_bytes());
                     }
                     write_response(&mut conn, &DaemonResponse::Exit(0))?;
                     return Ok(());
@@ -1423,7 +1567,7 @@ fn handle_client(
                         Some((p.slave, child_out, child_err)),
                         true,
                         Some(forwarded_env.clone()),
-                        cancellation.as_ref(),
+                        Some(&cancellation),
                     )?;
                     pty_master = Some(p.master);
                 } else {
@@ -1441,9 +1585,12 @@ fn handle_client(
                         Some((in_fd, child_out, err_fd)),
                         false,
                         Some(forwarded_env.clone()),
-                        cancellation.as_ref(),
+                        Some(&cancellation),
                     )?;
                 }
+                // Stop the launch-cancellation watcher before `wait_for_application`
+                // begins reading terminal/control frames from `conn`.
+                drop(cancellation);
 
                 // Create a per-client RON lock file under ~/.config/vopono/locks/<ns>/client-<pid>
                 // so status readers can report daemon-launched applications and Drop can see
@@ -1716,10 +1863,27 @@ fn handle_client(
 
 fn stop_daemon_namespace(id: &str, uid: Uid) -> anyhow::Result<crate::control::StopResult> {
     let transition = crate::namespace_sessions::lock_namespace(id);
-    crate::namespace_ownership::authorize(id, uid)?;
     let path = Path::new("/run/netns").join(id);
+    // Check existence before ownership authorization so stopping a non-existent
+    // namespace preserves the typed `namespace_not_found` error contract.
+    let status = vopono_core::status::read_lock_namespaces()?;
+    let exists_on_host = match std::fs::metadata(&path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if !status.namespaces.contains_key(id) && !exists_on_host {
+        return Err(crate::errors::CliError::NamespaceNotFound { id: id.to_owned() }.into());
+    }
+    crate::namespace_ownership::authorize(id, uid)?;
     // Hold the original generation open while the forwarder releases its lease.
-    let original = File::open(&path)?;
+    let original = match File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(crate::errors::CliError::NamespaceNotFound { id: id.to_owned() }.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
     let identity = original.metadata()?;
     crate::control::mark_namespace_stopping(id, uid)?;
     crate::namespace_sessions::stop_monitor(id)?;
@@ -1729,7 +1893,7 @@ fn stop_daemon_namespace(id: &str, uid: Uid) -> anyhow::Result<crate::control::S
         crate::namespace_sessions::wait_forwarder_released(&released, Duration::from_secs(5));
     }
 
-    let transition = crate::namespace_sessions::lock_namespace(id);
+    let mut transition = Some(crate::namespace_sessions::lock_namespace(id));
     let same_generation = match std::fs::metadata(&path) {
         Ok(current) => current.dev() == identity.dev() && current.ino() == identity.ino(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -1745,7 +1909,14 @@ fn stop_daemon_namespace(id: &str, uid: Uid) -> anyhow::Result<crate::control::S
         });
     }
 
-    let result = crate::control::stop_namespace(id, Some(uid))?;
+    let result = crate::control::stop_namespace_with_wait_hook(id, Some(uid), || {
+        // Release the transition lock before polling so `Session::run_until_unused`
+        // can acquire it and finish tearing down the namespace without deadlocking.
+        drop(transition.take());
+    })?;
+    if transition.is_none() {
+        transition = Some(crate::namespace_sessions::lock_namespace(id));
+    }
     let released = crate::namespace_sessions::invalidate(id);
     drop(transition);
     if let Some(released) = released {

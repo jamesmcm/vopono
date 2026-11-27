@@ -121,6 +121,11 @@ impl Wireguard {
             );
         }
 
+        let kernel_ipv6_disabled = std::fs::read_to_string("/sys/module/ipv6/parameters/disable")
+            .map(|value| value.trim() == "1")
+            .unwrap_or(false);
+        let effective_disable_ipv6 = disable_ipv6 || kernel_ipv6_disabled;
+
         // Resolve the peer with the host resolver before configuring WireGuard. A provider's
         // tunnel DNS is not reachable until WireGuard is connected, so passing a hostname to
         // `wg setconf` would create a DNS bootstrap dependency inside the namespace.
@@ -129,12 +134,12 @@ impl Wireguard {
             .endpoint
             .resolve_ips()
             .context("Failed to resolve Wireguard peer endpoint")?;
-        let peer_endpoint_ip =
-            select_endpoint_ip(&endpoint_addresses, disable_ipv6).with_context(|| {
+        let peer_endpoint_ip = select_endpoint_ip(&endpoint_addresses, effective_disable_ipv6)
+            .with_context(|| {
                 format!(
                     "No usable Wireguard endpoint found for {}{}",
                     config.peer.endpoint,
-                    if disable_ipv6 {
+                    if effective_disable_ipv6 {
                         " while IPv6 is disabled"
                     } else {
                         ""
@@ -152,8 +157,9 @@ impl Wireguard {
             port: config.peer.endpoint.port(),
             public_key: config.peer.public_key.clone(),
             address: peer_endpoint_ip,
-            disable_ipv6,
+            disable_ipv6: effective_disable_ipv6,
             persistent_keepalive: config.peer.keepalive.clone(),
+            allowed_ips: config.peer.allowed_ips.clone(),
         };
         let endpoint_line = Regex::new(r"(?m)^Endpoint\s*=.*$")?;
         config_string = endpoint_line
@@ -188,10 +194,6 @@ impl Wireguard {
             NamedTempFile::new()
         }
         .context("Creating temporary Wireguard config")?;
-        let kernel_ipv6_disabled = std::fs::read_to_string("/sys/module/ipv6/parameters/disable")
-            .map(|value| value.trim() == "1")
-            .unwrap_or(false);
-        let effective_disable_ipv6 = disable_ipv6 || kernel_ipv6_disabled;
 
         write!(
             wg_temp_file,
@@ -215,64 +217,68 @@ impl Wireguard {
         let peer_ip_str = peer_endpoint_ip.to_string();
         match firewall {
             Firewall::NfTables => {
-                let ip_family = if peer_endpoint_ip.is_ipv4() {
-                    "ip"
-                } else {
-                    "ip6"
-                };
+                if !(effective_disable_ipv6 && peer_endpoint_ip.is_ipv6()) {
+                    let ip_family = if peer_endpoint_ip.is_ipv4() {
+                        "ip"
+                    } else {
+                        "ip6"
+                    };
 
-                debug!(
-                    "Opening firewall for Wireguard peer (out): {peer_ip_str} dport {peer_port}"
-                );
-                // Allow the initial OUTGOING connection packet.
-                NetworkNamespace::exec(
-                    &namespace.name,
-                    &[
-                        "nft",
-                        "add",
-                        "rule",
-                        "inet",
+                    debug!(
+                        "Opening firewall for Wireguard peer (out): {peer_ip_str} dport {peer_port}"
+                    );
+                    // Allow the initial OUTGOING connection packet.
+                    NetworkNamespace::exec(
                         &namespace.name,
-                        "output",
-                        "meta",
-                        "mark",
-                        WIREGUARD_FWMARK,
-                        ip_family,
-                        "daddr",
-                        &peer_ip_str,
-                        "udp",
-                        "dport",
-                        &peer_port,
-                        "counter",
-                        "accept",
-                        "comment",
-                        "vopono-recovery-endpoint",
-                    ],
-                )?;
+                        &[
+                            "nft",
+                            "add",
+                            "rule",
+                            "inet",
+                            &namespace.name,
+                            "output",
+                            "meta",
+                            "mark",
+                            WIREGUARD_FWMARK,
+                            ip_family,
+                            "daddr",
+                            &peer_ip_str,
+                            "udp",
+                            "dport",
+                            &peer_port,
+                            "counter",
+                            "accept",
+                            "comment",
+                            "vopono-recovery-endpoint",
+                        ],
+                    )?;
 
-                debug!("Opening firewall for Wireguard peer (in): {peer_ip_str} sport {peer_port}");
-                // Allow the server's INCOMING reply packet.
-                NetworkNamespace::exec(
-                    &namespace.name,
-                    &[
-                        "nft",
-                        "add",
-                        "rule",
-                        "inet",
+                    debug!(
+                        "Opening firewall for Wireguard peer (in): {peer_ip_str} sport {peer_port}"
+                    );
+                    // Allow the server's INCOMING reply packet.
+                    NetworkNamespace::exec(
                         &namespace.name,
-                        "input",
-                        ip_family,
-                        "saddr",
-                        &peer_ip_str,
-                        "udp",
-                        "sport",
-                        &peer_port,
-                        "counter",
-                        "accept",
-                        "comment",
-                        "vopono-recovery-endpoint",
-                    ],
-                )?;
+                        &[
+                            "nft",
+                            "add",
+                            "rule",
+                            "inet",
+                            &namespace.name,
+                            "input",
+                            ip_family,
+                            "saddr",
+                            &peer_ip_str,
+                            "udp",
+                            "sport",
+                            &peer_port,
+                            "counter",
+                            "accept",
+                            "comment",
+                            "vopono-recovery-endpoint",
+                        ],
+                    )?;
+                }
             }
             Firewall::IpTables => {
                 if !(effective_disable_ipv6 && peer_endpoint_ip.is_ipv6()) {

@@ -84,6 +84,12 @@ pub fn prepare(command: &mut ExecCommand) -> anyhow::Result<()> {
             .provider
             .as_ref()
             .is_none_or(|p| p.to_variant() == vopono_core::config::providers::VpnProvider::Custom)
+        && !command.protocol.as_ref().is_some_and(|p| {
+            matches!(
+                p.to_variant(),
+                vopono_core::config::vpn::Protocol::Ssh | vopono_core::config::vpn::Protocol::Warp
+            )
+        })
         && let Ok(path) = config.get_string("custom")
         && !path.is_empty()
     {
@@ -374,5 +380,36 @@ mod tests {
         assert!(command.monitor);
         assert!(command.recover);
         assert!(command.json);
+    }
+
+    #[test]
+    fn prepare_does_not_inherit_custom_for_cli_ssh_or_warp_protocol() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "custom = '/tmp/default.ovpn'\n").unwrap();
+        for proto in ["ssh", "warp"] {
+            let Some(crate::args::Command::Exec(mut command)) = crate::args::App::try_parse_from([
+                "vopono",
+                "exec",
+                "--vopono-config",
+                config.to_str().unwrap(),
+                "--protocol",
+                proto,
+                "--server",
+                "mybox",
+                "true",
+            ])
+            .unwrap()
+            .cmd
+            else {
+                unreachable!()
+            };
+            prepare(&mut command).unwrap();
+            assert!(
+                command.custom.is_none(),
+                "top-level custom leaked onto --protocol {proto}"
+            );
+        }
     }
 }

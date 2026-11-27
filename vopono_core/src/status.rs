@@ -666,8 +666,11 @@ fn application_pid_is_stale(pid: u32, namespace: &str) -> bool {
         return true;
     }
     // Lockfiles cannot outlive their namespace: when the netns handle is gone
-    // no recorded process can still be attached to it.
-    if !Path::new("/var/run/netns").join(namespace).exists() {
+    // no recorded process can still be attached to it. Permission errors do
+    // not establish absence, so only `NotFound` marks the PID stale.
+    if std::fs::metadata(Path::new("/var/run/netns").join(namespace))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
         return true;
     }
     matches!(process_namespace_matches(pid, namespace), Some(false))

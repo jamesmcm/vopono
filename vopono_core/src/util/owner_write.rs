@@ -213,7 +213,9 @@ pub struct OwnerWriteContext {
 pub fn capture_owner_write_context() -> anyhow::Result<OwnerWriteContext> {
     let owner = super::config_write_owner()?;
     let helper_exe = match (owner, helper_exe_override()) {
-        (Some(_), None) => Some(std::env::current_exe().context("Failed to locate write helper")?),
+        (Some(_), None) => {
+            Some(crate::util::current_vopono_exe().context("Failed to locate write helper")?)
+        }
         (_, helper_exe) => helper_exe,
     };
     Ok(OwnerWriteContext { owner, helper_exe })
@@ -241,9 +243,11 @@ pub fn run_owner_write_from_stdin() -> anyhow::Result<()> {
 
 /// Spawn the helper binary with the given user identity to apply `request`.
 fn spawn_owner_write(request: &OwnerWriteRequest, uid: Uid, gid: Gid) -> anyhow::Result<()> {
-    let exe = helper_exe_override().ok_or_else(|| {
-        anyhow!("No helper executable configured for dropped-privilege config writes")
-    })?;
+    let exe = helper_exe_override()
+        .or_else(|| crate::util::current_vopono_exe().ok())
+        .ok_or_else(|| {
+            anyhow!("No helper executable configured for dropped-privilege config writes")
+        })?;
     let user = User::from_uid(uid)?.ok_or_else(|| anyhow!("Unknown uid {uid}"))?;
     let groups = supplementary_groups(&user.name, gid)?;
     let payload = serde_json::to_vec(request)?;
@@ -453,13 +457,24 @@ pub fn validated_user_owned_dir(path: &Path, uid: Uid) -> anyhow::Result<PathBuf
 
 /// Read a regular configuration file with the authenticated user's permissions.
 /// Runs a separate executable so daemon threads never change process credentials.
+///
+/// Only drops privileges in daemon mode (or when an explicit config-owner
+/// override is installed). Direct `sudo vopono` invocations retain root read
+/// access so root-only configs such as `/etc/wireguard/*.conf` remain readable.
 pub fn read_file_as_config_owner(path: &Path) -> anyhow::Result<Vec<u8>> {
-    let Some((uid, gid)) = super::config_write_owner()? else {
+    let drop_owner = if let Some(owner) = super::config_owner_override() {
+        (!owner.0.is_root()).then_some(owner)
+    } else if super::is_daemon_mode() {
+        super::config_write_owner()?
+    } else {
+        None
+    };
+    let Some((uid, gid)) = drop_owner else {
         return read_regular_file(path)
             .with_context(|| format!("Could not read {}", path.display()));
     };
     let exe = helper_exe_override()
-        .or_else(|| std::env::current_exe().ok())
+        .or_else(|| crate::util::current_vopono_exe().ok())
         .context("Missing config reader executable")?;
     let user = User::from_uid(uid)?.context("Unknown config owner")?;
     let groups = supplementary_groups(&user.name, gid)?;

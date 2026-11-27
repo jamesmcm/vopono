@@ -138,6 +138,14 @@ pub fn stop_namespace(
     namespace_id: &str,
     requester_uid: Option<nix::unistd::Uid>,
 ) -> Result<StopResult> {
+    stop_namespace_with_wait_hook(namespace_id, requester_uid, || {})
+}
+
+pub(crate) fn stop_namespace_with_wait_hook(
+    namespace_id: &str,
+    requester_uid: Option<nix::unistd::Uid>,
+    before_wait: impl FnOnce(),
+) -> Result<StopResult> {
     let status = read_lock_namespaces()?;
     // Lockfiles can be missing (for example after a manual cleanup) while the
     // owned namespace still exists, so consult both sources.
@@ -181,6 +189,12 @@ pub fn stop_namespace(
             )? {
                 allow_completed_teardown(namespace.teardown(), || namespace_exists(namespace_id))?;
             }
+        }
+        // Release any caller-held namespace transition lock before polling so a
+        // live session controller (`Session::run_until_unused`) can acquire the
+        // lock and complete teardown without deadlocking.
+        if namespace_exists(namespace_id)? {
+            before_wait();
         }
         let namespace_removed = wait_for_namespace_removal(namespace_id)?;
         if !namespace_removed {

@@ -212,9 +212,12 @@ impl OpenVpn {
             // Parse DNS headers and active connected peer IP from OpenVPN log
             let dns_regex = Regex::new(r"dhcp-option (?:DNS6|DNS) ([^,\s']+)").unwrap();
             let peer_regex = openvpn_peer_regex();
+            let link_proto_regex = openvpn_link_proto_regex();
             let mut openvpn_dns_servers = Vec::new();
-            let mut connected_peers: Vec<(IpAddr, u16)> = Vec::new();
+            let mut connected_peers: Vec<(IpAddr, u16, Option<OpenVpnProtocol>)> = Vec::new();
+            let mut last_link_proto: Option<OpenVpnProtocol> = None;
             let mut connect_state: Option<OpenVpnStartupState> = None;
+            let mut saw_tls_error = false;
             let startup_deadline = Instant::now() + OPENVPN_STARTUP_TIMEOUT;
             loop {
                 line_buffer.clear();
@@ -255,15 +258,34 @@ impl OpenVpn {
                     }
                 }
 
-                if let Some((ip, port)) = parse_openvpn_peer_line(&line_buffer, &peer_regex)
-                    && !connected_peers.contains(&(ip, port))
-                {
-                    connected_peers.push((ip, port));
+                if let Some(proto) = parse_openvpn_link_proto(&line_buffer, &link_proto_regex) {
+                    last_link_proto = Some(proto);
+                }
+
+                if let Some((ip, port)) = parse_openvpn_peer_line(&line_buffer, &peer_regex) {
+                    let peer_entry = (ip, port, last_link_proto.clone());
+                    if let Some(pos) = connected_peers
+                        .iter()
+                        .position(|p| p.0 == ip && p.1 == port)
+                    {
+                        connected_peers.remove(pos);
+                    }
+                    connected_peers.push(peer_entry);
                 }
 
                 if let Some(state) = parse_openvpn_startup_state(&line_buffer) {
                     debug!("OpenVPN startup state: {state:?}");
-                    connect_state = Some(state);
+                    // Stray/reordered UDP packets or first-remote timeouts log
+                    // "TLS Error" even when OpenVPN recovers or fails over to
+                    // the next remote. Keep waiting unless it's a hard cert
+                    // verification failure or OpenVPN actually exits/times out.
+                    if state == OpenVpnStartupState::TlsFailed
+                        && !line_buffer.contains("VERIFY ERROR")
+                    {
+                        saw_tls_error = true;
+                    } else {
+                        connect_state = Some(state);
+                    }
                 }
 
                 if connect_state.is_some() {
@@ -274,6 +296,10 @@ impl OpenVpn {
                 // still buffered in the logfile. Drain those lines before using
                 // process exit as a generic startup failure.
                 if x == 0 && supervised && runtime_dir.path().join("child-exited").exists() {
+                    if saw_tls_error {
+                        connect_state = Some(OpenVpnStartupState::TlsFailed);
+                        break;
+                    }
                     let status = std::fs::read_to_string(runtime_dir.path().join("child-exited"))
                         .unwrap_or_else(|_| "unknown exit status".to_owned());
                     return Err(anyhow!(
@@ -283,12 +309,24 @@ impl OpenVpn {
                 if x == 0
                     && let Some(status) = handle.try_wait()?
                 {
+                    if saw_tls_error {
+                        connect_state = Some(OpenVpnStartupState::TlsFailed);
+                        break;
+                    }
                     return Err(anyhow!(
                         "OpenVPN startup process exited with {status} before the tunnel was established"
                     ));
                 }
 
+                if crate::util::is_launch_cancelled() {
+                    return Err(anyhow!("OpenVPN launch cancelled"));
+                }
+
                 if Instant::now() >= startup_deadline {
+                    if saw_tls_error {
+                        connect_state = Some(OpenVpnStartupState::TlsFailed);
+                        break;
+                    }
                     return Err(anyhow!(
                         "OpenVPN did not establish the tunnel within {} seconds",
                         OPENVPN_STARTUP_TIMEOUT.as_secs()
@@ -352,13 +390,20 @@ impl OpenVpn {
                 None => unreachable!("startup loop only exits with a terminal state"),
             }
 
-            recovery_address = connected_peers.first().map(|(ip, _)| *ip);
-            recovery_port = connected_peers.first().map(|(_, port)| *port);
-            if let Some(first_remote) = remotes.first() {
+            let active_peer = connected_peers.last().cloned();
+            recovery_address = active_peer.as_ref().map(|(ip, _, _)| *ip);
+            recovery_port = active_peer.as_ref().map(|(_, port, _)| *port);
+            if let Some((_, _, Some(proto))) = &active_peer {
+                recovery_udp = *proto == OpenVpnProtocol::UDP;
+            } else if let Some((_, port, _)) = &active_peer {
+                if let Some(matched) = remotes.iter().find(|r| r.port == *port) {
+                    recovery_udp = matched.protocol == OpenVpnProtocol::UDP;
+                }
+            } else if let Some(first_remote) = remotes.first() {
                 recovery_udp = first_remote.protocol == OpenVpnProtocol::UDP;
             }
             let pinned_remotes = if supervised
-                && let Some((connected_ip, _)) = connected_peers.first()
+                && let Some((connected_ip, _, _)) = &active_peer
                 && remotes
                     .iter()
                     .any(|remote| matches!(remote.host, Host::Hostname(_)))
@@ -401,15 +446,23 @@ impl OpenVpn {
                 .first()
                 .map(|r| r.protocol.clone())
                 .unwrap_or(OpenVpnProtocol::UDP);
-            for (ip, port) in connected_peers {
+            for (ip, port, observed_proto) in connected_peers {
                 let host = match ip {
                     IpAddr::V4(v4) => Host::IPv4(v4),
                     IpAddr::V6(v6) => Host::IPv6(v6),
                 };
+                let protocol = observed_proto
+                    .or_else(|| {
+                        effective_remotes
+                            .iter()
+                            .find(|r| r.port == port)
+                            .map(|r| r.protocol.clone())
+                    })
+                    .unwrap_or_else(|| default_proto.clone());
                 effective_remotes.push(Remote {
                     host,
                     port,
-                    protocol: default_proto.clone(),
+                    protocol,
                 });
             }
 
@@ -927,6 +980,20 @@ pub fn killswitch(
     Ok(())
 }
 
+fn openvpn_link_proto_regex() -> Regex {
+    Regex::new(r"\b(UDP|TCP)v?[46]?(?:_CLIENT)?\s+(?:link\s+remote|connection\s+established)")
+        .unwrap()
+}
+
+fn parse_openvpn_link_proto(line: &str, re: &Regex) -> Option<OpenVpnProtocol> {
+    let caps = re.captures(line)?;
+    match &caps[1] {
+        "TCP" => Some(OpenVpnProtocol::TCP),
+        "UDP" => Some(OpenVpnProtocol::UDP),
+        _ => None,
+    }
+}
+
 fn openvpn_peer_regex() -> Regex {
     Regex::new(
         r"Peer Connection Initiated with \[AF_INET6?\](?:\[)?(?:(?i)::ffff:)?([0-9a-fA-F:.]+)(?:\])?:(\d+)",
@@ -1337,6 +1404,23 @@ mod tests {
         assert_eq!(
             parse_openvpn_startup_state("TCP connection established"),
             None
+        );
+    }
+
+    #[test]
+    fn parses_link_protocol_from_openvpn_logs() {
+        let re = openvpn_link_proto_regex();
+        assert_eq!(
+            parse_openvpn_link_proto("UDPv4 link remote: [AF_INET]198.51.100.7:443", &re),
+            Some(OpenVpnProtocol::UDP)
+        );
+        assert_eq!(
+            parse_openvpn_link_proto("TCPv4_CLIENT link remote: [AF_INET]198.51.100.7:443", &re),
+            Some(OpenVpnProtocol::TCP)
+        );
+        assert_eq!(
+            parse_openvpn_link_proto("TCP connection established with [AF_INET6]::1:443", &re),
+            Some(OpenVpnProtocol::TCP)
         );
     }
 }

@@ -547,6 +547,10 @@ enum DaemonForward {
 }
 
 fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonForward> {
+    // Collect client env (including PulseAudio discovery via `pactl`) BEFORE
+    // opening the daemon socket so slow audio discovery cannot trip the daemon's
+    // 2-second handshake timeout.
+    let client_env = daemon_client::collect_client_env();
     let (mut conn, daemon_version) = if cmd.profile.is_some() || cmd.monitor {
         match daemon_client::connect_with_version(daemon_client::Compatibility::ProfileOrMonitor) {
             Ok(connected) => connected,
@@ -577,7 +581,13 @@ fn forward_to_daemon(cmd: &ExecCommand, silent: bool) -> anyhow::Result<DaemonFo
         );
     }
     let daemon_supports_literal_app = daemon::version_at_least(&daemon_version, (1, 1, 0));
-    match forward_connected_execute(&mut conn, cmd, silent, daemon_supports_literal_app) {
+    match forward_connected_execute(
+        &mut conn,
+        cmd,
+        silent,
+        client_env,
+        daemon_supports_literal_app,
+    ) {
         Ok(forward) => Ok(forward),
         Err(ExecForwardError::PreDispatch(error)) => Err(error),
         Err(ExecForwardError::PostDispatch(error)) => Ok(if cmd.json {
@@ -599,16 +609,19 @@ fn forward_connected_execute(
     conn: &mut interprocess::local_socket::Stream,
     cmd: &ExecCommand,
     silent: bool,
+    client_env: std::collections::HashMap<String, String>,
     daemon_supports_literal_app: bool,
 ) -> Result<DaemonForward, ExecForwardError> {
     use anyhow::Context as _;
-    let request =
-        daemon_client::prepare_execute_for_daemon(cmd.clone(), silent, daemon_supports_literal_app)
-            .map_err(ExecForwardError::PreDispatch)?;
+    let request = daemon_client::prepare_execute_with_precollected_env(
+        cmd.clone(),
+        silent,
+        client_env,
+        daemon_supports_literal_app,
+    )
+    .map_err(ExecForwardError::PreDispatch)?;
     let bytes =
         wincode::serialize(&request).map_err(|e| ExecForwardError::PreDispatch(e.into()))?;
-    let mut sigs = Signals::new([SIGINT, SIGQUIT, SIGTERM, SIGTSTP])
-        .map_err(|e| ExecForwardError::PreDispatch(e.into()))?;
     let mut conn_ctrl = conn
         .try_clone()
         .map_err(|e| ExecForwardError::PreDispatch(e.into()))?;
@@ -636,7 +649,15 @@ fn forward_connected_execute(
             return Err(ExecForwardError::PreDispatch(err));
         }
     };
-    if dispatch.is_ok() {
+    if dispatch.is_ok()
+        && let Ok(mut sigs) = Signals::new([
+            SIGINT,
+            SIGQUIT,
+            SIGTERM,
+            SIGTSTP,
+            signal_hook::consts::signal::SIGHUP,
+        ])
+    {
         std::thread::spawn(move || {
             for signal in &mut sigs {
                 let request = daemon::DaemonRequest::Control(daemon::DaemonControl::Signal(signal));
@@ -682,6 +703,10 @@ fn expand_with_env(raw: &str, env: &std::collections::HashMap<String, String>) -
     .unwrap_or_else(|_| raw.to_owned())
 }
 
+fn is_unexpanded_shell_prefix(path: &str) -> bool {
+    path == "~" || path.starts_with("~/") || path.starts_with('$')
+}
+
 fn resolve_custom_path_for_daemon(
     cmd: &mut ExecCommand,
     client_working_dir: &std::path::Path,
@@ -696,8 +721,9 @@ fn resolve_custom_path_for_daemon(
     .into_iter()
     .flatten()
     {
-        let expanded = std::path::PathBuf::from(expand_with_env(&path.to_string_lossy(), env));
-        *path = if expanded.is_relative() {
+        let expanded_str = expand_with_env(&path.to_string_lossy(), env);
+        let expanded = std::path::PathBuf::from(&expanded_str);
+        *path = if expanded.is_relative() && !is_unexpanded_shell_prefix(&expanded_str) {
             client_working_dir.join(expanded)
         } else {
             expanded
@@ -713,6 +739,18 @@ fn resolve_custom_path_for_daemon(
     }
 }
 
+fn posix_shell_quote_word(word: &str) -> String {
+    if !word.is_empty()
+        && word.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b':' | b'=' | b'+')
+        })
+    {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
+
 fn resolve_daemon_path_string(
     value: &mut Option<String>,
     client_working_dir: &std::path::Path,
@@ -724,18 +762,21 @@ fn resolve_daemon_path_string(
     };
     let expanded = expand_with_env(raw, env);
     if commands_only {
-        let (first, rest) = match expanded.find(char::is_whitespace) {
-            Some(idx) => (&expanded[..idx], Some(&expanded[idx..])),
-            None => (expanded.as_str(), None),
-        };
-        if (first.contains('/') || first.starts_with('.')) && !first.starts_with(['\'', '"']) {
-            let path = std::path::Path::new(first);
+        if let Ok(mut words) = vopono_core::util::parse_command_str(&expanded)
+            && let Some(first) = words.first_mut()
+            && (first.contains('/') || first.starts_with('.'))
+            && !is_unexpanded_shell_prefix(first)
+        {
+            let path = std::path::Path::new(first.as_str());
             if path.is_relative() {
-                let mut resolved = client_working_dir.join(path).to_string_lossy().into_owned();
-                if let Some(rest) = rest {
-                    resolved.push_str(rest);
-                }
-                *value = Some(resolved);
+                *first = client_working_dir.join(path).to_string_lossy().into_owned();
+                *value = Some(
+                    words
+                        .iter()
+                        .map(|w| posix_shell_quote_word(w))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
                 return;
             }
         }
@@ -743,11 +784,13 @@ fn resolve_daemon_path_string(
         return;
     }
     let path = std::path::Path::new(&expanded);
-    *value = Some(if path.is_relative() {
-        client_working_dir.join(path).to_string_lossy().into_owned()
-    } else {
-        expanded
-    });
+    *value = Some(
+        if path.is_relative() && !is_unexpanded_shell_prefix(&expanded) {
+            client_working_dir.join(path).to_string_lossy().into_owned()
+        } else {
+            expanded
+        },
+    );
 }
 
 fn send_fds_over_unix_socket(conn: &LocalSocketStream, fds: &[RawFd]) -> anyhow::Result<()> {
@@ -828,5 +871,30 @@ mod tests {
             command.port_forwarding_callback.as_deref(),
             Some("/home/example/hooks/port.sh")
         );
+    }
+
+    #[test]
+    fn quotes_relative_hooks_in_cwd_with_spaces_and_preserves_unexpanded_tilde() {
+        let app = args::App::try_parse_from([
+            "vopono",
+            "exec",
+            "--custom",
+            "~/vpn.conf",
+            "--postup",
+            "./up.sh --flag value",
+            "true",
+        ])
+        .unwrap();
+        let args::Command::Exec(mut command) = app.cmd.unwrap() else {
+            panic!("expected exec command");
+        };
+        let empty_env = std::collections::HashMap::new();
+        resolve_custom_path_for_daemon(&mut command, Path::new("/tmp/my hooks"), &empty_env);
+        // Without HOME in env, `~/vpn.conf` stays unprefixed so the daemon expands it via passwd.
+        assert_eq!(command.custom.as_deref(), Some(Path::new("~/vpn.conf")));
+        // Hook command with spaces in CWD stays parseable as a single executable token.
+        let parsed =
+            vopono_core::util::parse_command_str(command.postup.as_deref().unwrap()).unwrap();
+        assert_eq!(parsed, vec!["/tmp/my hooks/./up.sh", "--flag", "value"]);
     }
 }

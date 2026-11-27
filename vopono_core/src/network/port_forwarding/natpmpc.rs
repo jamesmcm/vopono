@@ -83,9 +83,13 @@ impl Natpmpc {
             .as_ref()
             .map(|wg| wg.if_name.clone())
             .or_else(|| {
-                crate::network::firewall::wait_for_tunnel_interface(&ns.name, &["tun"], 1)
-                    .ok()
-                    .flatten()
+                crate::network::firewall::wait_for_tunnel_interface(
+                    &ns.name,
+                    &["tun", "tap", "utun"],
+                    3,
+                )
+                .ok()
+                .flatten()
             })
             .context("Could not determine tunnel interface for NAT-PMP gateway rule")?;
         match ns.firewall {

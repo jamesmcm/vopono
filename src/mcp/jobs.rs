@@ -341,8 +341,6 @@ impl Jobs {
             "MCP active job limit reached; cancel or wait for an existing job"
         );
         self.reserve_history()?;
-        // Connect with exact version match; no CLI subprocess, sudo fallback or sync.
-        let mut conn = connect()?;
         self.sequence += 1;
         let id = format!("{}-{}", self.nonce, self.sequence);
         let namespace = crate::namespace_ownership::name_for_uid(
@@ -352,11 +350,15 @@ impl Jobs {
         command.custom_netns_name = Some(format!("mcp-{id}"));
         command.json = true;
         command.silent = false;
+        // Prepare the execute request (including pactl detection) BEFORE opening
+        // the daemon socket so slow audio discovery never trips the 2s handshake timeout.
         let DaemonRequest::Execute { cmd, env } =
             crate::daemon_client::prepare_execute_with_env(command, false, filtered_mcp_env())?
         else {
             unreachable!("execute preparation always produces an execute request");
         };
+        // Connect with exact version match; no CLI subprocess, sudo fallback or sync.
+        let mut conn = connect()?;
         // Set O_NONBLOCK on pipe read ends before sending Execute so no post-send
         // setup call can fail and leak an untracked job.
         let (stdout_read, stdout_write) = pipe2(OFlag::O_CLOEXEC)?;

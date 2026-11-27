@@ -30,6 +30,24 @@ pub fn tunnel_only_killswitch_rules(
     endpoints: &[IpAddr],
     disable_ipv6: bool,
 ) -> Vec<Vec<String>> {
+    tunnel_only_killswitch_rules_with_uid_filter(
+        ns_name,
+        firewall,
+        tunnel_iface,
+        endpoints,
+        disable_ipv6,
+        true,
+    )
+}
+
+pub fn tunnel_only_killswitch_rules_with_uid_filter(
+    ns_name: &str,
+    firewall: Firewall,
+    tunnel_iface: Option<&str>,
+    endpoints: &[IpAddr],
+    disable_ipv6: bool,
+    restrict_endpoint_to_root: bool,
+) -> Vec<Vec<String>> {
     let mut rules: Vec<Vec<String>> = Vec::new();
     match firewall {
         Firewall::IpTables => {
@@ -85,19 +103,23 @@ pub fn tunnel_only_killswitch_rules(
                     if endpoint.is_ipv6() != is_v6 {
                         continue;
                     }
-                    rules.push(vec![
+                    let mut rule = vec![
                         ipcmd.into(),
                         "-A".into(),
                         "OUTPUT".into(),
                         "-d".into(),
                         endpoint.to_string(),
-                        "-m".into(),
-                        "owner".into(),
-                        "--uid-owner".into(),
-                        "0".into(),
-                        "-j".into(),
-                        "ACCEPT".into(),
-                    ]);
+                    ];
+                    if restrict_endpoint_to_root {
+                        rule.extend([
+                            "-m".into(),
+                            "owner".into(),
+                            "--uid-owner".into(),
+                            "0".into(),
+                        ]);
+                    }
+                    rule.extend(["-j".into(), "ACCEPT".into()]);
+                    rules.push(rule);
                 }
                 if is_v6 {
                     // Allow IPv6 Neighbor Discovery so outer IPv6 VPN endpoints
@@ -190,22 +212,25 @@ pub fn tunnel_only_killswitch_rules(
                     continue;
                 }
                 let family = if endpoint.is_ipv4() { "ip" } else { "ip6" };
-                rules.push(vec![
+                let mut rule = vec![
                     "nft".into(),
                     "add".into(),
                     "rule".into(),
                     "inet".into(),
                     ns_name.into(),
                     "output".into(),
-                    "meta".into(),
-                    "skuid".into(),
-                    "0".into(),
+                ];
+                if restrict_endpoint_to_root {
+                    rule.extend(["meta".into(), "skuid".into(), "0".into()]);
+                }
+                rule.extend([
                     family.into(),
                     "daddr".into(),
                     endpoint.to_string(),
                     "counter".into(),
                     "accept".into(),
                 ]);
+                rules.push(rule);
             }
             if !disable_ipv6 {
                 for icmpv6_type in ["nd-neighbor-solicit", "nd-neighbor-advert"] {
@@ -282,6 +307,24 @@ pub fn apply_tunnel_only_killswitch(
     firewall: Firewall,
     disable_ipv6: bool,
 ) -> anyhow::Result<()> {
+    apply_tunnel_only_killswitch_with_uid_filter(
+        netns,
+        tunnel_iface,
+        endpoints,
+        firewall,
+        disable_ipv6,
+        true,
+    )
+}
+
+pub fn apply_tunnel_only_killswitch_with_uid_filter(
+    netns: &NetworkNamespace,
+    tunnel_iface: Option<&str>,
+    endpoints: &[IpAddr],
+    firewall: Firewall,
+    disable_ipv6: bool,
+    restrict_endpoint_to_root: bool,
+) -> anyhow::Result<()> {
     info!(
         "Applying tunnel-only killswitch in {} (interface: {}, endpoints: {}, IPv6 disabled: {})",
         netns.name,
@@ -289,9 +332,14 @@ pub fn apply_tunnel_only_killswitch(
         endpoints.len(),
         disable_ipv6
     );
-    for rule in
-        tunnel_only_killswitch_rules(&netns.name, firewall, tunnel_iface, endpoints, disable_ipv6)
-    {
+    for rule in tunnel_only_killswitch_rules_with_uid_filter(
+        &netns.name,
+        firewall,
+        tunnel_iface,
+        endpoints,
+        disable_ipv6,
+        restrict_endpoint_to_root,
+    ) {
         debug!("killswitch: {}", rule.join(" "));
         let argv: Vec<&str> = rule.iter().map(String::as_str).collect();
         NetworkNamespace::exec(&netns.name, &argv)
@@ -316,6 +364,24 @@ pub fn apply_tunnel_only_killswitch_for_server(
     server: &str,
     tunnel_interface_prefixes: &[&str],
 ) -> anyhow::Result<()> {
+    apply_tunnel_only_killswitch_for_server_with_uid_filter(
+        netns,
+        firewall,
+        disable_ipv6,
+        server,
+        tunnel_interface_prefixes,
+        true,
+    )
+}
+
+pub fn apply_tunnel_only_killswitch_for_server_with_uid_filter(
+    netns: &NetworkNamespace,
+    firewall: Firewall,
+    disable_ipv6: bool,
+    server: &str,
+    tunnel_interface_prefixes: &[&str],
+    restrict_endpoint_to_root: bool,
+) -> anyhow::Result<()> {
     let Some(host) = host_from_server_arg(server) else {
         bail!("Could not derive a VPN server host from '{server}' for the killswitch");
     };
@@ -328,12 +394,13 @@ pub fn apply_tunnel_only_killswitch_for_server(
         bail!("VPN server {host} resolved to no usable addresses for killswitch");
     }
     let tunnel_iface = wait_for_tunnel_interface(&netns.name, tunnel_interface_prefixes, 20)?;
-    apply_tunnel_only_killswitch(
+    apply_tunnel_only_killswitch_with_uid_filter(
         netns,
         tunnel_iface.as_deref(),
         &endpoints,
         firewall,
         disable_ipv6,
+        restrict_endpoint_to_root,
     )
 }
 

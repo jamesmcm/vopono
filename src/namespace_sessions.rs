@@ -519,11 +519,20 @@ impl Session {
     pub fn abort_failed_launch(mut self) {
         self.unregister_application();
         if self.controller {
+            let name = self.ns.name.clone();
             self.forwarder_released.store(true, Ordering::Release);
-            remove_session(&self.ns.name, &self.valid);
+            remove_session(&name, &self.valid);
+            // Tear down the forwarder while the namespace still exists, then
+            // explicitly tear down the namespace before `Session::drop` disarms it.
+            drop(self.forwarder.take());
+            if let Err(error) = self.ns.teardown_in_place() {
+                log::warn!("Failed to tear down aborted launch namespace {name}: {error:#}");
+            }
+            if !std::path::Path::new("/run/netns").join(&name).exists() {
+                crate::namespace_ownership::remove(&name);
+            }
         }
-        // `self` drops here: if controller, `ns` and `forwarder` clean up;
-        // if attached non-controller, `ns` is already detached.
+        self.disarm();
     }
 
     /// Run only after the request has replied and released its client resources.

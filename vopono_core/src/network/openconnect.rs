@@ -257,12 +257,26 @@ pub fn apply_killswitch(
     } else {
         server.to_string()
     };
-    super::firewall::apply_tunnel_only_killswitch_for_server(
+    let uses_setuid = !crate::util::is_daemon_mode()
+        && config_file
+            .and_then(|path| read_config_as_owner(path).ok())
+            .is_some_and(|contents| {
+                contents.lines().any(|line| {
+                    let trimmed = line.trim();
+                    !trimmed.starts_with('#')
+                        && trimmed
+                            .split(|c: char| c.is_whitespace() || c == '=')
+                            .next()
+                            .is_some_and(|key| key.trim_start_matches("--") == "setuid")
+                })
+            });
+    super::firewall::apply_tunnel_only_killswitch_for_server_with_uid_filter(
         netns,
         firewall,
         disable_ipv6,
         &server,
         &["tun"],
+        !uses_setuid,
     )
 }
 
