@@ -303,7 +303,69 @@ result = ctx.client('exec', '--custom', str(tls_profile), '--protocol', 'openvpn
 assert result.returncode != 0
 assert json.loads(result.stdout)['error']['diagnostics'][0]['code'] == 'tunnel_tls', result.stdout
 assert Path('/etc/resolv.conf').read_bytes() == host_dns
+
+# A daemon crash during an unfinished OpenVPN handshake must NEVER fail open:
+# the namespace has an active underlay/NAT route before the killswitch is
+# installed, so the restarted daemon must tear it down and refuse attachment.
+hang_name = ctx.namespace('ovpn-crash-handshake')
+hang_profile = ctx.user_file(
+    'hang-client.ovpn',
+    base_profile + 'remote 192.0.2.2 1199\n',
+)
+hanging = ctx.spawn(
+    [
+        'exec',
+        '--custom',
+        str(hang_profile),
+        '--protocol',
+        'openvpn',
+        '--custom-netns-name',
+        'ovpn-crash-handshake',
+        '--interface',
+        'uplink',
+        '--firewall',
+        'nftables',
+        'true',
+    ],
+    'ovpn-crash-handshake.log',
+)
+owner_record = Path('/run/vopono/namespace-owners') / hang_name
+wait_for(
+    lambda: Path('/run/netns', hang_name).exists()
+    and owner_record.exists()
+    and subprocess.run(
+        ['nft', 'list', 'table', 'inet', 'vopono_bridge'],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+    ).returncode == 0
+)
+assert json.loads(owner_record.read_text())['lifecycle'] == 'initializing'
+# Crash the daemon mid-handshake (before OpenVPN connects or installs killswitch).
+ctx.restart(abrupt=True)
+hanging.wait(timeout=15)
+# Restarted daemon must have torn down the unfinished namespace and host rules before serving clients.
+assert not Path('/run/netns', hang_name).exists(), 'unfinished namespace survived daemon restart'
+assert not owner_record.exists(), 'initializing ownership record survived daemon restart'
+for table in ('vopono_nat', 'vopono_bridge'):
+    assert subprocess.run(
+        ['nft', 'list', 'table', 'inet', table],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+    ).returncode != 0, f'unfinished handshake leaked nftables table {table}'
+attach = ctx.client(
+    'exec',
+    '--existing-netns',
+    hang_name,
+    '--interface',
+    'uplink',
+    'python3 -c "import urllib.request; print(urllib.request.urlopen(\'http://192.0.2.2:18080\', timeout=2).read())"',
+    check=False,
+    timeout=15,
+)
+assert attach.returncode != 0, f'unexpectedly attached to crashed handshake namespace: {attach.stdout}'
+assert Path('/etc/resolv.conf').read_bytes() == host_dns
+
 for process in (peer, tcp_peer, auth_peer):
     process.terminate()
     process.wait(timeout=10)
-print('PASS: local OpenVPN TLS, typed AUTH/TLS errors, host DNS, frozen-input recovery and crash adoption', flush=True)
+print('PASS: local OpenVPN TLS, typed AUTH/TLS errors, host DNS, frozen-input recovery, handshake-crash fail-closed and crash adoption', flush=True)

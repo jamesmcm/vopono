@@ -1604,15 +1604,75 @@ impl ManagedNamespaceGuard {
     /// Explicitly tear down this namespace in-place when it is still owned
     /// inside a struct with a custom `Drop` implementation.
     pub fn teardown_in_place(&mut self) -> anyhow::Result<()> {
-        self.perform_teardown()
+        self.perform_teardown_inner(false)
+    }
+
+    /// Unconditionally tear down an unfinished (`Initializing`) namespace
+    /// without consulting user-writable lock directories or running `predown`.
+    pub fn force_teardown(mut self) -> anyhow::Result<()> {
+        self.perform_teardown_inner(true)
     }
 
     fn perform_teardown(&mut self) -> anyhow::Result<()> {
+        self.perform_teardown_inner(false)
+    }
+
+    fn perform_teardown_inner(&mut self, force: bool) -> anyhow::Result<()> {
         if self.disposition != GuardDisposition::Managed {
             debug!(
                 "Namespace {} is not managed by vopono - leaving it untouched",
                 self.name
             );
+            return Ok(());
+        }
+        if force {
+            self.disposition = GuardDisposition::TornDown;
+            let had_veth = self.veth_pair.is_some();
+            let ipv4_mask = self.veth_pair_ips.as_ref().and_then(|ips| {
+                ips.ipv4.as_ref().map(|pair| match pair.host_ip {
+                    IpAddr::V4(v4) => {
+                        let [a, b, c, _] = v4.octets();
+                        format!("{a}.{b}.{c}.0/24")
+                    }
+                    IpAddr::V6(_) => String::new(),
+                })
+            });
+            let ipv4_mask = ipv4_mask.filter(|s| !s.is_empty());
+            self.trojan = None;
+            self.shadowsocks = None;
+            self.openvpn = None;
+            self.veth_pair = None;
+            self.dns_config = None;
+            self.warp = None;
+            self.wireguard = None;
+            self.host_masquerade = None;
+            self.firewall_exception = None;
+            self.openconnect = None;
+            self.openfortivpn = None;
+            self.ssh = None;
+            // Also sweep any host veth / shared nftables rules that were created
+            // right before SIGKILL, before the `Initializing` snapshot updated.
+            if let Ok(base) = veth_interface_base(&self.name) {
+                let veth_dest = format!("{base}_d");
+                if !had_veth {
+                    let _ = sudo_command(&["ip", "link", "delete", &veth_dest]);
+                }
+                if self.firewall == Firewall::NfTables {
+                    super::host_masquerade::cleanup_orphaned_nft_rules(
+                        &veth_dest,
+                        ipv4_mask.as_deref(),
+                    );
+                }
+            }
+            super::etc_overlay::cleanup_namespace_overlays(&self.name);
+            if Path::new("/run/netns").join(&self.name).exists() {
+                sudo_command(&["ip", "netns", "delete", &self.name]).with_context(|| {
+                    format!(
+                        "Failed to delete unfinished network namespace {}",
+                        self.name
+                    )
+                })?;
+            }
             return Ok(());
         }
         let mut lock_dir = config_dir()?;

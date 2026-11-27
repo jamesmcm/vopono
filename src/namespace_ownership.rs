@@ -40,6 +40,7 @@ enum StoredNamespace {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum NamespaceLifecycle {
+    Initializing,
     #[default]
     Active,
     Persistent,
@@ -96,7 +97,23 @@ impl OwnerRecord {
             self.lifecycle != NamespaceLifecycle::Stopping,
             "Namespace {name} is being stopped"
         );
+        anyhow::ensure!(
+            self.lifecycle != NamespaceLifecycle::Initializing,
+            "Namespace {name} has not finished VPN setup"
+        );
         self.lifecycle = NamespaceLifecycle::Persistent;
+        Ok(())
+    }
+
+    fn ensure_ready(&self, name: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.lifecycle != NamespaceLifecycle::Initializing,
+            "Namespace {name} did not finish VPN setup and cannot be attached to"
+        );
+        anyhow::ensure!(
+            self.lifecycle != NamespaceLifecycle::Stopping,
+            "Namespace {name} is being stopped"
+        );
         Ok(())
     }
 
@@ -128,6 +145,41 @@ pub fn name_for_uid(base: &str, uid: Uid) -> anyhow::Result<String> {
 /// Persist ownership outside the user-writable config tree. Device/inode bind
 /// the record to this exact namespace rather than merely its reusable name.
 pub fn tag(namespace_state: &NetworkNamespace, uid: Uid) -> anyhow::Result<()> {
+    tag_with_lifecycle(namespace_state, uid, NamespaceLifecycle::Active)
+}
+
+/// Record a newly created namespace while its VPN tunnel and killswitch are
+/// still being set up. `Initializing` namespaces are never attachable and are
+/// torn down automatically if the daemon crashes before setup completes.
+pub fn tag_initializing(namespace_state: &NetworkNamespace, uid: Uid) -> anyhow::Result<()> {
+    tag_with_lifecycle(namespace_state, uid, NamespaceLifecycle::Initializing)
+}
+
+/// Refresh the snapshot of an `Initializing` namespace as host resources
+/// (veth, host masquerade, firewall exceptions) are added so crash cleanup can
+/// tear them all down cleanly.
+pub fn update_initializing_snapshot(
+    namespace_state: &NetworkNamespace,
+    uid: Uid,
+) -> anyhow::Result<()> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
+    let name = &namespace_state.name;
+    let mut record = validated_record(name, uid)?;
+    anyhow::ensure!(
+        record.lifecycle == NamespaceLifecycle::Initializing,
+        "Namespace {name} is no longer initializing"
+    );
+    record.namespace = StoredNamespace::Snapshot(namespace_state.snapshot()?);
+    persist_record(name, &record)
+}
+
+fn tag_with_lifecycle(
+    namespace_state: &NetworkNamespace,
+    uid: Uid,
+    lifecycle: NamespaceLifecycle,
+) -> anyhow::Result<()> {
     let _guard = OWNER_RECORD_LOCK
         .lock()
         .expect("owner record lock poisoned");
@@ -143,7 +195,7 @@ pub fn tag(namespace_state: &NetworkNamespace, uid: Uid) -> anyhow::Result<()> {
         device: namespace.dev(),
         inode: namespace.ino(),
         namespace: StoredNamespace::Snapshot(namespace_state.snapshot()?),
-        lifecycle: NamespaceLifecycle::Active,
+        lifecycle,
         runtime: None,
     };
     persist_record(name, &record)
@@ -220,6 +272,9 @@ pub fn restart_records() -> anyhow::Result<Vec<(String, Uid, RuntimeSettings)>> 
             let record: OwnerRecord = serde_json::from_reader(std::fs::File::open(entry.path())?)?;
             let uid = Uid::from_raw(record.uid);
             let record = validated_record(&name, uid)?;
+            if record.lifecycle == NamespaceLifecycle::Initializing {
+                return Ok(None);
+            }
             Ok(record.runtime.map(|runtime| (name.clone(), uid, runtime)))
         })();
         match result {
@@ -227,6 +282,51 @@ pub fn restart_records() -> anyhow::Result<Vec<(String, Uid, RuntimeSettings)>> 
             Ok(None) => {}
             Err(_) => {
                 // A stale root-owned record is disposable; its namespace is not.
+                log::warn!("Ignoring stale or invalid namespace ownership record {name}");
+                if entry.file_type()?.is_file()
+                    && std::fs::symlink_metadata(entry.path())?.uid() == 0
+                {
+                    std::fs::remove_file(entry.path())?;
+                }
+            }
+        }
+    }
+    Ok(records)
+}
+
+/// Enumerate namespaces whose setup was interrupted before the VPN tunnel and
+/// killswitch completed (`NamespaceLifecycle::Initializing`).
+pub fn initializing_records() -> anyhow::Result<Vec<(String, Uid)>> {
+    let mut records = Vec::new();
+    let entries = match std::fs::read_dir(OWNER_DIR) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(records),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if vopono_core::network::netns::validate_netns_name(&name).is_err() {
+            continue;
+        }
+        let result = (|| -> anyhow::Result<_> {
+            let meta = std::fs::symlink_metadata(entry.path())?;
+            anyhow::ensure!(
+                meta.is_file() && meta.uid() == 0 && meta.len() <= 4 * 1024 * 1024,
+                "Invalid ownership record"
+            );
+            let record: OwnerRecord = serde_json::from_reader(std::fs::File::open(entry.path())?)?;
+            let uid = Uid::from_raw(record.uid);
+            let record = validated_record(&name, uid)?;
+            Ok((record.lifecycle == NamespaceLifecycle::Initializing)
+                .then_some((name.clone(), uid)))
+        })();
+        match result {
+            Ok(Some(record)) => records.push(record),
+            Ok(None) => {}
+            Err(_) => {
                 log::warn!("Ignoring stale or invalid namespace ownership record {name}");
                 if entry.file_type()?.is_file()
                     && std::fs::symlink_metadata(entry.path())?.uid() == 0
@@ -258,11 +358,36 @@ pub fn authorize(name: &str, uid: Uid) -> anyhow::Result<()> {
     validated_record(name, uid).map(|_| ())
 }
 
+/// Authorize attaching an application or probe to an existing namespace.
+/// Refuses unfinished (`Initializing`) or `Stopping` namespaces so apps can
+/// never attach to an un-killswitched namespace left by a crashed setup.
+pub fn authorize_attach(name: &str, uid: Uid) -> anyhow::Result<()> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
+    let record = validated_record(name, uid)?;
+    record.ensure_ready(name)
+}
+
 pub fn load(name: &str, uid: Uid) -> anyhow::Result<NetworkNamespace> {
     let _guard = OWNER_RECORD_LOCK
         .lock()
         .expect("owner record lock poisoned");
     let record = validated_record(name, uid)?;
+    load_from_record(name, record)
+}
+
+/// Load a namespace only if its VPN setup finished (`Active` / `Persistent`).
+pub fn load_ready(name: &str, uid: Uid) -> anyhow::Result<NetworkNamespace> {
+    let _guard = OWNER_RECORD_LOCK
+        .lock()
+        .expect("owner record lock poisoned");
+    let record = validated_record(name, uid)?;
+    record.ensure_ready(name)?;
+    load_from_record(name, record)
+}
+
+fn load_from_record(name: &str, record: OwnerRecord) -> anyhow::Result<NetworkNamespace> {
     let snapshot = match record.namespace {
         StoredNamespace::Snapshot(snapshot) => snapshot,
         StoredNamespace::LegacyJson(json) => {
@@ -467,5 +592,22 @@ mod tests {
                 .unwrap()
                 .into_managed_guard();
         assert_eq!(restored.name, "vo_test");
+    }
+
+    #[test]
+    fn initializing_namespace_rejects_attach_and_persistence() {
+        let mut record = OwnerRecord {
+            uid: 1000,
+            device: 7,
+            inode: 11,
+            namespace: StoredNamespace::LegacyJson("snapshot".to_string()),
+            lifecycle: NamespaceLifecycle::Initializing,
+            runtime: None,
+        };
+        let encoded = serde_json::to_string(&record).unwrap();
+        let decoded: OwnerRecord = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.lifecycle, NamespaceLifecycle::Initializing);
+        assert!(record.ensure_ready("vo_test").is_err());
+        assert!(record.mark_persistent("vo_test").is_err());
     }
 }

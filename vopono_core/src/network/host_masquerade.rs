@@ -584,6 +584,73 @@ fn nft_rule_deletions(table: &str, comment: &str) -> anyhow::Result<String> {
     Ok(batch)
 }
 
+/// Sweep any orphaned shared nftables rules referencing `veth_dest` or
+/// `ipv4_mask` left behind if the daemon was killed with SIGKILL between
+/// installing host rules and persisting its `Initializing` snapshot.
+pub(crate) fn cleanup_orphaned_nft_rules(veth_dest: &str, ipv4_mask: Option<&str>) {
+    let _nft_guard = host_nft_lock();
+    let veth_token = nft_token(veth_dest);
+    if let Err(error) =
+        delete_nft_rules_matching("vopono_bridge", |comment| comment.contains(&veth_token))
+    {
+        warn!("Failed to sweep orphaned nftables bridge rules for {veth_dest}: {error:#}");
+    }
+    if nft_table_has_no_rules("vopono_bridge") {
+        delete_firewall_rule(
+            &["nft", "delete", "table", "inet", "vopono_bridge"],
+            "nftables namespace bridge table",
+        );
+    }
+    if let Some(mask) = ipv4_mask {
+        let mask_token = nft_token(mask);
+        if let Err(error) =
+            delete_nft_rules_matching("vopono_nat", |comment| comment.contains(&mask_token))
+        {
+            warn!("Failed to sweep orphaned nftables nat rules for {mask}: {error:#}");
+        }
+        if nft_table_has_no_rules("vopono_nat") {
+            let _ = sudo_command(&["nft", "delete", "table", "inet", "vopono_nat"]);
+        }
+    }
+}
+
+fn delete_nft_rules_matching(
+    table: &str,
+    mut matches: impl FnMut(&str) -> bool,
+) -> anyhow::Result<()> {
+    let listing = Command::new("nft")
+        .args(["-j", "list", "table", "inet", table])
+        .output()
+        .with_context(|| format!("Failed to list nftables table {table}"))?;
+    if !listing.status.success() {
+        return Ok(());
+    }
+    let ruleset: serde_json::Value = serde_json::from_slice(&listing.stdout)
+        .with_context(|| format!("Invalid nftables JSON for {table}"))?;
+    let mut batch = String::new();
+    for item in ruleset["nftables"]
+        .as_array()
+        .with_context(|| format!("Invalid nftables listing for {table}"))?
+    {
+        let Some(rule) = item.get("rule") else {
+            continue;
+        };
+        let Some(comment) = rule["comment"].as_str() else {
+            continue;
+        };
+        if !matches(comment) {
+            continue;
+        }
+        let chain = rule["chain"].as_str().context("Missing nftables chain")?;
+        ensure_shared_chain(chain)?;
+        let handle = rule["handle"].as_u64().context("Missing nftables handle")?;
+        batch.push_str(&format!(
+            "delete rule inet {table} {chain} handle {handle}\n"
+        ));
+    }
+    apply_nft_batch(table, &batch)
+}
+
 fn delete_nft_rules_with_comment(table: &str, comment: &str) -> anyhow::Result<()> {
     apply_nft_batch(table, &nft_rule_deletions(table, comment)?)
 }

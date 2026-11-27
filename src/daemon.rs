@@ -1474,7 +1474,7 @@ fn handle_client(
                     drop(cancellation);
                     // No child will consume the received SCM_RIGHTS descriptors in
                     // this branch, so take ownership and close all three locally.
-                    let (_client_stdin, client_stdout, client_stderr) =
+                    let (_client_stdin, client_stdout, _client_stderr) =
                         client_fds.take().expect("client fds present");
                     let registered = session.as_ref().expect("registered session");
                     if json {
@@ -1493,7 +1493,7 @@ fn handle_client(
                         if let Some(port) = registered.forwarded_port() {
                             text.push_str(&format!("Port Forwarding on port {port}\n"));
                         }
-                        write_client_notice(client_stderr, text.as_bytes());
+                        write_client_notice(client_stdout, text.as_bytes());
                     }
                     write_response(&mut conn, &DaemonResponse::Exit(0))?;
                     return Ok(());
@@ -1788,7 +1788,7 @@ fn handle_client(
             }
             // The probe needs root to enter the namespace, so it can only run
             // here (or in the sudo fallback path of the CLI).
-            crate::namespace_ownership::authorize(&request.id, uid)?;
+            crate::namespace_ownership::authorize_attach(&request.id, uid)?;
             let status = crate::check::probe_namespace(
                 &request.id,
                 request

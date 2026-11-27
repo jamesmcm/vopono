@@ -380,7 +380,7 @@ fn namespace_processes(namespace_id: &str) -> anyhow::Result<Vec<i32>> {
         .collect())
 }
 
-fn terminate_namespace_processes(namespace_id: &str) -> anyhow::Result<()> {
+pub(crate) fn terminate_namespace_processes(namespace_id: &str) -> anyhow::Result<()> {
     for pid in namespace_processes(namespace_id)? {
         send_signal(pid as u32, Signal::SIGTERM)?;
     }

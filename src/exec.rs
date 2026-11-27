@@ -513,7 +513,7 @@ fn setup_namespace_inner(
 
     if let Some(uid) = daemon_uid {
         if explicit_existing {
-            crate::namespace_ownership::authorize(&ns_name, uid)?;
+            crate::namespace_ownership::authorize_attach(&ns_name, uid)?;
         }
         crate::namespace_sessions::reserve(&ns_name, uid, monitor_requested)?;
     }
@@ -541,11 +541,7 @@ fn setup_namespace_inner(
     let reused = get_existing_namespaces()?.contains(&ns_name);
     if reused {
         if let Some(uid) = daemon_uid {
-            anyhow::ensure!(
-                !crate::namespace_ownership::is_stopping(&ns_name, uid)?,
-                "Namespace {ns_name} is being stopped"
-            );
-            ns = crate::namespace_ownership::load(&ns_name, uid)?;
+            ns = crate::namespace_ownership::load_ready(&ns_name, uid)?;
             info!("Using root-owned state for existing namespace: {}", ns_name);
             forwarder = None;
         } else if foreign_attach {
@@ -571,28 +567,21 @@ fn setup_namespace_inner(
             forwarder = None;
         }
         if !explicit_existing {
-            let matches_existing = if let Some(stored) = ns.launch_fingerprint() {
-                launch_fingerprint(
-                    &parsed_command,
-                    ns.config_file.as_deref(),
-                    parsed_command.open_hosts.as_deref(),
-                )
-                .map(|value| stored == value.as_str())
-                .unwrap_or_else(|_| {
-                    ns.provider == parsed_command.provider && ns.protocol == parsed_command.protocol
-                })
-            } else {
-                // Namespaces without a stored fingerprint (e.g. created before
-                // fingerprinting) can be reused when provider and protocol match.
-                ns.provider == parsed_command.provider && ns.protocol == parsed_command.protocol
-            };
+            let fingerprint = launch_fingerprint(
+                &parsed_command,
+                ns.config_file.as_deref(),
+                parsed_command.open_hosts.as_deref(),
+            );
+            let matches_existing = fingerprint
+                .as_ref()
+                .is_ok_and(|value| ns.launch_fingerprint() == Some(value.as_str()));
             if !matches_existing {
                 let existing_provider = ns.provider.clone();
                 let existing_protocol = ns.protocol.clone();
                 let existing_name = ns.name.clone();
                 ns.detach();
                 anyhow::bail!(
-                    "Namespace '{existing_name}' is already active with {existing_provider:?} / {existing_protocol:?} and different connection settings. Choose another --custom-netns-name, stop it with `vopono stop namespace {existing_name}`, or attach explicitly with `--existing-netns {existing_name}`."
+                    "Namespace '{existing_name}' is already active with {existing_provider:?} / {existing_protocol:?} and different or unverified connection settings. Choose another --custom-netns-name, stop it with `vopono stop namespace {existing_name}`, or attach explicitly with `--existing-netns {existing_name}`."
                 );
             }
         }
@@ -618,10 +607,11 @@ fn setup_namespace_inner(
             parsed_command.user.clone(),
             parsed_command.group.clone(),
         )?;
-        // Tag ownership immediately after netns creation so a daemon restart
-        // during a slow VPN handshake never leaves an untagged orphan namespace.
+        // Record as `Initializing` immediately after netns creation so a daemon
+        // crash during VPN setup never leaves an untagged orphan AND never allows
+        // any client to attach before the tunnel + killswitch are installed.
         if let Some(uid) = daemon_uid {
-            crate::namespace_ownership::tag(&ns, uid)?;
+            crate::namespace_ownership::tag_initializing(&ns, uid)?;
             early_ownership_guard.name = Some(ns.name.clone());
         }
         ns.set_server(Some(parsed_command.server.clone()));
@@ -632,6 +622,9 @@ fn setup_namespace_inner(
         ns.state.allow_host_access = Some(parsed_command.allow_host_access);
         ns.add_loopback()?;
         ns.add_veth_pair()?;
+        if let Some(uid) = daemon_uid {
+            crate::namespace_ownership::update_initializing_snapshot(&ns, uid)?;
+        }
 
         let original_open_hosts = parsed_command.open_hosts.clone();
         if parsed_command.trojan_host.is_some() || parsed_command.trojan_config.is_some() {
@@ -721,12 +714,18 @@ fn setup_namespace_inner(
             parsed_command.interface.clone(),
             parsed_command.firewall,
         )?;
+        if let Some(uid) = daemon_uid {
+            crate::namespace_ownership::update_initializing_snapshot(&ns, uid)?;
+        }
         ns.add_firewall_exception(
             parsed_command.interface.clone(),
             NetworkInterface::new(ns.veth_pair.as_ref().unwrap().dest.clone())?,
             parsed_command.firewall,
             parsed_command.disable_ipv6,
         )?;
+        if let Some(uid) = daemon_uid {
+            crate::namespace_ownership::update_initializing_snapshot(&ns, uid)?;
+        }
         // IPv6 forwarding is enabled only for protocols with a family-aware
         // killswitch. Protocols without one remain fail-closed on the host
         // veth even when IPv6 is enabled in the namespace.

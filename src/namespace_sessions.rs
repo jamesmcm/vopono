@@ -785,7 +785,36 @@ impl Drop for Session {
 
 /// Rebuild workers from root-owned intent, without rereading client commands or
 /// provisioning VPN keys. Kernel tunnels and applications survive daemon exit.
+/// Unfinished (`Initializing`) namespaces from an interrupted launch are torn
+/// down synchronously before the daemon accepts client connections so no app
+/// can ever attach to an un-killswitched namespace.
 pub fn restore_all() -> anyhow::Result<()> {
+    for (name, uid) in crate::namespace_ownership::initializing_records()? {
+        let _transition = lock_namespace(&name);
+        log::warn!("Tearing down unfinished namespace {name} left behind by an interrupted launch");
+        if let Err(error) = crate::control::terminate_namespace_processes(&name) {
+            log::warn!("Could not terminate processes in unfinished namespace {name}: {error:#}");
+        }
+        match crate::namespace_ownership::load(&name, uid) {
+            Ok(ns) => {
+                if let Err(error) = ns.force_teardown() {
+                    log::warn!("Could not tear down unfinished namespace {name}: {error:#}");
+                }
+            }
+            Err(error) => {
+                log::warn!("Could not load unfinished namespace snapshot {name}: {error:#}");
+            }
+        }
+        let netns_path = std::path::Path::new("/run/netns").join(&name);
+        if netns_path.exists() {
+            let _ = std::process::Command::new("ip")
+                .args(["netns", "delete", &name])
+                .status();
+        }
+        if !netns_path.exists() {
+            crate::namespace_ownership::remove(&name);
+        }
+    }
     for (name, uid, runtime) in crate::namespace_ownership::restart_records()? {
         let transition = lock_namespace(&name);
         if let Err(error) = reserve_resources(&name, uid, runtime.monitor) {
